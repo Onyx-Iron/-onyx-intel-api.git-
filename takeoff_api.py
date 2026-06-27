@@ -157,6 +157,110 @@ async def upload_and_stream(
     )
 
 
+@app.post(
+    "/api/parse/document",
+    summary="Parse a document file and return extracted text, metadata, and page count",
+    dependencies=[Depends(verify_secret)],
+)
+async def parse_document(
+    file: UploadFile = File(...),
+    x_onyx_tenant: str | None = Header(default=None),
+    x_onyx_project: str | None = Header(default=None),
+    document_id: str | None = Query(default=None),
+) -> dict:
+    """
+    Accepts PDF, TIFF, JPEG, PNG files. Extracts text and metadata.
+    Returns JSON with: page_count, text_preview (first 2000 chars), metadata, file_type.
+
+    For PDFs: uses pdfplumber to extract text page by page.
+    For images (TIFF, JPEG, PNG): returns metadata only (dimensions, mode, format).
+    For other files (.dwg, .dxf, .xlsx): returns file metadata only.
+    """
+    import json as _json
+
+    filename = file.filename or "unknown"
+    ext = Path(filename).suffix.lower()
+    content = await file.read()
+
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    if len(content) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File exceeds 100 MB limit")
+
+    result: dict = {
+        "file_name": filename,
+        "file_type": ext.lstrip("."),
+        "size_bytes": len(content),
+        "tenant_id": x_onyx_tenant,
+        "project_id": x_onyx_project,
+        "document_id": document_id,
+        "page_count": None,
+        "text_preview": None,
+        "metadata": {},
+        "status": "parsed",
+    }
+
+    tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+    try:
+        tmp.write(content)
+        tmp.flush()
+        tmp_path = tmp.name
+    finally:
+        tmp.close()
+
+    try:
+        if ext == ".pdf":
+            import pdfplumber
+            with pdfplumber.open(tmp_path) as pdf:
+                result["page_count"] = len(pdf.pages)
+                texts = []
+                for page in pdf.pages[:10]:  # preview first 10 pages
+                    t = page.extract_text()
+                    if t:
+                        texts.append(t)
+                full_text = "\n\n".join(texts)
+                result["text_preview"] = full_text[:3000] if full_text else None
+                result["metadata"] = {
+                    "pdf_info": {k: str(v) for k, v in (pdf.metadata or {}).items()},
+                }
+
+        elif ext in (".tiff", ".tif", ".jpg", ".jpeg", ".png"):
+            from PIL import Image as PILImage
+            with PILImage.open(tmp_path) as img:
+                result["page_count"] = getattr(img, "n_frames", 1)
+                result["metadata"] = {
+                    "width": img.width,
+                    "height": img.height,
+                    "mode": img.mode,
+                    "format": img.format,
+                }
+
+        elif ext in (".dwg", ".dxf"):
+            result["status"] = "pending_specialized"
+            result["metadata"] = {"note": "CAD parsing requires specialized processing"}
+
+        elif ext in (".xlsx", ".xls"):
+            result["status"] = "pending_specialized"
+            result["metadata"] = {"note": "Spreadsheet parsing queued"}
+
+        else:
+            result["status"] = "unsupported"
+
+    except Exception as e:
+        logger.warning("[parse_document] error parsing %s: %s", filename, e)
+        result["status"] = "parse_error"
+        result["metadata"] = {"error": str(e)}
+
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+    logger.info(
+        "[parse_document] file=%s type=%s pages=%s status=%s",
+        filename, ext, result["page_count"], result["status"],
+    )
+    return result
+
+
 @app.get(
     "/api/stream/takeoff/{file_path:path}",
     summary="Stream a server-side takeoff JSON file as NDJSON (local use only)",
