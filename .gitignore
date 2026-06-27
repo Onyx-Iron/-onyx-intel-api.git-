@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+.env.*
+
+# Node / Portal
+node_modules/
+portal/node_modules/
+portal/.next/
+portal/.env.local
+portal/.env*.local
+
+# Data / examples (keep out of git)
+data/
+examples/
+public/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
