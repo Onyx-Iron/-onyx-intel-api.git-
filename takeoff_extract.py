@@ -184,10 +184,29 @@ def extract_from_pdf(path: str) -> dict:
     ai_candidate_pages: list[int] = []
     pages_with_tables = 0
 
+    # Drawing pages are dense with vector lines; pdfplumber's table finder can
+    # explode (time + memory) on them and OOM the worker. Skip table detection on
+    # graphical pages (route them to the AI vision path) and cap total work.
+    MAX_TABLE_PAGES = 120          # hard backstop on pages we run table-detection over
+    LINE_COMPLEXITY_LIMIT = 1200   # above this many vector objects, treat page as a drawing
+
     with pdfplumber.open(path) as pdf:
         page_count = len(pdf.pages)
         for idx, page in enumerate(pdf.pages, start=1):
-            tables = page.extract_tables() or []
+            # Cheaply gauge how "drawing-like" the page is before the expensive call.
+            try:
+                complexity = len(page.lines) + len(page.curves) + len(page.rects)
+            except Exception:
+                complexity = 0
+
+            if idx > MAX_TABLE_PAGES or complexity > LINE_COMPLEXITY_LIMIT:
+                ai_candidate_pages.append(idx)  # graphical/over-cap → AI vision can read it
+                continue
+
+            try:
+                tables = page.extract_tables() or []
+            except Exception:
+                tables = []
             page_made_rows = False
 
             for table in tables:
