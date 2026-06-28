@@ -187,20 +187,35 @@ def extract_from_pdf(path: str) -> dict:
     # Drawing pages are dense with vector lines; pdfplumber's table finder can
     # explode (time + memory) on them and OOM the worker. Skip table detection on
     # graphical pages (route them to the AI vision path) and cap total work.
-    MAX_TABLE_PAGES = 120          # hard backstop on pages we run table-detection over
+    MAX_TABLE_PAGES = 30           # only run deterministic table-detection on the first N pages
     LINE_COMPLEXITY_LIMIT = 1200   # above this many vector objects, treat page as a drawing
+
+    def _release(pg) -> None:
+        # Free pdfplumber's per-page object cache so big drawing sets don't OOM.
+        if hasattr(pg, "flush_cache"):
+            try: pg.flush_cache()
+            except Exception: pass
+        if hasattr(pg, "close"):
+            try: pg.close()
+            except Exception: pass
 
     with pdfplumber.open(path) as pdf:
         page_count = len(pdf.pages)
-        for idx, page in enumerate(pdf.pages, start=1):
-            # Cheaply gauge how "drawing-like" the page is before the expensive call.
+        for idx in range(1, page_count + 1):
+            # Beyond the cap, don't even parse the page — route straight to AI vision.
+            if idx > MAX_TABLE_PAGES:
+                ai_candidate_pages.append(idx)
+                continue
+
+            page = pdf.pages[idx - 1]
             try:
                 complexity = len(page.lines) + len(page.curves) + len(page.rects)
             except Exception:
                 complexity = 0
 
-            if idx > MAX_TABLE_PAGES or complexity > LINE_COMPLEXITY_LIMIT:
-                ai_candidate_pages.append(idx)  # graphical/over-cap → AI vision can read it
+            if complexity > LINE_COMPLEXITY_LIMIT:
+                ai_candidate_pages.append(idx)  # drawing page → AI vision can read it
+                _release(page)
                 continue
 
             try:
@@ -244,6 +259,8 @@ def extract_from_pdf(path: str) -> dict:
             else:
                 # No machine-readable table — this page is a drawing; AI vision can read it.
                 ai_candidate_pages.append(idx)
+
+            _release(page)
 
     return {
         "source_type": "pdf",
