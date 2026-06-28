@@ -42,7 +42,7 @@ API_SECRET: str | None = os.getenv("API_SECRET")
 app = FastAPI(
     title="Onyx Intel Takeoff Stream",
     description="NDJSON streaming endpoint for CSI MasterFormat takeoff sheets",
-    version="2.2.0",
+    version="2.3.0",
 )
 
 app.add_middleware(
@@ -328,6 +328,89 @@ async def extract_takeoff(
     return result
 
 
+@app.post(
+    "/api/takeoff/extract-stream",
+    summary="Stream CSI takeoff rows page-by-page as NDJSON (memory-safe for large PDFs)",
+    dependencies=[Depends(verify_secret)],
+)
+async def extract_takeoff_stream(
+    file: UploadFile = File(...),
+    x_onyx_tenant: str | None = Header(default=None),
+    x_onyx_project: str | None = Header(default=None),
+) -> StreamingResponse:
+    """
+    Page-by-page takeoff extraction. For PDFs, processes ONE page at a time and
+    releases its memory before the next, so arbitrarily large drawing sets stream
+    without OOM-ing the worker. Emits NDJSON events:
+      {"event":"STARTED","total_pages":N}
+      {"event":"PAGE","page":i,"total_pages":N,"rows":[...]}   (rows=[] -> drawing page -> AI candidate)
+      {"event":"COMPLETED","total_rows":R,"ai_candidate_pages":[...]}
+      {"event":"ERROR","message":"..."}
+    DXF/IFC/XLSX are extracted whole and emitted as a single page.
+    """
+    import json as _json
+    from takeoff_extract import iter_pdf_pages, extract as _extract
+
+    filename = file.filename or "unknown"
+    ext = Path(filename).suffix.lower()
+    content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    if len(content) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File exceeds 100 MB limit")
+
+    tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+    try:
+        tmp.write(content)
+        tmp.flush()
+        tmp_path = tmp.name
+    finally:
+        tmp.close()
+
+    def _frame(obj) -> bytes:
+        return (_json.dumps(obj, default=str) + "\n").encode("utf-8")
+
+    def gen():
+        try:
+            if ext == ".pdf":
+                ai_pages: list[int] = []
+                total_rows = 0
+                started = False
+                for idx, total, rows in iter_pdf_pages(tmp_path):
+                    if not started:
+                        yield _frame({"event": "STARTED", "total_pages": total, "file": filename})
+                        started = True
+                    if rows:
+                        total_rows += len(rows)
+                        yield _frame({"event": "PAGE", "page": idx, "total_pages": total, "rows": rows})
+                    else:
+                        ai_pages.append(idx)
+                        yield _frame({"event": "PAGE", "page": idx, "total_pages": total, "rows": []})
+                if not started:
+                    yield _frame({"event": "STARTED", "total_pages": 0, "file": filename})
+                yield _frame({"event": "COMPLETED", "total_rows": total_rows, "ai_candidate_pages": ai_pages})
+            else:
+                result = _extract(tmp_path)
+                rows = result.get("rows", [])
+                yield _frame({"event": "STARTED", "total_pages": 1, "file": filename})
+                yield _frame({"event": "PAGE", "page": 1, "total_pages": 1, "rows": rows})
+                yield _frame({"event": "COMPLETED", "total_rows": len(rows),
+                              "ai_candidate_pages": result.get("ai_candidate_pages", [])})
+        except ValueError as e:
+            yield _frame({"event": "ERROR", "message": str(e)})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[extract_stream] failed for %s", filename)
+            yield _frame({"event": "ERROR", "message": f"Extraction failed: {e}"})
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+
+    return StreamingResponse(
+        gen(),
+        media_type="application/x-ndjson",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache, no-store"},
+    )
+
+
 @app.get(
     "/api/stream/takeoff/{file_path:path}",
     summary="Stream a server-side takeoff JSON file as NDJSON (local use only)",
@@ -361,7 +444,7 @@ async def health() -> dict:
     return {
         "status": "ok",
         "service": "onyx-intel-takeoff-stream",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "origins": ALLOWED_ORIGINS,
         "auth": "enabled" if API_SECRET else "disabled",
     }

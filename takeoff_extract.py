@@ -177,6 +177,76 @@ def _row(description: str, qty: float, basis: str,
 # PDF — schedule / spec table extraction (pdfplumber, already a dependency)
 # ─────────────────────────────────────────────────────────────────────────────
 
+_PDF_COMPLEXITY_LIMIT = 1200  # above this many vector objects, a page is a drawing, not a schedule
+
+
+def _release_page(pg) -> None:
+    """Free pdfplumber's per-page object cache so big drawing sets can't OOM."""
+    if hasattr(pg, "flush_cache"):
+        try: pg.flush_cache()
+        except Exception: pass
+    if hasattr(pg, "close"):
+        try: pg.close()
+        except Exception: pass
+
+
+def _rows_from_pdf_page(page, idx: int) -> list[dict]:
+    """Extract takeoff rows from ONE pdfplumber page. Returns [] for drawing pages
+    (too vector-dense to be a schedule) so the caller can route them to AI vision."""
+    try:
+        complexity = len(page.lines) + len(page.curves) + len(page.rects)
+    except Exception:
+        complexity = 0
+    if complexity > _PDF_COMPLEXITY_LIMIT:
+        return []
+    try:
+        tables = page.extract_tables() or []
+    except Exception:
+        tables = []
+
+    rows: list[dict] = []
+    for table in tables:
+        if not table or len(table) < 2:
+            continue
+        header = [(c or "").strip() for c in table[0]]
+        desc_col = next((i for i, h in enumerate(header) if DESC_HEADERS.search(h)), 0)
+        qty_col  = next((i for i, h in enumerate(header) if QTY_HEADERS.search(h)), None)
+        unit_col = next((i for i, h in enumerate(header) if UNIT_HEADERS.search(h)), None)
+        for raw in table[1:]:
+            if not raw or all((c is None or str(c).strip() == "") for c in raw):
+                continue
+            desc = (raw[desc_col] if desc_col < len(raw) else None) or ""
+            desc = str(desc).replace("\n", " ").strip()
+            if not desc or len(desc) < 2:
+                continue
+            qty = _to_float(raw[qty_col]) if (qty_col is not None and qty_col < len(raw)) else None
+            if qty is None:
+                qty = 1.0
+                basis = f"Schedule row, p.{idx} (count defaulted to 1 — no qty column)"
+            else:
+                basis = f"Schedule table, p.{idx}, col '{header[qty_col] or 'qty'}'"
+            unit = raw[unit_col] if (unit_col is not None and unit_col < len(raw)) else None
+            rows.append(_row(desc, qty, basis, uom=str(unit) if unit else None, drawing_ref=f"PDF p.{idx}"))
+    return rows
+
+
+def iter_pdf_pages(path: str):
+    """Generator yielding (page_index, total_pages, rows) ONE page at a time.
+    Memory-bounded: each page's cache is released before the next, so an
+    arbitrarily large drawing set streams without ever OOM-ing the worker."""
+    import pdfplumber
+    with pdfplumber.open(path) as pdf:
+        total = len(pdf.pages)
+        for idx in range(1, total + 1):
+            page = pdf.pages[idx - 1]
+            try:
+                rows = _rows_from_pdf_page(page, idx)
+            except Exception:
+                rows = []
+            yield idx, total, rows
+            _release_page(page)
+
+
 def extract_from_pdf(path: str) -> dict:
     import pdfplumber
 
