@@ -607,6 +607,6 @@ def validate_rows_from_list(
 
     Raises DataIntegrityBreachException on any checksum mismatch.
     """
-    raw_json = json.dumps(rows, ensure_ascii=False)
+    raw_json = json.dumps(rows, ensure_ascii=False, default=str)
     parser   = DeterministicOnyxParser(raw_json)
     return parser.execute_zero_skip_parse()

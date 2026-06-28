@@ -60,9 +60,10 @@ CSI_RULES: list[tuple[re.Pattern[str], str, str, str, str]] = [
     (re.compile(r"\b(cmu|concrete block|brick|masonry|mortar)\b"), "04", "04-20-00", "Masonry", "SF"),
     # ── Division 05 — Metals ──
     (re.compile(r"\b(steel beam|w\d+x\d+|wide flange|hss|structural steel|joist|girder)\b"), "05", "05-12-00", "Structural Steel", "LB"),
-    (re.compile(r"\b(metal deck|decking|stud|metal framing)\b"),   "05", "05-40-00", "Metals", "SF"),
+    (re.compile(r"\b(metal deck|decking|metal stud|metal framing)\b"), "05", "05-40-00", "Metals", "SF"),
     # ── Division 06 — Wood ──
-    (re.compile(r"\b(lumber|framing|plywood|sheathing|2x\d+|joist)\b"), "06", "06-10-00", "Carpentry", "LF"),
+    (re.compile(r"\b(lumber|wood framing|plywood|sheathing)\b"),      "06", "06-10-00", "Carpentry", "LF"),
+    (re.compile(r"\b2x\d+\b(?=.*\b(stud|plate|joist|rafter|header|blocking|sill|lumber)\b)"), "06", "06-10-00", "Carpentry", "LF"),
     # ── Division 07 — Thermal / Moisture ──
     (re.compile(r"\b(insulation|batt|rigid board|vapor barrier)\b"), "07", "07-21-00", "Insulation", "SF"),
     (re.compile(r"\b(roofing|membrane|tpo|epdm|built.?up|shingle)\b"), "07", "07-50-00", "Roofing", "SF"),
@@ -85,6 +86,8 @@ CSI_RULES: list[tuple[re.Pattern[str], str, str, str, str]] = [
     (re.compile(r"\b(vav|ahu|rtu\b|fan coil|fcu|air handler|rooftop unit|chiller|boiler|condens(er|ing)|furnace|heat pump)\b"), "23", "23-70-00", "HVAC", "EA"),
     (re.compile(r"\b(diffuser|grille|register|louver)\b"),         "23", "23-37-00", "HVAC", "EA"),
     (re.compile(r"\b(refrigerant|hydronic|chilled water|hot water pipe)\b"), "23", "23-21-00", "HVAC", "LF"),
+    # ── Division 28 — Electronic Safety (before 26 so "smoke detector" beats "device") ──
+    (re.compile(r"\b(fire alarm|smoke detector|pull station|notification appliance|nac\b|horn strobe)\b"), "28", "28-31-00", "Fire Alarm", "EA"),
     # ── Division 26 — Electrical ──
     (re.compile(r"\b(conduit|emt\b|rmc\b|raceway|cable tray)\b"),  "26", "26-05-33", "Electrical", "LF"),
     (re.compile(r"\b(wire|conductor|thhn|feeder|branch circuit|mc cable)\b"), "26", "26-05-19", "Electrical", "LF"),
@@ -93,8 +96,6 @@ CSI_RULES: list[tuple[re.Pattern[str], str, str, str, str]] = [
     (re.compile(r"\b(luminaire|light fixture|lighting|fixture type [a-z]|downlight|troffer)\b"), "26", "26-51-00", "Lighting", "EA"),
     # ── Division 27 — Comms ──
     (re.compile(r"\b(data drop|cat\s?6|cat6a|fiber|patch panel|telecom)\b"), "27", "27-10-00", "Communications", "EA"),
-    # ── Division 28 — Electronic Safety ──
-    (re.compile(r"\b(fire alarm|smoke detector|pull station|notification|nac\b)\b"), "28", "28-31-00", "Fire Alarm", "EA"),
     # ── Division 31 — Earthwork ──
     (re.compile(r"\b(excavat|grading|cut and fill|backfill|fill\b|earthwork)\b"), "31", "31-23-00", "Earthwork", "CY"),
     # ── Division 32 — Exterior Improvements ──
