@@ -42,7 +42,7 @@ API_SECRET: str | None = os.getenv("API_SECRET")
 app = FastAPI(
     title="Onyx Intel Takeoff Stream",
     description="NDJSON streaming endpoint for CSI MasterFormat takeoff sheets",
-    version="2.0.0",
+    version="2.1.0",
 )
 
 app.add_middleware(
@@ -361,7 +361,7 @@ async def health() -> dict:
     return {
         "status": "ok",
         "service": "onyx-intel-takeoff-stream",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "origins": ALLOWED_ORIGINS,
         "auth": "enabled" if API_SECRET else "disabled",
     }
