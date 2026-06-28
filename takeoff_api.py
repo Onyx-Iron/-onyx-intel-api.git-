@@ -261,6 +261,73 @@ async def parse_document(
     return result
 
 
+@app.post(
+    "/api/takeoff/extract",
+    summary="Deterministically extract CSI-coded takeoff rows from PDF/DXF/DWG/IFC/XLSX (no AI)",
+    dependencies=[Depends(verify_secret)],
+)
+async def extract_takeoff(
+    file: UploadFile = File(...),
+    x_onyx_tenant: str | None = Header(default=None),
+    x_onyx_project: str | None = Header(default=None),
+) -> dict:
+    """
+    Build-once, run-free extraction. Routes by extension:
+      .pdf            schedule/spec tables  (pdfplumber)
+      .dxf / .dwg     real geometry         (ezdxf — exact lengths/areas/counts)
+      .ifc            BIM base quantities   (ifcopenshell)
+      .xlsx / .xls    tabular estimate/BOM  (openpyxl)
+
+    Returns: { source_type, rows[], coverage{}, ai_candidate_pages[] }.
+    For PDFs, ai_candidate_pages lists drawing pages with no machine-readable
+    table — the portal may optionally run the AI vision path on just those.
+    """
+    from takeoff_extract import extract as _extract
+
+    filename = file.filename or "unknown"
+    ext = Path(filename).suffix.lower()
+    allowed = {".pdf", ".dxf", ".dwg", ".ifc", ".xlsx", ".xls"}
+    if ext not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported type '{ext}'. Accepts: {', '.join(sorted(allowed))}",
+        )
+
+    content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    if len(content) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File exceeds 100 MB limit")
+
+    tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+    try:
+        tmp.write(content)
+        tmp.flush()
+        tmp_path = tmp.name
+    finally:
+        tmp.close()
+
+    try:
+        result = _extract(tmp_path)
+    except ValueError as e:
+        # Expected, user-actionable errors (e.g. binary DWG, missing IFC lib).
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.exception("[extract_takeoff] failed for %s", filename)
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {e}")
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+    result["file_name"] = filename
+    result["tenant_id"] = x_onyx_tenant
+    result["project_id"] = x_onyx_project
+    logger.info(
+        "[extract_takeoff] file=%s type=%s rows=%d",
+        filename, result.get("source_type"), len(result.get("rows", [])),
+    )
+    return result
+
+
 @app.get(
     "/api/stream/takeoff/{file_path:path}",
     summary="Stream a server-side takeoff JSON file as NDJSON (local use only)",
