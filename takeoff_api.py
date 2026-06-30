@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import uuid
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -50,6 +51,38 @@ _raw_origins = os.getenv("ALLOWED_ORIGINS", "https://app.onyx-iron.com,http://lo
 ALLOWED_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
 API_SECRET: str | None = os.getenv("API_SECRET")
+
+# Server-side takeoff base dir for `/api/stream/takeoff/{file_path:path}`.
+# Requests outside this directory are rejected (prevents path traversal).
+TAKEOFF_BASE_DIR: Path = Path(
+    os.getenv("TAKEOFF_BASE_DIR", str(Path(tempfile.gettempdir()) / "onyx_takeoffs"))
+).resolve()
+TAKEOFF_BASE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _safe_uuid(value: str | None) -> str | None:
+    """Return the canonical UUID string if valid, else None. Never raises.
+
+    Used to sanitize `X-Onyx-Tenant` / `X-Onyx-Project` headers before they
+    are injected into outbound NDJSON events or returned in responses.
+    """
+    if not value:
+        return None
+    try:
+        return str(uuid.UUID(value.strip()))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _require_uuid(value: str | None, field: str) -> str:
+    """Validate a UUID header and 400 if missing/malformed."""
+    safe = _safe_uuid(value)
+    if not safe:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} header must be a valid UUID",
+        )
+    return safe
 
 
 def _install_memory_guard() -> None:
@@ -188,16 +221,18 @@ def _enhanced_stream_file(
     import json
 
     parser = EnhancedStreamingParser(file_path=file_path, cost_db=_COST_DB)
+    safe_tenant = _safe_uuid(tenant_id)
+    safe_project = _safe_uuid(project_id)
 
     async def _inject() -> AsyncGenerator[bytes, None]:
         try:
             async for evt_str in parser.stream_with_costs(chunk_size=chunk_size, region=region):
                 try:
                     payload = json.loads(evt_str.strip())
-                    if tenant_id:
-                        payload["tenant_id"] = tenant_id
-                    if project_id:
-                        payload["project_id"] = project_id
+                    if safe_tenant:
+                        payload["tenant_id"] = safe_tenant
+                    if safe_project:
+                        payload["project_id"] = safe_project
                     yield (json.dumps(payload, default=str) + "\n").encode("utf-8")
                 except Exception:
                     yield evt_str.encode("utf-8") if isinstance(evt_str, str) else evt_str
@@ -207,8 +242,8 @@ def _enhanced_stream_file(
                 "breach_type": e.breach_type.value if hasattr(e.breach_type, "value") else str(e.breach_type),
                 "message": str(e.message),
                 "details": e.details,
-                "tenant_id": tenant_id,
-                "project_id": project_id,
+                "tenant_id": safe_tenant,
+                "project_id": safe_project,
             }
             yield (json.dumps(err, default=str) + "\n").encode("utf-8")
         except Exception as e:  # noqa: BLE001
@@ -233,16 +268,18 @@ def _stream_file(
     import json
 
     processor = CSITakeoffStreamProcessor(file_path=file_path, chunk_size=chunk_size)
+    safe_tenant = _safe_uuid(tenant_id)
+    safe_project = _safe_uuid(project_id)
 
     async def _inject() -> AsyncGenerator[bytes, None]:
         async for raw_frame in processor.parse_and_stream_sheet():
-            if tenant_id or project_id:
+            if safe_tenant or safe_project:
                 try:
                     payload = json.loads(raw_frame.decode("utf-8").strip())
-                    if tenant_id:
-                        payload["tenant_id"] = tenant_id
-                    if project_id:
-                        payload["project_id"] = project_id
+                    if safe_tenant:
+                        payload["tenant_id"] = safe_tenant
+                    if safe_project:
+                        payload["project_id"] = safe_project
                     raw_frame = (json.dumps(payload, default=str) + "\n").encode("utf-8")
                 except Exception:
                     pass  # emit original frame if JSON manipulation fails
@@ -609,15 +646,32 @@ async def stream_server_file(
     x_onyx_tenant: str | None = Header(default=None),
     x_onyx_project: str | None = Header(default=None),
 ) -> StreamingResponse:
-    """Stream a takeoff file that already exists on the server's filesystem."""
-    target = Path(file_path)
-    if not target.exists() or not target.is_file():
-        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
-    if target.suffix.lower() != ".json":
+    """Stream a takeoff file that already exists on the server's filesystem.
+
+    Path is interpreted RELATIVE to TAKEOFF_BASE_DIR. Any attempt to escape
+    that root (absolute paths, `..` segments, symlinks pointing outside) is
+    rejected with 400. This is the path-traversal guard.
+    """
+    # Reject obvious traversal attempts before filesystem hits
+    if not file_path or file_path.startswith(("/", "\\")) or ".." in Path(file_path).parts:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
+    candidate = (TAKEOFF_BASE_DIR / file_path).resolve()
+    base = TAKEOFF_BASE_DIR.resolve()
+    # `commonpath` raises ValueError on different drives; treat that as escape
+    try:
+        inside = os.path.commonpath([str(candidate), str(base)]) == str(base)
+    except ValueError:
+        inside = False
+    if not inside:
+        raise HTTPException(status_code=400, detail="File path escapes takeoff root")
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    if candidate.suffix.lower() != ".json":
         raise HTTPException(status_code=400, detail="Only .json files are supported")
 
     return StreamingResponse(
-        _stream_file(str(target.resolve()), chunk_size, x_onyx_tenant, x_onyx_project),
+        _stream_file(str(candidate), chunk_size, x_onyx_tenant, x_onyx_project),
         media_type="application/x-ndjson",
         headers={
             "X-Accel-Buffering": "no",
@@ -687,6 +741,119 @@ async def enhance_takeoff(
         "rows": [r.model_dump() for r in validated],
         "summary": summary,
     }
+
+
+@app.post(
+    "/api/takeoff/extract-from-drive",
+    summary="Pull a blueprint from Google Drive, run takeoff, optionally export to Sheets",
+    dependencies=[Depends(verify_secret)],
+)
+async def extract_from_drive(
+    file_id: str = Query(..., min_length=8, description="Google Drive file ID"),
+    export_to_sheet_id: str | None = Query(
+        default=None,
+        description="Optional Google Sheets spreadsheet ID to write results to",
+    ),
+    region: str = Query(default="US_EAST"),
+    x_onyx_tenant: str | None = Header(default=None),
+    x_onyx_project: str | None = Header(default=None),
+    x_onyx_secret: str | None = Header(default=None),
+) -> dict:
+    """End-to-end: Drive -> takeoff_extract.extract -> EnhancedDeterministicParser
+    cost enrichment -> (optional) Google Sheets export.
+
+    Tenant + project headers are UUID-validated.
+    Temp file is unlinked in `finally` regardless of outcome.
+    """
+    import json
+
+    from google_integration import (
+        download_file_from_drive,
+        export_rows_to_google_sheet,
+    )
+    from takeoff_extract import extract as _extract
+
+    safe_tenant = _require_uuid(x_onyx_tenant, "X-Onyx-Tenant")
+    safe_project = _require_uuid(x_onyx_project, "X-Onyx-Project")
+
+    try:
+        content, filename = download_file_from_drive(file_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.exception("[extract-from-drive] download failed for %s", file_id)
+        raise HTTPException(status_code=502, detail=f"Drive download failed: {e}")
+
+    if not content:
+        raise HTTPException(status_code=422, detail="Drive returned empty file")
+
+    size_mb = len(content) / (1024 * 1024)
+    _enforce_upload_quota(len(content), safe_tenant, x_onyx_secret)
+
+    suffix = Path(filename).suffix.lower() or ".bin"
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    try:
+        tmp.write(content)
+        tmp.flush()
+        tmp_path = tmp.name
+    finally:
+        tmp.close()
+
+    try:
+        try:
+            raw_rows = _extract(tmp_path)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[extract-from-drive] takeoff_extract failed")
+            raise HTTPException(status_code=422, detail=f"Takeoff extract failed: {e}")
+
+        if not isinstance(raw_rows, list):
+            raise HTTPException(status_code=422, detail="Extractor did not return a row list")
+
+        parser = EnhancedDeterministicParser(json.dumps(raw_rows), _COST_DB)
+        try:
+            validated, summary = parser.execute_with_cost_enrichment(region=region)
+        except DataIntegrityBreachException as e:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "breach_type": e.breach_type.value if hasattr(e.breach_type, "value") else str(e.breach_type),
+                    "message": str(e.message),
+                    "details": e.details,
+                },
+            )
+
+        rows_out = [r.model_dump() for r in validated]
+
+        sheet_status: str | None = None
+        if export_to_sheet_id:
+            try:
+                sheet_status = export_rows_to_google_sheet(
+                    spreadsheet_id=export_to_sheet_id,
+                    rows=rows_out,
+                    summary=summary,
+                )
+            except RuntimeError as e:
+                # Google not configured — surface as warning, not failure
+                sheet_status = f"skipped: {e}"
+            except Exception as e:  # noqa: BLE001
+                logger.exception("[extract-from-drive] sheet export failed")
+                sheet_status = f"failed: {e}"
+
+        logger.info(
+            "[extract-from-drive] file_id=%s filename=%s size_mb=%.2f rows=%d tenant=%s project=%s sheet=%s",
+            file_id, filename, size_mb, len(rows_out), safe_tenant, safe_project, sheet_status,
+        )
+
+        return {
+            "tenant_id": safe_tenant,
+            "project_id": safe_project,
+            "source": {"drive_file_id": file_id, "filename": filename},
+            "rows": rows_out,
+            "summary": summary,
+            "sheet_export": sheet_status,
+        }
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
 
 @app.get("/api/health")
