@@ -287,46 +287,110 @@ class EnhancedDeterministicParser:
 
 class CostDatabase:
     """
-    In-memory cost reference (similar to OpenConstructionERP).
-    
-    In production, this would query Supabase or a PostgreSQL database with:
-    - 42+ regional cost catalogues
-    - RSMeans data integration
-    - Supplier pricing
-    - Historical project costs
+    Cost reference catalog.
+
+    Two modes:
+      • "supabase" — calls the portal's /api/cost-catalog/v2 with tenant_id,
+                     zip, and state to resolve location-aware unit costs from
+                     Supabase. Default when env vars are set.
+      • "sample"   — small in-memory sample for tests + local dev.
+
+    All constructor params are optional so existing callers like
+    `CostDatabase()` keep working; tenant/state/zip can also be passed at
+    `lookup()` time (overrides per-call).
     """
-    
-    def __init__(self):
-        # Initialize with common baseline costs (in-memory sample)
-        self._cache: dict[str, CostDatabaseReference] = self._build_sample_costs()
-    
+
+    def __init__(
+        self,
+        tenant_id: str | None = None,
+        state_code: str | None = None,
+        zip_code: str | None = None,
+        mode: str | None = None,
+    ):
+        self.tenant_id = tenant_id
+        self.state_code = state_code
+        self.zip_code = zip_code
+
+        if mode is None:
+            try:
+                from cost_supabase import is_configured as _is_configured
+                mode = "supabase" if _is_configured() else "sample"
+            except Exception:
+                mode = "sample"
+        self.mode = mode
+
+        # Sample cache always built — used as fallback if Supabase returns nothing
+        self._sample_cache: dict[str, CostDatabaseReference] = self._build_sample_costs()
+
     def lookup(
         self,
         trade: str,
         cost_code: str,
         description: str,
         region: str = "US_EAST",
+        tenant_id: str | None = None,
+        state_code: str | None = None,
+        zip_code: str | None = None,
     ) -> CostDatabaseReference | None:
-        """Look up unit cost for a takeoff line."""
-        
+        """Look up unit cost for a takeoff line.
+
+        Per-call tenant/state/zip override the values passed to the constructor.
+        """
+        effective_tenant = tenant_id or self.tenant_id
+        effective_state = state_code or self.state_code
+        effective_zip = zip_code or self.zip_code
+
+        if self.mode == "supabase":
+            try:
+                from cost_supabase import resolve_unit_cost
+                result = resolve_unit_cost(
+                    csi_code=cost_code,
+                    tenant_id=effective_tenant,
+                    zip_code=effective_zip,
+                    state_code=effective_state,
+                )
+            except Exception as exc:  # pragma: no cover — network / import failure
+                logger.warning("Supabase cost lookup failed for %s: %s", cost_code, exc)
+                result = None
+
+            if result:
+                ref = CostDatabaseReference(
+                    trade=result.get("trade") or trade,
+                    cost_code=result.get("csi_code") or cost_code,
+                    description=result.get("description") or description,
+                    region=result.get("region") or region,
+                    base_unit_cost=float(result["base_unit_cost"]),
+                    labor_cost=float(result.get("labor_cost") or 0.0),
+                    material_cost=float(result.get("material_cost") or 0.0),
+                    equipment_cost=float(result.get("equipment_cost") or 0.0),
+                    supplier_id=result.get("supplier_id"),
+                    last_updated=result.get("last_updated") or datetime.now(timezone.utc).isoformat(),
+                )
+                # Attach confidence + source as attributes (outside pydantic model_config="ignore")
+                try:
+                    object.__setattr__(ref, "_meta", {
+                        "confidence": result.get("confidence", 0.8),
+                        "source_database": result.get("source_database", "supabase"),
+                    })
+                except Exception:
+                    pass
+                return ref
+            # fall through to sample fallback when Supabase has no entry
+
+        # "sample" mode (or supabase miss)
         key = f"{cost_code}_{region}".lower()
-        
-        # Try exact match first
-        if key in self._cache:
-            return self._cache[key]
-        
-        # Try fallback to US_EAST baseline
+        if key in self._sample_cache:
+            return self._sample_cache[key]
         if region != "US_EAST":
             base_key = f"{cost_code}_US_EAST".lower()
-            if base_key in self._cache:
-                return self._cache[base_key]
-        
-        # No cost found (return None — will use manual estimate)
-        logger.warning(f"No cost data for {cost_code} ({trade}) in {region}")
+            if base_key in self._sample_cache:
+                return self._sample_cache[base_key]
+
+        logger.warning("No cost data for %s (%s) in %s", cost_code, trade, region)
         return None
     
     def _build_sample_costs(self) -> dict[str, CostDatabaseReference]:
-        """Sample cost database (in production: load from Supabase)."""
+        """Sample cost database — fallback when Supabase is unreachable / unset."""
         
         sample_costs = [
             # Concrete (Division 03)
