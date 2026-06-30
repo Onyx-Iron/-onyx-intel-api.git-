@@ -154,36 +154,44 @@ def _headers(tenant_id: str | None) -> dict[str, str]:
     return headers
 
 
-def _normalize(payload: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Normalize the portal response into the `CostResolveResult` shape."""
-    if not payload:
+_CONFIDENCE_TO_FLOAT = {"high": 0.95, "medium": 0.75, "low": 0.5}
+
+
+def _normalize(item: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalize one portal `CostResolveResult` item into the legacy shape."""
+    if not isinstance(item, dict):
         return None
-    # Portal may return either the bare record or {data: {...}, confidence: ...}
-    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-    if not data:
+    if item.get("source") == "none":
         return None
-    base = float(data.get("base_unit_cost") or data.get("unit_cost") or 0.0)
+    base = float(item.get("unit_cost") or 0.0)
     if base <= 0:
         return None
-    labor = float(data.get("labor_cost") or 0.0)
-    material = float(data.get("material_cost") or 0.0)
-    equipment = float(data.get("equipment_cost") or 0.0)
-    # If no breakdown was provided, fall back to 40/45/15 split
+    labor = float(item.get("labor_cost") or 0.0)
+    material = float(item.get("material_cost") or 0.0)
+    equipment = float(item.get("equipment_cost") or 0.0)
     if labor == 0.0 and material == 0.0 and equipment == 0.0:
         labor, material, equipment = base * 0.40, base * 0.45, base * 0.15
+    conf = item.get("confidence")
+    if isinstance(conf, str):
+        conf_val = _CONFIDENCE_TO_FLOAT.get(conf, 0.75)
+    else:
+        try:
+            conf_val = float(conf) if conf is not None else 0.75
+        except (TypeError, ValueError):
+            conf_val = 0.75
     return {
-        "csi_code": data.get("csi_code") or data.get("cost_code") or "",
-        "trade": data.get("trade") or "",
-        "description": data.get("description") or "",
-        "region": data.get("region") or "US_EAST",
+        "csi_code": item.get("cost_code") or "",
+        "trade": "",
+        "description": item.get("detail") or "",
+        "region": item.get("region_code") or "US_EAST",
         "base_unit_cost": base,
         "labor_cost": labor,
         "material_cost": material,
         "equipment_cost": equipment,
-        "supplier_id": data.get("supplier_id"),
-        "source_database": data.get("source_database") or "supabase",
-        "last_updated": data.get("last_updated") or data.get("updated_at") or "",
-        "confidence": float(payload.get("confidence") or data.get("confidence") or 0.8),
+        "supplier_id": None,
+        "source_database": item.get("source") or "supabase",
+        "last_updated": item.get("observed_at") or "",
+        "confidence": conf_val,
     }
 
 
@@ -212,10 +220,7 @@ def resolve_unit_cost(
 
     base = _portal_base_url()
     url = f"{base}/api/cost-catalog/v2"
-    params = {
-        "csi_code": csi_code,
-        "region": region,
-    }
+    params: dict[str, str] = {"cost_codes": csi_code}
     if zip_code:
         params["zip"] = zip_code
     if state_code:
@@ -243,10 +248,14 @@ def resolve_unit_cost(
         return None
 
     try:
-        normalized = _normalize(resp.json())
+        payload = resp.json()
     except ValueError:
         logger.warning("cost-catalog returned non-JSON for %s", csi_code)
         return None
+
+    items = payload.get("items") if isinstance(payload, dict) else None
+    item = items[0] if isinstance(items, list) and items else None
+    normalized = _normalize(item)
 
     _cache_put(key, normalized)
     return normalized
@@ -279,42 +288,49 @@ def bulk_resolve(
     if not uncached:
         return out
 
+    # Use the GET endpoint with comma-joined codes (route accepts this batch form)
     base = _portal_base_url()
-    url = f"{base}/api/cost-catalog/v2/batch"
-    body = {
-        "csi_codes": uncached,
-        "region": region,
-        "zip": zip_code,
-        "state": state_code,
-    }
+    url = f"{base}/api/cost-catalog/v2"
+    params: dict[str, str] = {"cost_codes": ",".join(uncached)}
+    if zip_code:
+        params["zip"] = zip_code
+    if state_code:
+        params["state"] = state_code
+
     try:
-        resp = requests.post(
+        resp = requests.get(
             url,
-            json=body,
+            params=params,
             headers=_headers(tenant_id),
             timeout=_DEFAULT_TIMEOUT,
         )
     except requests.RequestException as exc:
         logger.warning("cost-catalog batch failed, falling back to singles: %s", exc)
-        resp = None
+        for code in uncached:
+            result = resolve_unit_cost(code, tenant_id, zip_code, state_code)
+            if result is not None:
+                out[code] = result
+        return out
 
-    if resp is not None and resp.ok:
-        try:
-            payload = resp.json()
-        except ValueError:
-            payload = None
-        results = (payload or {}).get("results") if isinstance(payload, dict) else None
-        if isinstance(results, dict):
-            for code in uncached:
-                normalized = _normalize(results.get(code))
-                _cache_put(_cache_key(code, tenant_id, region), normalized)
-                if normalized is not None:
-                    out[code] = normalized
-            return out
+    if not resp.ok:
+        logger.warning(
+            "cost-catalog batch returned %s: %s",
+            resp.status_code, resp.text[:200],
+        )
+        return out
 
-    # Fallback: per-code GET
-    for code in uncached:
-        result = resolve_unit_cost(code, tenant_id, zip_code, state_code)
-        if result is not None:
-            out[code] = result
+    try:
+        payload = resp.json()
+    except ValueError:
+        return out
+
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return out
+    # Items come back in the same order as the requested codes
+    for code, item in zip(uncached, items):
+        normalized = _normalize(item if isinstance(item, dict) else None)
+        _cache_put(_cache_key(code, tenant_id, region), normalized)
+        if normalized is not None:
+            out[code] = normalized
     return out
