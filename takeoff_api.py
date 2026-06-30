@@ -34,6 +34,12 @@ from rate_limiting import (
     REQUESTS_PER_MIN,
     UPLOAD_MB_PER_HOUR,
 )
+from enhanced_takeoff_system import (
+    CostDatabase,
+    EnhancedDeterministicParser,
+    EnhancedStreamingParser,
+    DataIntegrityBreachException,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -163,6 +169,56 @@ def _enforce_upload_quota(
 
 # ── Stream helpers ─────────────────────────────────────────────────────────────
 
+_COST_DB = CostDatabase()
+
+
+def _enhanced_stream_file(
+    file_path: str,
+    chunk_size: int,
+    region: str,
+    tenant_id: str | None,
+    project_id: str | None,
+) -> AsyncGenerator[bytes, None]:
+    """
+    Run EnhancedStreamingParser over a .json takeoff file.
+    Yields NDJSON events: ROW_VALIDATED (with cost), SUMMARY, ERROR.
+    Tenant + project ids are injected into every event so the portal can
+    write rows with correct isolation.
+    """
+    import json
+
+    parser = EnhancedStreamingParser(file_path=file_path, cost_db=_COST_DB)
+
+    async def _inject() -> AsyncGenerator[bytes, None]:
+        try:
+            async for evt_str in parser.stream_with_costs(chunk_size=chunk_size, region=region):
+                try:
+                    payload = json.loads(evt_str.strip())
+                    if tenant_id:
+                        payload["tenant_id"] = tenant_id
+                    if project_id:
+                        payload["project_id"] = project_id
+                    yield (json.dumps(payload, default=str) + "\n").encode("utf-8")
+                except Exception:
+                    yield evt_str.encode("utf-8") if isinstance(evt_str, str) else evt_str
+        except DataIntegrityBreachException as e:
+            err = {
+                "event": "ERROR",
+                "breach_type": e.breach_type.value if hasattr(e.breach_type, "value") else str(e.breach_type),
+                "message": str(e.message),
+                "details": e.details,
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+            }
+            yield (json.dumps(err, default=str) + "\n").encode("utf-8")
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[enhanced_stream] unhandled error")
+            err = {"event": "ERROR", "message": f"Enhanced parse failed: {e}"}
+            yield (json.dumps(err) + "\n").encode("utf-8")
+
+    return _inject()
+
+
 def _stream_file(
     file_path: str,
     chunk_size: int,
@@ -205,6 +261,15 @@ def _stream_file(
 async def upload_and_stream(
     file: UploadFile = File(..., description="JSON takeoff file"),
     chunk_size: int = Query(default=15, ge=1, le=500),
+    with_costs: bool = Query(
+        default=False,
+        description="If true, use EnhancedStreamingParser to enrich each row with "
+                    "regional cost data + labor/material/equipment breakdown.",
+    ),
+    region: str = Query(
+        default="US_EAST",
+        description="Regional cost basis. One of: US_EAST, US_WEST, US_MIDWEST, US_SOUTH, INTERNATIONAL.",
+    ),
     x_onyx_tenant: str | None = Header(default=None),
     x_onyx_project: str | None = Header(default=None),
     x_onyx_secret: str | None = Header(default=None),
@@ -239,14 +304,21 @@ async def upload_and_stream(
         tmp.close()
 
     logger.info(
-        "[upload] file=%s size=%d tenant=%s project=%s",
-        file.filename, len(content), x_onyx_tenant, x_onyx_project,
+        "[upload] file=%s size=%d tenant=%s project=%s with_costs=%s region=%s",
+        file.filename, len(content), x_onyx_tenant, x_onyx_project, with_costs, region,
     )
 
     async def _stream_and_cleanup() -> AsyncGenerator[bytes, None]:
         try:
-            async for frame in _stream_file(tmp_path, chunk_size, x_onyx_tenant, x_onyx_project):
-                yield frame
+            if with_costs:
+                # Enhanced path: rows + cost enrichment via EnhancedStreamingParser
+                async for frame in _enhanced_stream_file(
+                    tmp_path, chunk_size, region, x_onyx_tenant, x_onyx_project,
+                ):
+                    yield frame
+            else:
+                async for frame in _stream_file(tmp_path, chunk_size, x_onyx_tenant, x_onyx_project):
+                    yield frame
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
@@ -554,18 +626,86 @@ async def stream_server_file(
     )
 
 
+@app.post(
+    "/api/takeoff/enhance",
+    summary="Enrich already-validated takeoff rows with regional cost data (batch)",
+    dependencies=[Depends(verify_secret)],
+)
+async def enhance_takeoff(
+    payload: dict,
+    region: str = Query(default="US_EAST"),
+    x_onyx_tenant: str | None = Header(default=None),
+    x_onyx_project: str | None = Header(default=None),
+    x_onyx_secret: str | None = Header(default=None),
+) -> dict:
+    """
+    Batch cost enrichment for already-extracted takeoff rows.
+
+    Body:  { "rows": [ ...takeoff row dicts... ] }
+    Query: ?region=US_EAST|US_WEST|US_MIDWEST|US_SOUTH|INTERNATIONAL
+
+    Returns:
+      {
+        "rows": [ ...rows with estimated_unit_cost + estimated_line_total + breakdown ],
+        "summary": { total_qty, estimated_cost, cost_breakdown{labor,material,equipment}, ... }
+      }
+
+    Reuses the validation engine in EnhancedDeterministicParser — rows that
+    fail validation are dropped from the result and summarized in errors.
+    """
+    import json
+
+    # Rate-limit this as a regular request (no file_size)
+    try:
+        check_rate_limit(x_onyx_tenant, file_size_mb=0.0, secret=x_onyx_secret)
+    except RateLimitExceeded as e:
+        raise HTTPException(status_code=429, detail=e.reason, headers={"Retry-After": "60"})
+
+    rows = payload.get("rows") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=400, detail="Body must be { rows: [...] }")
+    if len(rows) > 10_000:
+        raise HTTPException(status_code=413, detail="Max 10,000 rows per enhance call")
+
+    raw_json = json.dumps(rows)
+    parser = EnhancedDeterministicParser(raw_json, _COST_DB)
+    try:
+        validated, summary = parser.execute_with_cost_enrichment(region=region)
+    except DataIntegrityBreachException as e:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "breach_type": e.breach_type.value if hasattr(e.breach_type, "value") else str(e.breach_type),
+                "message": str(e.message),
+                "details": e.details,
+            },
+        )
+
+    return {
+        "tenant_id": x_onyx_tenant,
+        "project_id": x_onyx_project,
+        "rows": [r.model_dump() for r in validated],
+        "summary": summary,
+    }
+
+
 @app.get("/api/health")
 async def health() -> dict:
     return {
         "status": "ok",
         "service": "onyx-intel-takeoff-stream",
-        "version": "2.4.0",
+        "version": "2.5.0",
         "origins": ALLOWED_ORIGINS,
         "auth": "enabled" if API_SECRET else "disabled",
         "rate_limiting": {
             "enabled": RATE_LIMIT_ENABLED,
             "requests_per_min": REQUESTS_PER_MIN,
             "upload_mb_per_hour": UPLOAD_MB_PER_HOUR,
+        },
+        "cost_enrichment": {
+            "enabled": True,
+            "cost_records": len(_COST_DB._cache),
+            "regions": ["US_EAST", "US_WEST", "US_MIDWEST", "US_SOUTH", "INTERNATIONAL"],
         },
     }
 
