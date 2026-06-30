@@ -14,9 +14,11 @@ Environment variables:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import tempfile
+import uuid
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -40,6 +42,7 @@ from enhanced_takeoff_system import (
     EnhancedStreamingParser,
     DataIntegrityBreachException,
 )
+import google_integration
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -50,6 +53,92 @@ _raw_origins = os.getenv("ALLOWED_ORIGINS", "https://app.onyx-iron.com,http://lo
 ALLOWED_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
 API_SECRET: str | None = os.getenv("API_SECRET")
+
+# Root directory under which server-side takeoff JSON files must live for the
+# /api/stream/takeoff/{file_path:path} endpoint to serve them. Required for that
+# endpoint — if unset, the endpoint refuses every request. This is the anchor
+# the path-traversal guard resolves against.
+_RAW_TAKEOFF_BASE_DIR: str = os.getenv("TAKEOFF_BASE_DIR", "").strip()
+TAKEOFF_BASE_DIR: Path | None = (
+    Path(_RAW_TAKEOFF_BASE_DIR).expanduser().resolve()
+    if _RAW_TAKEOFF_BASE_DIR
+    else None
+)
+
+
+def _validated_uuid(value: str | None, header_name: str) -> str | None:
+    """
+    Strictly validate a tenant/project header as a UUID before it ever
+    reaches a downstream data structure.
+
+    Accepts the canonical 8-4-4-4-12 hex form (with or without braces or
+    URN prefix — ``uuid.UUID()`` normalizes those). Returns the
+    canonical string form (``str(uuid.UUID(value))``) on success, ``None``
+    when the header was omitted, and raises HTTP 400 on any malformed
+    input.
+
+    Validating these here prevents injection of hostile strings into
+    NDJSON payloads, log lines, and downstream queries that key off
+    ``tenant_id`` / ``project_id``.
+    """
+    if value is None:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        return str(uuid.UUID(raw))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Header {header_name} must be a valid UUID string",
+        )
+
+
+def _resolve_takeoff_path(file_path: str) -> Path:
+    """
+    Resolve a requested takeoff file path safely under
+    ``TAKEOFF_BASE_DIR``.
+
+    Hardens ``/api/stream/takeoff/{file_path:path}`` against:
+
+    * Absolute paths (``/etc/passwd``)
+    * Parent-traversal segments (``../../etc/passwd``)
+    * Symlinks that point outside the base directory
+
+    The check uses ``Path.resolve()`` plus ``os.path.commonpath`` — the
+    resolved candidate's common path with the resolved base must equal
+    the base itself, or the request is rejected with 400.
+    """
+    if TAKEOFF_BASE_DIR is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Server-side takeoff streaming is disabled "
+                "(TAKEOFF_BASE_DIR env var is not configured)."
+            ),
+        )
+
+    raw = (file_path or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file path")
+
+    # Reject absolute paths outright — joining them onto the base dir
+    # would still yield an absolute path that escapes the sandbox.
+    candidate_raw = Path(raw)
+    if candidate_raw.is_absolute() or raw.startswith(("/", "\\")):
+        raise HTTPException(status_code=400, detail="Absolute paths are not allowed")
+
+    candidate = (TAKEOFF_BASE_DIR / candidate_raw).resolve()
+    try:
+        common = os.path.commonpath([str(candidate), str(TAKEOFF_BASE_DIR)])
+    except ValueError:
+        # Different drives on Windows, or otherwise incomparable paths.
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    if Path(common) != TAKEOFF_BASE_DIR:
+        raise HTTPException(status_code=400, detail="Path escapes takeoff base directory")
+
+    return candidate
 
 
 def _install_memory_guard() -> None:
@@ -286,6 +375,9 @@ async def upload_and_stream(
     if not file.filename or not file.filename.lower().endswith(".json"):
         raise HTTPException(status_code=400, detail="Only .json files are accepted")
 
+    tenant_id = _validated_uuid(x_onyx_tenant, "X-Onyx-Tenant")
+    project_id = _validated_uuid(x_onyx_project, "X-Onyx-Project")
+
     content = await file.read()
     if len(content) == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
@@ -293,7 +385,7 @@ async def upload_and_stream(
         raise HTTPException(status_code=413, detail="File exceeds 50 MB limit")
 
     # Per-tenant upload quota — admin secret bypasses
-    _enforce_upload_quota(len(content), x_onyx_tenant, x_onyx_secret)
+    _enforce_upload_quota(len(content), tenant_id, x_onyx_secret)
 
     tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
     try:
@@ -305,7 +397,7 @@ async def upload_and_stream(
 
     logger.info(
         "[upload] file=%s size=%d tenant=%s project=%s with_costs=%s region=%s",
-        file.filename, len(content), x_onyx_tenant, x_onyx_project, with_costs, region,
+        file.filename, len(content), tenant_id, project_id, with_costs, region,
     )
 
     async def _stream_and_cleanup() -> AsyncGenerator[bytes, None]:
@@ -313,11 +405,11 @@ async def upload_and_stream(
             if with_costs:
                 # Enhanced path: rows + cost enrichment via EnhancedStreamingParser
                 async for frame in _enhanced_stream_file(
-                    tmp_path, chunk_size, region, x_onyx_tenant, x_onyx_project,
+                    tmp_path, chunk_size, region, tenant_id, project_id,
                 ):
                     yield frame
             else:
-                async for frame in _stream_file(tmp_path, chunk_size, x_onyx_tenant, x_onyx_project):
+                async for frame in _stream_file(tmp_path, chunk_size, tenant_id, project_id):
                     yield frame
         finally:
             Path(tmp_path).unlink(missing_ok=True)
@@ -354,6 +446,9 @@ async def parse_document(
     """
     import json as _json
 
+    tenant_id = _validated_uuid(x_onyx_tenant, "X-Onyx-Tenant")
+    project_id = _validated_uuid(x_onyx_project, "X-Onyx-Project")
+
     filename = file.filename or "unknown"
     ext = Path(filename).suffix.lower()
     content = await file.read()
@@ -364,14 +459,14 @@ async def parse_document(
         raise HTTPException(status_code=413, detail="File exceeds 100 MB limit")
 
     # Per-tenant upload quota — admin secret bypasses
-    _enforce_upload_quota(len(content), x_onyx_tenant, x_onyx_secret)
+    _enforce_upload_quota(len(content), tenant_id, x_onyx_secret)
 
     result: dict = {
         "file_name": filename,
         "file_type": ext.lstrip("."),
         "size_bytes": len(content),
-        "tenant_id": x_onyx_tenant,
-        "project_id": x_onyx_project,
+        "tenant_id": tenant_id,
+        "project_id": project_id,
         "document_id": document_id,
         "page_count": None,
         "text_preview": None,
@@ -464,6 +559,9 @@ async def extract_takeoff(
     """
     from takeoff_extract import extract as _extract
 
+    tenant_id = _validated_uuid(x_onyx_tenant, "X-Onyx-Tenant")
+    project_id = _validated_uuid(x_onyx_project, "X-Onyx-Project")
+
     filename = file.filename or "unknown"
     ext = Path(filename).suffix.lower()
     allowed = {".pdf", ".dxf", ".dwg", ".ifc", ".xlsx", ".xls"}
@@ -480,7 +578,7 @@ async def extract_takeoff(
         raise HTTPException(status_code=413, detail="File exceeds 100 MB limit")
 
     # Per-tenant upload quota — admin secret bypasses
-    _enforce_upload_quota(len(content), x_onyx_tenant, x_onyx_secret)
+    _enforce_upload_quota(len(content), tenant_id, x_onyx_secret)
 
     tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
     try:
@@ -502,13 +600,194 @@ async def extract_takeoff(
         Path(tmp_path).unlink(missing_ok=True)
 
     result["file_name"] = filename
-    result["tenant_id"] = x_onyx_tenant
-    result["project_id"] = x_onyx_project
+    result["tenant_id"] = tenant_id
+    result["project_id"] = project_id
     logger.info(
         "[extract_takeoff] file=%s type=%s rows=%d",
         filename, result.get("source_type"), len(result.get("rows", [])),
     )
     return result
+
+
+@app.post(
+    "/api/takeoff/extract-from-drive",
+    summary="Pull a blueprint from Google Drive, extract takeoff rows, enrich with regional costs, optionally sync to a Google Sheet",
+    dependencies=[Depends(verify_secret)],
+)
+async def extract_from_drive(
+    file_id: str = Query(..., description="Google Drive file resource ID"),
+    export_to_sheet_id: str | None = Query(
+        default=None,
+        description="Optional target spreadsheet ID. When set, the enriched rows + summary are written to Sheet1 of that spreadsheet.",
+    ),
+    region: str = Query(
+        default="US_EAST",
+        description="Regional cost basis. One of US_EAST, US_WEST, US_MIDWEST, US_SOUTH, INTERNATIONAL.",
+    ),
+    x_onyx_tenant: str | None = Header(default=None),
+    x_onyx_project: str | None = Header(default=None),
+    x_onyx_secret: str | None = Header(default=None),
+) -> dict:
+    """
+    End-to-end Drive → takeoff → (optional) Sheets pipeline.
+
+    1. Resolve and validate tenant / project UUID headers.
+    2. Download the file binary from Google Drive (uses the service
+       account configured via ``GOOGLE_CREDENTIALS_JSON``).
+    3. Write it to a ``tempfile.NamedTemporaryFile`` with the original
+       extension so the deterministic parser can dispatch correctly.
+    4. Run ``takeoff_extract.extract`` and feed the resulting rows
+       through ``EnhancedDeterministicParser`` for regional cost
+       enrichment.
+    5. If ``export_to_sheet_id`` is provided, push headers + enriched
+       rows + summary to that Google Sheet *before* unlinking the temp
+       file — the spreadsheet sync runs while the file is still around
+       in case it ever needs to re-read the source.
+
+    Returns
+    -------
+    dict
+        ``{ file_id, file_name, source_type, tenant_id, project_id,
+        region, rows: [...], summary: {...}, sheet_export: str | None }``
+    """
+    if not google_integration.is_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Google integration is not configured on this server. "
+                "Set GOOGLE_CREDENTIALS_JSON to enable Drive imports."
+            ),
+        )
+
+    tenant_id = _validated_uuid(x_onyx_tenant, "X-Onyx-Tenant")
+    project_id = _validated_uuid(x_onyx_project, "X-Onyx-Project")
+
+    # Rate-limit the request before we hit Google. The Drive payload size
+    # is unknown at this point — count it as a normal request.
+    try:
+        check_rate_limit(tenant_id, file_size_mb=0.0, secret=x_onyx_secret)
+    except RateLimitExceeded as e:
+        raise HTTPException(
+            status_code=429,
+            detail=e.reason,
+            headers={"Retry-After": "60"},
+        )
+
+    # ── 1. Download from Drive ────────────────────────────────────────
+    try:
+        file_bytes, drive_filename = google_integration.download_file_from_drive(file_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        # googleapiclient HttpError has a .resp.status — surface it when present.
+        status_code = getattr(getattr(e, "resp", None), "status", 502) or 502
+        logger.exception("[extract_from_drive] Drive download failed file_id=%s", file_id)
+        raise HTTPException(status_code=int(status_code), detail=f"Drive download failed: {e}")
+
+    # Validate file type + size before we touch the disk.
+    ext = Path(drive_filename).suffix.lower()
+    allowed = {".pdf", ".dxf", ".dwg", ".ifc", ".xlsx", ".xls"}
+    if ext not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported file type '{ext}' for {drive_filename!r}. "
+                f"Accepts: {', '.join(sorted(allowed))}"
+            ),
+        )
+    if len(file_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Drive file is empty")
+    if len(file_bytes) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Drive file exceeds 100 MB limit")
+
+    # Charge against the per-tenant upload quota now that we know the size.
+    _enforce_upload_quota(len(file_bytes), tenant_id, x_onyx_secret)
+
+    # ── 2. Spool to a temp file with the original extension ───────────
+    from takeoff_extract import extract as _extract
+
+    tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+    try:
+        tmp.write(file_bytes)
+        tmp.flush()
+        tmp_path = tmp.name
+    finally:
+        tmp.close()
+
+    sheet_export_status: str | None = None
+    try:
+        # ── 3. Deterministic extract ────────────────────────────────
+        try:
+            extracted = _extract(tmp_path)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[extract_from_drive] extract failed file_id=%s", file_id)
+            raise HTTPException(status_code=500, detail=f"Extraction failed: {e}")
+
+        raw_rows: list[dict] = list(extracted.get("rows", []) or [])
+
+        # ── 4. Batch enrich with regional cost data ─────────────────
+        parser = EnhancedDeterministicParser(json.dumps(raw_rows), _COST_DB)
+        try:
+            validated, summary = parser.execute_with_cost_enrichment(region=region)
+        except DataIntegrityBreachException as e:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "breach_type": (
+                        e.breach_type.value
+                        if hasattr(e.breach_type, "value")
+                        else str(e.breach_type)
+                    ),
+                    "message": str(e.message),
+                    "details": e.details,
+                },
+            )
+
+        enriched_rows: list[dict] = [r.model_dump() for r in validated]
+
+        # ── 5. Optional Google Sheets sync (before unlinking tempfile) ─
+        if export_to_sheet_id:
+            try:
+                sheet_export_status = google_integration.export_rows_to_google_sheet(
+                    spreadsheet_id=export_to_sheet_id,
+                    rows=enriched_rows,
+                    summary=summary,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            except Exception as e:  # noqa: BLE001
+                status_code = getattr(getattr(e, "resp", None), "status", 502) or 502
+                logger.exception(
+                    "[extract_from_drive] Sheet export failed spreadsheet_id=%s",
+                    export_to_sheet_id,
+                )
+                raise HTTPException(
+                    status_code=int(status_code),
+                    detail=f"Sheet export failed: {e}",
+                )
+    finally:
+        # Always unlink the temp file — even when the spreadsheet sync raised.
+        Path(tmp_path).unlink(missing_ok=True)
+
+    logger.info(
+        "[extract_from_drive] file_id=%s name=%s rows=%d region=%s sheet=%s tenant=%s",
+        file_id, drive_filename, len(enriched_rows), region,
+        export_to_sheet_id or "-", tenant_id,
+    )
+    return {
+        "file_id": file_id,
+        "file_name": drive_filename,
+        "source_type": extracted.get("source_type"),
+        "tenant_id": tenant_id,
+        "project_id": project_id,
+        "region": region,
+        "rows": enriched_rows,
+        "summary": summary,
+        "sheet_export": sheet_export_status,
+        "ai_candidate_pages": extracted.get("ai_candidate_pages", []),
+    }
 
 
 @app.post(
@@ -535,6 +814,12 @@ async def extract_takeoff_stream(
     import json as _json
     from takeoff_extract import iter_pdf_pages, extract as _extract
 
+    tenant_id = _validated_uuid(x_onyx_tenant, "X-Onyx-Tenant")
+    project_id = _validated_uuid(x_onyx_project, "X-Onyx-Project")
+    # project_id is currently informational on this endpoint; keep the
+    # validation so a bad header is rejected up-front.
+    del project_id
+
     filename = file.filename or "unknown"
     ext = Path(filename).suffix.lower()
     content = await file.read()
@@ -544,7 +829,7 @@ async def extract_takeoff_stream(
         raise HTTPException(status_code=413, detail="File exceeds 100 MB limit")
 
     # Per-tenant upload quota — admin secret bypasses
-    _enforce_upload_quota(len(content), x_onyx_tenant, x_onyx_secret)
+    _enforce_upload_quota(len(content), tenant_id, x_onyx_secret)
 
     tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
     try:
@@ -609,15 +894,29 @@ async def stream_server_file(
     x_onyx_tenant: str | None = Header(default=None),
     x_onyx_project: str | None = Header(default=None),
 ) -> StreamingResponse:
-    """Stream a takeoff file that already exists on the server's filesystem."""
-    target = Path(file_path)
-    if not target.exists() or not target.is_file():
-        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+    """
+    Stream a takeoff file that already exists on the server's filesystem.
+
+    The requested ``file_path`` is treated as relative to the configured
+    ``TAKEOFF_BASE_DIR`` environment variable. Absolute paths and parent-
+    traversal segments (e.g. ``../../etc/passwd``) are rejected — the
+    resolved candidate must live strictly inside the resolved base
+    directory (checked via ``os.path.commonpath`` against the
+    canonicalized form). If ``TAKEOFF_BASE_DIR`` is unset, the endpoint
+    returns 503.
+    """
+    tenant_id = _validated_uuid(x_onyx_tenant, "X-Onyx-Tenant")
+    project_id = _validated_uuid(x_onyx_project, "X-Onyx-Project")
+
+    target = _resolve_takeoff_path(file_path)
+
     if target.suffix.lower() != ".json":
         raise HTTPException(status_code=400, detail="Only .json files are supported")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
 
     return StreamingResponse(
-        _stream_file(str(target.resolve()), chunk_size, x_onyx_tenant, x_onyx_project),
+        _stream_file(str(target), chunk_size, tenant_id, project_id),
         media_type="application/x-ndjson",
         headers={
             "X-Accel-Buffering": "no",
@@ -653,11 +952,12 @@ async def enhance_takeoff(
     Reuses the validation engine in EnhancedDeterministicParser — rows that
     fail validation are dropped from the result and summarized in errors.
     """
-    import json
+    tenant_id = _validated_uuid(x_onyx_tenant, "X-Onyx-Tenant")
+    project_id = _validated_uuid(x_onyx_project, "X-Onyx-Project")
 
     # Rate-limit this as a regular request (no file_size)
     try:
-        check_rate_limit(x_onyx_tenant, file_size_mb=0.0, secret=x_onyx_secret)
+        check_rate_limit(tenant_id, file_size_mb=0.0, secret=x_onyx_secret)
     except RateLimitExceeded as e:
         raise HTTPException(status_code=429, detail=e.reason, headers={"Retry-After": "60"})
 
@@ -682,8 +982,8 @@ async def enhance_takeoff(
         )
 
     return {
-        "tenant_id": x_onyx_tenant,
-        "project_id": x_onyx_project,
+        "tenant_id": tenant_id,
+        "project_id": project_id,
         "rows": [r.model_dump() for r in validated],
         "summary": summary,
     }
@@ -707,6 +1007,10 @@ async def health() -> dict:
             "cost_records": len(_COST_DB._cache),
             "regions": ["US_EAST", "US_WEST", "US_MIDWEST", "US_SOUTH", "INTERNATIONAL"],
         },
+        "google_integration": {
+            "enabled": google_integration.is_enabled(),
+        },
+        "takeoff_base_dir": str(TAKEOFF_BASE_DIR) if TAKEOFF_BASE_DIR else None,
     }
 
 
