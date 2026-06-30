@@ -26,6 +26,14 @@ from fastapi.responses import StreamingResponse
 import uvicorn
 
 from takeoff_parser import CSITakeoffStreamProcessor
+from rate_limiting import (
+    check_rate_limit,
+    RateLimitExceeded,
+    get_tenant_quota,
+    RATE_LIMIT_ENABLED,
+    REQUESTS_PER_MIN,
+    UPLOAD_MB_PER_HOUR,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,6 +44,61 @@ _raw_origins = os.getenv("ALLOWED_ORIGINS", "https://app.onyx-iron.com,http://lo
 ALLOWED_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
 API_SECRET: str | None = os.getenv("API_SECRET")
+
+
+def _install_memory_guard() -> None:
+    """Cap the worker's address space just below the container limit so a runaway
+    PDF allocation (a dense CAD drawing) raises a *catchable* MemoryError instead of
+    the OS SIGKILL-ing the whole worker — which Railway surfaces as a 502
+    "Application failed to respond". With this guard, an over-heavy page is caught by
+    the per-page try/except and routed to the AI vision path instead of crashing."""
+    try:
+        import resource
+    except ImportError:
+        return  # non-Unix (e.g. local Windows dev) — nothing to do
+
+    total: int | None = None
+    # cgroup v2, then v1 — the real limit Railway enforces.
+    for path in ("/sys/fs/cgroup/memory.max",
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            with open(path) as fh:
+                raw = fh.read().strip()
+            if raw.isdigit():
+                total = int(raw)
+                break
+        except OSError:
+            continue
+    # "max"/unlimited or unreadable → fall back to physical RAM.
+    if not total or total > (1 << 60):
+        try:
+            with open("/proc/meminfo") as fh:
+                for line in fh:
+                    if line.startswith("MemTotal:"):
+                        total = int(line.split()[1]) * 1024
+                        break
+        except OSError:
+            total = None
+    if not total:
+        return
+
+    # Leave 256 MB of headroom for the interpreter/runtime; never cap below 512 MB
+    # (a too-tight limit would fail even normal pages). Floor protects against
+    # mis-detected tiny limits.
+    soft = max(total - (256 << 20), 512 << 20)
+    if soft >= total:
+        return  # container too small to guard safely — leave limits alone
+    try:
+        _, hard = resource.getrlimit(resource.RLIMIT_AS)
+        new_hard = hard if hard != resource.RLIM_INFINITY else soft
+        resource.setrlimit(resource.RLIMIT_AS, (soft, new_hard))
+        logger.info("Memory guard active: RLIMIT_AS soft=%d MB (container=%d MB)",
+                    soft >> 20, total >> 20)
+    except (ValueError, OSError) as exc:
+        logger.warning("Could not install memory guard: %s", exc)
+
+
+_install_memory_guard()
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
@@ -60,6 +123,42 @@ def verify_secret(x_onyx_secret: str | None = Header(default=None)) -> None:
     """Reject requests missing the shared API secret when one is configured."""
     if API_SECRET and x_onyx_secret != API_SECRET:
         raise HTTPException(status_code=401, detail="Invalid or missing X-Onyx-Secret header")
+
+
+def rate_limit_request(
+    x_onyx_tenant: str | None = Header(default=None),
+    x_onyx_secret: str | None = Header(default=None),
+) -> None:
+    """
+    Per-tenant request-rate enforcement. Use as a FastAPI dependency on
+    non-upload endpoints. Admin secret (RATE_LIMIT_ADMIN_SECRET) bypasses limits.
+    For upload endpoints, call check_rate_limit() inline after we know file size.
+    """
+    try:
+        check_rate_limit(x_onyx_tenant, file_size_mb=0.0, secret=x_onyx_secret)
+    except RateLimitExceeded as e:
+        raise HTTPException(
+            status_code=429,
+            detail=e.reason,
+            headers={"Retry-After": "60"},
+        )
+
+
+def _enforce_upload_quota(
+    file_size_bytes: int,
+    tenant_id: str | None,
+    secret: str | None,
+) -> None:
+    """Inline upload quota check; converts RateLimitExceeded to HTTP 429."""
+    size_mb = file_size_bytes / (1024 * 1024) if file_size_bytes else 0.0
+    try:
+        check_rate_limit(tenant_id, file_size_mb=size_mb, secret=secret)
+    except RateLimitExceeded as e:
+        raise HTTPException(
+            status_code=429,
+            detail=e.reason,
+            headers={"Retry-After": str(3600 if e.limit_type == "upload_mb_per_hour" else 60)},
+        )
 
 
 # ── Stream helpers ─────────────────────────────────────────────────────────────
@@ -108,6 +207,7 @@ async def upload_and_stream(
     chunk_size: int = Query(default=15, ge=1, le=500),
     x_onyx_tenant: str | None = Header(default=None),
     x_onyx_project: str | None = Header(default=None),
+    x_onyx_secret: str | None = Header(default=None),
 ) -> StreamingResponse:
     """
     Accepts a multipart/form-data upload from the portal, writes to a temp file,
@@ -126,6 +226,9 @@ async def upload_and_stream(
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
     if len(content) > 50 * 1024 * 1024:  # 50 MB hard limit
         raise HTTPException(status_code=413, detail="File exceeds 50 MB limit")
+
+    # Per-tenant upload quota — admin secret bypasses
+    _enforce_upload_quota(len(content), x_onyx_tenant, x_onyx_secret)
 
     tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
     try:
@@ -166,6 +269,7 @@ async def parse_document(
     file: UploadFile = File(...),
     x_onyx_tenant: str | None = Header(default=None),
     x_onyx_project: str | None = Header(default=None),
+    x_onyx_secret: str | None = Header(default=None),
     document_id: str | None = Query(default=None),
 ) -> dict:
     """
@@ -186,6 +290,9 @@ async def parse_document(
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
     if len(content) > 100 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File exceeds 100 MB limit")
+
+    # Per-tenant upload quota — admin secret bypasses
+    _enforce_upload_quota(len(content), x_onyx_tenant, x_onyx_secret)
 
     result: dict = {
         "file_name": filename,
@@ -270,6 +377,7 @@ async def extract_takeoff(
     file: UploadFile = File(...),
     x_onyx_tenant: str | None = Header(default=None),
     x_onyx_project: str | None = Header(default=None),
+    x_onyx_secret: str | None = Header(default=None),
 ) -> dict:
     """
     Build-once, run-free extraction. Routes by extension:
@@ -298,6 +406,9 @@ async def extract_takeoff(
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
     if len(content) > 100 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File exceeds 100 MB limit")
+
+    # Per-tenant upload quota — admin secret bypasses
+    _enforce_upload_quota(len(content), x_onyx_tenant, x_onyx_secret)
 
     tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
     try:
@@ -337,6 +448,7 @@ async def extract_takeoff_stream(
     file: UploadFile = File(...),
     x_onyx_tenant: str | None = Header(default=None),
     x_onyx_project: str | None = Header(default=None),
+    x_onyx_secret: str | None = Header(default=None),
 ) -> StreamingResponse:
     """
     Page-by-page takeoff extraction. For PDFs, processes ONE page at a time and
@@ -358,6 +470,9 @@ async def extract_takeoff_stream(
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
     if len(content) > 100 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File exceeds 100 MB limit")
+
+    # Per-tenant upload quota — admin secret bypasses
+    _enforce_upload_quota(len(content), x_onyx_tenant, x_onyx_secret)
 
     tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
     try:
@@ -444,10 +559,39 @@ async def health() -> dict:
     return {
         "status": "ok",
         "service": "onyx-intel-takeoff-stream",
-        "version": "2.3.0",
+        "version": "2.4.0",
         "origins": ALLOWED_ORIGINS,
         "auth": "enabled" if API_SECRET else "disabled",
+        "rate_limiting": {
+            "enabled": RATE_LIMIT_ENABLED,
+            "requests_per_min": REQUESTS_PER_MIN,
+            "upload_mb_per_hour": UPLOAD_MB_PER_HOUR,
+        },
     }
+
+
+@app.get(
+    "/api/quota",
+    summary="Return current rate-limit quota usage for a tenant",
+    dependencies=[Depends(verify_secret)],
+)
+async def quota(
+    x_onyx_tenant: str | None = Header(default=None),
+) -> dict:
+    """Returns the requesting tenant's current usage against the per-minute
+    request limit and per-hour upload limit."""
+    tid = x_onyx_tenant or "anonymous"
+    return get_tenant_quota(tid)
+
+
+# Log rate-limit configuration on startup so misconfiguration is obvious in logs
+logger.info(
+    "[RateLimit] enabled=%s requests/min=%d upload_mb/hour=%.0f admin_secret=%s",
+    RATE_LIMIT_ENABLED,
+    REQUESTS_PER_MIN,
+    UPLOAD_MB_PER_HOUR,
+    "configured" if os.getenv("RATE_LIMIT_ADMIN_SECRET") else "NOT SET",
+)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
