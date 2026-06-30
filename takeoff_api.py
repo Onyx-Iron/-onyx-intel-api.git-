@@ -871,7 +871,8 @@ async def health() -> dict:
         },
         "cost_enrichment": {
             "enabled": True,
-            "cost_records": len(_COST_DB._cache),
+            "cost_records": len(getattr(_COST_DB, "_sample_cache", {})),
+            "mode": getattr(_COST_DB, "mode", "unknown"),
             "regions": ["US_EAST", "US_WEST", "US_MIDWEST", "US_SOUTH", "INTERNATIONAL"],
         },
     }
