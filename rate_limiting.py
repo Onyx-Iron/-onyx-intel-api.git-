@@ -26,8 +26,8 @@ from __future__ import annotations
 import logging
 import os
 from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -44,26 +44,22 @@ UPLOAD_MB_PER_HOUR = float(os.getenv("RATE_LIMIT_UPLOAD_MB_PER_HOUR", "500"))
 # In-Memory Store (use Redis for production)
 # ────────────────────────────────────────────────────────────────────────────
 
-class TenantQuota(NamedTuple):
-    """Quota usage for a single tenant in current window."""
-    request_count: int
-    request_window_start: datetime
-    bytes_uploaded: int
-    upload_window_start: datetime
+@dataclass
+class TenantQuota:
+    """Mutable quota usage for a single tenant in current window.
+
+    Was previously a NamedTuple, which caused AttributeError on
+    ``quota.request_count += 1`` since NamedTuple fields are immutable.
+    """
+    request_count: int = 0
+    request_window_start: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    bytes_uploaded: int = 0
+    upload_window_start: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # In-memory store: tenant_id -> TenantQuota
-# For production, replace with Redis:
-#   import redis
-#   redis_client = redis.Redis(host=os.getenv("REDIS_HOST", "localhost"))
-_quota_store: dict[str, TenantQuota] = defaultdict(
-    lambda: TenantQuota(
-        request_count=0,
-        request_window_start=datetime.now(timezone.utc),
-        bytes_uploaded=0,
-        upload_window_start=datetime.now(timezone.utc),
-    )
-)
+# For production, replace with Redis.
+_quota_store: dict[str, TenantQuota] = defaultdict(TenantQuota)
 
 
 class RateLimitExceeded(Exception):

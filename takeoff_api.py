@@ -57,7 +57,10 @@ API_SECRET: str | None = os.getenv("API_SECRET")
 TAKEOFF_BASE_DIR: Path = Path(
     os.getenv("TAKEOFF_BASE_DIR", str(Path(tempfile.gettempdir()) / "onyx_takeoffs"))
 ).resolve()
-TAKEOFF_BASE_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    TAKEOFF_BASE_DIR.mkdir(parents=True, exist_ok=True)
+except OSError as _e:
+    logger.warning("Could not create TAKEOFF_BASE_DIR=%s: %s (will retry per-request)", TAKEOFF_BASE_DIR, _e)
 
 
 def _safe_uuid(value: str | None) -> str | None:
@@ -202,7 +205,12 @@ def _enforce_upload_quota(
 
 # ── Stream helpers ─────────────────────────────────────────────────────────────
 
-_COST_DB = CostDatabase()
+try:
+    _COST_DB = CostDatabase()
+    logger.info("[cost_db] initialized mode=%s", getattr(_COST_DB, "mode", "unknown"))
+except Exception as _e:  # noqa: BLE001
+    logger.exception("[cost_db] init failed, using sample fallback: %s", _e)
+    _COST_DB = CostDatabase(mode="sample")
 
 
 def _enhanced_stream_file(
@@ -254,16 +262,18 @@ def _enhanced_stream_file(
     return _inject()
 
 
-def _stream_file(
+async def _stream_file(
     file_path: str,
     chunk_size: int,
     tenant_id: str | None,
     project_id: str | None,
 ) -> AsyncGenerator[bytes, None]:
-    """
-    Wrap CSITakeoffStreamProcessor, injecting tenant_id and project_id into
-    every CHUNK_PROCESSED event so the portal can write rows to Supabase
-    with correct tenant isolation on the client side.
+    """Stream validated CSI takeoff rows as NDJSON with tenant_id + project_id
+    injected into every event.
+
+    Natively async — an `async def` generator, not a sync function returning
+    an inner async generator. FastAPI's StreamingResponse consumes this
+    directly. Tenant + project headers are UUID-sanitized before injection.
     """
     import json
 
@@ -271,21 +281,18 @@ def _stream_file(
     safe_tenant = _safe_uuid(tenant_id)
     safe_project = _safe_uuid(project_id)
 
-    async def _inject() -> AsyncGenerator[bytes, None]:
-        async for raw_frame in processor.parse_and_stream_sheet():
-            if safe_tenant or safe_project:
-                try:
-                    payload = json.loads(raw_frame.decode("utf-8").strip())
-                    if safe_tenant:
-                        payload["tenant_id"] = safe_tenant
-                    if safe_project:
-                        payload["project_id"] = safe_project
-                    raw_frame = (json.dumps(payload, default=str) + "\n").encode("utf-8")
-                except Exception:
-                    pass  # emit original frame if JSON manipulation fails
-            yield raw_frame
-
-    return _inject()
+    async for raw_frame in processor.parse_and_stream_sheet():
+        if safe_tenant or safe_project:
+            try:
+                payload = json.loads(raw_frame.decode("utf-8").strip())
+                if safe_tenant:
+                    payload["tenant_id"] = safe_tenant
+                if safe_project:
+                    payload["project_id"] = safe_project
+                raw_frame = (json.dumps(payload, default=str) + "\n").encode("utf-8")
+            except Exception:
+                pass  # emit original frame if JSON manipulation fails
+        yield raw_frame
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
