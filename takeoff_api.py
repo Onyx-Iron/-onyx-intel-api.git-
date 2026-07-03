@@ -162,9 +162,20 @@ app.add_middleware(
 # ── Auth dependency ────────────────────────────────────────────────────────────
 
 def verify_secret(x_onyx_secret: str | None = Header(default=None)) -> None:
-    """Reject requests missing the shared API secret when one is configured."""
-    if API_SECRET and x_onyx_secret != API_SECRET:
-        raise HTTPException(status_code=401, detail="Invalid or missing X-Onyx-Secret header")
+    """Reject requests missing the shared API secret when one is configured.
+
+    Accepts either API_SECRET (regular auth) or RATE_LIMIT_ADMIN_SECRET
+    (auth + rate-limit bypass). The rate limiter separately checks whether
+    the value matched the admin secret.
+    """
+    if not API_SECRET:
+        return
+    admin_secret = os.getenv("RATE_LIMIT_ADMIN_SECRET") or ""
+    if x_onyx_secret == API_SECRET:
+        return
+    if admin_secret and x_onyx_secret == admin_secret:
+        return
+    raise HTTPException(status_code=401, detail="Invalid or missing X-Onyx-Secret header")
 
 
 def rate_limit_request(
