@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import CADVectorLayer from "./CADVectorLayer";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -412,6 +413,29 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               )}
             </svg>
           )}
+
+          {/* CAD vector layer — rendered atop the PDF, below the tool overlay */}
+          <CADVectorLayer
+            pageId={pageId}
+            projectId={projectId}
+            canvasSize={renderSize}
+            scaleRatio={calibration?.scale_ratio ?? 1}
+            onCommitted={(m) => {
+              // Mirror an approved CAD vector into the local shapes dock so
+              // estimators see it immediately without needing to reload.
+              setShapes((prev) => [...prev, {
+                key: `cad-${Date.now()}`,
+                tool: m.takeoff_type,
+                points: Array.isArray((m.geometry as { points?: { x: number; y: number }[] })?.points)
+                  ? ((m.geometry as { points: { x: number; y: number }[] }).points)
+                  : [],
+                quantity: m.quantity,
+                unit: m.unit,
+                cost_code: m.cost_code,
+                saved: true,
+              }]);
+            }}
+          />
 
           {!renderSize && !loadError && (
             <div className="absolute inset-0 flex items-center justify-center text-xs text-white/40">
