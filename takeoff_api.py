@@ -224,18 +224,20 @@ except Exception as _e:  # noqa: BLE001
     _COST_DB = CostDatabase(mode="sample")
 
 
-def _enhanced_stream_file(
+async def _enhanced_stream_file(
     file_path: str,
     chunk_size: int,
     region: str,
     tenant_id: str | None,
     project_id: str | None,
 ) -> AsyncGenerator[bytes, None]:
-    """
-    Run EnhancedStreamingParser over a .json takeoff file.
-    Yields NDJSON events: ROW_VALIDATED (with cost), SUMMARY, ERROR.
-    Tenant + project ids are injected into every event so the portal can
-    write rows with correct isolation.
+    """Run EnhancedStreamingParser over a .json takeoff file.
+
+    Natively `async def` — yields NDJSON events directly instead of returning
+    an inner async generator, so FastAPI's StreamingResponse consumes it as a
+    single continuous coroutine (no double-await hop, no scope handoff).
+    Tenant + project ids are UUID-validated before injection so downstream
+    JSON is guaranteed safe.
     """
     import json
 
@@ -243,34 +245,31 @@ def _enhanced_stream_file(
     safe_tenant = _safe_uuid(tenant_id)
     safe_project = _safe_uuid(project_id)
 
-    async def _inject() -> AsyncGenerator[bytes, None]:
-        try:
-            async for evt_str in parser.stream_with_costs(chunk_size=chunk_size, region=region):
-                try:
-                    payload = json.loads(evt_str.strip())
-                    if safe_tenant:
-                        payload["tenant_id"] = safe_tenant
-                    if safe_project:
-                        payload["project_id"] = safe_project
-                    yield (json.dumps(payload, default=str) + "\n").encode("utf-8")
-                except Exception:
-                    yield evt_str.encode("utf-8") if isinstance(evt_str, str) else evt_str
-        except DataIntegrityBreachException as e:
-            err = {
-                "event": "ERROR",
-                "breach_type": e.breach_type.value if hasattr(e.breach_type, "value") else str(e.breach_type),
-                "message": str(e.message),
-                "details": e.details,
-                "tenant_id": safe_tenant,
-                "project_id": safe_project,
-            }
-            yield (json.dumps(err, default=str) + "\n").encode("utf-8")
-        except Exception as e:  # noqa: BLE001
-            logger.exception("[enhanced_stream] unhandled error")
-            err = {"event": "ERROR", "message": f"Enhanced parse failed: {e}"}
-            yield (json.dumps(err) + "\n").encode("utf-8")
-
-    return _inject()
+    try:
+        async for evt_str in parser.stream_with_costs(chunk_size=chunk_size, region=region):
+            try:
+                payload = json.loads(evt_str.strip())
+                if safe_tenant:
+                    payload["tenant_id"] = safe_tenant
+                if safe_project:
+                    payload["project_id"] = safe_project
+                yield (json.dumps(payload, default=str) + "\n").encode("utf-8")
+            except Exception:
+                yield evt_str.encode("utf-8") if isinstance(evt_str, str) else evt_str
+    except DataIntegrityBreachException as e:
+        err = {
+            "event": "ERROR",
+            "breach_type": e.breach_type.value if hasattr(e.breach_type, "value") else str(e.breach_type),
+            "message": str(e.message),
+            "details": e.details,
+            "tenant_id": safe_tenant,
+            "project_id": safe_project,
+        }
+        yield (json.dumps(err, default=str) + "\n").encode("utf-8")
+    except Exception as e:  # noqa: BLE001
+        logger.exception("[enhanced_stream] unhandled error")
+        err = {"event": "ERROR", "message": f"Enhanced parse failed: {e}"}
+        yield (json.dumps(err) + "\n").encode("utf-8")
 
 
 async def _stream_file(
@@ -670,19 +669,27 @@ async def stream_server_file(
     that root (absolute paths, `..` segments, symlinks pointing outside) is
     rejected with 400. This is the path-traversal guard.
     """
-    # Reject obvious traversal attempts before filesystem hits
+    # Reject obvious traversal attempts before touching the filesystem.
     if not file_path or file_path.startswith(("/", "\\")) or ".." in Path(file_path).parts:
-        raise HTTPException(status_code=400, detail="Invalid file path")
+        raise HTTPException(status_code=403, detail="Forbidden: invalid or traversal path")
 
-    candidate = (TAKEOFF_BASE_DIR / file_path).resolve()
-    base = TAKEOFF_BASE_DIR.resolve()
-    # `commonpath` raises ValueError on different drives; treat that as escape
+    # Resolve against TAKEOFF_BASE_DIR — this collapses `..` segments, symlinks,
+    # and normalises separators to real absolute paths that we can string-compare.
+    candidate_abs = str((TAKEOFF_BASE_DIR / file_path).resolve())
+    base_abs      = str(TAKEOFF_BASE_DIR.resolve())
+
+    # Directory breakout guard — the resolved path MUST start with the base.
+    # `os.path.commonpath` handles case + separator normalisation on Windows;
+    # ValueError happens across drives — also an escape.
     try:
-        inside = os.path.commonpath([str(candidate), str(base)]) == str(base)
+        inside = os.path.commonpath([candidate_abs, base_abs]) == base_abs
     except ValueError:
         inside = False
     if not inside:
-        raise HTTPException(status_code=400, detail="File path escapes takeoff root")
+        logger.warning("[stream_server_file] blocked traversal attempt: %s → %s", file_path, candidate_abs)
+        raise HTTPException(status_code=403, detail="Forbidden: path escapes takeoff root")
+
+    candidate = Path(candidate_abs)
     if not candidate.exists() or not candidate.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     if candidate.suffix.lower() != ".json":
