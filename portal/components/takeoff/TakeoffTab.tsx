@@ -461,6 +461,11 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
   };
 
   // ── Deterministic extraction (PDF tables / DXF / IFC / XLSX) ──
+  //
+  // Small files (< 3.5 MB): POST directly to /api/takeoff/extract — simplest path.
+  // Larger files: use the two-step signed-upload flow to bypass Vercel's 4.5 MB
+  // ingress body limit. Vercel returns a plain 413 with no JSON body if we try
+  // to send a big multipart there.
   const extractDeterministic = useCallback(async (file: File) => {
     setFileName(file.name); setPhase("uploading"); setRows([]);
     setProgress(0); setStatusMsg("Extracting…"); setAuditStatus(null);
@@ -469,14 +474,64 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     pdfFileRef.current = isPdf ? file : null;
     setHasLocalPdf(isPdf);
 
-    const form = new FormData();
-    form.append("file", file);
+    // Threshold slightly under Vercel's ~4.5 MB ingress ceiling for safety.
+    const DIRECT_UPLOAD_LIMIT = 3.5 * 1024 * 1024;
+    const useStorageUpload = file.size > DIRECT_UPLOAD_LIMIT;
 
     let res: Response;
     try {
-      res = await fetch(`/api/takeoff/extract?project_id=${encodeURIComponent(projectId)}`, {
-        method: "POST", body: form,
-      });
+      if (useStorageUpload) {
+        setStatusMsg("Uploading to secure storage…");
+        // 1) Reserve document + get signed upload URL.
+        const urlRes = await fetch("/api/takeoff/upload-url", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            project_id: projectId,
+            file_name: file.name,
+            size: file.size,
+            content_type: file.type || "application/octet-stream",
+          }),
+        });
+        const urlData = await urlRes.json().catch(() => ({}));
+        if (!urlRes.ok) {
+          setPhase("error");
+          setStatusMsg(typeof urlData?.error === "string" ? urlData.error : `Upload URL failed (${urlRes.status})`);
+          return;
+        }
+        // 2) PUT bytes directly to Supabase Storage — bypasses Vercel entirely.
+        const putRes = await fetch(urlData.upload.url, {
+          method: "PUT",
+          headers: {
+            "Content-Type": file.type || "application/octet-stream",
+            "x-upsert": "false",
+          },
+          body: file,
+        });
+        if (!putRes.ok) {
+          const detail = await putRes.text().catch(() => putRes.statusText);
+          setPhase("error");
+          setStatusMsg(`Storage upload failed (${putRes.status}): ${detail.slice(0, 200)}`);
+          return;
+        }
+        // 3) Run takeoff off the stored file.
+        setStatusMsg("Extracting…");
+        res = await fetch(`/api/takeoff/from-document`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            document_id: urlData.document_id,
+            project_id: projectId,
+          }),
+        });
+      } else {
+        // Small file: direct multipart to Vercel is fine.
+        const form = new FormData();
+        form.append("file", file);
+        res = await fetch(`/api/takeoff/extract?project_id=${encodeURIComponent(projectId)}`, {
+          method: "POST", body: form,
+        });
+      }
     } catch {
       setPhase("error"); setStatusMsg("Upload failed — check your connection and try again."); return;
     }
