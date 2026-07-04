@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -58,8 +59,10 @@ class TenantQuota:
 
 
 # In-memory store: tenant_id -> TenantQuota
-# For production, replace with Redis.
+# For production, replace with Redis (this store is per-worker; multi-worker
+# uvicorn = per-worker limits, and the `_quota_lock` doesn't cross processes).
 _quota_store: dict[str, TenantQuota] = defaultdict(TenantQuota)
+_quota_lock = threading.Lock()
 
 
 class RateLimitExceeded(Exception):
@@ -129,73 +132,62 @@ def check_rate_limit(
 
     tid = tenant_id or "anonymous"
     now = datetime.now(timezone.utc)
-    quota = _quota_store[tid]
 
-    # ── Request rate limit (per minute) ──
-    min_window_elapsed = now - quota.request_window_start
-    if min_window_elapsed >= timedelta(minutes=1):
-        # Reset window
-        _quota_store[tid] = TenantQuota(
-            request_count=1,
-            request_window_start=now,
-            bytes_uploaded=quota.bytes_uploaded,
-            upload_window_start=quota.upload_window_start,
-        )
-    else:
-        # Check current window
-        _quota_store[tid].request_count += 1
-        if _quota_store[tid].request_count > REQUESTS_PER_MIN:
-            raise RateLimitExceeded(
-                reason=f"Request limit exceeded: {REQUESTS_PER_MIN} requests per minute. "
-                f"Retry in {(timedelta(minutes=1) - min_window_elapsed).total_seconds():.0f}s.",
-                tenant_id=tid,
-                limit_type="requests_per_minute",
-                current=_quota_store[tid].request_count,
-                limit=REQUESTS_PER_MIN,
-            )
+    with _quota_lock:
+        quota = _quota_store[tid]
 
-    # ── Upload size limit (per hour) ──
-    if file_size_mb > 0:
-        hour_window_elapsed = now - quota.upload_window_start
-        if hour_window_elapsed >= timedelta(hours=1):
-            # Reset window
-            _quota_store[tid] = TenantQuota(
-                request_count=_quota_store[tid].request_count,
-                request_window_start=_quota_store[tid].request_window_start,
-                bytes_uploaded=int(file_size_mb * 1024 * 1024),
-                upload_window_start=now,
-            )
+        # ── Request rate limit (per minute) ──
+        min_window_elapsed = now - quota.request_window_start
+        if min_window_elapsed >= timedelta(minutes=1):
+            quota.request_count = 1
+            quota.request_window_start = now
         else:
-            # Check current window
-            new_total_bytes = quota.bytes_uploaded + int(file_size_mb * 1024 * 1024)
-            limit_bytes = int(UPLOAD_MB_PER_HOUR * 1024 * 1024)
-            if new_total_bytes > limit_bytes:
+            quota.request_count += 1
+            if quota.request_count > REQUESTS_PER_MIN:
                 raise RateLimitExceeded(
-                    reason=f"Upload quota exceeded: {UPLOAD_MB_PER_HOUR} MB per hour. "
-                    f"Current: {new_total_bytes / (1024 * 1024):.1f} MB. "
-                    f"Retry in {(timedelta(hours=1) - hour_window_elapsed).total_seconds():.0f}s.",
+                    reason=f"Request limit exceeded: {REQUESTS_PER_MIN} requests per minute. "
+                    f"Retry in {(timedelta(minutes=1) - min_window_elapsed).total_seconds():.0f}s.",
                     tenant_id=tid,
-                    limit_type="upload_mb_per_hour",
-                    current=new_total_bytes / (1024 * 1024),
-                    limit=UPLOAD_MB_PER_HOUR,
+                    limit_type="requests_per_minute",
+                    current=quota.request_count,
+                    limit=REQUESTS_PER_MIN,
                 )
-            _quota_store[tid] = TenantQuota(
-                request_count=_quota_store[tid].request_count,
-                request_window_start=_quota_store[tid].request_window_start,
-                bytes_uploaded=new_total_bytes,
-                upload_window_start=_quota_store[tid].upload_window_start,
-            )
+
+        # ── Upload size limit (per hour) ──
+        if file_size_mb > 0:
+            hour_window_elapsed = now - quota.upload_window_start
+            add_bytes = int(file_size_mb * 1024 * 1024)
+            if hour_window_elapsed >= timedelta(hours=1):
+                quota.bytes_uploaded = add_bytes
+                quota.upload_window_start = now
+            else:
+                new_total_bytes = quota.bytes_uploaded + add_bytes
+                limit_bytes = int(UPLOAD_MB_PER_HOUR * 1024 * 1024)
+                if new_total_bytes > limit_bytes:
+                    raise RateLimitExceeded(
+                        reason=f"Upload quota exceeded: {UPLOAD_MB_PER_HOUR} MB per hour. "
+                        f"Current: {new_total_bytes / (1024 * 1024):.1f} MB. "
+                        f"Retry in {(timedelta(hours=1) - hour_window_elapsed).total_seconds():.0f}s.",
+                        tenant_id=tid,
+                        limit_type="upload_mb_per_hour",
+                        current=new_total_bytes / (1024 * 1024),
+                        limit=UPLOAD_MB_PER_HOUR,
+                    )
+                quota.bytes_uploaded = new_total_bytes
+
+        current_requests = quota.request_count
+        current_bytes = quota.bytes_uploaded
 
     logger.info(
-        f"[RateLimit] tenant={tid} requests={_quota_store[tid].request_count}/{REQUESTS_PER_MIN} "
-        f"upload_mb={_quota_store[tid].bytes_uploaded / (1024 * 1024):.1f}/{UPLOAD_MB_PER_HOUR}"
+        f"[RateLimit] tenant={tid} requests={current_requests}/{REQUESTS_PER_MIN} "
+        f"upload_mb={current_bytes / (1024 * 1024):.1f}/{UPLOAD_MB_PER_HOUR}"
     )
 
     return {
         "tenant_id": tid,
-        "requests_current": _quota_store[tid].request_count,
+        "requests_current": current_requests,
         "requests_limit": REQUESTS_PER_MIN,
-        "upload_mb_current": round(_quota_store[tid].bytes_uploaded / (1024 * 1024), 2),
+        "upload_mb_current": round(current_bytes / (1024 * 1024), 2),
         "upload_mb_limit": UPLOAD_MB_PER_HOUR,
     }
 

@@ -53,9 +53,10 @@ export async function POST(req: NextRequest): Promise<Response> {
       if (dlErr || !fileData) return NextResponse.json({ error: `Could not load file: ${dlErr?.message}` }, { status: 502 });
       bytes = Buffer.from(await fileData.arrayBuffer());
     } else if (driveFileId) {
-      // Plan lives in the user's Google Drive – download it with their token.
-      const browserToken = req.headers.get("x-google-token");
-      const gToken = browserToken ?? await getAccessToken(tenantId, userId);
+      // Plan lives in the user's Google Drive – always use the server-stored refresh token.
+      // Do NOT accept a browser-supplied bearer token: it would let a client spoof any
+      // Google account's Drive read for this tenant.
+      const gToken = await getAccessToken(tenantId, userId);
       if (!gToken) {
         return NextResponse.json({
           error: "This plan is in Google Drive, but Google is not connected for this workspace yet. Connect Google or reopen the file from Drive.",

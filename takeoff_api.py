@@ -819,11 +819,19 @@ async def extract_from_drive(
 
     try:
         try:
-            raw_rows = _extract(tmp_path)
+            extracted = _extract(tmp_path)
         except Exception as e:  # noqa: BLE001
             logger.exception("[extract-from-drive] takeoff_extract failed")
             raise HTTPException(status_code=422, detail=f"Takeoff extract failed: {e}")
 
+        # `takeoff_extract.extract` returns a dict {rows: [...], ...}
+        # For legacy callers that returned a list, fall through gracefully.
+        if isinstance(extracted, dict):
+            raw_rows = extracted.get("rows") or []
+        elif isinstance(extracted, list):
+            raw_rows = extracted
+        else:
+            raise HTTPException(status_code=422, detail="Extractor returned no rows")
         if not isinstance(raw_rows, list):
             raise HTTPException(status_code=422, detail="Extractor did not return a row list")
 

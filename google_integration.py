@@ -64,7 +64,8 @@ def download_file_from_drive(file_id: str) -> tuple[bytes, str]:
     done = False
     while not done:
         status, done = downloader.next_chunk()
-        logger.info(f"[Drive] {file_id} {int(status.progress() * 100)}%")
+        if status:
+            logger.info(f"[Drive] {file_id} {int(status.progress() * 100)}%")
     return stream.getvalue(), filename
 
 

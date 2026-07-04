@@ -80,7 +80,7 @@ class CostDatabaseReference(BaseModel):
     labor_cost: float
     material_cost: float
     equipment_cost: float
-    supplier_id: str = None
+    supplier_id: str | None = None
     last_updated: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
