@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { PipeRunsPanel, EntrancesPanel, StockpilesPanel, LedgerPanel } from "./CivilScopePanels";
+
+type TabKey = "bulk" | "pipe_runs" | "entrances" | "stockpiles" | "ledger";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -72,6 +75,7 @@ interface Props { projectId: string; projectName: string }
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
 export default function MassHaulMatrix({ projectId, projectName }: Props) {
+  const [tab, setTab] = useState<TabKey>("bulk");
   const [surfaces, setSurfaces] = useState<Surface[]>([]);
   const [rows, setRows] = useState<VolumeRow[]>([]);
   const [totals, setTotals] = useState<Totals | null>(null);
@@ -166,8 +170,44 @@ export default function MassHaulMatrix({ projectId, projectName }: Props) {
             <p className="mt-0.5 text-xs text-white/40">{projectName}</p>
           </div>
         </div>
+        {/* Tabs */}
+        <div className="mt-4 flex flex-wrap items-center gap-1">
+          {([
+            { k: "bulk",       label: "Bulk Cut/Fill" },
+            { k: "pipe_runs",  label: "Pipe Runs & Embedment" },
+            { k: "entrances",  label: "Construction Entrances" },
+            { k: "stockpiles", label: "Stockpiles" },
+            { k: "ledger",     label: "Import / Export Ledger" },
+          ] as { k: TabKey; label: string }[]).map((t) => (
+            <button
+              key={t.k}
+              type="button"
+              onClick={() => setTab(t.k)}
+              className={`h-8 rounded-full px-3.5 text-[10px] font-mono uppercase tracking-widest transition-colors ${
+                tab === t.k ? "bg-[#CCFF00] text-black" : "text-white/60 hover:text-white hover:bg-white/[0.06] border border-white/10"
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
       </div>
 
+      {tab !== "bulk" && (
+        <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-10">
+          {tab === "pipe_runs"  && <PipeRunsPanel projectId={projectId} />}
+          {tab === "entrances"  && <EntrancesPanel projectId={projectId} />}
+          {tab === "stockpiles" && <StockpilesPanel projectId={projectId} />}
+          {tab === "ledger"     && <LedgerPanel projectId={projectId} />}
+        </div>
+      )}
+
+      {tab === "bulk" && (
+      <>
+      </>
+      )}
+
+      {tab === "bulk" && (<>
       {/* Site-wide summary */}
       <div className="border-b border-white/10 bg-[#0E0F12]/60 px-4 py-4 sm:px-6 lg:px-10">
         <div className="grid grid-cols-2 gap-4 md:grid-cols-4 lg:grid-cols-6">
@@ -286,6 +326,7 @@ export default function MassHaulMatrix({ projectId, projectName }: Props) {
           </table>
         )}
       </div>
+      </>)}
     </div>
   );
 }
