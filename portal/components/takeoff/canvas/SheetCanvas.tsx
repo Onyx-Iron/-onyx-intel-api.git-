@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import CADVectorLayer from "./CADVectorLayer";
+import VisionExtractionsPanel from "./VisionExtractionsPanel";
 import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
+import { classifyLayer } from "@/lib/cad/layer-classify";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -51,6 +53,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [loadError, setLoadError]   = useState<string | null>(null);
   const [saving, setSaving]         = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [vectorDescriptions, setVectorDescriptions] = useState<string[]>([]);
 
   // ── Load signed URL + existing calibration + saved takeoffs ────────────────
   useEffect(() => {
@@ -449,6 +452,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             projectId={projectId}
             canvasSize={renderSize}
             scaleRatio={calibration?.scale_ratio ?? 1}
+            onVectorsLoaded={setVectorDescriptions}
             onCommitted={(m) => {
               // Mirror an approved CAD vector into the local shapes dock so
               // estimators see it immediately without needing to reload.
@@ -494,6 +498,22 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
       {/* Right: dock */}
       <aside className="w-[360px] shrink-0 border-l border-white/10 bg-[#0E0F12] flex flex-col">
+        <VisionExtractionsPanel
+          pageId={pageId}
+          projectId={projectId}
+          vectorDescriptions={vectorDescriptions}
+          onCommitted={(vi) => {
+            setShapes((prev) => [...prev, {
+              key: `vision-${Date.now()}`,
+              tool: vi.unit === "EA" ? "count" : vi.unit === "SF" || vi.unit === "CY" ? "area" : "length",
+              points: [],
+              quantity: vi.quantity,
+              unit: (vi.unit === "EA" || vi.unit === "SF" || vi.unit === "LF") ? vi.unit as "EA"|"SF"|"LF" : "EA",
+              cost_code: vi.cost_code,
+              saved: true,
+            }]);
+          }}
+        />
         <div className="border-b border-white/10 px-4 py-3">
           <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Measurements</div>
           <div className="mt-1 text-sm font-semibold">

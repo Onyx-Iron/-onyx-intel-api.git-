@@ -34,12 +34,14 @@ interface Props {
     description: string;
     geometry: unknown;
   }) => void;
+  /** Called whenever the CAD vector set is (re)loaded — used by cross-verify. */
+  onVectorsLoaded?: (descriptions: string[]) => void;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
-export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRatio, onCommitted }: Props) {
+export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRatio, onCommitted, onVectorsLoaded }: Props) {
   const [raw, setRaw] = useState<RawVector[]>([]);
   const [enabled, setEnabled] = useState(true);
   const [hoverKey, setHoverKey] = useState<string | null>(null);
@@ -57,7 +59,11 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
         const res = await fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
         if (!res.ok) return;
         const data = await res.json() as { vectors: RawVector[] };
-        if (!cancelled && Array.isArray(data.vectors)) setRaw(data.vectors);
+        if (!cancelled && Array.isArray(data.vectors)) {
+          setRaw(data.vectors);
+          const descriptions = Array.from(new Set(data.vectors.map((v) => classifyLayer(v.layer).description)));
+          onVectorsLoaded?.(descriptions);
+        }
       } catch { /* silent */ }
     };
     void load();
