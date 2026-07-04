@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { headerSafe } from "@/lib/http";
+import { runScopeGapAgent } from "@/lib/agents/scope-gap";
+import { runRfiDrafterAgent } from "@/lib/agents/rfi-drafter";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
@@ -193,7 +195,52 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     .update({ vision_extractions: result, vision_extracted_at: result.extracted_at })
     .eq("id", body.page_id).eq("tenant_id", tenantId);
 
+  // ── Background agents (fire-and-forget) ──────────────────────────────────
+  // Agents ONLY write to `ai_agent_audit_trails` with status
+  // 'pending_human_review'. They cannot mutate estimates, send RFIs, or push
+  // purchasing metrics until the human clicks Approve.
+  void runBackgroundAgents({
+    db: anyDb,
+    tenantId,
+    projectId: null,
+    pageId: page.id,
+    documentId: (page as { document_id?: string }).document_id ?? null,
+    pageNumber: (page as { page_number?: number }).page_number ?? 1,
+    visionItems: items,
+  }).catch((e) => console.error("[agents]", e));
+
   return NextResponse.json({ result, cached: false });
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function runBackgroundAgents(args: { db: any; tenantId: string; projectId: string | null; pageId: string; documentId: string | null; pageNumber: number; visionItems: any[] }): Promise<void> {
+  const { db, tenantId, pageId, pageNumber, visionItems } = args;
+  let projectId = args.projectId;
+  let documentName: string | null = null;
+
+  // Resolve project via document_id (page → document → project)
+  if (args.documentId) {
+    const { data: doc } = await db.from("documents")
+      .select("project_id, file_name")
+      .eq("id", args.documentId).eq("tenant_id", tenantId).maybeSingle();
+    projectId = (doc as { project_id?: string })?.project_id ?? projectId;
+    documentName = (doc as { file_name?: string })?.file_name ?? null;
+  }
+  if (!projectId) return;
+
+  await Promise.allSettled([
+    runScopeGapAgent({
+      db, tenantId, projectId, pageId,
+      documentId: args.documentId,
+      visionItems,
+    }),
+    runRfiDrafterAgent({
+      db, tenantId, projectId, pageId, pageNumber,
+      documentId: args.documentId,
+      documentName,
+      visionItems,
+    }),
+  ]);
 }
 
 function safeNumber(v: unknown, fallback: number, min?: number, max?: number): number {
