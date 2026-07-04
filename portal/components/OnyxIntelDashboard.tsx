@@ -21,6 +21,7 @@ import {
 import GoogleConnect from "@/components/google/GoogleConnect";
 import GoogleCalendarCard from "@/components/dashboard/GoogleCalendarCard";
 import GmailInboxCard from "@/components/dashboard/GmailInboxCard";
+import AIProviderPicker from "@/components/ai/AIProviderPicker";
 import BrandMark from "@/components/brand/BrandMark";
 import GlobalSearch from "@/components/search/GlobalSearch";
 
@@ -407,12 +408,7 @@ function AICommandPanel({
   return (
     <Panel
       title="AI Command"
-      action={
-        <span className="inline-flex items-center gap-1.5 text-xs text-white/40">
-          <Circle size={7} className="fill-[#CCFF00] text-[#CCFF00]" />
-          {providerLabel}
-        </span>
-      }
+      action={<AIProviderPicker />}
       className="min-h-[520px]"
     >
       <div className="flex h-[460px] flex-col">
