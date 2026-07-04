@@ -69,13 +69,35 @@ def download_file_from_drive(file_id: str) -> tuple[bytes, str]:
     return stream.getvalue(), filename
 
 
+def _first_sheet_title(sheets, spreadsheet_id: str) -> str:
+    """Return the first tab's title (default 'Sheet1' if that fails)."""
+    try:
+        meta = sheets.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(title))",
+        ).execute()
+        tabs = meta.get("sheets") or []
+        if tabs:
+            return str(tabs[0].get("properties", {}).get("title") or "Sheet1")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[Sheets] Could not read sheet metadata: %s (defaulting to Sheet1)", e)
+    return "Sheet1"
+
+
 def export_rows_to_google_sheet(
     spreadsheet_id: str,
     rows: list[dict],
     summary: dict,
+    tab_title: str | None = None,
 ) -> str:
-    """Write enriched takeoff rows to a Google Sheet tab. Returns status string."""
+    """Write enriched takeoff rows to a Google Sheet tab. Returns status string.
+
+    Uses the first tab of the spreadsheet by default (auto-discovers name so a
+    renamed 'Sheet1' still works). Pass `tab_title` to target a specific tab.
+    """
     _, sheets = _get_services()
+
+    tab = tab_title or _first_sheet_title(sheets, spreadsheet_id)
 
     headers = [
         "Trade", "Cost Code", "Description", "Quantity Basis",
@@ -100,13 +122,13 @@ def export_rows_to_google_sheet(
     values.append(["SUMMARY", f"Total Cost: ${summary.get('estimated_cost', 0.0):,.2f}"])
 
     sheets.spreadsheets().values().clear(
-        spreadsheetId=spreadsheet_id, range="Sheet1!A:Z"
+        spreadsheetId=spreadsheet_id, range=f"{tab}!A:Z"
     ).execute()
     result = sheets.spreadsheets().values().update(
         spreadsheetId=spreadsheet_id,
-        range="Sheet1!A1",
+        range=f"{tab}!A1",
         valueInputOption="USER_ENTERED",
         body={"values": values},
     ).execute()
 
-    return f"Updated {result.get('updatedCells')} cells."
+    return f"Updated {result.get('updatedCells')} cells in tab '{tab}'."

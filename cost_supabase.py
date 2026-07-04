@@ -36,12 +36,24 @@ _DEFAULT_TIMEOUT = 8.0
 _CACHE_TTL_SECONDS = 300  # 5 minutes
 
 
+_portal_url_warned = False
+
+
 def _portal_base_url() -> str:
+    global _portal_url_warned
     explicit = os.environ.get("ONYX_PORTAL_URL")
     if explicit:
         return explicit.rstrip("/")
-    # Fall back to localhost for dev
-    return os.environ.get("NEXT_PUBLIC_SITE_URL", "http://localhost:3000").rstrip("/")
+    fallback = os.environ.get("NEXT_PUBLIC_SITE_URL", "http://localhost:3000").rstrip("/")
+    if not _portal_url_warned and ("localhost" in fallback or "127.0.0.1" in fallback):
+        logger.warning(
+            "[cost_supabase] ONYX_PORTAL_URL is not set — falling back to %s. "
+            "Cost lookups will fail in production. Set ONYX_PORTAL_URL to the "
+            "public portal URL (e.g. https://app.onyx-iron.com).",
+            fallback,
+        )
+        _portal_url_warned = True
+    return fallback
 
 
 def _service_key() -> str | None:
