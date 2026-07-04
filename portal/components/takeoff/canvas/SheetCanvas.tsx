@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import CADVectorLayer from "./CADVectorLayer";
+import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -91,13 +92,16 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }, [pageId, projectId]);
 
   // ── Render the PDF page onto <canvas> via pdfjs-dist ──────────────────────
+  //
+  // After render, kick off a one-time PDF vector extraction for the page if
+  // no CAD vectors have been persisted yet. This makes civil takeoffs work
+  // from vector-authored PDFs (Bluebeam / Civil 3D exports) not just DWG/DXF.
   useEffect(() => {
     if (!pdfUrl) return;
     let cancelled = false;
     (async () => {
       try {
         const pdfjs = await import("pdfjs-dist");
-        // Point at the mjs worker shipped inside the package.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (pdfjs as any).GlobalWorkerOptions.workerSrc = new URL(
           "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -119,12 +123,37 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         if (!ctx) return;
         await page.render({ canvasContext: ctx, viewport, canvas: cvs }).promise;
         if (!cancelled) setRenderSize({ w: viewport.width, h: viewport.height });
+
+        // ── PDF vector extraction (once per page) ─────────────────────────
+        // Check if vectors already exist server-side; if not, extract + PUT.
+        try {
+          const check = await fetch(
+            `/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`,
+            { cache: "no-store" },
+          );
+          const existing = check.ok ? (await check.json() as { vectors?: unknown[] }) : { vectors: [] };
+          if ((existing.vectors ?? []).length === 0) {
+            const vectors = await extractVectorsFromPdfPage(page);
+            if (vectors.length > 0 && !cancelled) {
+              await fetch("/api/takeoff/canvas/vectors", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ page_id: pageId, vectors }),
+              });
+              // Nudge the CAD overlay to re-fetch — a small delay ensures the
+              // PUT has landed before the overlay's GET runs.
+              window.setTimeout(() => window.dispatchEvent(new CustomEvent("onyx:cad-vectors-refresh", { detail: { pageId } })), 300);
+            }
+          }
+        } catch (extractErr) {
+          console.warn("[SheetCanvas] PDF vector extraction skipped:", extractErr);
+        }
       } catch (e) {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
       }
     })();
     return () => { cancelled = true; };
-  }, [pdfUrl]);
+  }, [pdfUrl, pageId]);
 
   // ── Coordinate conversion (SVG uses canvas pixel space directly) ──────────
   const toLocal = useCallback((clientX: number, clientY: number, svgEl: SVGSVGElement): Pt => {

@@ -49,18 +49,28 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
   const [status, setStatus] = useState<string | null>(null);
   const [layerFilter, setLayerFilter] = useState<Set<string>>(new Set());
 
-  // ── Load vectors ──────────────────────────────────────────────────────────
+  // ── Load vectors (initial + on refresh signal from PDF extractor) ─────────
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    const load = async () => {
       try {
         const res = await fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
         if (!res.ok) return;
         const data = await res.json() as { vectors: RawVector[] };
         if (!cancelled && Array.isArray(data.vectors)) setRaw(data.vectors);
       } catch { /* silent */ }
-    })();
-    return () => { cancelled = true; };
+    };
+    void load();
+
+    const onRefresh = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ pageId?: string }>).detail;
+      if (!detail?.pageId || detail.pageId === pageId) void load();
+    };
+    window.addEventListener("onyx:cad-vectors-refresh", onRefresh as EventListener);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("onyx:cad-vectors-refresh", onRefresh as EventListener);
+    };
   }, [pageId]);
 
   // ── World→screen projection ───────────────────────────────────────────────
