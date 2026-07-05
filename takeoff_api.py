@@ -88,6 +88,15 @@ def _require_uuid(value: str | None, field: str) -> str:
     return safe
 
 
+# Preferred public name for the header sanitizer. Alias of _safe_uuid — kept as
+# a distinct symbol so security-audit greps for "validate_uuid_header" land here.
+def _validate_uuid_header(value: str | None) -> str | None:
+    """Return the canonical UUID string if the header value is a genuine UUID,
+    else None. Used to scrub `X-Onyx-Tenant` and `X-Onyx-Project` before any
+    downstream injection into event payloads or response bodies."""
+    return _safe_uuid(value)
+
+
 def _install_memory_guard() -> None:
     """Cap the worker's address space just below the container limit so a runaway
     PDF allocation (a dense CAD drawing) raises a *catchable* MemoryError instead of

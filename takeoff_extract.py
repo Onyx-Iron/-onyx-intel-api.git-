@@ -52,6 +52,24 @@ logger = logging.getLogger(__name__)
 # Ordered most-specific first; first match wins. Codes follow "NN-NN-NN".
 
 CSI_RULES: list[tuple[re.Pattern[str], str, str, str, str]] = [
+    # High-specificity MEP and site utility rules. These stay ahead of broad
+    # concrete/site terms so phrases like "pipe below slab" classify as piping.
+    (re.compile(r"\b(site|utility|civil)\b.{0,50}\b(storm drain|storm sewer|stormwater|catch basin|manhole)\b|\b(storm drain|storm sewer|stormwater)\b.{0,50}\b(site|utility|main)\b"), "33", "33-40-00", "Utilities", "LF"),
+    (re.compile(r"\b(sewer main|sanitary sewer|site sewer|utility sewer)\b"), "33", "33-30-00", "Utilities", "LF"),
+    (re.compile(r"\b(water main|site water|utility water)\b"), "33", "33-10-00", "Utilities", "LF"),
+    (re.compile(r"\b(sanitary|waste|vent)\b.{0,40}\b(pipe|piping|drain)\b|\b(pipe|piping)\b.{0,40}\b(sanitary|waste|vent)\b"), "22", "22-13-16", "Plumbing", "LF"),
+    (re.compile(r"\b(facility storm drain|storm drain piping|storm drainage piping|roof drain|roof leader|roof leaders)\b"), "22", "22-14-13", "Plumbing", "LF"),
+    (re.compile(r"\b(domestic|potable|cold water|hot water|copper|pex|cpvc)\b.{0,40}\b(water pipe|water piping|pipe|piping)\b"), "22", "22-11-16", "Plumbing", "LF"),
+    (re.compile(r"\b(backflow|pressure reducing valve|prv\b|mixing valve|balancing valve|shut.?off valve|isolation valve|check valve)\b"), "22", "22-05-23", "Plumbing", "EA"),
+    (re.compile(r"\b(water heater|domestic water pump|sump pump|ejector pump)\b"), "22", "22-30-00", "Plumbing", "EA"),
+    (re.compile(r"\b(refrigerant piping|refrigerant pipe|line set|condensate drain)\b"), "23", "23-23-00", "HVAC", "LF"),
+    (re.compile(r"\b(hydronic|chilled water|heating hot water|hot water heating)\b.{0,40}\b(pipe|piping)\b"), "23", "23-21-13", "HVAC", "LF"),
+    (re.compile(r"\b(sheet metal duct|rectangular duct|spiral duct|ductwork|duct\b)\b"), "23", "23-31-13", "HVAC", "SF"),
+    (re.compile(r"\b(diffuser|grille|register|louver)\b"), "23", "23-37-13", "HVAC", "EA"),
+    (re.compile(r"\b(panelboard|panel board|branch panel|distribution panel)\b"), "26", "26-24-16", "Electrical", "EA"),
+    (re.compile(r"\b(transformer|dry type transformer)\b"), "26", "26-22-00", "Electrical", "EA"),
+    (re.compile(r"\b(switchboard|switchgear)\b"), "26", "26-24-13", "Electrical", "EA"),
+    (re.compile(r"\b(fire alarm|smoke detector|duct detector|pull station|notification appliance|horn strobe|nac\b)\b"), "28", "28-31-00", "Fire Alarm", "EA"),
     # ── Division 03 — Concrete ──
     (re.compile(r"\b(rebar|reinforc|#\d\s*bar|dowel)\b"),          "03", "03-20-00", "Concrete", "LB"),
     (re.compile(r"\b(slab|footing|foundation|grade beam|pier cap)\b"), "03", "03-30-00", "Concrete", "CY"),
@@ -180,10 +198,15 @@ def _row(description: str, qty: float, basis: str,
 _PDF_COMPLEXITY_LIMIT = 1200  # above this many vector objects, a page is a drawing, not a schedule
 
 
-def _release_page(pg) -> None:
-    """Free pdfplumber's per-page object cache so big drawing sets can't OOM."""
-    if hasattr(pg, "flush_cache"):
-        try: pg.flush_cache()
+def _release_page(pg, pdf=None) -> None:
+    """Free pdfplumber's per-page object cache so big drawing sets can't OOM.
+
+    Also flush the parent pdf's allocation cache when passed — pdfplumber
+    keeps a document-level object cache that grows unbounded across pages
+    on large plansets. Flushing per-page reclaims that memory.
+    """
+    if pdf is not None and hasattr(pdf, "flush_cache"):
+        try: pdf.flush_cache()
         except Exception: pass
     if hasattr(pg, "close"):
         try: pg.close()
@@ -196,7 +219,9 @@ def _rows_from_pdf_page(page, idx: int) -> list[dict]:
     try:
         complexity = len(page.lines) + len(page.curves) + len(page.rects)
     except Exception:
-        complexity = 0
+        # Force corrupted / unparseable pages onto the AI vision fallback path
+        # instead of silently treating them as simple schedules.
+        complexity = 9999
     if complexity > _PDF_COMPLEXITY_LIMIT:
         return []
     try:
@@ -244,7 +269,7 @@ def iter_pdf_pages(path: str):
             except Exception:
                 rows = []
             yield idx, total, rows
-            _release_page(page)
+            _release_page(page, pdf)
 
 
 def extract_from_pdf(path: str) -> dict:
@@ -260,10 +285,11 @@ def extract_from_pdf(path: str) -> dict:
     MAX_TABLE_PAGES = 30           # only run deterministic table-detection on the first N pages
     LINE_COMPLEXITY_LIMIT = 1200   # above this many vector objects, treat page as a drawing
 
-    def _release(pg) -> None:
-        # Free pdfplumber's per-page object cache so big drawing sets don't OOM.
-        if hasattr(pg, "flush_cache"):
-            try: pg.flush_cache()
+    def _release(pg, pdf=None) -> None:
+        # Free the DOCUMENT-level object cache (not just the page's) — that's
+        # where pdfplumber accumulates memory across a large planset.
+        if pdf is not None and hasattr(pdf, "flush_cache"):
+            try: pdf.flush_cache()
             except Exception: pass
         if hasattr(pg, "close"):
             try: pg.close()
@@ -281,11 +307,13 @@ def extract_from_pdf(path: str) -> dict:
             try:
                 complexity = len(page.lines) + len(page.curves) + len(page.rects)
             except Exception:
-                complexity = 0
+                # Corrupted / unparseable page → route to AI vision, never treat
+                # as a simple schedule.
+                complexity = 9999
 
             if complexity > LINE_COMPLEXITY_LIMIT:
                 ai_candidate_pages.append(idx)  # drawing page → AI vision can read it
-                _release(page)
+                _release(page, pdf)
                 continue
 
             try:
@@ -330,7 +358,7 @@ def extract_from_pdf(path: str) -> dict:
                 # No machine-readable table — this page is a drawing; AI vision can read it.
                 ai_candidate_pages.append(idx)
 
-            _release(page)
+            _release(page, pdf)
 
     return {
         "source_type": "pdf",

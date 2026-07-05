@@ -7,7 +7,11 @@ import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
 
-const BUCKET = "project-documents";
+// Aligned with the Supabase Edge Functions (`page-split-worker`, `page-processor`)
+// which read/write everything under `plans-bucket/`. Keeping a single bucket
+// name avoids silent cross-bucket drift where uploads land in one place and
+// downstream workers look for them in another.
+const BUCKET = "plans-bucket";
 
 /**
  * POST /api/takeoff/upload-url

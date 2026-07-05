@@ -37,9 +37,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const toInsert: Record<string, unknown>[] = [];
 
+  // Alias to the takeoff_items column names — `csi_code` → `cost_code`,
+  // `label` → `description`, `quantity` → `total_qty`, `unit` → `uom`,
+  // `rate` → `estimated_unit_cost`. Prior version selected columns that
+  // don't exist and silently seeded zero rows.
   const { data: takeoffs } = await anyDb
     .from("takeoff_items")
-    .select("id, cost_code, description, quantity_basis, total_qty, uom, estimated_unit_cost")
+    .select("id, cost_code:csi_code, description:label, total_qty:quantity, uom:unit, estimated_unit_cost:rate")
     .eq("tenant_id", tenantId).eq("project_id", body.project_id);
   for (const t of takeoffs ?? []) {
     if (seen.has(t.id)) continue;

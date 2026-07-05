@@ -7,7 +7,8 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { pythonApiHeaders } from "@/lib/python-api";
 
 const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
-const BUCKET = "project-documents";
+// Aligned with the Supabase Edge Functions — see `page-split-worker/index.ts`.
+const BUCKET = "plans-bucket";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;

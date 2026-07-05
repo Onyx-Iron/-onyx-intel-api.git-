@@ -486,8 +486,15 @@ class EnhancedStreamingParser:
             with open(self.file_path, "r") as f:
                 raw_json = f.read()
         else:
-            # Use your existing extract_from_pdf, extract_from_dxf, etc.
-            raw_json = "{}"  # Placeholder
+            # Non-JSON blueprint (PDF / DXF / IFC / XLSX): run through the
+            # deterministic extractor and serialise the row list into JSON so
+            # `EnhancedDeterministicParser` treats it exactly like a hand-authored
+            # takeoff.  Previously this branch silently produced `{}` which meant
+            # every non-JSON upload came back with zero rows and no cost data.
+            from takeoff_extract import extract as _takeoff_extract
+            extracted = _takeoff_extract(self.file_path)
+            rows = extracted.get("rows", []) if isinstance(extracted, dict) else (extracted or [])
+            raw_json = json.dumps(rows)
         
         # Create enhanced parser
         parser = EnhancedDeterministicParser(raw_json, self.cost_db)
