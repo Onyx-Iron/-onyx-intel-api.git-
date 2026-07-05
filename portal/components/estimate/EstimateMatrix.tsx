@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
+import { calculateAssemblyQuantities, type RebarSize, REBAR_UNIT_WEIGHT_LBS_PER_FT } from "@/lib/math/assemblies";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -22,6 +23,17 @@ interface EstimateRow {
   sort_order: number;
   _dirty?: boolean;   // client-only: pending save
   _local?: string;    // client-only: local uuid for un-saved rows
+}
+
+interface AssemblyMixInput {
+  lengthFt: number;
+  widthFt: number;
+  thicknessInches: number;
+  mixDesign: string;
+  wasteMultiplier: number;
+  baseDepthInches: number;
+  rebarSize: RebarSize;
+  rebarSpacingInches: number;
 }
 
 interface FinancialSettings {
@@ -56,6 +68,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [seedResult, setSeedResult] = useState<string | null>(null);
+  const [assemblyModalOpen, setAssemblyModalOpen] = useState(false);
   const saveTimer = useRef<number | null>(null);
 
   // ── Initial load ──────────────────────────────────────────────────────────
@@ -144,6 +157,68 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         _dirty: true,
       },
     ]);
+  }
+
+  // ── Insert Assembly Mix — expands one composite spec into its nested
+  // material resource rows (concrete, aggregate base, rebar) ──
+  function insertAssembly(input: AssemblyMixInput) {
+    const areaSf = input.lengthFt * input.widthFt;
+    const qty = calculateAssemblyQuantities({
+      area_sf: areaSf,
+      thickness_inches: input.thicknessInches,
+      waste_multiplier: input.wasteMultiplier,
+      base_depth_inches: input.baseDepthInches,
+      rebar_size: input.rebarSize,
+      rebar_spacing_inches: input.rebarSpacingInches,
+      grid_run_lengths_ft: [input.lengthFt, input.widthFt],
+    });
+
+    const newRows: EstimateRow[] = [];
+    const nextSort = rows.length;
+
+    if (qty.concrete_cy > 0) {
+      newRows.push({
+        _local: `asm-concrete-${Date.now()}`,
+        cost_code: "03-30-00",
+        description: `Concrete — ${input.mixDesign}, ${input.thicknessInches}" thick`,
+        quantity: qty.concrete_cy,
+        unit: "CY",
+        labor_unit: 0, material_unit: 0, equipment_unit: 0,
+        subcontractor_unit: 0, trucking_unit: 0, disposal_unit: 0,
+        notes: `Assembly mix · ${areaSf.toLocaleString()} SF @ ${input.thicknessInches}"`,
+        sort_order: nextSort + newRows.length, _dirty: true,
+      });
+    }
+    if (qty.base_material_tons > 0) {
+      newRows.push({
+        _local: `asm-base-${Date.now()}`,
+        cost_code: "31-23-00",
+        description: `Aggregate Subbase — ${input.baseDepthInches}" depth`,
+        quantity: qty.base_material_tons,
+        unit: "TON",
+        labor_unit: 0, material_unit: 0, equipment_unit: 0,
+        subcontractor_unit: 0, trucking_unit: 0, disposal_unit: 0,
+        notes: `Assembly mix · ${areaSf.toLocaleString()} SF`,
+        sort_order: nextSort + newRows.length, _dirty: true,
+      });
+    }
+    if (qty.rebar_lbs > 0) {
+      newRows.push({
+        _local: `asm-rebar-${Date.now()}`,
+        cost_code: "03-20-00",
+        description: `Rebar — ${input.rebarSize} @ ${input.rebarSpacingInches}" o.c.`,
+        quantity: qty.rebar_lbs,
+        unit: "LB",
+        labor_unit: 0, material_unit: 0, equipment_unit: 0,
+        subcontractor_unit: 0, trucking_unit: 0, disposal_unit: 0,
+        notes: `Assembly mix · ${REBAR_UNIT_WEIGHT_LBS_PER_FT[input.rebarSize]} lb/ft unit weight`,
+        sort_order: nextSort + newRows.length, _dirty: true,
+      });
+    }
+
+    setRows((prev) => [...prev, ...newRows]);
+    scheduleAutoSave();
+    setAssemblyModalOpen(false);
   }
 
   async function removeRow(idx: number) {
@@ -279,6 +354,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
           <div className="flex items-center gap-2">
             <button type="button" onClick={seed} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white disabled:opacity-40">Load from Takeoffs</button>
             <button type="button" onClick={addRow} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white">+ Row</button>
+            <button type="button" onClick={() => setAssemblyModalOpen(true)} className="inline-flex h-9 items-center rounded-full border border-[#00D2FF]/30 bg-[#00D2FF]/10 px-4 text-[11px] font-semibold uppercase tracking-widest text-[#00D2FF] hover:bg-[#00D2FF]/20">Insert Assembly Mix</button>
             <button type="button" onClick={exportProposal} className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85">Export XLSX</button>
           </div>
         </div>
@@ -366,7 +442,96 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         </div>
         {saving && <div className="mt-1 text-center text-[10px] uppercase tracking-widest font-mono text-white/40">Saving…</div>}
       </div>
+
+      {assemblyModalOpen && (
+        <AssemblyMixModal onClose={() => setAssemblyModalOpen(false)} onInsert={insertAssembly} />
+      )}
     </div>
+  );
+}
+
+// ─── Assembly Mix Modal ─────────────────────────────────────────────────────
+const REBAR_SIZES = Object.keys(REBAR_UNIT_WEIGHT_LBS_PER_FT) as RebarSize[];
+
+function AssemblyMixModal({ onClose, onInsert }: { onClose: () => void; onInsert: (input: AssemblyMixInput) => void }) {
+  const [lengthFt, setLengthFt] = useState(100);
+  const [widthFt, setWidthFt] = useState(20);
+  const [thicknessInches, setThicknessInches] = useState(6);
+  const [mixDesign, setMixDesign] = useState("4000 PSI");
+  const [wasteMultiplier, setWasteMultiplier] = useState(1.05);
+  const [baseDepthInches, setBaseDepthInches] = useState(4);
+  const [rebarSize, setRebarSize] = useState<RebarSize>("#4");
+  const [rebarSpacingInches, setRebarSpacingInches] = useState(18);
+
+  const preview = useMemo(() => calculateAssemblyQuantities({
+    area_sf: lengthFt * widthFt,
+    thickness_inches: thicknessInches,
+    waste_multiplier: wasteMultiplier,
+    base_depth_inches: baseDepthInches,
+    rebar_size: rebarSize,
+    rebar_spacing_inches: rebarSpacingInches,
+    grid_run_lengths_ft: [lengthFt, widthFt],
+  }), [lengthFt, widthFt, thicknessInches, wasteMultiplier, baseDepthInches, rebarSize, rebarSpacingInches]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
+      <div
+        className="w-full max-w-lg rounded-xl border border-white/10 bg-[#0E0F12] p-6"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="text-sm font-bold uppercase tracking-widest text-white">Insert Assembly Mix</h3>
+          <button type="button" onClick={onClose} className="text-white/40 hover:text-white">✕</button>
+        </div>
+        <p className="mb-4 text-[11px] text-white/50">
+          Composite concrete / paving assembly — expands into concrete, aggregate subbase, and rebar rows.
+        </p>
+
+        <div className="grid grid-cols-2 gap-3">
+          <ModalField label="Length (ft)"><input type="number" value={lengthFt} onChange={(e) => setLengthFt(Number(e.target.value))} className={inputCls} /></ModalField>
+          <ModalField label="Width (ft)"><input type="number" value={widthFt} onChange={(e) => setWidthFt(Number(e.target.value))} className={inputCls} /></ModalField>
+          <ModalField label="Thickness (in)"><input type="number" step="0.5" value={thicknessInches} onChange={(e) => setThicknessInches(Number(e.target.value))} className={inputCls} /></ModalField>
+          <ModalField label="Mix Design"><input type="text" value={mixDesign} onChange={(e) => setMixDesign(e.target.value)} className={inputCls} /></ModalField>
+          <ModalField label="Aggregate Subbase Depth (in)"><input type="number" step="0.5" value={baseDepthInches} onChange={(e) => setBaseDepthInches(Number(e.target.value))} className={inputCls} /></ModalField>
+          <ModalField label="Waste Multiplier"><input type="number" step="0.01" value={wasteMultiplier} onChange={(e) => setWasteMultiplier(Number(e.target.value))} className={inputCls} /></ModalField>
+          <ModalField label="Rebar Size">
+            <select value={rebarSize} onChange={(e) => setRebarSize(e.target.value as RebarSize)} className={inputCls}>
+              {REBAR_SIZES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </ModalField>
+          <ModalField label="Rebar Spacing (in o.c.)"><input type="number" step="1" value={rebarSpacingInches} onChange={(e) => setRebarSpacingInches(Number(e.target.value))} className={inputCls} /></ModalField>
+        </div>
+
+        <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.02] p-3 text-[11px] text-white/70">
+          <div className="mb-1 text-[9px] uppercase tracking-widest text-white/40">Preview</div>
+          <div className="flex justify-between"><span>Concrete</span><span className="font-mono">{preview.concrete_cy.toLocaleString()} CY</span></div>
+          <div className="flex justify-between"><span>Aggregate Subbase</span><span className="font-mono">{preview.base_material_tons.toLocaleString()} TON</span></div>
+          <div className="flex justify-between"><span>Rebar</span><span className="font-mono">{preview.rebar_lbs.toLocaleString()} LB</span></div>
+        </div>
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="inline-flex h-9 items-center rounded-full border border-white/15 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/70 hover:text-white">Cancel</button>
+          <button
+            type="button"
+            onClick={() => onInsert({ lengthFt, widthFt, thicknessInches, mixDesign, wasteMultiplier, baseDepthInches, rebarSize, rebarSpacingInches })}
+            className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85"
+          >
+            Insert Rows
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const inputCls = "w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-[#CCFF00]";
+
+function ModalField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[9px] uppercase tracking-widest text-white/40">{label}</span>
+      {children}
+    </label>
   );
 }
 
