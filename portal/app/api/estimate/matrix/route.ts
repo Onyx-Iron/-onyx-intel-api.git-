@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -78,6 +79,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!body.project_id) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  try {
+    await assertPermission(tenantId, userId, "financial", "write");
+  } catch (e) {
+    if (e instanceof PermissionError) return NextResponse.json({ error: e.message }, { status: e.status });
+    throw e;
+  }
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
@@ -132,6 +139,12 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   const body = await req.json().catch(() => ({})) as EstimateRow;
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  try {
+    await assertPermission(tenantId, userId, "financial", "write");
+  } catch (e) {
+    if (e instanceof PermissionError) return NextResponse.json({ error: e.message }, { status: e.status });
+    throw e;
+  }
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
@@ -158,6 +171,12 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  try {
+    await assertPermission(tenantId, userId, "financial", "write");
+  } catch (e) {
+    if (e instanceof PermissionError) return NextResponse.json({ error: e.message }, { status: e.status });
+    throw e;
+  }
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;

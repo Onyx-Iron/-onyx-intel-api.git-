@@ -42,6 +42,13 @@ interface FinancialSettings {
   contingency_pct: number;
 }
 
+// Roles whose view of the pricing matrix is masked: unit cost cells, markup
+// sliders, and the assembly-mix pricing action are hidden/disabled, while
+// quantities and descriptions (which mirror drawing/field takeoff data) stay
+// visible so these roles can still confirm scope.
+type RestrictedRole = "FieldSuperintendent" | "ClientView";
+const RESTRICTED_ROLES: ReadonlySet<string> = new Set<RestrictedRole>(["FieldSuperintendent", "ClientView"]);
+
 interface Props {
   projectId: string;
   projectName: string;
@@ -69,7 +76,17 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   const [saving, setSaving] = useState(false);
   const [seedResult, setSeedResult] = useState<string | null>(null);
   const [assemblyModalOpen, setAssemblyModalOpen] = useState(false);
+  const [role, setRole] = useState<string | null>(null);
   const saveTimer = useRef<number | null>(null);
+
+  const pricingRestricted = role != null && RESTRICTED_ROLES.has(role);
+
+  useEffect(() => {
+    fetch("/api/project-controls/role", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d: { role?: string }) => setRole(d.role ?? null))
+      .catch(() => setRole(null));
+  }, []);
 
   // ── Initial load ──────────────────────────────────────────────────────────
   const load = useCallback(async () => {
@@ -133,6 +150,12 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
 
   // ── Row edit helpers ──────────────────────────────────────────────────────
   function updateRow(idx: number, patch: Partial<EstimateRow>) {
+    if (pricingRestricted) {
+      // Belt-and-suspenders: strip unit-cost fields even if a disabled
+      // input somehow still fired a change event.
+      for (const k of UNIT_COL_KEYS) delete (patch as Record<string, unknown>)[k];
+      if (Object.keys(patch).length === 0) return;
+    }
     setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch, _dirty: true } : r)));
     scheduleAutoSave();
   }
@@ -162,6 +185,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   // ── Insert Assembly Mix — expands one composite spec into its nested
   // material resource rows (concrete, aggregate base, rebar) ──
   function insertAssembly(input: AssemblyMixInput) {
+    if (pricingRestricted) return; // FieldSuperintendent / ClientView can't add priced rows
     const areaSf = input.lengthFt * input.widthFt;
     const qty = calculateAssemblyQuantities({
       area_sf: areaSf,
@@ -272,6 +296,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   }
 
   function updateSetting(key: keyof FinancialSettings, value: number) {
+    if (pricingRestricted) return; // markup sliders are locked for these roles
     setSettings((s) => ({ ...s, [key]: value }));
     if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => { void saveAll(); }, 400);
@@ -354,17 +379,25 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
           <div className="flex items-center gap-2">
             <button type="button" onClick={seed} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white disabled:opacity-40">Load from Takeoffs</button>
             <button type="button" onClick={addRow} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white">+ Row</button>
-            <button type="button" onClick={() => setAssemblyModalOpen(true)} className="inline-flex h-9 items-center rounded-full border border-[#00D2FF]/30 bg-[#00D2FF]/10 px-4 text-[11px] font-semibold uppercase tracking-widest text-[#00D2FF] hover:bg-[#00D2FF]/20">Insert Assembly Mix</button>
+            {!pricingRestricted && (
+              <button type="button" onClick={() => setAssemblyModalOpen(true)} className="inline-flex h-9 items-center rounded-full border border-[#00D2FF]/30 bg-[#00D2FF]/10 px-4 text-[11px] font-semibold uppercase tracking-widest text-[#00D2FF] hover:bg-[#00D2FF]/20">Insert Assembly Mix</button>
+            )}
             <button type="button" onClick={exportProposal} className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85">Export XLSX</button>
           </div>
         </div>
 
-        {/* Slider row */}
+        {/* Slider row — markup/profit multipliers are masked for field & client roles */}
         <div className="border-t border-white/5 px-4 py-2 grid grid-cols-3 gap-6">
-          <SliderControl label="Overhead" value={settings.overhead_pct} onChange={(v) => updateSetting("overhead_pct", v)} tone="text-[#CCFF00]" />
-          <SliderControl label="Profit" value={settings.profit_pct} onChange={(v) => updateSetting("profit_pct", v)} tone="text-[#00D2FF]" />
-          <SliderControl label="Contingency" value={settings.contingency_pct} onChange={(v) => updateSetting("contingency_pct", v)} tone="text-amber-400" />
+          <SliderControl label="Overhead" value={settings.overhead_pct} onChange={(v) => updateSetting("overhead_pct", v)} tone="text-[#CCFF00]" disabled={pricingRestricted} />
+          <SliderControl label="Profit" value={settings.profit_pct} onChange={(v) => updateSetting("profit_pct", v)} tone="text-[#00D2FF]" disabled={pricingRestricted} />
+          <SliderControl label="Contingency" value={settings.contingency_pct} onChange={(v) => updateSetting("contingency_pct", v)} tone="text-amber-400" disabled={pricingRestricted} />
         </div>
+
+        {pricingRestricted && (
+          <div className="border-t border-white/5 bg-amber-900/10 px-4 py-1.5 text-[11px] text-amber-400/80">
+            Pricing and markup controls are hidden for your role ({role}).
+          </div>
+        )}
 
         {seedResult && <div className="border-t border-white/5 bg-white/[0.03] px-4 py-1.5 text-[11px] text-white/70">{seedResult}</div>}
       </div>
@@ -416,10 +449,14 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
                     </td>
                     {UNIT_COL_KEYS.map((k) => (
                       <td key={k} className="border-b border-white/5 px-1 py-1">
-                        <input type="number" step="0.01" value={r[k]} onChange={(e) => updateRow(i, { [k]: Number(e.target.value) } as Partial<EstimateRow>)} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
+                        {pricingRestricted ? (
+                          <span className="block w-full px-1 py-1 text-xs text-right font-mono text-white/20 select-none" aria-hidden="true">••••</span>
+                        ) : (
+                          <input type="number" step="0.01" value={r[k]} onChange={(e) => updateRow(i, { [k]: Number(e.target.value) } as Partial<EstimateRow>)} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
+                        )}
                       </td>
                     ))}
-                    <td className="border-b border-white/5 px-2 py-1 text-right text-xs font-mono text-white">${fmt(direct)}</td>
+                    <td className="border-b border-white/5 px-2 py-1 text-right text-xs font-mono text-white">{pricingRestricted ? "••••" : `$${fmt(direct)}`}</td>
                     <td className="border-b border-white/5 px-1 py-1 text-center">
                       <button type="button" onClick={() => removeRow(i)} className="text-white/30 hover:text-red-400 text-xs">✕</button>
                     </td>
@@ -431,15 +468,19 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         )}
       </div>
 
-      {/* Totals footer */}
+      {/* Totals footer — hidden for masked roles since it exposes markup/profit */}
       <div className="sticky bottom-0 z-20 border-t border-white/10 bg-[#0E0F12] px-4 py-3">
-        <div className="grid grid-cols-2 gap-6 md:grid-cols-5">
-          <Total label="Direct" value={totals.direct} />
-          <Total label={`Contingency (${settings.contingency_pct}%)`} value={totals.contingency} tone="text-amber-400" />
-          <Total label="Subtotal" value={totals.subtotal} />
-          <Total label={`+ Overhead & Profit`} value={totals.finalBid - totals.subtotal} />
-          <Total label="FINAL BID" value={totals.finalBid} tone="text-[#CCFF00]" big />
-        </div>
+        {pricingRestricted ? (
+          <div className="text-center text-[11px] uppercase tracking-widest font-mono text-white/30">Pricing totals hidden for your role</div>
+        ) : (
+          <div className="grid grid-cols-2 gap-6 md:grid-cols-5">
+            <Total label="Direct" value={totals.direct} />
+            <Total label={`Contingency (${settings.contingency_pct}%)`} value={totals.contingency} tone="text-amber-400" />
+            <Total label="Subtotal" value={totals.subtotal} />
+            <Total label={`+ Overhead & Profit`} value={totals.finalBid - totals.subtotal} />
+            <Total label="FINAL BID" value={totals.finalBid} tone="text-[#CCFF00]" big />
+          </div>
+        )}
         {saving && <div className="mt-1 text-center text-[10px] uppercase tracking-widest font-mono text-white/40">Saving…</div>}
       </div>
 
@@ -536,16 +577,16 @@ function ModalField({ label, children }: { label: string; children: ReactNode })
 }
 
 // ─── Small subcomponents ────────────────────────────────────────────────────
-function SliderControl({ label, value, onChange, tone }: { label: string; value: number; onChange: (v: number) => void; tone: string }) {
+function SliderControl({ label, value, onChange, tone, disabled }: { label: string; value: number; onChange: (v: number) => void; tone: string; disabled?: boolean }) {
   return (
-    <label className="flex flex-col gap-1">
+    <label className={`flex flex-col gap-1 ${disabled ? "opacity-30" : ""}`}>
       <div className="flex items-baseline justify-between">
         <span className="text-[10px] uppercase tracking-widest font-mono text-white/40">{label}</span>
-        <span className={`text-sm font-mono font-bold ${tone}`}>{value.toFixed(1)}%</span>
+        <span className={`text-sm font-mono font-bold ${tone}`}>{disabled ? "•••" : `${value.toFixed(1)}%`}</span>
       </div>
       <div className="flex items-center gap-2">
-        <input type="range" min={0} max={50} step={0.5} value={value} onChange={(e) => onChange(Number(e.target.value))} className="flex-1 accent-[#CCFF00]" />
-        <input type="number" min={0} max={100} step={0.1} value={value} onChange={(e) => onChange(Number(e.target.value))} className="w-16 bg-black/40 border border-white/10 rounded px-1.5 py-1 text-xs font-mono text-right focus:outline-none focus:border-[#CCFF00]" />
+        <input type="range" min={0} max={50} step={0.5} value={value} disabled={disabled} onChange={(e) => onChange(Number(e.target.value))} className="flex-1 accent-[#CCFF00] disabled:cursor-not-allowed" />
+        <input type="number" min={0} max={100} step={0.1} value={value} disabled={disabled} onChange={(e) => onChange(Number(e.target.value))} className="w-16 bg-black/40 border border-white/10 rounded px-1.5 py-1 text-xs font-mono text-right focus:outline-none focus:border-[#CCFF00] disabled:cursor-not-allowed" />
       </div>
     </label>
   );
