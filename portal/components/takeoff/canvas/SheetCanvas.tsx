@@ -11,7 +11,7 @@ import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
-type Tool = "pan" | "calibrate" | "count" | "length" | "area" | "utility_pipe";
+type Tool = "pan" | "calibrate" | "count" | "length" | "area" | "utility_pipe" | "spot_elevation" | "contour_line" | "civil_area_bounds";
 
 interface Pt { x: number; y: number }
 
@@ -58,6 +58,39 @@ interface Calibration {
   unit_type: string;          // "LF"
 }
 
+// ── Topographic contour / spot elevation nodes ──
+interface TopoNode {
+  key: string;
+  id?: string;
+  node_type: "contour_line" | "spot_elevation";
+  points: Pt[];               // canvas pixel coords
+  elevation: number;
+  layer_assignment?: string;  // "manual" or the matched CAD layer, e.g. "C-TOPO"
+  saved?: boolean;
+}
+
+// ── Area Bounds takeoff (site clearing / stripping / paving / flatwork) ──
+const AREA_BOUNDARY_KINDS = [
+  { value: "topsoil_stripping", label: "Topsoil Stripping Limits" },
+  { value: "building_pad",      label: "Building Pad Subgrade / Over-Excavation Limits" },
+  { value: "asphalt_paving",    label: "Asphalt Paving Limits" },
+  { value: "concrete_flatwork", label: "Concrete Sidewalk & Flatwork Bounds" },
+] as const;
+type BoundaryKind = typeof AREA_BOUNDARY_KINDS[number]["value"];
+const DEPTH_APPLICABLE_KINDS: ReadonlySet<BoundaryKind> = new Set(["topsoil_stripping", "building_pad"]);
+
+interface AreaBound {
+  key: string;
+  id?: string;
+  points: Pt[];                // canvas pixel coords
+  boundary_kind: BoundaryKind;
+  area_sf: number;
+  depth_in?: number;
+  volume_cy?: number;
+  target_cost_code?: string;
+  saved?: boolean;
+}
+
 interface Props {
   projectId: string;
   projectName: string;
@@ -87,16 +120,30 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [utilityDraftPts, setUtilityDraftPts] = useState<Pt[]>([]);
   const [utilityModalPts, setUtilityModalPts] = useState<Pt[] | null>(null); // non-null while the input overlay is open
 
+  // Topo (contour / spot elevation)
+  const [topoNodes, setTopoNodes] = useState<TopoNode[]>([]);
+  const [contourDraftPts, setContourDraftPts] = useState<Pt[]>([]);
+  const [autoTopoMatching, setAutoTopoMatching] = useState(false);
+  const [autoTopoStatus, setAutoTopoStatus] = useState<string | null>(null);
+
+  // Area Bounds
+  const [areaBounds, setAreaBounds] = useState<AreaBound[]>([]);
+  const [areaDraftPts, setAreaDraftPts] = useState<Pt[]>([]);
+  const [areaBoundaryKind, setAreaBoundaryKind] = useState<BoundaryKind>("topsoil_stripping");
+  const [areaDepthIn, setAreaDepthIn] = useState(6);
+
   // ── Load signed URL + existing calibration + saved takeoffs ────────────────
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [urlRes, calRes, mtRes, utRes] = await Promise.all([
+        const [urlRes, calRes, mtRes, utRes, topoRes, areaRes] = await Promise.all([
           fetch(`/api/takeoff/canvas/page-url?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/calibration?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/manual?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/utility?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
+          fetch(`/api/takeoff/canvas/topo?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
+          fetch(`/api/takeoff/canvas/area-bounds?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
         ]);
         if (!urlRes.ok) throw new Error(`page-url ${urlRes.status}`);
         const urlData = await urlRes.json() as { url: string };
@@ -148,6 +195,38 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 native_backfill_cy: it.computed_trench_json?.common_backfill_cy ?? 0,
               },
               cost_code: it.cost_code ?? undefined,
+              saved: true,
+            })));
+          }
+        }
+        if (topoRes.ok) {
+          type SavedTopoRow = { id: string; node_type: "contour_line" | "spot_elevation"; elevation: number; layer_assignment: string | null; geometry: { points?: Pt[] } | null };
+          const topoData = await topoRes.json() as { items: SavedTopoRow[] };
+          if (!cancelled) {
+            setTopoNodes(topoData.items.map((it) => ({
+              key: `saved-${it.id}`, id: it.id, node_type: it.node_type,
+              points: Array.isArray(it.geometry?.points) ? it.geometry!.points! : [],
+              elevation: Number(it.elevation),
+              layer_assignment: it.layer_assignment ?? undefined,
+              saved: true,
+            })));
+          }
+        }
+        if (areaRes.ok) {
+          type SavedAreaRow = {
+            id: string; boundary_kind: BoundaryKind; area_sf: number; stripping_depth_in: number | null;
+            excavation_volume_cy: number | null; target_cost_code: string | null; boundary_geometry: { points?: Pt[] } | null;
+          };
+          const areaData = await areaRes.json() as { items: SavedAreaRow[] };
+          if (!cancelled) {
+            setAreaBounds(areaData.items.map((it) => ({
+              key: `saved-${it.id}`, id: it.id,
+              points: Array.isArray(it.boundary_geometry?.points) ? it.boundary_geometry!.points! : [],
+              boundary_kind: it.boundary_kind,
+              area_sf: Number(it.area_sf),
+              depth_in: it.stripping_depth_in != null ? Number(it.stripping_depth_in) : undefined,
+              volume_cy: it.excavation_volume_cy != null ? Number(it.excavation_volume_cy) : undefined,
+              target_cost_code: it.target_cost_code ?? undefined,
               saved: true,
             })));
           }
@@ -304,6 +383,31 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (tool === "utility_pipe") {
       setUtilityDraftPts((prev) => [...prev, p]);
     }
+
+    if (tool === "spot_elevation") {
+      const raw = window.prompt("Enter the true elevation at this point (feet), e.g. 412.55:", "");
+      if (raw != null) {
+        const elevation = Number(raw);
+        if (Number.isFinite(elevation)) {
+          setTopoNodes((prev) => [...prev, {
+            key: `spot-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            node_type: "spot_elevation",
+            points: [p],
+            elevation,
+            layer_assignment: "manual",
+          }]);
+        }
+      }
+      return;
+    }
+
+    if (tool === "contour_line") {
+      setContourDraftPts((prev) => [...prev, p]);
+    }
+
+    if (tool === "civil_area_bounds") {
+      setAreaDraftPts((prev) => [...prev, p]);
+    }
   };
 
   const finishUtilityDraft = useCallback(() => {
@@ -341,8 +445,51 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     setUtilityDraftPts([]);
   }, [utilityModalPts, scale]);
 
+  const finishContourDraft = useCallback(() => {
+    if (contourDraftPts.length < 2) { setContourDraftPts([]); return; }
+    const raw = window.prompt("Enter this contour's baseline elevation (feet), e.g. 410.00:", "");
+    if (raw != null) {
+      const elevation = Number(raw);
+      if (Number.isFinite(elevation)) {
+        setTopoNodes((prev) => [...prev, {
+          key: `contour-${Date.now()}`,
+          node_type: "contour_line",
+          points: contourDraftPts,
+          elevation,
+          layer_assignment: "manual",
+        }]);
+      }
+    }
+    setContourDraftPts([]);
+  }, [contourDraftPts]);
+
+  // Live SF (shoelace × scale²) and, for stripping/pad kinds, CY preview while drawing.
+  const areaDraftPreview = useMemo(() => {
+    if (areaDraftPts.length < 3) return { sf: 0, cy: null as number | null };
+    const sf = polygonArea(areaDraftPts) * scale * scale;
+    const cy = DEPTH_APPLICABLE_KINDS.has(areaBoundaryKind) ? (sf * (areaDepthIn / 12)) / 27 : null;
+    return { sf, cy };
+  }, [areaDraftPts, scale, areaBoundaryKind, areaDepthIn]);
+
+  const finishAreaBoundsDraft = useCallback(() => {
+    if (areaDraftPts.length < 3) { setAreaDraftPts([]); return; }
+    const sf = polygonArea(areaDraftPts) * scale * scale;
+    const cy = DEPTH_APPLICABLE_KINDS.has(areaBoundaryKind) ? (sf * (areaDepthIn / 12)) / 27 : undefined;
+    setAreaBounds((prev) => [...prev, {
+      key: `area-${Date.now()}`,
+      points: areaDraftPts,
+      boundary_kind: areaBoundaryKind,
+      area_sf: sf,
+      depth_in: DEPTH_APPLICABLE_KINDS.has(areaBoundaryKind) ? areaDepthIn : undefined,
+      volume_cy: cy,
+    }]);
+    setAreaDraftPts([]);
+  }, [areaDraftPts, scale, areaBoundaryKind, areaDepthIn]);
+
   const finishDraft = useCallback(() => {
     if (tool === "utility_pipe") { finishUtilityDraft(); return; }
+    if (tool === "contour_line") { finishContourDraft(); return; }
+    if (tool === "civil_area_bounds") { finishAreaBoundsDraft(); return; }
     if (draftPoints.length < 2) { setDraftPoints([]); return; }
     if (tool === "length") {
       const quantity = totalLen(draftPoints) * scale;
@@ -364,12 +511,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       }]);
     }
     setDraftPoints([]);
-  }, [draftPoints, tool, scale]);
+  }, [draftPoints, tool, scale, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft]);
 
   // Escape/Enter shortcuts for finishing a polygon/line.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { setDraftPoints([]); setCalibPts([]); setUtilityDraftPts([]); }
+      if (e.key === "Escape") { setDraftPoints([]); setCalibPts([]); setUtilityDraftPts([]); setContourDraftPts([]); setAreaDraftPts([]); }
       else if (e.key === "Enter") finishDraft();
     };
     window.addEventListener("keydown", onKey);
@@ -389,10 +536,51 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
   }
 
+  // ── "Auto-Select Layer Topology" — scan CAD vectors on C-TOPO/PGCONT
+  // layers, read their nearest numeric text label as elevation, and turn
+  // them into topo nodes automatically. ──
+  const TOPO_LAYER_RE = /C-TOPO|PGCONT/i;
+  async function runAutoTopoMatch() {
+    setAutoTopoStatus("Scanning CAD layers…");
+    try {
+      const res = await fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
+      if (!res.ok) { setAutoTopoStatus("Could not load vectors."); return; }
+      const data = await res.json() as { vectors?: Array<{ layer: string; type: string; points: Array<[number, number]>; text_tag?: string }> };
+      const vectors = data.vectors ?? [];
+      const matches = vectors.filter((v) => TOPO_LAYER_RE.test(v.layer));
+      let matched = 0;
+      const nodes: TopoNode[] = [];
+      for (const v of matches) {
+        const numMatch = (v.text_tag ?? "").match(/-?\d{2,4}(\.\d+)?/);
+        if (!numMatch) continue; // no nearby elevation label — skip rather than guess
+        const elevation = Number(numMatch[0]);
+        if (!Number.isFinite(elevation)) continue;
+        // Vector coordinates are real-world units (feet); convert to canvas
+        // pixel space the same way the page calibration defines it.
+        const points: Pt[] = v.points.map(([vx, vy]) => ({ x: vx / scale, y: vy / scale }));
+        const nodeType = v.type === "point" || points.length === 1 ? "spot_elevation" : "contour_line";
+        nodes.push({
+          key: `auto-${nodeType}-${matched}-${Date.now()}`,
+          node_type: nodeType,
+          points,
+          elevation,
+          layer_assignment: v.layer,
+        });
+        matched++;
+      }
+      if (nodes.length > 0) setTopoNodes((prev) => [...prev, ...nodes]);
+      setAutoTopoStatus(`Matched ${nodes.length} of ${matches.length} candidate lines on C-TOPO/PGCONT layers.`);
+    } catch {
+      setAutoTopoStatus("Auto-match failed.");
+    }
+  }
+
   async function saveAllUnsaved() {
     const unsaved = shapes.filter((s) => !s.saved);
     const unsavedRuns = utilityRuns.filter((r) => !r.saved);
-    if (unsaved.length === 0 && unsavedRuns.length === 0) return;
+    const unsavedTopo = topoNodes.filter((n) => !n.saved);
+    const unsavedAreas = areaBounds.filter((a) => !a.saved);
+    if (unsaved.length === 0 && unsavedRuns.length === 0 && unsavedTopo.length === 0 && unsavedAreas.length === 0) return;
     setSaving(true);
     try {
       const requests: Promise<Response>[] = [];
@@ -434,11 +622,47 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         }));
       }
 
+      if (unsavedTopo.length > 0) {
+        const items = unsavedTopo.map((n) => ({
+          project_id: projectId,
+          page_id: pageId,
+          node_type: n.node_type,
+          elevation: n.elevation,
+          layer_assignment: n.layer_assignment ?? "manual",
+          geometry: { points: n.points, page_number: pageNumber },
+        }));
+        requests.push(fetch("/api/takeoff/canvas/topo", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items }),
+        }));
+      }
+
+      if (unsavedAreas.length > 0) {
+        const items = unsavedAreas.map((a) => ({
+          project_id: projectId,
+          page_id: pageId,
+          boundary_kind: a.boundary_kind,
+          area_sf: a.area_sf,
+          stripping_depth_in: a.depth_in ?? null,
+          excavation_volume_cy: a.volume_cy ?? null,
+          target_cost_code: a.target_cost_code || null,
+          boundary_geometry: { points: a.points, page_number: pageNumber },
+        }));
+        requests.push(fetch("/api/takeoff/canvas/area-bounds", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items }),
+        }));
+      }
+
       const results = await Promise.all(requests);
       const allOk = results.every((r) => r.ok);
       if (allOk) {
         setShapes((prev) => prev.map((s) => (s.saved ? s : { ...s, saved: true })));
         setUtilityRuns((prev) => prev.map((r) => (r.saved ? r : { ...r, saved: true })));
+        setTopoNodes((prev) => prev.map((n) => (n.saved ? n : { ...n, saved: true })));
+        setAreaBounds((prev) => prev.map((a) => (a.saved ? a : { ...a, saved: true })));
       } else {
         const failed = results.find((r) => !r.ok);
         const err = failed ? await failed.json().catch(() => ({})) : {};
@@ -460,6 +684,87 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }
   function removeUtilityRun(key: string) {
     setUtilityRuns((prev) => prev.filter((r) => r.key !== key));
+  }
+  function removeTopoNode(key: string) {
+    setTopoNodes((prev) => prev.filter((n) => n.key !== key));
+  }
+  function removeAreaBound(key: string) {
+    setAreaBounds((prev) => prev.filter((a) => a.key !== key));
+  }
+  function updateAreaCostCode(key: string, code: string) {
+    setAreaBounds((prev) => prev.map((a) => (a.key === key ? { ...a, target_cost_code: code, saved: false } : a)));
+  }
+
+  // ── "Compile to civil_surfaces" — push all topo nodes into the site
+  // surface mesh model for cut/fill grid calculations. ──
+  const [compilingMesh, setCompilingMesh] = useState(false);
+  async function compileToSurfaceMesh() {
+    if (topoNodes.length === 0) return;
+    setCompilingMesh(true);
+    try {
+      const coordinateMesh = topoNodes.flatMap((n) => n.points.map((p) => ({
+        x: Number((p.x * scale).toFixed(2)),
+        y: Number((p.y * scale).toFixed(2)),
+        elevation: n.elevation,
+        node_type: n.node_type,
+      })));
+      const spotElevations = topoNodes
+        .filter((n) => n.node_type === "spot_elevation")
+        .map((n) => ({
+          x: Number((n.points[0].x * scale).toFixed(2)),
+          y: Number((n.points[0].y * scale).toFixed(2)),
+          elevation: n.elevation,
+        }));
+      const res = await fetch("/api/earthwork/surfaces", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project_id: projectId,
+          surface_type: "topo_survey",
+          name: `Canvas Topo — Page ${pageNumber}`,
+          units: "ft",
+          coordinate_mesh: coordinateMesh,
+          spot_elevations: spotElevations,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Compile to surface mesh failed: ${err.error ?? res.status}`);
+      }
+    } finally {
+      setCompilingMesh(false);
+    }
+  }
+
+  // ── "Commit Area to Earthwork" — push a boundary's excavation volume into
+  // earthwork_volumes as a localized deduction layer. ──
+  const [committingAreaKey, setCommittingAreaKey] = useState<string | null>(null);
+  async function commitAreaToEarthwork(a: AreaBound) {
+    setCommittingAreaKey(a.key);
+    try {
+      const res = await fetch("/api/earthwork/volumes", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project_id: projectId,
+          layer_name: "area_bounds_deductions",
+          deduction: {
+            kind: a.boundary_kind,
+            area_sf: a.area_sf,
+            depth_in: a.depth_in ?? null,
+            volume_cy: a.volume_cy ?? 0,
+            area_limit_id: a.id ?? null,
+            source: "canvas_area_bounds",
+          },
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Commit to earthwork failed: ${err.error ?? res.status}`);
+      }
+    } finally {
+      setCommittingAreaKey(null);
+    }
   }
 
   const totals = useMemo(() => {
@@ -496,11 +801,11 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
           {/* Tool switcher */}
           <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] p-1">
-            {(["pan", "calibrate", "count", "length", "area", "utility_pipe"] as Tool[]).map((t) => (
+            {(["pan", "calibrate", "count", "length", "area", "utility_pipe", "spot_elevation", "contour_line", "civil_area_bounds"] as Tool[]).map((t) => (
               <button
                 key={t}
                 type="button"
-                onClick={() => { setTool(t); setDraftPoints([]); setCalibPts([]); setUtilityDraftPts([]); }}
+                onClick={() => { setTool(t); setDraftPoints([]); setCalibPts([]); setUtilityDraftPts([]); setContourDraftPts([]); setAreaDraftPts([]); }}
                 className={`px-3 h-7 text-[10px] uppercase tracking-widest font-mono rounded-full transition-colors ${
                   tool === t
                     ? "bg-[#CCFF00] text-black"
@@ -518,6 +823,46 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               : <span className="text-amber-400">Not calibrated — pick <b>calibrate</b> tool</span>}
           </div>
         </div>
+
+        {/* Context bar: topo auto-match toggle + area-bounds boundary config */}
+        {(tool === "contour_line" || tool === "spot_elevation") && (
+          <div className="flex items-center gap-3 border-t border-white/5 bg-white/[0.02] px-4 py-2">
+            <label className="flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono text-white/60">
+              <input
+                type="checkbox"
+                checked={autoTopoMatching}
+                onChange={(e) => { setAutoTopoMatching(e.target.checked); if (e.target.checked) void runAutoTopoMatch(); }}
+                className="accent-[#CCFF00]"
+              />
+              Auto-Select Layer Topology
+            </label>
+            {autoTopoStatus && <span className="text-[10px] text-white/40">{autoTopoStatus}</span>}
+          </div>
+        )}
+        {tool === "civil_area_bounds" && (
+          <div className="flex items-center gap-3 border-t border-white/5 bg-white/[0.02] px-4 py-2">
+            <label className="flex items-center gap-2">
+              <span className="text-[10px] uppercase tracking-widest font-mono text-white/40">Boundary Type</span>
+              <select
+                value={areaBoundaryKind}
+                onChange={(e) => setAreaBoundaryKind(e.target.value as BoundaryKind)}
+                className="bg-black/40 border border-white/10 rounded px-2 py-1 text-[11px] font-mono text-white focus:outline-none focus:border-[#CCFF00]"
+              >
+                {AREA_BOUNDARY_KINDS.map((k) => <option key={k.value} value={k.value}>{k.label}</option>)}
+              </select>
+            </label>
+            {DEPTH_APPLICABLE_KINDS.has(areaBoundaryKind) && (
+              <label className="flex items-center gap-2">
+                <span className="text-[10px] uppercase tracking-widest font-mono text-white/40">Depth (in)</span>
+                <input
+                  type="number" min={0.5} step={0.5} value={areaDepthIn}
+                  onChange={(e) => setAreaDepthIn(Number(e.target.value))}
+                  className="w-16 bg-black/40 border border-white/10 rounded px-2 py-1 text-[11px] font-mono text-white focus:outline-none focus:border-[#CCFF00]"
+                />
+              </label>
+            )}
+          </div>
+        )}
 
         {/* PDF + overlay */}
         <div className="relative mx-auto my-4 w-max">
@@ -585,6 +930,65 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   />
                   {utilityDraftPts.map((p, i) => (
                     <circle key={i} cx={p.x} cy={p.y} r={3} fill="#fff" stroke="#a855f7" strokeWidth={1.5} />
+                  ))}
+                </g>
+              )}
+
+              {/* Committed topo nodes (contours + spot elevations) */}
+              {topoNodes.map((n) => {
+                if (n.node_type === "spot_elevation") {
+                  const p = n.points[0];
+                  return (
+                    <g key={n.key}>
+                      <line x1={p.x - 7} y1={p.y} x2={p.x + 7} y2={p.y} stroke="#22d3ee" strokeWidth={2} />
+                      <line x1={p.x} y1={p.y - 7} x2={p.x} y2={p.y + 7} stroke="#22d3ee" strokeWidth={2} />
+                      <circle cx={p.x} cy={p.y} r={2} fill="#22d3ee" />
+                      <text x={p.x + 10} y={p.y - 8} fontSize={11} fill="#22d3ee" fontFamily="monospace">{n.elevation.toFixed(2)}&apos;</text>
+                    </g>
+                  );
+                }
+                const d = n.points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+                const mid = n.points[Math.floor(n.points.length / 2)];
+                return (
+                  <g key={n.key}>
+                    <path d={d} stroke="#22d3ee" strokeWidth={2.5} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                    {mid && <text x={mid.x + 6} y={mid.y - 6} fontSize={11} fill="#22d3ee" fontFamily="monospace">{n.elevation.toFixed(2)}&apos;</text>}
+                  </g>
+                );
+              })}
+
+              {/* Draft (in-progress) contour line */}
+              {tool === "contour_line" && contourDraftPts.length > 0 && (
+                <g>
+                  <path
+                    d={contourDraftPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ")}
+                    stroke="#22d3ee" strokeWidth={2} strokeDasharray="6 4" fill="none"
+                  />
+                  {contourDraftPts.map((p, i) => (
+                    <circle key={i} cx={p.x} cy={p.y} r={3} fill="#fff" stroke="#22d3ee" strokeWidth={1.5} />
+                  ))}
+                </g>
+              )}
+
+              {/* Committed area bounds polygons */}
+              {areaBounds.map((a) => {
+                const d = a.points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z";
+                return (
+                  <g key={a.key}>
+                    <path d={d} fill="#f9731633" stroke="#f97316" strokeWidth={2} />
+                  </g>
+                );
+              })}
+
+              {/* Draft (in-progress) area bounds polygon */}
+              {tool === "civil_area_bounds" && areaDraftPts.length > 0 && (
+                <g>
+                  <path
+                    d={areaDraftPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + (areaDraftPts.length >= 3 ? " Z" : "")}
+                    stroke="#f97316" strokeWidth={2} strokeDasharray="6 4" fill="#f9731622"
+                  />
+                  {areaDraftPts.map((p, i) => (
+                    <circle key={i} cx={p.x} cy={p.y} r={3} fill="#fff" stroke="#f97316" strokeWidth={1.5} />
                   ))}
                 </g>
               )}
@@ -658,6 +1062,29 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             <div className="mt-0.5 text-sm">
               <span className="text-[#a855f7] font-mono">{(totalLen(utilityDraftPts) * scale).toFixed(2)}</span> LF
               <span className="ml-3 text-[10px] text-white/40">Enter/double-click = configure run · Esc = cancel</span>
+            </div>
+          </div>
+        )}
+
+        {tool === "contour_line" && contourDraftPts.length > 0 && (
+          <div className="fixed bottom-4 left-4 z-10 rounded-lg border border-white/10 bg-black/80 px-3 py-2 backdrop-blur">
+            <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Contour Draft</div>
+            <div className="mt-0.5 text-sm">
+              <span className="text-[#22d3ee] font-mono">{contourDraftPts.length}</span> point{contourDraftPts.length === 1 ? "" : "s"}
+              <span className="ml-3 text-[10px] text-white/40">Enter/double-click = set elevation · Esc = cancel</span>
+            </div>
+          </div>
+        )}
+
+        {tool === "civil_area_bounds" && areaDraftPts.length > 0 && (
+          <div className="fixed bottom-4 left-4 z-10 rounded-lg border border-white/10 bg-black/80 px-3 py-2 backdrop-blur">
+            <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Area Bounds Draft</div>
+            <div className="mt-0.5 text-sm">
+              <span className="text-orange-400 font-mono">{areaDraftPreview.sf.toFixed(1)}</span> SF
+              {areaDraftPreview.cy !== null && (
+                <> · <span className="text-orange-400 font-mono">{areaDraftPreview.cy.toFixed(2)}</span> CY</>
+              )}
+              <span className="ml-3 text-[10px] text-white/40">Enter/double-click = close polygon · Esc = cancel</span>
             </div>
           </div>
         )}
@@ -794,11 +1221,80 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           </div>
         )}
 
+        {topoNodes.length > 0 && (
+          <div className="border-t border-white/10 px-3 py-2 space-y-1.5 max-h-[30vh] overflow-y-auto">
+            <div className="flex items-center justify-between px-1">
+              <span className="text-[10px] uppercase tracking-widest font-mono text-[#22d3ee]">Topo Nodes · {topoNodes.length}</span>
+              <button
+                type="button"
+                onClick={compileToSurfaceMesh}
+                disabled={compilingMesh}
+                className="text-[9px] uppercase tracking-widest font-mono text-[#22d3ee] hover:opacity-70 disabled:opacity-40"
+              >
+                {compilingMesh ? "Compiling…" : "Compile to Surface Mesh"}
+              </button>
+            </div>
+            {topoNodes.map((n) => (
+              <div key={n.key} className="flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5">
+                <div className="text-[11px]">
+                  <span className="text-[9px] uppercase tracking-widest font-mono text-[#22d3ee]">{n.node_type === "spot_elevation" ? "Spot" : "Contour"}</span>
+                  <span className="ml-2 font-mono">{n.elevation.toFixed(2)}&apos;</span>
+                  <span className="ml-2 text-white/30 text-[10px]">{n.layer_assignment}</span>
+                </div>
+                <button type="button" onClick={() => removeTopoNode(n.key)} className="text-[10px] text-white/30 hover:text-red-400">✕</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {areaBounds.length > 0 && (
+          <div className="border-t border-white/10 px-3 py-2 space-y-1.5 max-h-[35vh] overflow-y-auto">
+            <div className="px-1 text-[10px] uppercase tracking-widest font-mono text-orange-400">Area Bounds · {areaBounds.length}</div>
+            {areaBounds.map((a) => {
+              const kindLabel = AREA_BOUNDARY_KINDS.find((k) => k.value === a.boundary_kind)?.label ?? a.boundary_kind;
+              return (
+                <div key={a.key} className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-[9px] uppercase tracking-widest font-mono text-orange-400">{kindLabel}</span>
+                      <div className="text-sm font-mono">
+                        {a.area_sf.toFixed(1)} <span className="text-white/40">SF</span>
+                        {a.volume_cy != null && <span className="text-white/40 text-xs"> · {a.volume_cy.toFixed(2)} CY</span>}
+                      </div>
+                    </div>
+                    <button type="button" onClick={() => removeAreaBound(a.key)} className="text-[10px] text-white/30 hover:text-red-400">✕</button>
+                  </div>
+                  <div className="mt-1.5 flex items-center gap-2">
+                    <input
+                      type="text" placeholder="NN-NN-NN" value={a.target_cost_code ?? ""}
+                      onChange={(e) => updateAreaCostCode(a.key, e.target.value)}
+                      className={`flex-1 rounded border px-2 py-1 text-[11px] font-mono bg-black/40 focus:outline-none focus:border-[#CCFF00] ${
+                        a.target_cost_code && !/^\d{2}-\d{2}-\d{2}$/.test(a.target_cost_code) ? "border-red-400/50" : "border-white/10"
+                      }`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => commitAreaToEarthwork(a)}
+                      disabled={committingAreaKey === a.key}
+                      className="shrink-0 text-[9px] uppercase tracking-widest font-mono text-orange-400 hover:opacity-70 disabled:opacity-40"
+                    >
+                      {committingAreaKey === a.key ? "Committing…" : "Commit to Earthwork"}
+                    </button>
+                  </div>
+                  {a.saved && <span className="text-[9px] uppercase tracking-widest font-mono text-white/40">Saved</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         <div className="border-t border-white/10 p-3">
           <button
             type="button"
             onClick={saveAllUnsaved}
-            disabled={saving || (shapes.every((s) => s.saved) && utilityRuns.every((r) => r.saved)) || (shapes.length === 0 && utilityRuns.length === 0)}
+            disabled={saving
+              || ([...shapes, ...utilityRuns, ...topoNodes, ...areaBounds].every((x) => x.saved))
+              || (shapes.length === 0 && utilityRuns.length === 0 && topoNodes.length === 0 && areaBounds.length === 0)}
             className="w-full inline-flex h-11 items-center justify-center rounded-full bg-[#CCFF00] px-5 text-xs font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85 disabled:opacity-40"
           >
             {saving ? "Saving…" : "Save to Project Book"}
