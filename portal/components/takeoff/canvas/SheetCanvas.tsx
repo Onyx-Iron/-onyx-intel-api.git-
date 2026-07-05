@@ -6,11 +6,12 @@ import CADVectorLayer from "./CADVectorLayer";
 import VisionExtractionsPanel from "./VisionExtractionsPanel";
 import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
 import { classifyLayer } from "@/lib/cad/layer-classify";
+import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
-type Tool = "pan" | "calibrate" | "count" | "length" | "area";
+type Tool = "pan" | "calibrate" | "count" | "length" | "area" | "utility_pipe";
 
 interface Pt { x: number; y: number }
 
@@ -22,6 +23,34 @@ interface Shape {
   unit: "EA" | "LF" | "SF";
   cost_code?: string;
   saved?: boolean;            // has been persisted to manual_takeoffs
+}
+
+const SYSTEM_TYPES = ["Sanitary Sewer", "Storm Drain", "Water Line", "Fire Line"] as const;
+type SystemType = typeof SYSTEM_TYPES[number];
+
+interface UtilityRunInputs {
+  system_type: SystemType;
+  pipe_diameter_in: number;
+  invert_elevation_start: number;
+  invert_elevation_end: number;
+  trench_width_ft: number;
+}
+
+interface TrenchYield {
+  trench_excavation_bcy: number;
+  bedding_material_cy: number;
+  native_backfill_cy: number;
+}
+
+interface UtilityRun {
+  key: string;
+  id?: string;                // server id once saved
+  points: Pt[];                // canvas pixel coords
+  run_length_lf: number;
+  inputs: UtilityRunInputs;
+  trench: TrenchYield;
+  cost_code?: string;
+  saved?: boolean;
 }
 
 interface Calibration {
@@ -54,16 +83,20 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [saving, setSaving]         = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [vectorDescriptions, setVectorDescriptions] = useState<string[]>([]);
+  const [utilityRuns, setUtilityRuns] = useState<UtilityRun[]>([]);
+  const [utilityDraftPts, setUtilityDraftPts] = useState<Pt[]>([]);
+  const [utilityModalPts, setUtilityModalPts] = useState<Pt[] | null>(null); // non-null while the input overlay is open
 
   // ── Load signed URL + existing calibration + saved takeoffs ────────────────
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [urlRes, calRes, mtRes] = await Promise.all([
+        const [urlRes, calRes, mtRes, utRes] = await Promise.all([
           fetch(`/api/takeoff/canvas/page-url?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/calibration?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/manual?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
+          fetch(`/api/takeoff/canvas/utility?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
         ]);
         if (!urlRes.ok) throw new Error(`page-url ${urlRes.status}`);
         const urlData = await urlRes.json() as { url: string };
@@ -85,6 +118,38 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               cost_code: it.cost_code ?? undefined,
               saved: true,
             })).filter((s, i, arr) => arr.findIndex((x) => x.key === s.key) === i)); // dedupe by key
+          }
+        }
+        if (utRes.ok) {
+          type SavedUtilityRow = {
+            id: string; system_type: string; pipe_diameter_in: number;
+            invert_elevation_start: number | null; invert_elevation_end: number | null;
+            trench_width_ft: number; run_length_lf: number;
+            cost_code: string | null; geometry: { points?: Pt[] } | null;
+            computed_trench_json: { trench_excavation_bcy?: number; common_backfill_cy?: number; totals?: { aggregate_import_cy?: number } } | null;
+          };
+          const utData = await utRes.json() as { items: SavedUtilityRow[] };
+          if (!cancelled) {
+            setUtilityRuns(utData.items.map((it) => ({
+              key: `saved-${it.id}`,
+              id: it.id,
+              points: Array.isArray(it.geometry?.points) ? it.geometry!.points! : [],
+              run_length_lf: Number(it.run_length_lf),
+              inputs: {
+                system_type: it.system_type as SystemType,
+                pipe_diameter_in: it.pipe_diameter_in,
+                invert_elevation_start: it.invert_elevation_start ?? 0,
+                invert_elevation_end: it.invert_elevation_end ?? 0,
+                trench_width_ft: it.trench_width_ft,
+              },
+              trench: {
+                trench_excavation_bcy: it.computed_trench_json?.trench_excavation_bcy ?? 0,
+                bedding_material_cy: it.computed_trench_json?.totals?.aggregate_import_cy ?? 0,
+                native_backfill_cy: it.computed_trench_json?.common_backfill_cy ?? 0,
+              },
+              cost_code: it.cost_code ?? undefined,
+              saved: true,
+            })));
           }
         }
       } catch (e) {
@@ -235,9 +300,49 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (tool === "length" || tool === "area") {
       setDraftPoints((prev) => [...prev, p]);
     }
+
+    if (tool === "utility_pipe") {
+      setUtilityDraftPts((prev) => [...prev, p]);
+    }
   };
 
+  const finishUtilityDraft = useCallback(() => {
+    if (utilityDraftPts.length < 2) { setUtilityDraftPts([]); return; }
+    setUtilityModalPts(utilityDraftPts); // hand off to the input overlay; cleared on submit/cancel
+  }, [utilityDraftPts]);
+
+  // Trench cover isn't captured by the modal (only inverts/diameter/width) —
+  // mirrors the server-side DEFAULT_COVER_FT assumption in the API route so
+  // the client preview matches what actually gets persisted.
+  const DEFAULT_COVER_FT = 4;
+
+  const commitUtilityRun = useCallback((inputs: UtilityRunInputs) => {
+    if (!utilityModalPts) return;
+    const lengthLf = totalLen(utilityModalPts) * scale;
+    const trenchFull = calcPipeEmbedment({
+      length_lf: lengthLf,
+      diameter_in: inputs.pipe_diameter_in,
+      trench_width_ft: inputs.trench_width_ft,
+      avg_depth_ft: DEFAULT_COVER_FT,
+    });
+    const run: UtilityRun = {
+      key: `u-${Date.now()}`,
+      points: utilityModalPts,
+      run_length_lf: lengthLf,
+      inputs,
+      trench: {
+        trench_excavation_bcy: trenchFull.trench_excavation_bcy,
+        bedding_material_cy: trenchFull.totals.aggregate_import_cy,
+        native_backfill_cy: trenchFull.common_backfill_cy,
+      },
+    };
+    setUtilityRuns((prev) => [...prev, run]);
+    setUtilityModalPts(null);
+    setUtilityDraftPts([]);
+  }, [utilityModalPts, scale]);
+
   const finishDraft = useCallback(() => {
+    if (tool === "utility_pipe") { finishUtilityDraft(); return; }
     if (draftPoints.length < 2) { setDraftPoints([]); return; }
     if (tool === "length") {
       const quantity = totalLen(draftPoints) * scale;
@@ -264,7 +369,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // Escape/Enter shortcuts for finishing a polygon/line.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { setDraftPoints([]); setCalibPts([]); }
+      if (e.key === "Escape") { setDraftPoints([]); setCalibPts([]); setUtilityDraftPts([]); }
       else if (e.key === "Enter") finishDraft();
     };
     window.addEventListener("keydown", onKey);
@@ -286,28 +391,58 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
   async function saveAllUnsaved() {
     const unsaved = shapes.filter((s) => !s.saved);
-    if (unsaved.length === 0) return;
+    const unsavedRuns = utilityRuns.filter((r) => !r.saved);
+    if (unsaved.length === 0 && unsavedRuns.length === 0) return;
     setSaving(true);
     try {
-      const items = unsaved.map((s) => ({
-        project_id: projectId,
-        page_id: pageId,
-        cost_code: s.cost_code || null,
-        takeoff_type: s.tool,
-        quantity: Number(s.quantity.toFixed(3)),
-        unit: s.unit,
-        geometry: { points: s.points, page_number: pageNumber },
-      }));
-      const res = await fetch("/api/takeoff/canvas/manual", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items }),
-      });
-      if (res.ok) {
+      const requests: Promise<Response>[] = [];
+
+      if (unsaved.length > 0) {
+        const items = unsaved.map((s) => ({
+          project_id: projectId,
+          page_id: pageId,
+          cost_code: s.cost_code || null,
+          takeoff_type: s.tool,
+          quantity: Number(s.quantity.toFixed(3)),
+          unit: s.unit,
+          geometry: { points: s.points, page_number: pageNumber },
+        }));
+        requests.push(fetch("/api/takeoff/canvas/manual", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items }),
+        }));
+      }
+
+      if (unsavedRuns.length > 0) {
+        const items = unsavedRuns.map((r) => ({
+          project_id: projectId,
+          page_id: pageId,
+          cost_code: r.cost_code || null,
+          system_type: r.inputs.system_type,
+          pipe_diameter_in: r.inputs.pipe_diameter_in,
+          invert_elevation_start: r.inputs.invert_elevation_start,
+          invert_elevation_end: r.inputs.invert_elevation_end,
+          trench_width_ft: r.inputs.trench_width_ft,
+          run_length_lf: r.run_length_lf,
+          geometry: { points: r.points, page_number: pageNumber },
+        }));
+        requests.push(fetch("/api/takeoff/canvas/utility", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items }),
+        }));
+      }
+
+      const results = await Promise.all(requests);
+      const allOk = results.every((r) => r.ok);
+      if (allOk) {
         setShapes((prev) => prev.map((s) => (s.saved ? s : { ...s, saved: true })));
+        setUtilityRuns((prev) => prev.map((r) => (r.saved ? r : { ...r, saved: true })));
       } else {
-        const err = await res.json().catch(() => ({}));
-        alert(`Save failed: ${err.error ?? res.status}`);
+        const failed = results.find((r) => !r.ok);
+        const err = failed ? await failed.json().catch(() => ({})) : {};
+        alert(`Save failed: ${err.error ?? failed?.status}`);
       }
     } finally {
       setSaving(false);
@@ -319,6 +454,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }
   function removeShape(key: string) {
     setShapes((prev) => prev.filter((s) => s.key !== key));
+  }
+  function updateUtilityCostCode(key: string, code: string) {
+    setUtilityRuns((prev) => prev.map((r) => (r.key === key ? { ...r, cost_code: code, saved: false } : r)));
+  }
+  function removeUtilityRun(key: string) {
+    setUtilityRuns((prev) => prev.filter((r) => r.key !== key));
   }
 
   const totals = useMemo(() => {
@@ -355,11 +496,11 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
           {/* Tool switcher */}
           <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] p-1">
-            {(["pan", "calibrate", "count", "length", "area"] as Tool[]).map((t) => (
+            {(["pan", "calibrate", "count", "length", "area", "utility_pipe"] as Tool[]).map((t) => (
               <button
                 key={t}
                 type="button"
-                onClick={() => { setTool(t); setDraftPoints([]); setCalibPts([]); }}
+                onClick={() => { setTool(t); setDraftPoints([]); setCalibPts([]); setUtilityDraftPts([]); }}
                 className={`px-3 h-7 text-[10px] uppercase tracking-widest font-mono rounded-full transition-colors ${
                   tool === t
                     ? "bg-[#CCFF00] text-black"
@@ -418,6 +559,35 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   </g>
                 );
               })}
+
+              {/* Committed utility pipe runs */}
+              {utilityRuns.map((u) => {
+                const d = u.points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+                return (
+                  <g key={u.key}>
+                    <path d={d} stroke="#a855f7" strokeWidth={4} fill="none" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="10 4" />
+                    {u.points.map((p, i) => (
+                      <circle key={i} cx={p.x} cy={p.y} r={3.5} fill="#a855f7" stroke="#000" strokeWidth={1} />
+                    ))}
+                  </g>
+                );
+              })}
+
+              {/* Draft (in-progress) utility pipe run */}
+              {tool === "utility_pipe" && utilityDraftPts.length > 0 && (
+                <g>
+                  <path
+                    d={utilityDraftPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ")}
+                    stroke="#a855f7"
+                    strokeWidth={3}
+                    strokeDasharray="6 4"
+                    fill="none"
+                  />
+                  {utilityDraftPts.map((p, i) => (
+                    <circle key={i} cx={p.x} cy={p.y} r={3} fill="#fff" stroke="#a855f7" strokeWidth={1.5} />
+                  ))}
+                </g>
+              )}
 
               {/* Draft (in-progress) polyline / polygon */}
               {draftPoints.length > 0 && (
@@ -481,6 +651,16 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             </div>
           )}
         </div>
+
+        {tool === "utility_pipe" && utilityDraftPts.length > 0 && (
+          <div className="fixed bottom-4 left-4 z-10 rounded-lg border border-white/10 bg-black/80 px-3 py-2 backdrop-blur">
+            <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Pipe Run Draft</div>
+            <div className="mt-0.5 text-sm">
+              <span className="text-[#a855f7] font-mono">{(totalLen(utilityDraftPts) * scale).toFixed(2)}</span> LF
+              <span className="ml-3 text-[10px] text-white/40">Enter/double-click = configure run · Esc = cancel</span>
+            </div>
+          </div>
+        )}
 
         {(tool === "length" || tool === "area") && draftPoints.length > 0 && (
           <div className="fixed bottom-4 left-4 z-10 rounded-lg border border-white/10 bg-black/80 px-3 py-2 backdrop-blur">
@@ -575,11 +755,50 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           })}
         </div>
 
+        {utilityRuns.length > 0 && (
+          <div className="border-t border-white/10 px-3 py-2 space-y-1.5 max-h-[35vh] overflow-y-auto">
+            <div className="px-1 text-[10px] uppercase tracking-widest font-mono text-[#a855f7]">
+              Utility Pipe Runs · {utilityRuns.length}
+            </div>
+            {utilityRuns.map((r) => (
+              <div key={r.key} className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-[9px] uppercase tracking-widest font-mono text-[#a855f7]">{r.inputs.system_type}</span>
+                    <div className="text-sm font-mono">
+                      {r.run_length_lf.toFixed(1)} <span className="text-white/40">LF</span>
+                      <span className="text-white/40 text-xs"> · {r.inputs.pipe_diameter_in}&quot; Ø</span>
+                    </div>
+                  </div>
+                  <button type="button" onClick={() => removeUtilityRun(r.key)} className="text-[10px] text-white/30 hover:text-red-400">✕</button>
+                </div>
+                <div className="mt-1 grid grid-cols-3 gap-1 text-[10px] font-mono text-white/50">
+                  <span>Exc: {r.trench.trench_excavation_bcy.toFixed(1)} BCY</span>
+                  <span>Bedding: {r.trench.bedding_material_cy.toFixed(1)} CY</span>
+                  <span>Backfill: {r.trench.native_backfill_cy.toFixed(1)} CY</span>
+                </div>
+                <div className="mt-1.5 flex items-center gap-2">
+                  <input
+                    type="text"
+                    placeholder="NN-NN-NN"
+                    value={r.cost_code ?? ""}
+                    onChange={(e) => updateUtilityCostCode(r.key, e.target.value)}
+                    className={`flex-1 rounded border px-2 py-1 text-[11px] font-mono bg-black/40 focus:outline-none focus:border-[#CCFF00] ${
+                      r.cost_code && !/^\d{2}-\d{2}-\d{2}$/.test(r.cost_code) ? "border-red-400/50" : "border-white/10"
+                    }`}
+                  />
+                  {r.saved && <span className="text-[9px] uppercase tracking-widest font-mono text-white/40">Saved</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div className="border-t border-white/10 p-3">
           <button
             type="button"
             onClick={saveAllUnsaved}
-            disabled={saving || shapes.every((s) => s.saved) || shapes.length === 0}
+            disabled={saving || (shapes.every((s) => s.saved) && utilityRuns.every((r) => r.saved)) || (shapes.length === 0 && utilityRuns.length === 0)}
             className="w-full inline-flex h-11 items-center justify-center rounded-full bg-[#CCFF00] px-5 text-xs font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85 disabled:opacity-40"
           >
             {saving ? "Saving…" : "Save to Project Book"}
@@ -589,6 +808,107 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           </p>
         </div>
       </aside>
+
+      {utilityModalPts && (
+        <UtilityRunModal
+          previewLengthLf={totalLen(utilityModalPts) * scale}
+          onCancel={() => { setUtilityModalPts(null); setUtilityDraftPts([]); }}
+          onSubmit={commitUtilityRun}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Utility Pipe Run input overlay ─────────────────────────────────────────
+function UtilityRunModal({
+  previewLengthLf, onCancel, onSubmit,
+}: {
+  previewLengthLf: number;
+  onCancel: () => void;
+  onSubmit: (inputs: UtilityRunInputs) => void;
+}) {
+  const [systemType, setSystemType] = useState<SystemType>("Sanitary Sewer");
+  const [diameterIn, setDiameterIn] = useState(8);
+  const [investStart, setInvertStart] = useState(0);
+  const [invertEnd, setInvertEnd] = useState(0);
+  const [trenchWidthFt, setTrenchWidthFt] = useState(3);
+
+  const preview = useMemo(() => calcPipeEmbedment({
+    length_lf: previewLengthLf,
+    diameter_in: diameterIn,
+    trench_width_ft: trenchWidthFt,
+    avg_depth_ft: 4, // matches the server's DEFAULT_COVER_FT assumption
+  }), [previewLengthLf, diameterIn, trenchWidthFt]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#0E0F12] p-6">
+        <div className="mb-1 flex items-center justify-between">
+          <h3 className="text-sm font-bold uppercase tracking-widest text-white">Configure Pipe Run</h3>
+          <button type="button" onClick={onCancel} className="text-white/40 hover:text-white">✕</button>
+        </div>
+        <p className="mb-4 text-[11px] text-white/50">
+          Run length: <span className="font-mono text-[#a855f7]">{previewLengthLf.toFixed(1)} LF</span> (from the drawn polyline)
+        </p>
+
+        <div className="grid grid-cols-2 gap-3">
+          <label className="col-span-2 flex flex-col gap-1">
+            <span className="text-[9px] uppercase tracking-widest text-white/40">System Type</span>
+            <select
+              value={systemType}
+              onChange={(e) => setSystemType(e.target.value as SystemType)}
+              className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-[#CCFF00]"
+            >
+              {SYSTEM_TYPES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[9px] uppercase tracking-widest text-white/40">Pipe Diameter (in)</span>
+            <input type="number" min={1} step={1} value={diameterIn} onChange={(e) => setDiameterIn(Number(e.target.value))}
+              className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-[#CCFF00]" />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[9px] uppercase tracking-widest text-white/40">Trench Width (ft)</span>
+            <input type="number" min={0.5} step={0.5} value={trenchWidthFt} onChange={(e) => setTrenchWidthFt(Number(e.target.value))}
+              className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-[#CCFF00]" />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[9px] uppercase tracking-widest text-white/40">Start Invert Elev. (ft)</span>
+            <input type="number" step={0.01} value={investStart} onChange={(e) => setInvertStart(Number(e.target.value))}
+              className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-[#CCFF00]" />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[9px] uppercase tracking-widest text-white/40">End Invert Elev. (ft)</span>
+            <input type="number" step={0.01} value={invertEnd} onChange={(e) => setInvertEnd(Number(e.target.value))}
+              className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-[#CCFF00]" />
+          </label>
+        </div>
+
+        <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.02] p-3 text-[11px] text-white/70">
+          <div className="mb-1 text-[9px] uppercase tracking-widest text-white/40">Trench Excavation Yield</div>
+          <div className="flex justify-between"><span>Total Trench Excavation</span><span className="font-mono">{preview.trench_excavation_bcy.toLocaleString()} BCY</span></div>
+          <div className="flex justify-between"><span>Bedding Material</span><span className="font-mono">{preview.totals.aggregate_import_cy.toLocaleString()} CY</span></div>
+          <div className="flex justify-between"><span>Native Backfill</span><span className="font-mono">{preview.common_backfill_cy.toLocaleString()} CY</span></div>
+        </div>
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onCancel} className="inline-flex h-9 items-center rounded-full border border-white/15 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/70 hover:text-white">Cancel</button>
+          <button
+            type="button"
+            onClick={() => onSubmit({
+              system_type: systemType,
+              pipe_diameter_in: diameterIn,
+              invert_elevation_start: investStart,
+              invert_elevation_end: invertEnd,
+              trench_width_ft: trenchWidthFt,
+            })}
+            className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85"
+          >
+            Add Pipe Run
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
