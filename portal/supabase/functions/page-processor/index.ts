@@ -174,6 +174,10 @@ async function embedBatch(inputs: string[]): Promise<Array<number[] | null>> {
     requests: inputs.map((text) => ({
       model: `models/${EMBED_MODEL}`,
       content: { parts: [{ text }] },
+      // Pin the output size so a future model swap/version bump on Google's
+      // side can't silently change vector length and break the pgvector
+      // column dimension check on `document_chunks.embedding`.
+      outputDimensionality: 768,
     })),
   };
   const res = await fetch(

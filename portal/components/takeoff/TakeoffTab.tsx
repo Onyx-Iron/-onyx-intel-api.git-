@@ -626,6 +626,9 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     try {
       while (true) {
         const { done, value } = await reader.read();
+        // Estimator may have switched projects mid-stream — stop before this
+        // stale reader writes another page's rows into the new project's state.
+        if (abortRef.current?.signal.aborted) break;
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         const lines = buf.split("\n");
@@ -741,6 +744,9 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     try {
       while (true) {
         const { done, value } = await reader.read();
+        // Estimator may have switched projects mid-stream — stop before this
+        // stale reader writes another page's rows into the new project's state.
+        if (abortRef.current?.signal.aborted) break;
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         const lines = buf.split("\n");
