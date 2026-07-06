@@ -68,8 +68,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .from("projects").select("id").eq("id", project_id).eq("tenant_id", tenantId).single();
     if (projErr || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
 
-    const safeName = file_name.replace(/[^\w.\-]+/g, "_");
-    const storagePath = `${tenantId}/${project_id}/${Date.now()}-${safeName}`;
+    // Same `originals/{document_id}.pdf` convention page-split-worker already
+    // uses for Drive imports, so both paths are truly unified — the worker
+    // doesn't need to know or care which route created the document.
+    const documentId = crypto.randomUUID();
+    const storagePath = `originals/${documentId}.pdf`;
 
     // Create the signed upload URL. Supabase returns a short-lived token that the
     // browser can PUT to directly.
@@ -85,7 +88,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     // Pre-insert the document row so `from-document` can find it after the client uploads.
     const insertRow: TablesInsert<"documents"> = {
-      id: crypto.randomUUID(),
+      id: documentId,
       tenant_id: tenantId,
       project_id,
       file_name,

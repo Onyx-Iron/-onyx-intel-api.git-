@@ -68,7 +68,8 @@ export async function POST(req: NextRequest): Promise<Response> {
         document_id,
         tenant_id: tenantId,
         project_id,
-        storage_path: storagePath,
+        original_path: storagePath,
+        is_local_upload: true,
         user_id: userId,
       }).catch((err) => {
         console.error("[from-document] page-split-worker invoke failed", err);
@@ -202,7 +203,8 @@ async function invokePageSplitWorker(payload: {
   document_id: string;
   tenant_id: string;
   project_id: string;
-  storage_path: string;
+  original_path: string;
+  is_local_upload: true;
   user_id: string;
 }): Promise<void> {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;

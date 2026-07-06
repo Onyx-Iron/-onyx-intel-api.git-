@@ -1,18 +1,24 @@
 // Supabase Edge Function: page-split-worker
 // Deno runtime.
 //
-// Contract — two input modes:
+// Contract — two input modes, sharing the SAME `original_path` field
+// (`originals/{document_id}.pdf` in both cases) so the rest of the pipeline
+// never needs to know which route created the document:
 //   Drive-imported (from /api/documents/import-drive):
 //     POST { document_id, tenant_id, project_id, drive_file_id, original_path,
 //            access_token, user_id }
-//   Already-in-storage (from /api/takeoff/from-document, large local uploads):
-//     POST { document_id, tenant_id, project_id, storage_path, user_id }
-//   Exactly one of (drive_file_id + access_token) or storage_path must be set.
+//   Local direct-upload (from /api/takeoff/from-document, large uploads):
+//     POST { document_id, tenant_id, project_id, original_path,
+//            is_local_upload: true, user_id }
+//   Mode is decided by `!body.drive_file_id` — no `drive_file_id` means the
+//   browser already PUT the original PDF straight into
+//   `plans-bucket/{original_path}`, so the Drive fetch step is skipped
+//   entirely and we just read it back from our own storage.
 //
 // Pipeline:
 //   1. Get the original PDF bytes — either streamed from Google Drive (and
 //      copied into `plans-bucket/{original_path}`), or read directly from
-//      `plans-bucket/{storage_path}` if it's already there (local uploads).
+//      `plans-bucket/{original_path}` if it's already there (local uploads).
 //   2. Load the PDF via pdf-lib.
 //   3. Update `documents.page_count`.
 //   4. Burst each page into a standalone 1-page PDF at
@@ -39,9 +45,9 @@ interface Payload {
   tenant_id: string;
   project_id: string;
   drive_file_id?: string;
-  original_path?: string;
+  original_path: string;
   access_token?: string;
-  storage_path?: string;
+  is_local_upload?: boolean;
   user_id: string;
 }
 
@@ -54,9 +60,14 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({ error: "invalid JSON" }), { status: 400 });
   }
 
-  const fromStorage = Boolean(body.storage_path);
-  if (!fromStorage && !(body.drive_file_id && body.access_token)) {
-    return new Response(JSON.stringify({ error: "either storage_path, or drive_file_id + access_token, is required" }), { status: 400 });
+  // No drive_file_id means this is a local direct-upload: the browser already
+  // PUT the original PDF into plans-bucket/{original_path} itself.
+  const fromStorage = !body.drive_file_id;
+  if (!fromStorage && !body.access_token) {
+    return new Response(JSON.stringify({ error: "access_token is required when drive_file_id is set" }), { status: 400 });
+  }
+  if (!body.original_path) {
+    return new Response(JSON.stringify({ error: "original_path is required" }), { status: 400 });
   }
 
   const db = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
@@ -73,8 +84,9 @@ Deno.serve(async (req) => {
     // ── 1. Get original PDF bytes ────────────────────────────────────────────
     let originalBytes: Uint8Array;
     if (fromStorage) {
-      // Already uploaded directly to our own storage — just read it back.
-      const dl = await db.storage.from(PLANS_BUCKET).download(body.storage_path!);
+      // Local direct-upload — the browser already PUT the original here.
+      // Skip the Drive fetch step completely and just read it back.
+      const dl = await db.storage.from(PLANS_BUCKET).download(body.original_path);
       if (dl.error || !dl.data) throw new Error(`storage download: ${dl.error?.message ?? "empty"}`);
       originalBytes = new Uint8Array(await dl.data.arrayBuffer());
     } else {
@@ -89,7 +101,7 @@ Deno.serve(async (req) => {
       originalBytes = new Uint8Array(await driveRes.arrayBuffer());
 
       const upOrig = await db.storage.from(PLANS_BUCKET)
-        .upload(body.original_path!, originalBytes, {
+        .upload(body.original_path, originalBytes, {
           contentType: "application/pdf",
           upsert: true,
         });
