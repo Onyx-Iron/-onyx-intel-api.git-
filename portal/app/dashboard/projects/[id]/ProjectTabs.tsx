@@ -64,7 +64,7 @@ const PHASES: { id: Phase; subtabs: SubTabDef[] }[] = [
     subtabs: [
       { id: "takeoff",   label: "Takeoff",         icon: <Layers size={13} />,        render: (p) => <TakeoffTab projectId={p} /> },
       { id: "estimates", label: "Estimates",       icon: <Calculator size={13} />,    render: (p) => <EstimateTab projectId={p} /> },
-      { id: "rfis",      label: "RFIs",            icon: <FileStack size={13} />,     render: (p) => <ProjectControlsTab projectId={p} /> },
+      { id: "rfis",      label: "RFIs & Controls", icon: <FileStack size={13} />,     render: (p) => <ProjectControlsTab projectId={p} /> },
       { id: "risk",      label: "Risk Assessment", icon: <AlertTriangle size={13} />, render: (p) => <RiskAssessmentTab projectId={p} /> },
       { id: "cutfill",   label: "Cut / Fill",      icon: <Layers size={13} />,        render: (p) => <CutFillTab projectId={p} /> },
     ],
