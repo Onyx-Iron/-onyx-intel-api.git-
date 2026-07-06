@@ -1,22 +1,26 @@
 // Supabase Edge Function: page-split-worker
 // Deno runtime.
 //
-// Contract (from /api/documents/import-drive):
-//   POST {
-//     document_id, tenant_id, project_id,
-//     drive_file_id, original_path,
-//     access_token, user_id
-//   }
+// Contract — two input modes:
+//   Drive-imported (from /api/documents/import-drive):
+//     POST { document_id, tenant_id, project_id, drive_file_id, original_path,
+//            access_token, user_id }
+//   Already-in-storage (from /api/takeoff/from-document, large local uploads):
+//     POST { document_id, tenant_id, project_id, storage_path, user_id }
+//   Exactly one of (drive_file_id + access_token) or storage_path must be set.
 //
 // Pipeline:
-//   1. Stream the file from Google Drive into `plans-bucket/{original_path}`.
+//   1. Get the original PDF bytes — either streamed from Google Drive (and
+//      copied into `plans-bucket/{original_path}`), or read directly from
+//      `plans-bucket/{storage_path}` if it's already there (local uploads).
 //   2. Load the PDF via pdf-lib.
 //   3. Update `documents.page_count`.
 //   4. Burst each page into a standalone 1-page PDF at
 //      `plans-bucket/pages/{document_id}/page-{n}.pdf`.
 //   5. Insert `document_pages` rows (status="pending").
-//   6. Enqueue each page for `page-processor` by invoking that function
-//      per-page (fire-and-forget).
+//   6. Enqueue each page for BOTH `page-processor` (OCR + embeddings, for
+//      document Q&A/search) and `page-takeoff-worker` (real CSI takeoff rows,
+//      for the estimate grid) — fire-and-forget, per page.
 //
 // This function must be deployed with `supabase functions deploy page-split-worker`
 // and needs env vars:
@@ -34,9 +38,10 @@ interface Payload {
   document_id: string;
   tenant_id: string;
   project_id: string;
-  drive_file_id: string;
-  original_path: string;
-  access_token: string;
+  drive_file_id?: string;
+  original_path?: string;
+  access_token?: string;
+  storage_path?: string;
   user_id: string;
 }
 
@@ -47,6 +52,11 @@ Deno.serve(async (req) => {
     body = await req.json();
   } catch {
     return new Response(JSON.stringify({ error: "invalid JSON" }), { status: 400 });
+  }
+
+  const fromStorage = Boolean(body.storage_path);
+  if (!fromStorage && !(body.drive_file_id && body.access_token)) {
+    return new Response(JSON.stringify({ error: "either storage_path, or drive_file_id + access_token, is required" }), { status: 400 });
   }
 
   const db = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
@@ -60,24 +70,31 @@ Deno.serve(async (req) => {
     .eq("tenant_id", body.tenant_id);
 
   try {
-    // ── 1. Stream from Drive → Supabase Storage ──────────────────────────────
-    const driveUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(body.drive_file_id)}?alt=media`;
-    const driveRes = await fetch(driveUrl, {
-      headers: { Authorization: `Bearer ${body.access_token}` },
-    });
-    if (!driveRes.ok || !driveRes.body) {
-      throw new Error(`Drive fetch ${driveRes.status}: ${(await driveRes.text().catch(() => "")).slice(0, 200)}`);
-    }
-
-    // Buffer the response (Supabase JS upload wants a Blob/ArrayBuffer, not a stream).
-    const originalBytes = new Uint8Array(await driveRes.arrayBuffer());
-
-    const upOrig = await db.storage.from(PLANS_BUCKET)
-      .upload(body.original_path, originalBytes, {
-        contentType: "application/pdf",
-        upsert: true,
+    // ── 1. Get original PDF bytes ────────────────────────────────────────────
+    let originalBytes: Uint8Array;
+    if (fromStorage) {
+      // Already uploaded directly to our own storage — just read it back.
+      const dl = await db.storage.from(PLANS_BUCKET).download(body.storage_path!);
+      if (dl.error || !dl.data) throw new Error(`storage download: ${dl.error?.message ?? "empty"}`);
+      originalBytes = new Uint8Array(await dl.data.arrayBuffer());
+    } else {
+      const driveUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(body.drive_file_id!)}?alt=media`;
+      const driveRes = await fetch(driveUrl, {
+        headers: { Authorization: `Bearer ${body.access_token}` },
       });
-    if (upOrig.error) throw new Error(`upload original: ${upOrig.error.message}`);
+      if (!driveRes.ok || !driveRes.body) {
+        throw new Error(`Drive fetch ${driveRes.status}: ${(await driveRes.text().catch(() => "")).slice(0, 200)}`);
+      }
+      // Buffer the response (Supabase JS upload wants a Blob/ArrayBuffer, not a stream).
+      originalBytes = new Uint8Array(await driveRes.arrayBuffer());
+
+      const upOrig = await db.storage.from(PLANS_BUCKET)
+        .upload(body.original_path!, originalBytes, {
+          contentType: "application/pdf",
+          upsert: true,
+        });
+      if (upOrig.error) throw new Error(`upload original: ${upOrig.error.message}`);
+    }
 
     // ── 2. Load PDF ──────────────────────────────────────────────────────────
     const pdf = await PDFDocument.load(originalBytes, { ignoreEncryption: true });
@@ -132,10 +149,13 @@ Deno.serve(async (req) => {
       if (insErr) throw new Error(`insert document_pages: ${insErr.message}`);
     }
 
-    // ── 6. Fan out: fire-and-forget each page to page-processor ──────────────
-    const workerUrl = `${SUPABASE_URL.replace(/\/$/, "")}/functions/v1/page-processor`;
-    await Promise.allSettled(pageRows.map((p) =>
-      fetch(workerUrl, {
+    // ── 6. Fan out: fire-and-forget each page to page-processor (OCR/embed
+    // for search) AND page-takeoff-worker (real CSI takeoff rows) ───────────
+    const base = SUPABASE_URL.replace(/\/$/, "");
+    const processorUrl = `${base}/functions/v1/page-processor`;
+    const takeoffWorkerUrl = `${base}/functions/v1/page-takeoff-worker`;
+    await Promise.allSettled(pageRows.flatMap((p) => [
+      fetch(processorUrl, {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
@@ -148,8 +168,23 @@ Deno.serve(async (req) => {
           page_number: p.page_number,
           storage_path: p.storage_path,
         }),
-      })
-    ));
+      }),
+      fetch(takeoffWorkerUrl, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          page_id: p.id,
+          document_id: p.document_id,
+          tenant_id: p.tenant_id,
+          project_id: body.project_id,
+          page_number: p.page_number,
+          storage_path: p.storage_path,
+        }),
+      }),
+    ]));
 
     // Mark documents.status="split" — pages are now the unit of work.
     await db.from("documents")

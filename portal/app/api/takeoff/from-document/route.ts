@@ -10,14 +10,26 @@ const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localho
 // Aligned with the Supabase Edge Functions — see `page-split-worker/index.ts`.
 const BUCKET = "plans-bucket";
 
+// Files at or above this size get routed through the async page-split
+// pipeline instead of the synchronous Railway stream — the same 300s
+// maxDuration ceiling that protects small files becomes a silent-failure
+// risk once a plan set gets into the tens of megabytes (confirmed: a 55MB
+// upload was retried 4 times and never produced a single takeoff row,
+// because the stream disconnects mid-transfer with no server-side error).
+const ASYNC_THRESHOLD_BYTES = 3.5 * 1024 * 1024;
+
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
 /**
  * Page-by-page takeoff from an already-uploaded document.
- * Downloads the stored file (Supabase storage) and streams it to the Python
- * /api/takeoff/extract-stream endpoint, proxying the NDJSON progress back to the
- * browser. Sidesteps browser upload limits and processes one page at a time.
+ *
+ * Large local-upload PDFs (>3.5MB, storage_path-backed) are intercepted here
+ * and handed off to the async page-split pipeline (page-split-worker →
+ * page-processor + page-takeoff-worker fan-out per page) — the same
+ * architecture the Google Drive import path already uses. Everything else
+ * (small files, local disk paths, direct Drive reads) still proxies
+ * synchronously to Python's /api/takeoff/extract-stream.
  */
 export async function POST(req: NextRequest): Promise<Response> {
   try {
@@ -43,6 +55,27 @@ export async function POST(req: NextRequest): Promise<Response> {
     const storagePath = meta.storage_path as string | undefined;
     const driveFileId = meta.drive_file_id as string | undefined;
     const localPath = meta.local_path as string | undefined;
+    const fileSize = typeof meta.size === "number" ? meta.size : null;
+    const isPdf = doc.file_name.toLowerCase().endsWith(".pdf");
+
+    // ── Large local-upload PDF → async page-split pipeline ───────────────────
+    if (storagePath && isPdf && fileSize != null && fileSize >= ASYNC_THRESHOLD_BYTES) {
+      await db.from("documents")
+        .update({ status: "queued", updated_at: new Date().toISOString() } as never)
+        .eq("id", document_id).eq("tenant_id", tenantId);
+
+      void invokePageSplitWorker({
+        document_id,
+        tenant_id: tenantId,
+        project_id,
+        storage_path: storagePath,
+        user_id: userId,
+      }).catch((err) => {
+        console.error("[from-document] page-split-worker invoke failed", err);
+      });
+
+      return NextResponse.json({ status: "queued", async: true, document_id }, { status: 202 });
+    }
 
     let bytes: Buffer;
     if (localPath) {
@@ -106,7 +139,51 @@ export async function POST(req: NextRequest): Promise<Response> {
       return NextResponse.json({ error: `[from-document] upstream ${upstream.status}: ${detail.slice(0, 300)}` }, { status: 502 });
     }
 
-    return new Response(upstream.body, {
+    // Tap the passthrough stream so `documents.status` reflects the outcome
+    // once Railway finishes sending — previously this route never touched
+    // status at all, so a document stayed "queued" forever regardless of
+    // whether extraction actually succeeded. Read manually (rather than a
+    // TransformStream) so a mid-stream network error from Railway — not just
+    // a client-initiated abort — is caught and recorded as "failed" too.
+    const upstreamReader = upstream.body.getReader();
+    let settled = false;
+    const markDone = async () => {
+      if (settled) return;
+      settled = true;
+      await db.from("documents")
+        .update({ status: "done", processed_at: new Date().toISOString() } as never)
+        .eq("id", document_id).eq("tenant_id", tenantId);
+    };
+    const markFailed = async () => {
+      if (settled) return;
+      settled = true;
+      await db.from("documents")
+        .update({ status: "failed" } as never)
+        .eq("id", document_id).eq("tenant_id", tenantId);
+    };
+
+    const tappedStream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { done, value } = await upstreamReader.read();
+          if (done) {
+            controller.close();
+            await markDone();
+            return;
+          }
+          controller.enqueue(value);
+        } catch (err) {
+          controller.error(err);
+          await markFailed();
+        }
+      },
+      async cancel(reason) {
+        await upstreamReader.cancel(reason).catch(() => {});
+        await markFailed();
+      },
+    });
+
+    return new Response(tappedStream, {
       status: 200,
       headers: {
         "Content-Type": "application/x-ndjson",
@@ -118,4 +195,28 @@ export async function POST(req: NextRequest): Promise<Response> {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[from-document] ${msg}` }, { status: 500 });
   }
+}
+
+// ── Async worker invocation (mirrors /api/documents/import-drive) ───────────
+async function invokePageSplitWorker(payload: {
+  document_id: string;
+  tenant_id: string;
+  project_id: string;
+  storage_path: string;
+  user_id: string;
+}): Promise<void> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+  const serviceKey  = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !serviceKey) {
+    throw new Error("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set");
+  }
+  const url = `${supabaseUrl.replace(/\/$/, "")}/functions/v1/page-split-worker`;
+  await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${serviceKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
 }

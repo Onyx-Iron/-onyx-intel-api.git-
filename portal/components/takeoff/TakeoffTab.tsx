@@ -41,7 +41,12 @@ interface CompletedEvent{ event: "PARSING_COMPLETED"; final_row_count: number; f
 interface ErrorEvent    { event: "ROW_VALIDATION_ERROR" | "CRITICAL_PARSER_FAILURE"; message?: string; error_count?: number; }
 
 type StreamEvent = ChunkEvent | StartedEvent | CompletedEvent | ErrorEvent;
-type Phase = "idle" | "uploading" | "streaming" | "done" | "error";
+type Phase = "idle" | "uploading" | "streaming" | "processing_async" | "done" | "error";
+
+interface SavedTakeoffItem {
+  id: string; label: string; csi_code: string | null; quantity: number | null;
+  unit: string | null; page: number | null; meta: Record<string, unknown> | null;
+}
 
 // ── CSI division colour mapping ────────────────────────────────────────────────
 
@@ -358,6 +363,10 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
   const [hasLocalPdf, setHasLocalPdf] = useState(false);
   const pdfFileRef = useRef<File | null>(null);
 
+  // ── Async page-split polling (large uploads routed off the sync stream) ──
+  const [asyncPages, setAsyncPages] = useState<{ total: number; done: number; error: number }>({ total: 0, done: 0, error: 0 });
+  const pollTimerRef = useRef<number | null>(null);
+
   // ── Saved items from DB ──
   const [savedItems, setSavedItems] = useState<SavedItem[]>([]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -412,6 +421,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     return () => {
       cancelled = true;
       abortRef.current?.abort();
+      if (pollTimerRef.current != null) window.clearTimeout(pollTimerRef.current);
     };
   }, [projectId, loadSavedItems]);
 
@@ -451,14 +461,145 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     }
   }, [projectId, loadSavedItems]);
 
+  // Shared NDJSON page-by-page reader for the *synchronous* from-document
+  // path (small/local-disk/Drive files that didn't get routed async).
+  // Previously extractDeterministic's storage-upload branch called
+  // `res.json()` on this same NDJSON body, which silently failed to parse
+  // (multiple newline-delimited JSON objects aren't valid single JSON) and
+  // always produced zero rows — fixed by reading it the same way
+  // runFromDocument already does.
+  const consumeNdjsonExtractStream = useCallback(async (body: ReadableStream<Uint8Array>, docName: string) => {
+    setPhase("streaming"); setStatusMsg("Extracting…");
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let collected: TakeoffRow[] = [];
+
+    const handle = (ev: { event: string; page?: number; total_pages?: number; rows?: TakeoffRow[]; total_rows?: number; ai_candidate_pages?: number[]; message?: string; source_type?: string; coverage?: Coverage }) => {
+      switch (ev.event) {
+        case "STARTED":
+          setTotalRows(0);
+          setStatusMsg(`Reading ${ev.total_pages ?? 0} pages from ${docName}…`);
+          break;
+        case "PAGE": {
+          const newRows = (ev.rows ?? []).map((r, i) => ({ ...r, id: `doc-${ev.page}-${i}` }));
+          if (newRows.length) { collected = [...collected, ...newRows]; setRows(collected); }
+          const total = ev.total_pages || 1;
+          setProgress(Math.round(((ev.page ?? 0) / total) * 100));
+          setStatusMsg(`Page ${ev.page} of ${total} — ${collected.length} item${collected.length !== 1 ? "s" : ""} so far`);
+          break;
+        }
+        case "COMPLETED":
+          setAiPages(ev.ai_candidate_pages ?? []);
+          setProgress(100);
+          setAuditStatus(collected.length > 0 ? "VERIFIED_SUCCESS" : "PARTIAL_WITH_ERRORS");
+          setStatusMsg(`Complete — ${collected.length} line items from ${docName}`);
+          setPhase("done");
+          void persistRows(collected);
+          break;
+        case "ERROR":
+          setPhase("error"); setStatusMsg(ev.message ?? "Extraction failed."); break;
+      }
+    };
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (abortRef.current?.signal.aborted) break;
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) { const t = line.trim(); if (t) try { handle(JSON.parse(t)); } catch { /* skip */ } }
+      }
+      if (buf.trim()) try { handle(JSON.parse(buf.trim())); } catch { /* skip */ }
+    } catch {
+      setPhase("error"); setStatusMsg("Stream interrupted.");
+    }
+  }, [persistRows]);
+
   const reset = () => {
     abortRef.current?.abort();
+    if (pollTimerRef.current != null) { window.clearTimeout(pollTimerRef.current); pollTimerRef.current = null; }
     setPhase("idle"); setRows([]); setProgress(0); setStatusMsg("");
     setTotalRows(0); setAuditStatus(null); setFailedRows(0); setFileName("");
     setSourceType(null); setCoverage(null); setAiPages([]); setAiRunning(false);
-    setHasLocalPdf(false);
+    setHasLocalPdf(false); setAsyncPages({ total: 0, done: 0, error: 0 });
     pdfFileRef.current = null;
   };
+
+  // ── Poll the async page-split pipeline for large uploads ─────────────────
+  // (page-split-worker → page-processor + page-takeoff-worker fan-out per
+  // page). Replaces the synchronous NDJSON reader loop once a from-document
+  // call comes back `{ status: "queued", async: true }`.
+  const pollSplitStatus = useCallback((documentId: string, docName: string) => {
+    setPhase("processing_async");
+    setStatusMsg(`Queued for background processing — ${docName}`);
+    setProgress(0);
+
+    const tick = async () => {
+      if (abortRef.current?.signal.aborted) return;
+      try {
+        const res = await fetch(`/api/takeoff/split-status?document_id=${encodeURIComponent(documentId)}`, { cache: "no-store" });
+        const data = await res.json().catch(() => ({})) as {
+          pages_total?: number; pages_done?: number; pages_error?: number;
+          finished?: boolean; document_status?: string; items?: SavedTakeoffItem[];
+        };
+        if (!res.ok) {
+          setPhase("error"); setStatusMsg("Lost track of background processing — check the document list."); return;
+        }
+        const total = data.pages_total ?? 0;
+        const done = data.pages_done ?? 0;
+        const errorCount = data.pages_error ?? 0;
+        setAsyncPages({ total, done, error: errorCount });
+
+        if (total > 0) {
+          setProgress(Math.round(((done + errorCount) / total) * 100));
+          setStatusMsg(`Page ${done + errorCount} of ${total} processed${errorCount > 0 ? ` (${errorCount} failed)` : ""}…`);
+        } else {
+          setStatusMsg(`Splitting ${docName} into pages…`);
+        }
+
+        if (data.finished) {
+          const items = data.items ?? [];
+          const extracted: TakeoffRow[] = items.map((it, i) => {
+            const meta = it.meta ?? {};
+            return {
+              id: it.id ?? `async-${i}`,
+              trade: String(meta.trade ?? ""),
+              cost_code: it.csi_code ?? "",
+              description: it.label ?? "",
+              quantity_basis: String(meta.quantity_basis ?? ""),
+              total_qty: Number(it.quantity ?? 0),
+              uom: it.unit ?? "",
+              drawing_ref: (meta.drawing_ref as string | null) ?? null,
+              location_tag: (meta.location_tag as string | null) ?? null,
+              extraction_method: (meta.extraction_method as "deterministic" | "ai_vision") ?? "deterministic",
+            };
+          });
+          setRows(extracted);
+          setTotalRows(extracted.length);
+          setProgress(100);
+          setAuditStatus(extracted.length > 0 ? "VERIFIED_SUCCESS" : "PARTIAL_WITH_ERRORS");
+          setStatusMsg(
+            data.document_status === "failed"
+              ? `Background processing failed for ${docName}.`
+              : `Complete — ${extracted.length} line items from ${docName}`,
+          );
+          setPhase(data.document_status === "failed" && extracted.length === 0 ? "error" : "done");
+          // Rows are already persisted by page-takeoff-worker directly —
+          // just refresh the saved-items list, don't re-POST them.
+          setSaveStatus("saved");
+          loadSavedItems();
+          return;
+        }
+      } catch {
+        // transient network hiccup — keep polling rather than failing the whole run
+      }
+      pollTimerRef.current = window.setTimeout(tick, 2500);
+    };
+    void tick();
+  }, [loadSavedItems]);
 
   // ── Deterministic extraction (PDF tables / DXF / IFC / XLSX) ──
   //
@@ -514,7 +655,9 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
           setStatusMsg(`Storage upload failed (${putRes.status}): ${detail.slice(0, 200)}`);
           return;
         }
-        // 3) Run takeoff off the stored file.
+        // 3) Run takeoff off the stored file — large PDFs may come back as an
+        // async 202 (queued for the background page-split pipeline) instead
+        // of the usual synchronous NDJSON stream.
         setStatusMsg("Extracting…");
         res = await fetch(`/api/takeoff/from-document`, {
           method: "POST",
@@ -524,6 +667,20 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
             project_id: projectId,
           }),
         });
+
+        if (res.status === 202) {
+          const asyncData = await res.json().catch(() => ({})) as { document_id?: string; async?: boolean };
+          if (asyncData.async && asyncData.document_id) {
+            pollSplitStatus(asyncData.document_id, file.name);
+            return;
+          }
+        }
+        if (!res.ok || !res.body) {
+          const d = await res.json().catch(() => ({}));
+          setPhase("error"); setStatusMsg(typeof d?.error === "string" ? d.error : `Extraction failed (${res.status})`); return;
+        }
+        await consumeNdjsonExtractStream(res.body, file.name);
+        return;
       } else {
         // Small file: direct multipart to Vercel is fine.
         const form = new FormData();
@@ -557,7 +714,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     setStatusMsg(`Extracted ${extracted.length.toLocaleString()} line items from ${file.name}`);
     setPhase("done");
     await persistRows(extracted);
-  }, [persistRows, projectId]);
+  }, [persistRows, projectId, pollSplitStatus, consumeNdjsonExtractStream]);
 
   // ── Page-by-page takeoff from an already-uploaded document (memory-safe) ──
   const runFromDocument = useCallback(async (documentId: string, docName: string, isDrive = false) => {
@@ -585,62 +742,20 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     } catch {
       setPhase("error"); setStatusMsg("Could not reach the server."); return;
     }
+    if (res.status === 202) {
+      const asyncData = await res.json().catch(() => ({})) as { document_id?: string; async?: boolean };
+      if (asyncData.async && asyncData.document_id) {
+        pollSplitStatus(asyncData.document_id, docName);
+        return;
+      }
+    }
     if (!res.ok || !res.body) {
       const d = await res.json().catch(() => ({}));
       setPhase("error"); setStatusMsg(typeof d?.error === "string" ? d.error : `Failed (${res.status})`); return;
     }
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    let collected: TakeoffRow[] = [];
-    const aiCandidates: number[] = [];
-
-    const handle = (ev: { event: string; page?: number; total_pages?: number; rows?: TakeoffRow[]; total_rows?: number; ai_candidate_pages?: number[]; message?: string }) => {
-      switch (ev.event) {
-        case "STARTED":
-          setTotalRows(0);
-          setStatusMsg(`Reading ${ev.total_pages ?? 0} pages from ${docName}…`);
-          break;
-        case "PAGE": {
-          const newRows = (ev.rows ?? []).map((r, i) => ({ ...r, id: `doc-${ev.page}-${i}` }));
-          if (newRows.length) { collected = [...collected, ...newRows]; setRows(collected); }
-          const total = ev.total_pages || 1;
-          setProgress(Math.round(((ev.page ?? 0) / total) * 100));
-          setStatusMsg(`Page ${ev.page} of ${total} — ${collected.length} item${collected.length !== 1 ? "s" : ""} so far`);
-          break;
-        }
-        case "COMPLETED":
-          setAiPages(ev.ai_candidate_pages ?? []);
-          setProgress(100);
-          setAuditStatus(collected.length > 0 ? "VERIFIED_SUCCESS" : "PARTIAL_WITH_ERRORS");
-          setStatusMsg(`Complete — ${collected.length} line items from ${docName}`);
-          setPhase("done");
-          void persistRows(collected);
-          break;
-        case "ERROR":
-          setPhase("error"); setStatusMsg(ev.message ?? "Extraction failed."); break;
-      }
-    };
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        // Estimator may have switched projects mid-stream — stop before this
-        // stale reader writes another page's rows into the new project's state.
-        if (abortRef.current?.signal.aborted) break;
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop() ?? "";
-        for (const line of lines) { const t = line.trim(); if (t) try { handle(JSON.parse(t)); } catch { /* skip */ } }
-      }
-      if (buf.trim()) try { handle(JSON.parse(buf.trim())); } catch { /* skip */ }
-    } catch {
-      setPhase("error"); setStatusMsg("Stream interrupted.");
-    }
-    void aiCandidates;
-  }, [persistRows, projectId]);
+    await consumeNdjsonExtractStream(res.body, docName);
+  }, [projectId, pollSplitStatus, consumeNdjsonExtractStream]);
 
   // ── AI vision fallback (Sonnet) for graphical PDF pages ──
   const runAiFallback = useCallback(async () => {
@@ -879,6 +994,34 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
           >
             Try Again
           </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Large upload routed to the async page-split pipeline — polling document_pages
+  if (phase === "processing_async") {
+    return (
+      <div className="max-w-2xl mx-auto py-4">
+        <div className="rounded-xl border border-white/10 bg-[#0E0F12] p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <svg className="w-4 h-4 text-[#00D2FF] animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+            </svg>
+            <div>
+              <p className="text-white text-xs font-bold tracking-wide">{fileName}</p>
+              <p className="text-[10px] text-gray-600 uppercase tracking-widest font-mono mt-0.5">{statusMsg}</p>
+            </div>
+          </div>
+          <ProgressBar
+            pct={progress}
+            label={asyncPages.total > 0 ? `Page ${asyncPages.done + asyncPages.error} of ${asyncPages.total} processed` : "Splitting document…"}
+          />
+          <p className="mt-4 text-[11px] text-gray-600 text-center">
+            Large plan set — processing in the background across multiple pages at once.
+            This tab will update automatically; you can navigate away and come back.
+          </p>
         </div>
       </div>
     );
