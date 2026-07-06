@@ -33,6 +33,23 @@ const EMBED_MODEL        = Deno.env.get("GEMINI_EMBED_MODEL") ?? "text-embedding
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
+// Gemini calls occasionally 429/5xx under load; retry with exponential
+// backoff rather than failing the whole page on a transient blip.
+async function fetchWithRetry(url: string, options: RequestInit, maxAttempts = 3): Promise<Response> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      if (res.ok || (res.status !== 429 && res.status < 500)) return res;
+      lastErr = new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      lastErr = err;
+    }
+    if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 500 * 2 ** (attempt - 1)));
+  }
+  throw lastErr;
+}
+
 interface Payload {
   page_id: string;
   document_id: string;
@@ -79,7 +96,7 @@ Deno.serve(async (req) => {
       generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
     };
 
-    const genRes = await fetch(
+    const genRes = await fetchWithRetry(
       `${GEMINI_BASE}/models/${TEXT_MODEL}:generateContent`,
       {
         method: "POST",
@@ -180,7 +197,7 @@ async function embedBatch(inputs: string[]): Promise<Array<number[] | null>> {
       outputDimensionality: 768,
     })),
   };
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `${GEMINI_BASE}/models/${EMBED_MODEL}:batchEmbedContents`,
     {
       method: "POST",

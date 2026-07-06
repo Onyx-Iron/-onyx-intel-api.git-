@@ -40,6 +40,23 @@ const SUPABASE_URL       = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY   = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const PLANS_BUCKET       = Deno.env.get("PLANS_BUCKET") ?? "plans-bucket";
 
+// Google Drive occasionally 429/5xx's under load; retry with exponential
+// backoff rather than failing the whole document on a transient blip.
+async function fetchWithRetry(url: string, options: RequestInit, maxAttempts = 3): Promise<Response> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      if (res.ok || (res.status !== 429 && res.status < 500)) return res;
+      lastErr = new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      lastErr = err;
+    }
+    if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 500 * 2 ** (attempt - 1)));
+  }
+  throw lastErr;
+}
+
 interface Payload {
   document_id: string;
   tenant_id: string;
@@ -91,7 +108,7 @@ Deno.serve(async (req) => {
       originalBytes = new Uint8Array(await dl.data.arrayBuffer());
     } else {
       const driveUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(body.drive_file_id!)}?alt=media`;
-      const driveRes = await fetch(driveUrl, {
+      const driveRes = await fetchWithRetry(driveUrl, {
         headers: { Authorization: `Bearer ${body.access_token}` },
       });
       if (!driveRes.ok || !driveRes.body) {

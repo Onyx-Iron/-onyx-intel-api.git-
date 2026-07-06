@@ -46,6 +46,23 @@ interface Payload {
   storage_path: string;
 }
 
+// Railway service occasionally cold-starts or briefly 5xx's under load;
+// retry with exponential backoff rather than failing the whole page.
+async function fetchWithRetry(url: string, options: RequestInit, maxAttempts = 3): Promise<Response> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      if (res.ok || (res.status !== 429 && res.status < 500)) return res;
+      lastErr = new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      lastErr = err;
+    }
+    if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 500 * 2 ** (attempt - 1)));
+  }
+  throw lastErr;
+}
+
 interface TakeoffRow {
   trade?: string;
   cost_code?: string;
@@ -86,7 +103,7 @@ Deno.serve(async (req) => {
     const form = new FormData();
     form.append("file", dl.data, `page-${body.page_number}.pdf`);
 
-    const res = await fetch(`${PYTHON_API_URL}/api/takeoff/extract`, {
+    const res = await fetchWithRetry(`${PYTHON_API_URL}/api/takeoff/extract`, {
       method: "POST",
       headers: {
         "X-Onyx-Secret": ONYX_API_SECRET,
