@@ -6,7 +6,7 @@
 //
 // Pipeline:
 //   1. Download single-page PDF bytes from storage.
-//   2. Send to Gemini 1.5 Flash via `generateContent` with inlineData
+//   2. Send to Gemini via `generateContent` with inlineData
 //      (base64-encoded PDF). NOTE: payload deliberately omits any
 //      `display_name` field — Gemini's REST schema doesn't accept it and
 //      rejects the whole request if present.
@@ -18,7 +18,7 @@
 // Env vars:
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GEMINI_API_KEY,
 //   PLANS_BUCKET (default "plans-bucket"),
-//   GEMINI_TEXT_MODEL  (default "gemini-1.5-flash"),
+//   GEMINI_TEXT_MODEL  (default "gemini-2.5-pro"),
 //   GEMINI_EMBED_MODEL (default "text-embedding-004").
 
 // deno-lint-ignore-file no-explicit-any
@@ -28,7 +28,7 @@ const SUPABASE_URL       = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY   = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GEMINI_API_KEY     = Deno.env.get("GEMINI_API_KEY")!;
 const PLANS_BUCKET       = Deno.env.get("PLANS_BUCKET") ?? "plans-bucket";
-const TEXT_MODEL         = Deno.env.get("GEMINI_TEXT_MODEL") ?? "gemini-1.5-flash";
+const TEXT_MODEL         = Deno.env.get("GEMINI_TEXT_MODEL") ?? "gemini-2.5-pro";
 const EMBED_MODEL        = Deno.env.get("GEMINI_EMBED_MODEL") ?? "text-embedding-004";
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
@@ -65,7 +65,7 @@ Deno.serve(async (req) => {
     const arrayBuf = await dl.data.arrayBuffer();
     const b64 = base64Encode(new Uint8Array(arrayBuf));
 
-    // ── 2. Extract text via Gemini 1.5 Flash ────────────────────────────────
+    // ── 2. Extract text via Gemini ───────────────────────────────────────────
     // Payload strictly omits `display_name` — the v1beta REST endpoint rejects
     // it (it exists only in the Files API, not inlineData parts).
     const genBody = {

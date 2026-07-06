@@ -11,7 +11,7 @@ export const maxDuration = 90;
 
 const PLANS_BUCKET     = "plans-bucket";
 const GEMINI_API_KEY   = headerSafe(process.env.GEMINI_API_KEY);
-const GEMINI_MODEL     = process.env.GEMINI_VISION_MODEL ?? process.env.GEMINI_MODEL ?? "gemini-1.5-flash";
+const GEMINI_MODEL     = process.env.GEMINI_VISION_MODEL ?? process.env.GEMINI_MODEL ?? "gemini-2.5-pro";
 const GEMINI_BASE      = "https://generativelanguage.googleapis.com/v1beta";
 
 /**

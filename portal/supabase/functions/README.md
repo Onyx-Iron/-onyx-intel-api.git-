@@ -20,7 +20,7 @@ Two functions power the Drive → page-split → per-page RAG pipeline:
    supabase secrets set \
      GEMINI_API_KEY="AQ...your-billing-key" \
      PLANS_BUCKET="plans-bucket" \
-     GEMINI_TEXT_MODEL="gemini-1.5-flash" \
+     GEMINI_TEXT_MODEL="gemini-2.5-pro" \
      GEMINI_EMBED_MODEL="text-embedding-004"
    ```
 
