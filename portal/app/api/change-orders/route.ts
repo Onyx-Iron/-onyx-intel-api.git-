@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { buildChangeOrderPayload } from "@/lib/project-controls/schema";
 import {
+  assertProjectBelongsToTenant,
   authTenantKey,
   authTenantName,
   getControlDb,
@@ -61,6 +62,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertProjectBelongsToTenant(projectId, tenantId);
     const payload = buildChangeOrderPayload(body, { tenantId, projectId });
     const db = await getControlDb();
 
@@ -92,7 +94,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    const status = msg.includes("required") ? 400 : 500;
+    const status = msg.includes("required") ? 400 : msg.includes("does not belong") ? 403 : 500;
     return NextResponse.json({ error: msg }, { status });
   }
 }

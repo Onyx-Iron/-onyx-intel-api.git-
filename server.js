@@ -39,6 +39,7 @@ import {
   addQnaEntry, getQnaHistory, addKnowledgeFacts, upsertDocumentSummary, getProjectContext,
 } from "./lib/project-store.js";
 import { runAgent } from "./lib/agent.js";
+import { rateLimit } from "./lib/rate-limit.js";
 import { computeCPM, buildGanttData } from "./lib/cpm.js";
 import { getAllAgents, getAgent } from "./lib/agents/index.js";
 import { CHATBOT_TOOLS, executeChatbotTool } from "./lib/chatbot-tools.js";
@@ -558,7 +559,11 @@ app.post("/api/chatbot/tool", (req, res) => {
   }
 });
 
-app.post("/api/chatbot", async (req, res) => {
+// Public, unauthenticated endpoint (marketing-site chatbot) — the single
+// biggest cost-abuse exposure in this file without a per-IP throttle.
+const chatbotRateLimit = rateLimit({ windowMs: 60_000, max: 10 });
+
+app.post("/api/chatbot", chatbotRateLimit, async (req, res) => {
   const { messages = [], sessionId } = req.body;
   if (!messages.length) return res.status(400).json({ error: "No messages provided" });
 
@@ -675,7 +680,11 @@ app.get("/website", (req, res) => {
 });
 
 // ── AI Agent ─────────────────────────────────────────────────────────
-app.post("/api/agent", async (req, res) => {
+// Every call fires up to 3 LLM requests (primary + secondary + synthesis) —
+// throttle harder than the single-call chatbot endpoint.
+const agentRateLimit = rateLimit({ windowMs: 60_000, max: 6 });
+
+app.post("/api/agent", agentRateLimit, async (req, res) => {
   const { messages, projectId, agentType } = req.body || {};
   if (!messages || !Array.isArray(messages)) {
     return res.status(400).json({ error: "messages array required" });

@@ -160,13 +160,25 @@ def _norm_uom(raw: str | None, fallback: str) -> str:
 
 _NUM = re.compile(r"-?\d[\d,]*\.?\d*")
 
+_PAREN_NEGATIVE = re.compile(r"\(\s*(\d[\d,]*\.?\d*)\s*\)")
+
 def _to_float(raw: Any) -> float | None:
-    """Parse a number out of a possibly-messy cell ('1,250 SF', '(3)', '12 ea')."""
+    """Parse a number out of a possibly-messy cell ('1,250 SF', '(3)', '12 ea').
+
+    Accounting-style parentheses denote a negative (deduction/credit), e.g. '(3)' -> -3.
+    """
     if raw is None:
         return None
     if isinstance(raw, (int, float)):
         return float(raw)
-    m = _NUM.search(str(raw).replace("\n", " "))
+    text = str(raw).replace("\n", " ")
+    paren = _PAREN_NEGATIVE.search(text)
+    if paren:
+        try:
+            return -float(paren.group(1).replace(",", ""))
+        except ValueError:
+            return None
+    m = _NUM.search(text)
     if not m:
         return None
     try:
@@ -426,22 +438,27 @@ def extract_from_dxf(path: str) -> dict:
             continue  # never let one malformed entity kill the takeoff
 
     units = _dxf_units(doc)
+    to_feet = _dxf_unit_to_feet_factor(doc)
     rows: list[dict] = []
 
     for layer, length in sorted(layer_len.items()):
-        if length <= 0:
+        length_ft = length * to_feet
+        if length_ft <= 0:
             continue
         rows.append(_row(
             description=f"{layer} — linear run",
-            qty=length, basis=f"Sum of LINE/POLYLINE geometry on layer '{layer}' ({units})",
+            qty=length_ft,
+            basis=f"Sum of LINE/POLYLINE geometry on layer '{layer}' ({units}, converted to LF)",
             uom="LF", location_tag=layer,
         ))
     for layer, area in sorted(layer_area.items()):
-        if area <= 0:
+        area_sf = area * (to_feet ** 2)
+        if area_sf <= 0:
             continue
         rows.append(_row(
             description=f"{layer} — area",
-            qty=area, basis=f"Sum of closed-polygon/hatch area on layer '{layer}' ({units}²)",
+            qty=area_sf,
+            basis=f"Sum of closed-polygon/hatch area on layer '{layer}' ({units}², converted to SF)",
             uom="SF", location_tag=layer,
         ))
     for (layer, block_name), count in sorted(block_counts.items()):
@@ -481,6 +498,30 @@ def _polygon_area(points: list) -> float:
 def _dxf_units(doc) -> str:
     code = doc.header.get("$INSUNITS", 0)
     return {0: "unitless", 1: "in", 2: "ft", 4: "mm", 5: "cm", 6: "m"}.get(code, "unitless")
+
+
+# $INSUNITS code -> feet per one drawing unit. Used to normalize raw DXF
+# geometry (which is authored in whatever unit the CAD operator set) to the
+# LF/SF units this takeoff always reports in. A drawing modeled in mm/in/m
+# would otherwise report wildly wrong quantities (e.g. millimeters summed
+# and labeled "LF" is off by a factor of ~304.8).
+_DXF_UNIT_TO_FEET = {
+    0: 1.0,       # unitless — assume feet (most common default for site/civil DXF)
+    1: 1.0 / 12,  # inches
+    2: 1.0,       # feet
+    4: 1.0 / 304.8,   # millimeters
+    5: 1.0 / 30.48,   # centimeters
+    6: 1.0 / 0.3048,  # meters
+}
+
+
+def _dxf_unit_to_feet_factor(doc) -> float:
+    code = doc.header.get("$INSUNITS", 0)
+    factor = _DXF_UNIT_TO_FEET.get(code)
+    if factor is None:
+        logger.warning("[DXF] Unrecognized $INSUNITS code %r — assuming feet", code)
+        return 1.0
+    return factor
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -20,6 +20,7 @@ export interface ControlQuery<T> extends PromiseLike<QueryResult<T>> {
   neq(column: string, value: unknown): ControlQuery<T>;
   order(column: string, options?: { ascending?: boolean }): ControlQuery<T>;
   limit(count: number): ControlQuery<T>;
+  range(from: number, to: number): ControlQuery<T>;
   single(): ControlQuery<T>;
 }
 
@@ -59,4 +60,28 @@ export function requireProjectId(value: unknown): string {
     throw new Error("project_id required");
   }
   return value.trim();
+}
+
+/**
+ * Verifies that `projectId` actually belongs to `tenantId` before it's used to
+ * scope an insert. POST handlers across rfis/change-orders/submittals/
+ * invoices/daily-logs accept a client-supplied project_id and previously
+ * inserted it unchecked alongside the caller's own tenant_id — so a request
+ * carrying a project_id from a *different* tenant would succeed, creating a
+ * row whose tenant_id and project_id point at different tenants (referential
+ * corruption, and a cross-tenant leak wherever downstream code joins by
+ * project_id alone). Throws if the project doesn't exist under that tenant.
+ */
+export async function assertProjectBelongsToTenant(projectId: string, tenantId: string): Promise<void> {
+  const db = await createServiceClient();
+  const { data, error } = await db
+    .from("projects")
+    .select("id")
+    .eq("id", projectId)
+    .eq("tenant_id", tenantId)
+    .single();
+
+  if (error || !data) {
+    throw new Error("project_id does not belong to this tenant");
+  }
 }
