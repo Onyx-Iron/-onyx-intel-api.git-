@@ -10,6 +10,7 @@ import {
 } from "@/lib/project-controls/server";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
+import { auditInsert } from "@/lib/audit";
 import { rfiCreateSchema, parseBody } from "@/lib/validation";
 
 export const runtime = "nodejs";
@@ -68,6 +69,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     if (error) return NextResponse.json({ ...UNAVAILABLE }, { status: 503 });
 
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "rfi_items",
+      record_id: (data as any).id,
+      new_values: data as Record<string, unknown>,
+    });
     void logEvent({
       projectId,
       tenantId,

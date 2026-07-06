@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
 
 export const runtime = "nodejs";
@@ -78,6 +79,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .single();
 
     if (error) return NextResponse.json({ error: `[POST /api/lien-waivers] ${error.message}` }, { status: 422 });
+
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: TABLE,
+      record_id: (data as any).id,
+      new_values: data as Record<string, unknown>,
+    });
+
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });

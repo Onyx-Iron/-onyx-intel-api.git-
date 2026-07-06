@@ -5,6 +5,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 import { requireGoogleToken } from "@/lib/google/api";
 import { logEvent } from "@/lib/activity";
+import { auditInsert, auditUpdate } from "@/lib/audit";
 
 export const runtime = "nodejs";
 
@@ -71,6 +72,22 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     created_by: userId,
   }).select("*").single();
   if (poErr) return NextResponse.json({ error: poErr.message }, { status: 500 });
+
+  auditInsert({
+    tenant_id: tenantId,
+    user_id: userId,
+    table_name: "purchase_orders",
+    record_id: po.id,
+    new_values: po as Record<string, unknown>,
+  });
+  auditUpdate({
+    tenant_id: tenantId,
+    user_id: userId,
+    table_name: "vendor_bids",
+    record_id: bid.id,
+    old_values: { status: bid.status },
+    new_values: { status: "awarded" },
+  });
 
   await Promise.all([
     anyDb.from("vendor_bids").update({ status: "awarded" }).eq("id", bid.id),

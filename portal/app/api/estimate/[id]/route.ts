@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { auditUpdate, auditDelete } from "@/lib/audit";
 
 export const runtime = "nodejs";
 
@@ -32,6 +33,15 @@ export async function PUT(req: NextRequest, ctx: RouteContext): Promise<NextResp
       if (k in body) updates[k] = body[k];
     }
 
+    // Snapshot old values for the audit log before mutation (pricing_status
+    // changes are effectively estimate item approval/rejection).
+    const { data: before } = await db
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .from("estimate_items" as any)
+      .select("*")
+      .eq("id", id).eq("tenant_id", tenantId).eq("project_id", project_id)
+      .maybeSingle();
+
     const { data, error } = await db
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .from("estimate_items" as any)
@@ -43,6 +53,16 @@ export async function PUT(req: NextRequest, ctx: RouteContext): Promise<NextResp
       .single();
 
     if (error) return NextResponse.json({ error: `[PUT /api/estimate/${id}] ${error.message}` }, { status: 422 });
+
+    auditUpdate({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "estimate_items",
+      record_id: id,
+      old_values: (before ?? null) as Record<string, unknown> | null,
+      new_values: data as Record<string, unknown>,
+    });
+
     return NextResponse.json({ item: data });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
@@ -62,8 +82,24 @@ export async function DELETE(req: NextRequest, ctx: RouteContext): Promise<NextR
     const db = await createServiceClient();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: before } = await db
+      .from("estimate_items" as any)
+      .select("*")
+      .eq("id", id).eq("tenant_id", tenantId).eq("project_id", project_id)
+      .maybeSingle();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { error } = await db.from("estimate_items" as any).delete().eq("id", id).eq("tenant_id", tenantId).eq("project_id", project_id);
     if (error) return NextResponse.json({ error: `[DELETE /api/estimate/${id}] ${error.message}` }, { status: 422 });
+
+    auditDelete({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "estimate_items",
+      record_id: id,
+      old_values: (before ?? null) as Record<string, unknown> | null,
+    });
+
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
