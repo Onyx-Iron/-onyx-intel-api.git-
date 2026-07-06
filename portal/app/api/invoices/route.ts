@@ -1,9 +1,10 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
+import { parsePagination, paginationMeta } from "@/lib/pagination";
 
 export const runtime = "nodejs";
 
@@ -29,11 +30,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const status = req.nextUrl.searchParams.get("status");
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const { page, limit, offset } = parsePagination(req.nextUrl.searchParams);
     const db = await createServiceClient();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let q: any = db.from(TABLE as any)
-      .select("*")
+      .select("*", { count: "exact" })
       .eq("tenant_id", tenantId)
       .eq("project_id", projectId);
 
@@ -44,10 +46,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       else if (VALID_STATUSES.has(status)) q = q.eq("status", status);
     }
 
-    const { data, error } = await q.order("created_at", { ascending: false });
+    const { data, error, count } = await q.order("created_at", { ascending: false }).range(offset, offset + limit - 1);
 
     if (error) return NextResponse.json({ error: `[GET /api/invoices] ${error.message}` }, { status: 500 });
-    return NextResponse.json({ items: data ?? [] });
+    return NextResponse.json({ items: data ?? [], pagination: paginationMeta(count ?? 0, page, limit) });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
@@ -76,6 +78,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const projectId = projectIdResult.data;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertProjectBelongsToTenant(projectId, tenantId);
     const db = await createServiceClient();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -105,6 +108,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const msg = String(err);
+    return NextResponse.json({ error: msg }, { status: msg.includes("does not belong") ? 403 : 500 });
   }
 }

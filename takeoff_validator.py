@@ -399,12 +399,15 @@ class DeterministicOnyxParser:
             ))
             return
 
-        # Extract provided_qty from source BEFORE validation so audit can reconcile
+        # Extract provided_qty from source BEFORE validation so audit can reconcile.
+        # Must stay SIGNED (not abs()'d) — _capture_source_checksum sums the raw
+        # signed total_qty, and _compute_destination_checksum sums this value back
+        # in via failed_qty_sum. Taking abs() here made a single rejected negative
+        # row (a normal validation failure) desync the two checksums by 2x its
+        # magnitude and falsely trip the whole-batch DataIntegrityBreachException.
         provided_qty: float = 0.0
         try:
             provided_qty = float(raw_row.get("total_qty", 0) or 0)
-            if provided_qty < 0:
-                provided_qty = abs(provided_qty)  # capture magnitude; validator rejects it below
         except (TypeError, ValueError):
             provided_qty = 0.0
 

@@ -7,7 +7,9 @@ import {
   getControlDb,
   getOrCreateTenant,
   requireProjectId,
+  assertProjectBelongsToTenant,
 } from "@/lib/project-controls/server";
+import { parsePagination, paginationMeta } from "@/lib/pagination";
 
 export const runtime = "nodejs";
 
@@ -20,17 +22,19 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
     const projectId = requireProjectId(req.nextUrl.searchParams.get("project_id"));
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const { page, limit, offset } = parsePagination(req.nextUrl.searchParams);
     const db = await getControlDb();
 
-    const { data, error } = await db
+    const { data, error, count } = await db
       .from<unknown[]>("submittal_items")
-      .select("*")
+      .select("*", { count: "exact" })
       .eq("tenant_id", tenantId)
       .eq("project_id", projectId)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
 
     if (error) return NextResponse.json({ items: [] });
-    return NextResponse.json({ items: data ?? [] });
+    return NextResponse.json({ items: data ?? [], pagination: paginationMeta(count ?? 0, page, limit) });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     const status = msg.includes("project_id") ? 400 : 500;
@@ -46,6 +50,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const body = (await req.json()) as Record<string, unknown>;
     const projectId = requireProjectId(body.project_id);
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertProjectBelongsToTenant(projectId, tenantId);
     const payload = buildSubmittalPayload(body, { tenantId, projectId });
     const db = await getControlDb();
 
@@ -59,7 +64,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    const status = msg.includes("required") ? 400 : 500;
+    const status = msg.includes("required") ? 400 : msg.includes("does not belong") ? 403 : 500;
     return NextResponse.json({ error: msg }, { status });
   }
 }

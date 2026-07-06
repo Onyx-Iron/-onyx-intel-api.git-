@@ -11,6 +11,15 @@ import {
 } from "@/lib/cutfill/sampling";
 import type { Json } from "@/lib/supabase/types";
 
+// Each grid cell runs two O(points) IDW scans (existing + proposed surface),
+// so cost is ~ cells * points. With grid_resolution_ft allowed down to 0.5ft,
+// a modest 1000x1000ft site was previously able to produce a 4M-cell grid
+// with no cap and no maxDuration, i.e. an unbounded synchronous computation
+// on Vercel's default (low) serverless timeout. Cap total cells instead.
+export const runtime = "nodejs";
+export const maxDuration = 300;
+const MAX_GRID_CELLS = 250_000;
+
 interface ComputeBody {
   project_id?: string;
   existing_surface_id?: string;
@@ -107,6 +116,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const maxY = Math.min(existingBounds.maxY, proposedBounds.maxY);
     if (maxX <= minX || maxY <= minY) {
       return NextResponse.json({ error: "Surfaces do not overlap in XY" }, { status: 422 });
+    }
+
+    const estRows = Math.ceil((maxY - minY) / gridRes) + 1;
+    const estCols = Math.ceil((maxX - minX) / gridRes) + 1;
+    if (estRows * estCols > MAX_GRID_CELLS) {
+      return NextResponse.json(
+        {
+          error: `Grid too large: ${estRows * estCols} cells (max ${MAX_GRID_CELLS}). Increase grid_resolution_ft or reduce the overlap area.`,
+        },
+        { status: 422 }
+      );
     }
 
     const grid = buildGrid({ minX, maxX, minY, maxY }, gridRes);

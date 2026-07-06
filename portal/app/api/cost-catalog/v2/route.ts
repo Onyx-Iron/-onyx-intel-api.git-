@@ -5,7 +5,7 @@ import {
   authTenantKey,
   authTenantName,
 } from "@/lib/project-controls/server";
-import { resolveCost, type CostResolveResult } from "@/lib/cost/resolver";
+import { resolveCostsBatch, type CostResolveResult } from "@/lib/cost/resolver";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -61,15 +61,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const state = sp.get("state") ?? undefined;
     const metro = sp.get("metro") ?? undefined;
 
-    const results: CostResolveResult[] = [];
-    for (const code of codes) {
-      const r = await resolveCost({
+    // Batched: resolves the full precedence cascade (tenant overrides →
+    // actuals → regional → national) for all codes in a handful of queries
+    // total instead of up to 6 sequential round trips PER code.
+    const results: CostResolveResult[] = await resolveCostsBatch(
+      codes.map((code) => ({
         cost_code: code,
         tenant_id: tenantId,
         region: { zip, state, metro },
-      });
-      results.push(r);
-    }
+      })),
+    );
 
     return NextResponse.json({ items: results });
   } catch (err: unknown) {

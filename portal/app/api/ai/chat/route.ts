@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 import { headerSafe } from "@/lib/http";
 import { logEvent } from "@/lib/activity";
 import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
@@ -849,6 +850,13 @@ export async function POST(req: NextRequest): Promise<Response> {
 
     if (mode === "assist") {
       if (!body.prompt) return NextResponse.json({ error: "prompt is required" }, { status: 400 });
+      const assistRl = await checkAiRateLimit(authTenantKey(userId, orgId), "ai/chat:assist", { windowMs: 60_000, max: 20 });
+      if (!assistRl.ok) {
+        return NextResponse.json(
+          { error: "Too many AI requests — please slow down." },
+          { status: 429, headers: { "Retry-After": String(assistRl.retryAfterSeconds) } },
+        );
+      }
       return await handleAssist({
         mode: "assist",
         prompt: body.prompt,
@@ -868,6 +876,19 @@ export async function POST(req: NextRequest): Promise<Response> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+
+    // Agentic mode fires up to MAX_TOOL_ROUNDS extra LLM calls per message —
+    // throttle it harder than a single rag turn.
+    const chatRl = await checkAiRateLimit(tenantId, `ai/chat:${mode}`, {
+      windowMs: 60_000,
+      max: mode === "agentic" ? 10 : 20,
+    });
+    if (!chatRl.ok) {
+      return NextResponse.json(
+        { error: "Too many AI requests — please slow down." },
+        { status: 429, headers: { "Retry-After": String(chatRl.retryAfterSeconds) } },
+      );
+    }
 
     if (mode === "agentic") {
       return await handleAgentic(tenantId, body.project_id, body.message, body.conversation_id);
