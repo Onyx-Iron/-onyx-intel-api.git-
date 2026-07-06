@@ -19,6 +19,8 @@ interface TakeoffRow {
   drawing_ref?: string | null;
   location_tag?: string | null;
   extraction_method?: "deterministic" | "ai_vision";
+  page?: number | null;
+  document_id?: string | null;
 }
 
 // Files routed to the deterministic Python extractor (no AI, zero cost).
@@ -436,6 +438,8 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
       unit: r.uom,
       rate: 0,
       type: "takeoff_import",
+      page: r.page ?? 0,
+      document_id: r.document_id ?? null,
       meta: {
         trade: r.trade,
         quantity_basis: r.quantity_basis,
@@ -455,11 +459,17 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
         loadSavedItems();
       } else {
         setSaveStatus("error");
+        const d = await res.json().catch(() => ({}));
+        toast({
+          title: typeof d?.error === "string" ? `Save failed: ${d.error}` : `Save failed (${res.status})`,
+          kind: "error",
+        });
       }
     } catch {
       setSaveStatus("error");
+      toast({ title: "Network error — takeoff items were not saved.", kind: "error" });
     }
-  }, [projectId, loadSavedItems]);
+  }, [projectId, loadSavedItems, toast]);
 
   // Shared NDJSON page-by-page reader for the *synchronous* from-document
   // path (small/local-disk/Drive files that didn't get routed async).
@@ -468,7 +478,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
   // (multiple newline-delimited JSON objects aren't valid single JSON) and
   // always produced zero rows — fixed by reading it the same way
   // runFromDocument already does.
-  const consumeNdjsonExtractStream = useCallback(async (body: ReadableStream<Uint8Array>, docName: string) => {
+  const consumeNdjsonExtractStream = useCallback(async (body: ReadableStream<Uint8Array>, docName: string, documentId?: string) => {
     setPhase("streaming"); setStatusMsg("Extracting…");
     const reader = body.getReader();
     const decoder = new TextDecoder();
@@ -482,7 +492,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
           setStatusMsg(`Reading ${ev.total_pages ?? 0} pages from ${docName}…`);
           break;
         case "PAGE": {
-          const newRows = (ev.rows ?? []).map((r, i) => ({ ...r, id: `doc-${ev.page}-${i}` }));
+          const newRows = (ev.rows ?? []).map((r, i) => ({ ...r, id: `doc-${ev.page}-${i}`, page: ev.page ?? null, document_id: documentId ?? null }));
           if (newRows.length) { collected = [...collected, ...newRows]; setRows(collected); }
           const total = ev.total_pages || 1;
           setProgress(Math.round(((ev.page ?? 0) / total) * 100));
@@ -731,7 +741,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
           const d = await res.json().catch(() => ({}));
           setPhase("error"); setStatusMsg(typeof d?.error === "string" ? d.error : `Extraction failed (${res.status})`); return;
         }
-        await consumeNdjsonExtractStream(res.body, file.name);
+        await consumeNdjsonExtractStream(res.body, file.name, documentId);
         return;
       } else {
         // Small file: direct multipart to Vercel is fine.
@@ -806,7 +816,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
       setPhase("error"); setStatusMsg(typeof d?.error === "string" ? d.error : `Failed (${res.status})`); return;
     }
 
-    await consumeNdjsonExtractStream(res.body, docName);
+    await consumeNdjsonExtractStream(res.body, docName, documentId);
   }, [projectId, pollSplitStatus, consumeNdjsonExtractStream]);
 
   // ── AI vision fallback (Sonnet) for graphical PDF pages ──
