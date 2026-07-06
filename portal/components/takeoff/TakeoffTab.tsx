@@ -622,9 +622,12 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     let res: Response;
     try {
       if (useStorageUpload) {
-        setStatusMsg("Uploading to secure storage…");
-        // 1) Reserve document + get signed upload URL.
-        const urlRes = await fetch("/api/takeoff/upload-url", {
+        // Prefer Google Drive — no Supabase-style 50MB global size ceiling to
+        // fight, and it feeds the same async page-split pipeline Drive
+        // imports already use. Falls back to Supabase Storage only if Drive
+        // isn't connected for this workspace.
+        setStatusMsg("Starting upload…");
+        const driveSessionRes = await fetch("/api/takeoff/drive-upload-session", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -634,28 +637,77 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
             content_type: file.type || "application/octet-stream",
           }),
         });
-        const urlData = await urlRes.json().catch(() => ({}));
-        if (!urlRes.ok) {
+        const driveSessionData = await driveSessionRes.json().catch(() => ({}));
+
+        let documentId: string;
+        if (driveSessionRes.ok && driveSessionData?.upload?.url) {
+          setStatusMsg("Uploading to Google Drive…");
+          const putRes = await fetch(driveSessionData.upload.url, {
+            method: "PUT",
+            headers: { "Content-Type": file.type || "application/octet-stream" },
+            body: file,
+          });
+          if (!putRes.ok) {
+            const detail = await putRes.text().catch(() => putRes.statusText);
+            setPhase("error");
+            setStatusMsg(`Drive upload failed (${putRes.status}): ${detail.slice(0, 200)}`);
+            return;
+          }
+          const driveFile = await putRes.json().catch(() => ({})) as { id?: string };
+          if (!driveFile.id) {
+            setPhase("error"); setStatusMsg("Drive did not confirm the upload — please retry."); return;
+          }
+          const finalizeRes = await fetch("/api/takeoff/drive-upload-session/finalize", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ document_id: driveSessionData.document_id, drive_file_id: driveFile.id }),
+          });
+          if (!finalizeRes.ok) {
+            setPhase("error"); setStatusMsg("Could not finalize the Drive upload — please retry."); return;
+          }
+          documentId = driveSessionData.document_id;
+        } else if (driveSessionData?.code === "NEED_GOOGLE") {
+          // Fallback: Supabase signed-upload-URL flow (works for files under
+          // Supabase's own global size ceiling — 50MB on the Free plan).
+          setStatusMsg("Uploading to secure storage…");
+          const urlRes = await fetch("/api/takeoff/upload-url", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              project_id: projectId,
+              file_name: file.name,
+              size: file.size,
+              content_type: file.type || "application/octet-stream",
+            }),
+          });
+          const urlData = await urlRes.json().catch(() => ({}));
+          if (!urlRes.ok) {
+            setPhase("error");
+            setStatusMsg(typeof urlData?.error === "string" ? urlData.error : `Upload URL failed (${urlRes.status})`);
+            return;
+          }
+          const putRes = await fetch(urlData.upload.url, {
+            method: "PUT",
+            headers: {
+              "Content-Type": file.type || "application/octet-stream",
+              "x-upsert": "false",
+            },
+            body: file,
+          });
+          if (!putRes.ok) {
+            const detail = await putRes.text().catch(() => putRes.statusText);
+            setPhase("error");
+            setStatusMsg(`Storage upload failed (${putRes.status}): ${detail.slice(0, 200)}`);
+            return;
+          }
+          documentId = urlData.document_id;
+        } else {
           setPhase("error");
-          setStatusMsg(typeof urlData?.error === "string" ? urlData.error : `Upload URL failed (${urlRes.status})`);
+          setStatusMsg(typeof driveSessionData?.error === "string" ? driveSessionData.error : `Upload failed (${driveSessionRes.status})`);
           return;
         }
-        // 2) PUT bytes directly to Supabase Storage — bypasses Vercel entirely.
-        const putRes = await fetch(urlData.upload.url, {
-          method: "PUT",
-          headers: {
-            "Content-Type": file.type || "application/octet-stream",
-            "x-upsert": "false",
-          },
-          body: file,
-        });
-        if (!putRes.ok) {
-          const detail = await putRes.text().catch(() => putRes.statusText);
-          setPhase("error");
-          setStatusMsg(`Storage upload failed (${putRes.status}): ${detail.slice(0, 200)}`);
-          return;
-        }
-        // 3) Run takeoff off the stored file — large PDFs may come back as an
+
+        // Run takeoff off the uploaded file — large PDFs may come back as an
         // async 202 (queued for the background page-split pipeline) instead
         // of the usual synchronous NDJSON stream.
         setStatusMsg("Extracting…");
@@ -663,7 +715,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            document_id: urlData.document_id,
+            document_id: documentId,
             project_id: projectId,
           }),
         });

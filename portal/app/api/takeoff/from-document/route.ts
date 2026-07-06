@@ -58,22 +58,48 @@ export async function POST(req: NextRequest): Promise<Response> {
     const fileSize = typeof meta.size === "number" ? meta.size : null;
     const isPdf = doc.file_name.toLowerCase().endsWith(".pdf");
 
-    // ── Large local-upload PDF → async page-split pipeline ───────────────────
-    if (storagePath && isPdf && fileSize != null && fileSize >= ASYNC_THRESHOLD_BYTES) {
+    // ── Large PDF → async page-split pipeline ────────────────────────────────
+    // Applies whether the original lives in Supabase Storage (older local
+    // uploads) or Google Drive (current default for new local uploads — see
+    // /api/takeoff/drive-upload-session) — both feed page-split-worker,
+    // just with a different fetch source for the original bytes.
+    const isLargePdf = isPdf && fileSize != null && fileSize >= ASYNC_THRESHOLD_BYTES;
+    if (isLargePdf && (storagePath || driveFileId)) {
       await db.from("documents")
         .update({ status: "queued", updated_at: new Date().toISOString() } as never)
         .eq("id", document_id).eq("tenant_id", tenantId);
 
-      void invokePageSplitWorker({
-        document_id,
-        tenant_id: tenantId,
-        project_id,
-        original_path: storagePath,
-        is_local_upload: true,
-        user_id: userId,
-      }).catch((err) => {
-        console.error("[from-document] page-split-worker invoke failed", err);
-      });
+      if (driveFileId) {
+        const gToken = await getAccessToken(tenantId, userId);
+        if (!gToken) {
+          return NextResponse.json({
+            error: "This plan is in Google Drive, but Google is not connected for this workspace yet. Connect Google or reopen the file from Drive.",
+            code: "NEED_GOOGLE",
+          }, { status: 412 });
+        }
+        void invokePageSplitWorker({
+          document_id,
+          tenant_id: tenantId,
+          project_id,
+          original_path: `originals/${document_id}.pdf`,
+          drive_file_id: driveFileId,
+          access_token: gToken,
+          user_id: userId,
+        }).catch((err) => {
+          console.error("[from-document] page-split-worker invoke failed", err);
+        });
+      } else {
+        void invokePageSplitWorker({
+          document_id,
+          tenant_id: tenantId,
+          project_id,
+          original_path: storagePath!,
+          is_local_upload: true,
+          user_id: userId,
+        }).catch((err) => {
+          console.error("[from-document] page-split-worker invoke failed", err);
+        });
+      }
 
       return NextResponse.json({ status: "queued", async: true, document_id }, { status: 202 });
     }
@@ -199,14 +225,11 @@ export async function POST(req: NextRequest): Promise<Response> {
 }
 
 // ── Async worker invocation (mirrors /api/documents/import-drive) ───────────
-async function invokePageSplitWorker(payload: {
-  document_id: string;
-  tenant_id: string;
-  project_id: string;
-  original_path: string;
-  is_local_upload: true;
-  user_id: string;
-}): Promise<void> {
+type PageSplitPayload =
+  | { document_id: string; tenant_id: string; project_id: string; original_path: string; is_local_upload: true; user_id: string }
+  | { document_id: string; tenant_id: string; project_id: string; original_path: string; drive_file_id: string; access_token: string; user_id: string };
+
+async function invokePageSplitWorker(payload: PageSplitPayload): Promise<void> {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
   const serviceKey  = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!supabaseUrl || !serviceKey) {
