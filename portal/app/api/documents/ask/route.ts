@@ -5,6 +5,7 @@ import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { getAccessToken } from "@/lib/google/oauth";
 import { headerSafe } from "@/lib/http";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -49,6 +50,27 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (error || !doc) return NextResponse.json({ error: "Document not found" }, { status: 404 });
 
     const meta = (doc.meta ?? {}) as Record<string, unknown>;
+
+    // Short-circuit repeat/duplicate questions about the same document — this
+    // route sends the ENTIRE PDF to Gemini on every call (see below), so
+    // re-asking a question a user already asked would otherwise re-upload and
+    // reprocess the full file for an answer we already have.
+    const normalizedQuestion = question.trim().toLowerCase();
+    const existingQsForCache = Array.isArray(meta.questions) ? meta.questions as Array<Record<string, unknown>> : [];
+    const cached = existingQsForCache.find(
+      (q) => typeof q.question === "string" && q.question.trim().toLowerCase() === normalizedQuestion,
+    );
+    if (cached) {
+      return NextResponse.json({ answer: cached.answer, document: doc.file_name, question_id: cached.id, cached: true });
+    }
+
+    const rl = await checkAiRateLimit(tenantId, "documents/ask", { windowMs: 60_000, max: 8 });
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many document Q&A requests — please slow down." },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
+      );
+    }
     const storagePath = meta.storage_path as string | undefined;
     const driveFileId = meta.drive_file_id as string | undefined;
     let bytes: Buffer;
@@ -114,7 +136,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const answer = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "(no answer)";
 
     // Persist Q&A to documents.meta.questions so it survives panel close + reload
-    const existingQs = Array.isArray(meta.questions) ? meta.questions as Array<Record<string, unknown>> : [];
     const newQ = {
       id: `q_${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
       question: question.trim(),
@@ -122,7 +143,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       asked_at: new Date().toISOString(),
       asked_by: userId,
     };
-    const updatedMeta = { ...meta, questions: [...existingQs, newQ] };
+    const updatedMeta = { ...meta, questions: [...existingQsForCache, newQ] };
     await db
       .from("documents")
       .update({ meta: updatedMeta } as never)

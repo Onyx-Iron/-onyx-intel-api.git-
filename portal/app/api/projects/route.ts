@@ -3,8 +3,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import type { TablesInsert } from "@/lib/supabase/types";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { parsePagination, paginationMeta } from "@/lib/pagination";
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) {
@@ -12,13 +13,18 @@ export async function GET(): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    // Default limit (200) matches every other list route's ceiling; kept high
+    // so existing callers that don't pass ?page/?limit still see effectively
+    // "all" projects for a normal tenant, while capping unbounded growth.
+    const { page, limit, offset } = parsePagination(req.nextUrl.searchParams, 200);
 
     const db = await createServiceClient();
-    const { data, error } = await db
+    const { data, error, count } = await db
       .from("projects")
-      .select("*")
+      .select("*", { count: "exact" })
       .eq("tenant_id", tenantId)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
 
     if (error) {
       return NextResponse.json(
@@ -27,7 +33,7 @@ export async function GET(): Promise<NextResponse> {
       );
     }
 
-    return NextResponse.json({ projects: data ?? [] });
+    return NextResponse.json({ projects: data ?? [], pagination: paginationMeta(count ?? 0, page, limit) });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[GET /api/projects] ${msg}` }, { status: 500 });

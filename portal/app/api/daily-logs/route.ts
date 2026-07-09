@@ -1,7 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { uuidSchema } from "@/lib/validation";
@@ -75,6 +75,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertProjectBelongsToTenant(pidParse.data, tenantId);
     const db = await createServiceClient();
 
     const { data, error } = await db
@@ -82,7 +83,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .from("daily_logs" as any)
       .insert({
         tenant_id:      tenantId,
-        project_id:     body.project_id,
+        project_id:     pidParse.data,
         log_date:       body.log_date ?? new Date().toISOString().split("T")[0],
         weather:        body.weather ?? null,
         temperature:    body.temperature ?? null,

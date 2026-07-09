@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { headerSafe } from "@/lib/http";
 import { pythonApiHeaders } from "@/lib/python-api";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
 
@@ -40,7 +41,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     const email = user?.emailAddresses?.[0]?.emailAddress ?? null;
 
     if (aiFallback) {
-      return await runAiFallback(req);
+      return await runAiFallback(req, tenantKey);
     }
 
     if (streaming) {
@@ -261,7 +262,7 @@ async function callAnthropic(base64: string, userText: string) {
   return { rows: toolUse?.input?.rows ?? [], model: ANTHROPIC_MODEL, usage: data.usage ?? null };
 }
 
-async function runAiFallback(req: NextRequest): Promise<NextResponse> {
+async function runAiFallback(req: NextRequest, tenantKey: string): Promise<NextResponse> {
   try {
     const provider = GEMINI_API_KEY ? "gemini" : ANTHROPIC_API_KEY ? "anthropic" : null;
     if (!provider) {
@@ -273,6 +274,17 @@ async function runAiFallback(req: NextRequest): Promise<NextResponse> {
           code: "NO_API_KEY",
         },
         { status: 503 },
+      );
+    }
+
+    // Full-document vision extraction is the most expensive call in this app
+    // (whole PDF, up to 32MB, sent per request) — throttle harder than the
+    // deterministic (non-AI) extraction path above.
+    const rl = await checkAiRateLimit(tenantKey, "takeoff/extract:ai_fallback", { windowMs: 60_000, max: 5 });
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many AI takeoff extraction requests — please slow down." },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
       );
     }
 

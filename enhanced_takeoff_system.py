@@ -47,24 +47,25 @@ class EnhancedTakeoffRow(BaseModel):
     cost_code: str = Field(..., pattern=r"^\d{2}-\d{2}-\d{2}$")
     description: str = Field(..., min_length=5, max_length=500)
     quantity_basis: str = Field(..., min_length=1, max_length=250)
-    total_qty: float
+    total_qty: float = Field(..., ge=0)  # negative quantities are a data-entry error, not a "credit"
     uom: str = Field(..., min_length=1, max_length=5)
     drawing_ref: str = Field(default="", max_length=50)
     location_tag: str = Field(default="", max_length=120)
-    
+
     # NEW: Enhanced cost fields (from OpenConstructionERP)
-    estimated_unit_cost: float = Field(default=0.0)
-    estimated_line_total: float = Field(default=0.0)
-    
+    estimated_unit_cost: float = Field(default=0.0, ge=0)
+    estimated_line_total: float = Field(default=0.0, ge=0)
+
     # Cost breakdown (labor, material, equipment)
-    labor_pct: float = Field(default=0.40)  # 40% labor default
-    material_pct: float = Field(default=0.45)  # 45% material
-    equipment_pct: float = Field(default=0.15)  # 15% equipment
-    
-    # Waste factor & regional adjustment
-    waste_factor: float = Field(default=1.0)  # 1.0 = no waste, 1.15 = 15% waste
-    regional_multiplier: float = Field(default=1.0)  # Cost adjustment by region
-    
+    labor_pct: float = Field(default=0.40, ge=0, le=1)  # 40% labor default
+    material_pct: float = Field(default=0.45, ge=0, le=1)  # 45% material
+    equipment_pct: float = Field(default=0.15, ge=0, le=1)  # 15% equipment
+
+    # Waste factor & regional adjustment — bounded to a sane real-world range so a
+    # malformed/adversarial payload can't arbitrarily inflate or deflate line totals
+    waste_factor: float = Field(default=1.0, ge=1.0, le=2.0)  # 1.0 = no waste, 1.15 = 15% waste
+    regional_multiplier: float = Field(default=1.0, gt=0, le=5.0)  # Cost adjustment by region
+
     # Source metadata for traceability
     source_database: str = Field(default="onyx-intel")  # "onyx-intel", "oce", "rs-means", etc.
     last_cost_update: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -162,7 +163,8 @@ class EnhancedDeterministicParser:
         labor_total = 0.0
         material_total = 0.0
         equipment_total = 0.0
-        
+        rows_missing_cost: list[dict[str, str]] = []
+
         for row in self._validated:
             # Look up historical cost
             cost_record = self._cost_db.lookup(
@@ -171,22 +173,36 @@ class EnhancedDeterministicParser:
                 description=row.description,
                 region=region,
             )
-            
+
             if cost_record:
                 # Calculate line total
                 base_cost = cost_record.base_unit_cost * row.total_qty
                 adjusted_cost = base_cost * row.waste_factor * row.regional_multiplier
-                
+
                 row.estimated_unit_cost = cost_record.base_unit_cost
                 row.estimated_line_total = adjusted_cost
-                
+
                 # Track breakdown
                 labor_total += adjusted_cost * row.labor_pct
                 material_total += adjusted_cost * row.material_pct
                 equipment_total += adjusted_cost * row.equipment_pct
-                
+
                 total_estimated += adjusted_cost
-        
+            else:
+                # No cost match — the row is silently excluded from total_estimated
+                # below, which would otherwise understate the project total with no
+                # visible signal. Surface it explicitly instead of only logging.
+                logger.warning(
+                    "No cost match for row %s (%s / %s) — excluded from estimated_cost",
+                    row.id, row.trade, row.cost_code,
+                )
+                rows_missing_cost.append({
+                    "row_id": row.id,
+                    "trade": row.trade,
+                    "cost_code": row.cost_code,
+                    "description": row.description[:120],
+                })
+
         # Step 3: Assemble summary
         summary = {
             "total_rows": len(self._validated),
@@ -203,8 +219,10 @@ class EnhancedDeterministicParser:
             "errors": len(self._errors),
             "source_checksum": source_checksum.model_dump() if hasattr(source_checksum, 'model_dump') else {},
             "validation_passed": len(self._errors) == 0,
+            "rows_missing_cost": rows_missing_cost,
+            "cost_coverage_incomplete": len(rows_missing_cost) > 0,
         }
-        
+
         return self._validated, summary
     
     def _parse_json_or_breach(self) -> list[dict[str, Any]]:
