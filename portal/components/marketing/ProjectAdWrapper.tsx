@@ -39,6 +39,7 @@ export default function ProjectAdWrapper({ onClose, onDone }: { onClose: () => v
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!projectId) { setImages([]); return; }
     setLoadingImages(true);
     setSelectedImages(new Set());

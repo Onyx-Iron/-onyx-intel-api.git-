@@ -75,6 +75,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       tenant_id: tenantId,
       user_id: userId,
       table_name: "rfi_items",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       record_id: (data as any).id,
       new_values: data as Record<string, unknown>,
     });
@@ -83,6 +84,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       tenantId,
       userId,
       entityType: "rfi",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       entityId: (data as any).id,
       action: "created",
       title: `RFI created: ${parsed.data.title}`,

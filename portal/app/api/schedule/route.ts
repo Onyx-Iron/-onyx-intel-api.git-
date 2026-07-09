@@ -86,6 +86,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       tenantId,
       userId,
       entityType: "schedule",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       entityId: (data as any).id,
       action: "created",
       title: `Schedule task created: ${name.trim()}`,

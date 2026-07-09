@@ -114,6 +114,7 @@ export default function WeeklyLogTab({ projectId }: { projectId: string }) {
       .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
   }, [projectId]);
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, [load]);
 
   const importLogs = useBulkImport<{

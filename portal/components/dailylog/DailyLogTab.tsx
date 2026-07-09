@@ -61,6 +61,7 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
       .then((d: { logs?: DailyLog[] }) => { setLogs(d.logs ?? []); setLoading(false); })
       .catch(() => setLoading(false));
   }, [projectId]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, [load]);
 
   const openAdd = () => { setForm(EMPTY_FORM); setPendingPhotos([]); setShowForm(true); };

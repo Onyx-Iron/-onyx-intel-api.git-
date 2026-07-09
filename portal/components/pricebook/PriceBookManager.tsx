@@ -39,6 +39,7 @@ export default function PriceBookManager() {
     setLoading(true);
     fetch("/api/cost-catalog").then((r) => r.json()).then((d: { items?: CatalogItem[] }) => { setItems(d.items ?? []); setLoading(false); }).catch(() => setLoading(false));
   };
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, []);
 
   const openAdd = () => { setEditId(null); setForm(EMPTY); setShowForm(true); };

@@ -72,7 +72,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const { data, error } = await db
       .from("cut_fill_surfaces")
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       .insert({
         tenant_id: tenantId,
         project_id,
@@ -81,6 +81,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         points: cleaned as unknown as Json,
         bounds: bounds as unknown as Json,
         point_count: cleaned.length,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } as any)
       .select("id,name,type,bounds,point_count,uploaded_at")
       .single();

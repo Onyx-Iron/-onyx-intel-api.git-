@@ -71,6 +71,7 @@ export default function RiskDigestCard({ projectId }: { projectId: string }) {
     }
   }, [projectId]);
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { fetchDigest(); }, [fetchDigest]);
 
   const refresh = async () => {

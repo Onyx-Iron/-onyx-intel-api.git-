@@ -101,6 +101,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         tenantId,
         userId,
         entityType: "contact",
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         entityId: (data as any)?.id,
         action: "created",
         title: `Contact created: ${name.trim().slice(0, 100)}`,

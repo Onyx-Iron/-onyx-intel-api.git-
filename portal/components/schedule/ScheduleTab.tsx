@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { CalendarDays, Calendar } from "lucide-react";
 import GanttView from "./GanttView";
 import UniversalImportButton from "@/components/common/UniversalImportButton";
-import { useBulkImport, toStr, toNum, toDate } from "@/components/common/useBulkImport";
+import { useBulkImport, toStr, toDate } from "@/components/common/useBulkImport";
 
 import { useConfirm } from "@/components/common/ConfirmDialog";
 import EmptyState from "@/components/common/EmptyState";
@@ -19,12 +19,6 @@ function pick(row: Record<string, string | number | null>, keys: string[]): stri
     }
   }
   return null;
-}
-
-function toIsoDate(v: string | null): string | null {
-  if (!v) return null;
-  const d = new Date(v);
-  return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
 }
 
 type TaskStatus = "not_started" | "in_progress" | "complete" | "blocked";
@@ -117,7 +111,8 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
       .catch(() => setLoading(false));
   };
 
-  useEffect(() => { loadTasks(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [projectId]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { loadTasks();   }, [projectId]);
 
   const importTasks = useBulkImport<{ project_id: string; name: string; status: TaskStatus; start_date: string | null; end_date: string | null; critical: boolean }>(projectId, {
     endpoint: "/api/schedule",

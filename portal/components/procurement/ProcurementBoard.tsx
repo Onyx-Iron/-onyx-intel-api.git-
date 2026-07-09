@@ -67,6 +67,7 @@ export default function ProcurementBoard({ projectId, projectName }: { projectId
       setLoading(false);
     }
   }, [projectId]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, [load]);
 
   async function approve(bidId: string) {

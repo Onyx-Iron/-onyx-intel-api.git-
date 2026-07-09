@@ -90,6 +90,7 @@ export default function MaterialVendorsTab({ projectId }: { projectId: string })
       .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
   };
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, [projectId]);
 
   const importItems = useBulkImport<{ project_id: string; name: string; category: string | null; contact_name: string | null; contact_email: string | null; contact_phone: string | null; unit_price: number | null; unit: string | null; lead_time_days: number | null; notes: string | null }>(projectId, {

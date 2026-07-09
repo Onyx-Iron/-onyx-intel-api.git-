@@ -95,6 +95,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       tenantId,
       userId,
       entityType: "punch_list",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       entityId: (data as any).id,
       action: "created",
       title: `Punch list item created: ${String(body.description).slice(0, 100)}`,

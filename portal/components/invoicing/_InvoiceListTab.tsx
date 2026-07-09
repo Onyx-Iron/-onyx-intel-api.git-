@@ -119,7 +119,8 @@ export default function InvoiceListTab({
       .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [projectId, direction, statusFilter]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { load();   }, [projectId, direction, statusFilter]);
 
   const importItems = useBulkImport<InvoicePayload>(projectId, {
     endpoint: "/api/invoices",

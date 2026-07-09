@@ -102,6 +102,7 @@ export default function EquipmentSuppliersTab({ projectId }: { projectId: string
       .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
   };
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, [projectId]);
 
   const importItems = useBulkImport<{ project_id: string; name: string; equipment_type: string | null; daily_rate: number | null; weekly_rate: number | null; monthly_rate: number | null; on_site_date: string | null; return_date: string | null; operator: string | null; status: Status; notes: string | null }>(projectId, {

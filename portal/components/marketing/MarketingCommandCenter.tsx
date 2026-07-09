@@ -50,6 +50,7 @@ export default function MarketingCommandCenter() {
       setLoading(false);
     }
   }, []);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, [load]);
 
   const totalSpend = campaigns.reduce((s, c) => s + Number(c.spend_total || 0), 0);

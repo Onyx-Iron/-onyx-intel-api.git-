@@ -1,12 +1,11 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import React, { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
   CheckCircle2,
   ChevronRight,
-  Circle,
   Clock,
   DollarSign,
   FileText,
@@ -150,28 +149,6 @@ function Panel({
       </div>
       {children}
     </section>
-  );
-}
-
-function MetricCard({ metric }: { metric: Metric }) {
-  const toneClasses = {
-    lime: "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
-    blue: "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
-    amber: "bg-amber-400/10 text-amber-400 border-amber-400/20",
-    slate: "bg-white/8 text-white/60 border-white/15",
-  }[metric.tone];
-
-  return (
-    <div className="rounded-xl border border-white/8 bg-[#111113] p-6 transition-colors hover:border-white/15">
-      <div className="mb-4 flex items-center justify-between">
-        <p className="text-[10px] font-semibold uppercase tracking-widest text-white/35">{metric.label}</p>
-        <span className={`flex h-7 w-7 items-center justify-center rounded-md ${toneClasses} border-0 bg-transparent`}>
-          {metric.icon}
-        </span>
-      </div>
-      <p className="font-mono text-4xl font-black leading-none text-white">{metric.value}</p>
-      <p className="mt-3 text-xs text-white/30">{metric.detail}</p>
-    </div>
   );
 }
 
@@ -391,7 +368,6 @@ function AICommandPanel({
   aiInput,
   aiMessages,
   aiLoading,
-  providerLabel,
   setAiInput,
   onSubmit,
   chatEndRef,
@@ -399,7 +375,6 @@ function AICommandPanel({
   aiInput: string;
   aiMessages: AIMessage[];
   aiLoading: boolean;
-  providerLabel: string;
   setAiInput: (value: string) => void;
   onSubmit: (event: FormEvent) => Promise<void>;
   chatEndRef: React.RefObject<HTMLDivElement | null>;
@@ -487,11 +462,10 @@ interface OnyxIntelDashboardProps {
   previewProviders?: string[];
 }
 
-export default function OnyxIntelDashboard({ userName, previewData, previewProviders }: OnyxIntelDashboardProps) {
+export default function OnyxIntelDashboard({ previewData, previewProviders }: OnyxIntelDashboardProps) {
   const [data, setData] = useState<DashData | null>(previewData ?? null);
   const [dataLoading, setDataLoading] = useState(!previewData);
   const [dataError, setDataError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
   const [aiInput, setAiInput] = useState("");
   const [aiMessages, setAiMessages] = useState<AIMessage[]>(INITIAL_AI_MESSAGES);
   const [aiLoading, setAiLoading] = useState(false);
@@ -524,20 +498,10 @@ export default function OnyxIntelDashboard({ userName, previewData, previewProvi
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [aiMessages]);
 
-  const filteredProjects = useMemo(() => {
-    const projects = data?.projects ?? [];
-    const query = searchQuery.trim().toLowerCase();
-    if (!query) return projects;
-    return projects.filter((project) =>
-      [project.name, project.location, project.status].some((value) => value.toLowerCase().includes(query)),
-    );
-  }, [data?.projects, searchQuery]);
+  const filteredProjects = data?.projects ?? [];
 
   const pendingTakeoffs = data?.projects.filter((project) => project.takeoffItems === 0).length ?? 0;
   const overBudget = data?.projects.filter((project) => project.budget > 0 && project.estimated > project.budget).length ?? 0;
-  const providerLabel = providers.length === 0
-    ? "No provider"
-    : providers.map((p) => ({ gemini: "Gemini", openai: "GPT", anthropic: "Claude" }[p] ?? p)).join(" + ");
 
   const metrics: Metric[] = data ? [
     { label: "Active Projects",  value: String(data.kpis.activeProjects), detail: `${data.kpis.projects} total projects in workspace`, icon: <TrendingUp size={16} />, tone: "lime" },
@@ -720,7 +684,6 @@ export default function OnyxIntelDashboard({ userName, previewData, previewProvi
               aiInput={aiInput}
               aiMessages={aiMessages}
               aiLoading={aiLoading}
-              providerLabel={providerLabel}
               setAiInput={setAiInput}
               onSubmit={handleAISubmit}
               chatEndRef={chatEndRef}

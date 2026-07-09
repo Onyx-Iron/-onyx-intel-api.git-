@@ -98,7 +98,8 @@ export default function LienWaiversTab({ projectId }: { projectId: string }) {
       .catch(() => setLoading(false));
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [projectId]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { load();   }, [projectId]);
 
   const importItems = useBulkImport<LienWaiverPayload>(projectId, {
     endpoint: "/api/lien-waivers",

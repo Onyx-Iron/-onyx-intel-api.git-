@@ -68,6 +68,7 @@ export default function CostActualsCapture({ projectId }: Props) {
   }, [projectId]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadActuals();
   }, [loadActuals]);
 

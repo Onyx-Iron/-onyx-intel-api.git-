@@ -48,6 +48,7 @@ export default function CompAccessAdminPage() {
 
   useEffect(() => {
     if (isLoaded && isAuthorized) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       void refresh();
     }
   }, [isLoaded, isAuthorized, refresh]);

@@ -46,6 +46,7 @@ export default function OnboardingTour() {
     if (typeof window === "undefined") return;
     try {
       const done = window.localStorage.getItem(STORAGE_KEY);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       if (!done) setOpen(true);
     } catch {
       // localStorage blocked — skip tour silently.
@@ -54,6 +55,7 @@ export default function OnboardingTour() {
 
   useEffect(() => {
     if (!open) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setHighlight(null);
       return;
     }

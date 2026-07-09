@@ -155,6 +155,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     }
 
     results.sort((a, b) => b.score - a.score);
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const trimmed = results.slice(0, TOTAL_CAP).map(({ score: _s, ...r }) => r);
 
     return NextResponse.json({ results: trimmed });

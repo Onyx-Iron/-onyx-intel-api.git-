@@ -110,6 +110,7 @@ Deno.serve(async (req) => {
     }
     const genJson = await genRes.json();
     const text: string = (genJson.candidates?.[0]?.content?.parts ?? [])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .map((p: any) => p.text ?? "")
       .join("")
       .trim();
@@ -146,6 +147,7 @@ Deno.serve(async (req) => {
       .eq("id", body.page_id);
 
     return new Response(JSON.stringify({ ok: true, page_id: body.page_id, chunks: rows.length }), { status: 200 });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
     console.error("[page-processor]", err);
     await db.from("document_pages")
@@ -210,5 +212,6 @@ async function embedBatch(inputs: string[]): Promise<Array<number[] | null>> {
     return inputs.map(() => null);
   }
   const json = await res.json();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return (json.embeddings ?? []).map((e: any) => (Array.isArray(e?.values) ? e.values : null));
 }

@@ -228,9 +228,11 @@ Deno.serve(async (req) => {
       pages_enqueued: pageRows.length,
       elapsed_ms: Date.now() - started,
     }), { status: 200, headers: { "Content-Type": "application/json" } });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
     console.error("[page-split-worker]", err);
     await db.from("documents")
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .update({ status: "error", error: String(err?.message ?? err).slice(0, 500) } as any)
       .eq("id", body.document_id)
       .eq("tenant_id", body.tenant_id);

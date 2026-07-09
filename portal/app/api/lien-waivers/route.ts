@@ -84,6 +84,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       tenant_id: tenantId,
       user_id: userId,
       table_name: TABLE,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       record_id: (data as any).id,
       new_values: data as Record<string, unknown>,
     });

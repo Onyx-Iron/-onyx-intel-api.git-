@@ -129,6 +129,7 @@ export async function decrementCredits(
 
   const next = Math.max(0, (billing.ai_credits_remaining ?? 0) - count);
   const supabase = await createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   await (supabase.from("tenants") as any)
     .update({ ai_credits_remaining: next })
     .eq("id", tenantId);

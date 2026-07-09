@@ -66,6 +66,7 @@ export default function GanttView({ tasks }: { tasks: GanttTask[] }) {
   const ticks = monthTicks(minStart, maxEnd);
 
   // today marker (if within range)
+  // eslint-disable-next-line react-hooks/purity
   const now = Date.now();
   const todayPct = now >= minStart && now <= maxEnd ? ((now - minStart) / span) * 100 : null;
 

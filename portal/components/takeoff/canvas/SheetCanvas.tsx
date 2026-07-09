@@ -5,7 +5,6 @@ import Link from "next/link";
 import CADVectorLayer from "./CADVectorLayer";
 import VisionExtractionsPanel from "./VisionExtractionsPanel";
 import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
-import { classifyLayer } from "@/lib/cad/layer-classify";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -156,7 +155,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         if (mtRes.ok) {
           const mtData = await mtRes.json() as { items: Array<{ id: string; takeoff_type: "count" | "length" | "area"; cost_code: string | null; quantity: number; unit: string | null; geometry: { points?: Pt[] } }> };
           if (!cancelled) {
-            setShapes(mtData.items.map((it, i) => ({
+            setShapes(mtData.items.map((it) => ({
               key: `saved-${it.id}`,
               tool: it.takeoff_type,
               points: Array.isArray(it.geometry?.points) ? it.geometry.points : [],
@@ -366,6 +365,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
     if (tool === "count") {
       const shape: Shape = {
+        // eslint-disable-next-line react-hooks/purity
         key: `c-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         tool: "count",
         points: [p],

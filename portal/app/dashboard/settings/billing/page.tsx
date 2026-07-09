@@ -76,6 +76,7 @@ export default async function BillingSettingsPage() {
   const tier: PlanTier = billing?.plan_tier ?? "trial";
   const plan = getPlan(tier);
 
+  // eslint-disable-next-line react-hooks/purity
   const now = Date.now();
   const compUntilMs = billing?.comp_until
     ? new Date(billing.comp_until).getTime()

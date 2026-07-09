@@ -32,7 +32,7 @@ export function useToast() {
     return {
       toast: (opts: ToastOptions) => {
         if (typeof window !== "undefined") {
-          // eslint-disable-next-line no-console
+           
           console.warn("[toast]", opts.title, opts.description ?? "");
         }
       },
@@ -98,6 +98,7 @@ export function Toaster() {
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
   }, []);
 

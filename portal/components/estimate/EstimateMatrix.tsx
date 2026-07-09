@@ -107,6 +107,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
       setLoading(false);
     }
   }, [projectId]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, [load]);
 
   // ── Seed from takeoffs / manual ───────────────────────────────────────────

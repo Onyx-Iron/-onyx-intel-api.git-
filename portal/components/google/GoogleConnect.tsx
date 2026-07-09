@@ -36,6 +36,7 @@ export default function GoogleConnect({ compact = false }: { compact?: boolean }
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     refresh();
     if (typeof window !== "undefined" && window.location.search.includes("google=")) {
       const t = setTimeout(refresh, 600);

@@ -17,6 +17,7 @@ function useProjectFetch<T>(projectId: string, url: string): { data: T | null; l
       if (res.ok) setData(await res.json());
     } finally { setLoading(false); }
   }, [projectId, url]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void refresh(); }, [refresh]);
   return { data, loading, refresh };
 }

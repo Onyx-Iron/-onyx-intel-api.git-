@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Activity, CircleDollarSign, ClipboardCheck, FileQuestion, Pencil, Plus, Trash2 } from "lucide-react";
 import UniversalImportButton from "@/components/common/UniversalImportButton";
-import { useBulkImport, toStr, toNum, toDate } from "@/components/common/useBulkImport";
+import { useBulkImport, toStr, toNum } from "@/components/common/useBulkImport";
 import EmptyState from "@/components/common/EmptyState";
 
 function pickCtrl(row: Record<string, string | number | null>, keys: string[]): string | null {
@@ -335,6 +335,7 @@ export default function ProjectControlsTab({ projectId }: { projectId: string })
 
   useEffect(() => {
     let ignore = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadControls().catch(() => {
       if (!ignore) setLoading(false);
     });

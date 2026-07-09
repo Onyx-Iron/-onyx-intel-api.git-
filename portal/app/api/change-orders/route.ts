@@ -28,6 +28,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const { page, limit, offset } = parsePagination(req.nextUrl.searchParams);
     const db = await getControlDb();
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data, error, count } = await (db as any)
       .from("change_order_items")
       .select("*", { count: "exact" })
@@ -66,6 +67,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const payload = buildChangeOrderPayload(body, { tenantId, projectId });
     const db = await getControlDb();
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data, error } = await (db as any)
       .from("change_order_items")
       .insert(payload)
@@ -78,6 +80,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       tenant_id: tenantId,
       user_id: userId,
       table_name: "change_order_items",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       record_id: (data as any)?.id,
       new_values: data as Record<string, unknown>,
     });
@@ -86,6 +89,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       tenantId,
       userId,
       entityType: "change_order",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       entityId: (data as any)?.id,
       action: "created",
       title: `Change order created: ${String(body.title ?? "").slice(0, 100)}`,

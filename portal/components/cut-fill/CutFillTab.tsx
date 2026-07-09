@@ -77,6 +77,7 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
   }, [projectId]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadSurfaces();
   }, [loadSurfaces]);
 

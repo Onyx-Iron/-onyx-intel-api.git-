@@ -65,6 +65,7 @@ export default function DocumentsPage() {
       .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
   };
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { loadDocuments(); }, []);
 
   return (

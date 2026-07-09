@@ -115,7 +115,7 @@ export function compareGrids(existing: GridSurface, proposed: GridSurface): Eart
         [rowsE[y + 1][x+1], rowsP[y + 1][x+1]],
       ] as Array<[number | null, number | null]>;
       if (corners.some(([a, b]) => a == null || b == null)) { holes++; continue; }
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+       
       const dz = ((corners[0][1]! - corners[0][0]!) + (corners[1][1]! - corners[1][0]!) +
                   (corners[2][1]! - corners[2][0]!) + (corners[3][1]! - corners[3][0]!)) / 4;
       const cy = (cellArea * dz) / 27;

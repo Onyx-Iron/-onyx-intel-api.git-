@@ -34,6 +34,7 @@ async function resolveTenantId(
 ): Promise<{ id: string } | { error: string; status: number }> {
   const db = await createServiceClient();
   if (body.tenant_id) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data } = await (db.from("tenants") as any)
       .select("id")
       .eq("id", body.tenant_id)
@@ -45,12 +46,14 @@ async function resolveTenantId(
   if (body.tenant_query) {
     const q = body.tenant_query.trim();
     // Try name match first, then clerk_org_id.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: byName } = await (db.from("tenants") as any)
       .select("id")
       .eq("name", q)
       .maybeSingle();
     if (byName?.id) return { id: byName.id as string };
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: byOrg } = await (db.from("tenants") as any)
       .select("id")
       .eq("clerk_org_id", q)
@@ -69,6 +72,7 @@ export async function GET(): Promise<NextResponse> {
     if (denied) return denied;
 
     const db = await createServiceClient();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data, error } = await (db.from("tenants") as any)
       .select("id, name, clerk_org_id, comp_until")
       .not("comp_until", "is", null);

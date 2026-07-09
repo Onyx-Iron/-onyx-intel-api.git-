@@ -83,6 +83,7 @@ export default function ContactsPage() {
       .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
   };
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { loadContacts(); }, []);
 
   const openAdd = () => {

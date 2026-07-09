@@ -81,8 +81,9 @@ export async function DELETE(req: NextRequest, ctx: RouteContext): Promise<NextR
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const db = await createServiceClient();
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     const { data: before } = await db
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .from("estimate_items" as any)
       .select("*")
       .eq("id", id).eq("tenant_id", tenantId).eq("project_id", project_id)

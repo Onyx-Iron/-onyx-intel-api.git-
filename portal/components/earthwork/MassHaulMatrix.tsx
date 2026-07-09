@@ -121,6 +121,7 @@ export default function MassHaulMatrix({ projectId, projectName }: Props) {
     } finally { setLoading(false); }
   }, [projectId, existingId, proposedId]);
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load(); }, [load]);
 
   async function compute() {

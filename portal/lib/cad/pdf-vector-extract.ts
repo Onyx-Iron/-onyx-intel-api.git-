@@ -36,8 +36,7 @@ interface Segment {
   args: number[];
 }
 
-const OPS_KEY_TO_NAME: Record<number, string> = {}; // built lazily from pdfjs.OPS
-
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function decodeCommandStream(ops: any, argsArr: number[]): Segment[] {
   // Encoded like: [op0, op1, op2, ...] with argsArr flattened per pdfjs docs.
   // We only care about moveTo (M), lineTo (L), curveTo (C), quadratic (Q), and close (Z).
@@ -113,6 +112,7 @@ function nearestText(cx: number, cy: number, tokens: TextToken[], maxDist: numbe
  * Extract polylines + labels from a pdfjs page proxy.
  * Returns page-unit coordinates (typically points, 72/inch).
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function extractVectorsFromPdfPage(page: any): Promise<ExtractedVector[]> {
   const ops = await page.getOperatorList();
   const textContent = await page.getTextContent();
@@ -141,6 +141,7 @@ export async function extractVectorsFromPdfPage(page: any): Promise<ExtractedVec
   } as const;
 
   const fnArray: number[] = ops.fnArray;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const argsArray: any[] = ops.argsArray;
 
   for (let i = 0; i < fnArray.length; i++) {

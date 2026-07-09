@@ -133,6 +133,7 @@ export default function CertificateOfOccupancyTab({ projectId }: { projectId: st
       .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
   };
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, [projectId]);
 
   const importItems = useBulkImport<{
@@ -288,6 +289,7 @@ export default function CertificateOfOccupancyTab({ projectId }: { projectId: st
     if (latest?.certificate_issued_date) {
       const t = new Date(latest.certificate_issued_date).getTime();
       if (Number.isFinite(t)) {
+        // eslint-disable-next-line react-hooks/purity
         days = Math.floor((Date.now() - t) / (1000 * 60 * 60 * 24));
       }
     }

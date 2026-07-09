@@ -76,6 +76,7 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
 
     if (error) return NextResponse.json({ error: error.message }, { status: 422 });
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const docProjectId = (docRow as any)?.project_id ?? null;
     if (docProjectId) {
       void logEvent({

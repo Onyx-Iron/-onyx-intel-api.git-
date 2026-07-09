@@ -22,6 +22,7 @@ export async function getTenantBilling(
 ): Promise<TenantBilling | null> {
   const supabase = await createServiceClient();
   // Cast to any: billing columns aren't in generated supabase types yet.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, error } = await (supabase.from("tenants") as any)
     .select(BILLING_COLS)
     .eq("id", tenantId)
@@ -36,6 +37,7 @@ export async function setTenantBilling(
   patch: Partial<TenantBilling>,
 ): Promise<void> {
   const supabase = await createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { error } = await (supabase.from("tenants") as any)
     .update(patch)
     .eq("id", tenantId);

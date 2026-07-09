@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { ClipboardList, Plus, ListChecks } from "lucide-react";
 import UniversalImportButton from "@/components/common/UniversalImportButton";
-import { useBulkImport, toStr, toNum, toDate } from "@/components/common/useBulkImport";
+import { useBulkImport, toStr } from "@/components/common/useBulkImport";
 
 import { useConfirm } from "@/components/common/ConfirmDialog";
 import EmptyState from "@/components/common/EmptyState";
@@ -118,6 +118,7 @@ export default function PunchListTab({ projectId }: { projectId: string }) {
       .catch(() => setLoading(false));
   };
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, [projectId]);
 
   const importItems = useBulkImport<{ project_id: string; description: string; location: string | null; priority: Priority; status: PunchStatus; assigned_to: string | null }>(projectId, {

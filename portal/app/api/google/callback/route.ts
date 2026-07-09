@@ -1,6 +1,5 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
-import { createServiceClient } from "@/lib/supabase/server";
 import { exchangeCode, saveConnection } from "@/lib/google/oauth";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 

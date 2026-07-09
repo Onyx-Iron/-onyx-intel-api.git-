@@ -59,6 +59,7 @@ export default function GlobalSearch() {
   useEffect(() => {
     const q = query.trim();
     if (!q) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setResults([]);
       setLoading(false);
       setError(null);

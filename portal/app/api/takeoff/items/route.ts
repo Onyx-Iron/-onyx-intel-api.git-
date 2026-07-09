@@ -46,20 +46,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   }
 }
 
-interface TakeoffRow {
-  id?: string | null;
-  label: string;
-  csi_code?: string | null;
-  division?: string | null;
-  quantity?: number | null;
-  unit?: string | null;
-  rate?: number | null;
-  type?: string | null;
-  page?: number | null;
-  document_id?: string | null;
-  meta?: Record<string, unknown> | null;
-}
-
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     const { userId, orgId, orgSlug } = await auth();

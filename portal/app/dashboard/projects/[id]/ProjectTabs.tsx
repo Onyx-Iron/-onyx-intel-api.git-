@@ -17,12 +17,10 @@ import {
   Layers,
   LayoutGrid,
   ListChecks,
-  Package,
   PackageOpen,
   Receipt,
   ShieldCheck,
   Truck,
-  Users,
 } from "lucide-react";
 import type { JSX } from "react";
 import { printDocument } from "@/lib/print";
@@ -35,7 +33,6 @@ import DocumentsTab             from "@/components/documents/DocumentsTab";
 import DailyLogTab              from "@/components/dailylog/DailyLogTab";
 import ContactsTab              from "@/components/contacts/ContactsTab";
 import RiskDigestCard           from "@/components/project/RiskDigestCard";
-import ComingSoonTab            from "@/components/common/ComingSoonTab";
 import MaterialVendorsTab       from "@/components/material-vendors/MaterialVendorsTab";
 import EquipmentSuppliersTab    from "@/components/equipment-suppliers/EquipmentSuppliersTab";
 import StaffTab                 from "@/components/staff/StaffTab";

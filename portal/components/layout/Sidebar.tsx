@@ -12,7 +12,6 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { OILogo } from "@/components/brand/BrandMark";
 
 interface NavItem {
   href: string;

@@ -477,7 +477,7 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
     </>
   );
 
-  function scaleFactor(_v: RenderedVector) {
+  function scaleFactor() {
     // world_units_per_screen_pixel for vertex-drag inverse projection.
     // Rough estimate — canvas is already fit-to-content; using scaleRatio
     // as an override when calibrated.

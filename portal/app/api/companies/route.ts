@@ -2,7 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
-import { auditInsert, auditUpdate, auditDelete } from "@/lib/audit";
+import { auditInsert, auditUpdate } from "@/lib/audit";
 
 export const runtime = "nodejs";
 

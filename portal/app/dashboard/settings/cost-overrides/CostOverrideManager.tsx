@@ -124,6 +124,7 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
   }, [toast]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load]);
 
@@ -132,6 +133,7 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
     if (!showCodeDropdown) return;
     const q = codeQuery.trim();
     if (q.length < 1) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setCodeOptions([]);
       return;
     }

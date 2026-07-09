@@ -141,8 +141,6 @@ function ProjectCard({ project, onDeleted }: { project: Project; onDeleted: () =
 }
 
 export default function ProjectsPage() {
-  const { toast } = useToast();
-  const { confirm } = useConfirm();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -168,6 +166,7 @@ export default function ProjectsPage() {
     }
   }, []);
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { loadProjects(); }, [loadProjects]);
 
   async function handleCreate(e: React.FormEvent) {

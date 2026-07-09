@@ -171,7 +171,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const { data: saved, error: insertError } = await db
       .from("cut_fill_computations")
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       .insert({
         tenant_id: tenantId,
         project_id,
@@ -182,6 +182,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         fill_volume_cy: vols.fill,
         net_volume_cy: vols.net,
         grid: gridJson as unknown as Json,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } as any)
       .select("id,computed_at")
       .single();

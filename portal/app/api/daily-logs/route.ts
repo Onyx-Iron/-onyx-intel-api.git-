@@ -103,6 +103,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       tenantId,
       userId,
       entityType: "daily_log",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       entityId: (data as any)?.id,
       action: "created",
       title: `Daily log created for ${String(body.log_date ?? new Date().toISOString().split("T")[0])}`,

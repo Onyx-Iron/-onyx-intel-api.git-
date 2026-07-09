@@ -100,7 +100,7 @@ interface SeriesTrend {
   pct_change_90d: number | null;
 }
 
-Deno.serve(async (_req) => {
+Deno.serve(async () => {
   const db = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
@@ -172,6 +172,7 @@ Deno.serve(async (_req) => {
     const historyRows: Record<string, unknown>[] = [];
     const priceUpdates: { id: string; unit_cost: number }[] = [];
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     for (const row of (staleRows ?? []) as any[]) {
       const division = row.cost_codes?.division as string | undefined;
       if (!division) continue;
@@ -221,6 +222,7 @@ Deno.serve(async (_req) => {
       }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
     console.error("[sync-commodity-indexes]", err);
     return new Response(JSON.stringify({ ok: false, error: String(err?.message ?? err) }), {

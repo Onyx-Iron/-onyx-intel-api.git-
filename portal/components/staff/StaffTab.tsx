@@ -92,6 +92,7 @@ export default function StaffTab({ projectId }: { projectId: string }) {
       .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
   };
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, [projectId]);
 
   const importItems = useBulkImport<{ project_id: string; name: string; role: string | null; email: string | null; phone: string | null; hourly_rate: number | null; project_role: string | null; certifications: string[] | null; notes: string | null }>(projectId, {

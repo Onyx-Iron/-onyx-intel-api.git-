@@ -154,6 +154,7 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({ ok: true, page_id: body.page_id, rows: rows.length }), {
       status: 200, headers: { "Content-Type": "application/json" },
     });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
     console.error("[page-takeoff-worker]", err);
     await db.from("document_pages")
