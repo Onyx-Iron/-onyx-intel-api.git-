@@ -52,6 +52,8 @@ if (!HAS_DB) {
   let tenantA: string;
   let tenantB: string;
   let projectA: string;
+  let documentA: string;
+  let pageA: string;
 
   before(async () => {
     const { data: ta, error: eta } = await db.from("tenants")
@@ -71,16 +73,31 @@ if (!HAS_DB) {
       .select("id").single();
     if (epa) throw epa;
     projectA = pa.id;
+
+    const { data: doc, error: edoc } = await db.from("documents")
+      .insert({ id: crypto.randomUUID(), tenant_id: tenantA, project_id: projectA, file_name: `${TEST_MARK}.pdf` })
+      .select("id").single();
+    if (edoc) throw edoc;
+    documentA = doc.id;
+
+    const { data: page, error: epage } = await db.from("document_pages")
+      .insert({ id: crypto.randomUUID(), tenant_id: tenantA, document_id: documentA, page_number: 1, storage_path: `${TEST_MARK}/page-1.pdf` })
+      .select("id").single();
+    if (epage) throw epage;
+    pageA = page.id;
   });
 
   after(async () => {
     // Delete in FK-safe order. estimate_items/takeoff_item_history first
-    // (no cascade from takeoff_items), then takeoff_items, then projects,
-    // then tenants (cascades would handle most of this, but being explicit
-    // avoids relying on cascade behavior for test cleanup correctness).
+    // (no cascade from takeoff_items), then takeoff_items, then
+    // documents/document_pages, then projects, then tenants (cascades
+    // would handle most of this, but being explicit avoids relying on
+    // cascade behavior for test cleanup correctness).
     await db.from("estimate_items").delete().in("tenant_id", [tenantA, tenantB]);
     await db.from("takeoff_item_history").delete().in("tenant_id", [tenantA, tenantB]);
     await db.from("takeoff_items").delete().in("tenant_id", [tenantA, tenantB]);
+    if (documentA) await db.from("document_pages").delete().eq("document_id", documentA);
+    if (documentA) await db.from("documents").delete().eq("id", documentA);
     await db.from("projects").delete().in("tenant_id", [tenantA, tenantB]);
     await db.from("tenants").delete().in("id", [tenantA, tenantB]);
   });
@@ -313,6 +330,64 @@ if (!HAS_DB) {
       await assert.rejects(() => checkProjectBelongsToTenant(projectA, tenantB), /does not belong to this tenant/);
       // Sanity check the positive case still works (same tenant → no throw).
       await assert.doesNotReject(() => checkProjectBelongsToTenant(projectA, tenantA));
+    });
+  });
+
+  describe("vision extraction re-run preserves review decisions (P-01 regression)", () => {
+    it("apply_vision_extraction_takeoff_items keeps decided items untouched, purges undecided ones, and logs the purge", async () => {
+      const approvedKey = `${TEST_MARK} approved finding|2.0000|ea`;
+      const staleKey = `${TEST_MARK} stale finding|3.0000|lf`;
+      const freshKey = `${TEST_MARK} fresh finding|4.0000|sf`;
+
+      const { data: approved, error: eApproved } = await db.from("takeoff_items").insert({
+        tenant_id: tenantA, project_id: projectA, label: `${TEST_MARK} approved finding`,
+        quantity: 2, unit: "ea", type: "takeoff_import", page: 1, document_id: documentA,
+        review_status: "approved", source_method: "ai_vision",
+        meta: { vision_page_id: pageA, item_key: approvedKey },
+      }).select("id, review_status").single();
+      if (eApproved) throw eApproved;
+
+      const { data: stale, error: eStale } = await db.from("takeoff_items").insert({
+        tenant_id: tenantA, project_id: projectA, label: `${TEST_MARK} stale finding`,
+        quantity: 3, unit: "lf", type: "takeoff_import", page: 1, document_id: documentA,
+        review_status: "suggested", source_method: "ai_vision",
+        meta: { vision_page_id: pageA, item_key: staleKey },
+      }).select("id").single();
+      if (eStale) throw eStale;
+
+      const { error: rpcErr } = await db.rpc("apply_vision_extraction_takeoff_items", {
+        p_tenant_id: tenantA, p_project_id: projectA, p_document_id: documentA,
+        p_page_id: pageA, p_page_number: 1,
+        p_items: [
+          { description: `${TEST_MARK} approved finding`, quantity: 2, unit: "ea", source: "note", confidence: 0.9 },
+          { description: `${TEST_MARK} fresh finding`, quantity: 4, unit: "sf", source: "schedule", confidence: 0.8 },
+        ],
+      });
+      if (rpcErr) throw rpcErr;
+
+      // (a) the approved row is untouched — same id, same review_status.
+      const { data: approvedAfter } = await db.from("takeoff_items")
+        .select("id, review_status").eq("id", approved.id).maybeSingle();
+      assert.ok(approvedAfter, "approved row should still exist");
+      assert.equal(approvedAfter.id, approved.id);
+      assert.equal(approvedAfter.review_status, "approved");
+
+      // (b) the old undecided row is gone.
+      const { data: staleAfter } = await db.from("takeoff_items").select("id").eq("id", stale.id).maybeSingle();
+      assert.equal(staleAfter, null);
+
+      // (c) the new finding was inserted as "suggested".
+      const { data: freshRows } = await db.from("takeoff_items")
+        .select("id, review_status, meta")
+        .eq("tenant_id", tenantA).eq("document_id", documentA)
+        .contains("meta", { item_key: freshKey });
+      assert.equal((freshRows ?? []).length, 1);
+      assert.equal(freshRows![0].review_status, "suggested");
+
+      // (d) a 'deleted' history row exists for the purged stale item.
+      const { data: historyRows } = await db.from("takeoff_item_history")
+        .select("action").eq("takeoff_item_id", stale.id).eq("action", "deleted");
+      assert.equal((historyRows ?? []).length, 1);
     });
   });
 }

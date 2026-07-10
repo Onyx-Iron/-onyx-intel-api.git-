@@ -7,7 +7,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { takeoffItemsSchema, parseBody } from "@/lib/validation";
-import { recordTakeoffHistory } from "@/lib/takeoff/history";
+import { recordTakeoffHistory, recordTakeoffHistoryBatch } from "@/lib/takeoff/history";
 import type { Json } from "@/lib/supabase/types";
 
 function jsonObject(value: Json | null | undefined): Record<string, unknown> | null {
@@ -142,17 +142,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     // Per-row history: "created" for genuinely new rows, "updated" (with
     // before/after) for edits to an existing row — satisfies "edits and
-    // deletions preserve audit history".
-    for (const row of data ?? []) {
+    // deletions preserve audit history". Batched into one insert (P-04 fix
+    // from the milestone-1 validation pass — this was previously N
+    // sequential awaited inserts for a batch of N takeoff items).
+    await recordTakeoffHistoryBatch(anyDb, (data ?? []).map((row) => {
       const before = existingById.get(row.id as string);
-      await recordTakeoffHistory(anyDb, {
+      return {
         tenantId, projectId: project_id, takeoffItemId: row.id as string,
-        action: before ? "updated" : "created",
+        action: (before ? "updated" : "created") as "updated" | "created",
         actorUserId: userId,
         before: before ?? null,
         after: row as Record<string, unknown>,
-      });
-    }
+      };
+    }));
 
     void logEvent({
       projectId: project_id,

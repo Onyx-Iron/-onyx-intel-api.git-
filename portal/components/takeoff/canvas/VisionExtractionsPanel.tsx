@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { computeItemKey } from "@/lib/takeoff/item-key";
 
 interface VisionItem {
   description: string;
@@ -53,9 +54,19 @@ interface Props {
  */
 export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onCommitted }: Props) {
   const [state, setState] = useState<{ result: VisionResult | null; loading: boolean; err: string | null }>({ result: null, loading: true, err: null });
-  const [takeoffItems, setTakeoffItems] = useState<TakeoffItemRef[]>([]);
+  // Keyed by computeItemKey(description, quantity, unit) — NOT by array
+  // position. The API returns this same shape (a key -> ref map, see
+  // fetchVisionTakeoffItems in the route), computed server-side from the
+  // stable meta.item_key stored on each row at insert time. Matching by
+  // content instead of index is the fix for a real bug found in the
+  // milestone-1 validation pass: two independently-ordered arrays
+  // (the cached vision_extractions items vs. a fresh takeoff_items query)
+  // could silently misalign, causing Approve/Reject to act on the wrong
+  // finding.
+  const [takeoffItemsByKey, setTakeoffItemsByKey] = useState<Record<string, TakeoffItemRef>>({});
   const [open, setOpen] = useState(true);
   const [acting, setActing] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const runExtract = useCallback(async (force: boolean) => {
     setState((s) => ({ ...s, loading: true, err: null }));
@@ -66,9 +77,9 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
         body: JSON.stringify({ page_id: pageId, force }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? String(res.status));
-      const data = await res.json() as { result: VisionResult; takeoffItems?: TakeoffItemRef[] };
+      const data = await res.json() as { result: VisionResult; takeoffItems?: Record<string, TakeoffItemRef> };
       setState({ result: data.result, loading: false, err: null });
-      setTakeoffItems(data.takeoffItems ?? []);
+      setTakeoffItemsByKey(data.takeoffItems ?? {});
       if (onCommitted) for (const it of data.result.items) onCommitted(it);
     } catch (e) {
       setState({ result: null, loading: false, err: e instanceof Error ? e.message : String(e) });
@@ -82,11 +93,11 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
       try {
         const cached = await fetch(`/api/takeoff/canvas/vision-extract?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
         if (!cached.ok) throw new Error(String(cached.status));
-        const data = await cached.json() as { result: VisionResult | null; takeoffItems?: TakeoffItemRef[] };
+        const data = await cached.json() as { result: VisionResult | null; takeoffItems?: Record<string, TakeoffItemRef> };
         if (data.result) {
           if (!cancelled) {
             setState({ result: data.result, loading: false, err: null });
-            setTakeoffItems(data.takeoffItems ?? []);
+            setTakeoffItemsByKey(data.takeoffItems ?? {});
           }
           return;
         }
@@ -99,19 +110,21 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
   }, [pageId, runExtract]);
 
   // ── Cross-reference each vision item against vector descriptions, and
-  // line it up with its takeoff_items row (same insertion order) ─────────
+  // look up its takeoff_items row by stable content key (not array index) ──
   const enriched = useMemo(() => {
     if (!state.result) return [];
     const vecKeywords = vectorDescriptions.map((d) => d.toLowerCase());
-    return state.result.items.map((it, i) => {
+    return state.result.items.map((it) => {
       const desc = it.description.toLowerCase();
       const matched = vecKeywords.some((v) => v && (desc.includes(v.slice(0, Math.min(20, v.length))) || v.includes(desc.slice(0, 20))));
-      return { ...it, cross_verified: matched, takeoffRef: takeoffItems[i] as TakeoffItemRef | undefined };
+      const key = computeItemKey(it.description, it.quantity, it.unit);
+      return { ...it, cross_verified: matched, takeoffRef: takeoffItemsByKey[key] as TakeoffItemRef | undefined };
     });
-  }, [state.result, vectorDescriptions, takeoffItems]);
+  }, [state.result, vectorDescriptions, takeoffItemsByKey]);
 
   const review = useCallback(async (takeoffId: string, action: "approve" | "reject") => {
     setActing(takeoffId);
+    setActionError(null);
     try {
       const res = await fetch(`/api/takeoff/items/${encodeURIComponent(takeoffId)}/review`, {
         method: "PATCH",
@@ -119,15 +132,23 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
         body: JSON.stringify({ action }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? String(res.status));
-      setTakeoffItems((prev) => prev.map((r) => r.id === takeoffId ? { ...r, review_status: action === "approve" ? "approved" : "rejected" } : r));
-    } catch {
-      // Leave state as-is on failure — the badge stays "pending review" so the user can retry.
+      setTakeoffItemsByKey((prev) => {
+        const next = { ...prev };
+        for (const [key, ref] of Object.entries(next)) {
+          if (ref.id === takeoffId) next[key] = { ...ref, review_status: action === "approve" ? "approved" : "rejected" };
+        }
+        return next;
+      });
+    } catch (e) {
+      // Visible error instead of a silent no-op — the button stays
+      // clickable so the user can retry, but they now see why it failed.
+      setActionError(e instanceof Error ? e.message : `Failed to ${action}`);
     } finally {
       setActing(null);
     }
   }, []);
 
-  const pendingCount = takeoffItems.filter((r) => needsDecision(r.review_status)).length;
+  const pendingCount = Object.values(takeoffItemsByKey).filter((r) => needsDecision(r.review_status)).length;
 
   return (
     <div className="border-b border-white/10">
@@ -169,6 +190,12 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
             <div className="text-[11px] text-red-400 px-2 py-2">
               {state.err}
               <button type="button" onClick={() => void runExtract(true)} className="ml-2 text-[#CCFF00]">retry</button>
+            </div>
+          )}
+          {actionError && (
+            <div className="text-[11px] text-red-400 px-2 py-2 flex items-center gap-2">
+              <span>Approve/Reject failed: {actionError}</span>
+              <button type="button" onClick={() => setActionError(null)} className="ml-auto text-white/40 hover:text-white">dismiss</button>
             </div>
           )}
           {state.result?.page_summary && (

@@ -29,6 +29,20 @@ export const runtime = "nodejs";
  * this: `id` is a path param scoped server-side by tenantId (derived from
  * the Clerk session, never trusted from the request body), and the review
  * decision is a fixed enum, not a client-supplied status string.
+ *
+ * Scope note (P-06 from the milestone-1 validation pass): this check is
+ * TENANT-wide, not project-scoped — any user with financial-write role in
+ * the tenant can approve/reject any takeoff item in that tenant, regardless
+ * of which project it belongs to. This is a deliberate match to how every
+ * other "financial" resource in the app works today (procurement/PO
+ * approval, the estimate matrix) — there is no existing per-project
+ * membership system anywhere in the codebase to extend instead (project
+ * access itself is tenant-wide; see AUTHORIZATION_AUDIT.md). Introducing
+ * project-level approval authority would mean inventing a new
+ * authorization dimension used nowhere else in the app, which is out of
+ * scope for this route alone. If project-scoped approval is genuinely
+ * required, it should be designed once, application-wide, not bolted onto
+ * this one endpoint.
  */
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }): Promise<NextResponse> {
   try {

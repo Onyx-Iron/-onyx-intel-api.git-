@@ -5,7 +5,6 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { headerSafe } from "@/lib/http";
 import { runScopeGapAgent } from "@/lib/agents/scope-gap";
 import { runRfiDrafterAgent } from "@/lib/agents/rfi-drafter";
-import { recordTakeoffHistory } from "@/lib/takeoff/history";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
@@ -59,11 +58,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const anyDb = db as any;
   const { data } = await anyDb
     .from("document_pages")
-    .select("vision_extractions, vision_extracted_at")
+    .select("vision_extractions, vision_extracted_at, document_id")
     .eq("id", pageId).eq("tenant_id", tenantId)
     .maybeSingle();
 
-  const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, pageId);
+  const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, data?.document_id ?? null, pageId);
 
   return NextResponse.json({
     result: (data?.vision_extractions ?? null) as VisionResult | null,
@@ -78,20 +77,24 @@ interface VisionTakeoffItemRef {
   rejected_reason: string | null;
 }
 
-// Vision items are matched back to their takeoff_items row via
-// meta->>vision_page_id (set at insert time) — there's no other stable key
-// since the cached VisionResult itself doesn't store row ids.
+// Vision items are matched back to their takeoff_items row via a stable
+// content key (meta.item_key, set by the SQL function at insert time),
+// returned as a key -> ref map rather than an array — the caller looks up
+// by key, never by position.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function fetchVisionTakeoffItems(anyDb: any, tenantId: string, pageId: string): Promise<VisionTakeoffItemRef[]> {
+async function fetchVisionTakeoffItems(anyDb: any, tenantId: string, documentId: string | null, pageId: string): Promise<Record<string, VisionTakeoffItemRef>> {
   const { data } = await anyDb
     .from("takeoff_items")
-    .select("id, review_status, rejected_reason, created_at")
+    .select("id, review_status, rejected_reason, meta")
     .eq("tenant_id", tenantId)
-    .contains("meta", { vision_page_id: pageId })
-    .order("created_at", { ascending: true });
-  return (data ?? []).map((r: { id: string; review_status: string; rejected_reason: string | null }) => ({
-    id: r.id, review_status: r.review_status, rejected_reason: r.rejected_reason,
-  }));
+    .eq("document_id", documentId ?? "")
+    .contains("meta", { vision_page_id: pageId });
+  const byKey: Record<string, VisionTakeoffItemRef> = {};
+  for (const r of (data ?? []) as Array<{ id: string; review_status: string; rejected_reason: string | null; meta?: { item_key?: string } }>) {
+    const key = r.meta?.item_key;
+    if (key) byKey[key] = { id: r.id, review_status: r.review_status, rejected_reason: r.rejected_reason };
+  }
+  return byKey;
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -115,7 +118,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!page) return NextResponse.json({ error: "Page not found" }, { status: 404 });
 
   if (page.vision_extractions && !body.force) {
-    const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, body.page_id);
+    const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, page.document_id ?? null, body.page_id);
     return NextResponse.json({ result: page.vision_extractions as VisionResult, cached: true, takeoffItems });
   }
 
@@ -236,13 +239,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     .update({ vision_extractions: result, vision_extracted_at: result.extracted_at })
     .eq("id", body.page_id).eq("tenant_id", tenantId);
 
-  // ── Auto-commit into takeoff_items ────────────────────────────────────────
-  // Vision findings used to require a manual per-item "Approve" click before
-  // becoming a real takeoff row. Every item still carries its confidence
-  // score and gets tagged extraction_method: "ai_vision", so downstream it
-  // lands in the estimate as pricing_status "review" rather than being
-  // silently treated as a verified quantity — but it no longer requires a
-  // human click just to exist in the takeoff.
+  // ── Auto-commit into takeoff_items (atomically, via Postgres function) ───
+  // Every AI-vision finding is committed as review_status "suggested" —
+  // visible in the takeoff grid immediately, but excluded from the estimate
+  // until a human explicitly approves or rejects it via
+  // PATCH /api/takeoff/items/[id]/review.
+  //
+  // apply_vision_extraction_takeoff_items (see the migration that defines
+  // it) does the delete-stale-suggestions + insert-fresh-ones + history
+  // logging in ONE Postgres function call — a single transaction, not two
+  // separate round trips. Critically, it only replaces rows still in
+  // "suggested"/"reviewed" state; a previously approved or rejected item is
+  // never touched by a re-extraction, and a freshly extracted finding whose
+  // content matches an already-decided item is skipped rather than
+  // re-suggested. This fixes a real bug where "refresh" used to delete
+  // every AI-vision row for the page unconditionally, silently reverting
+  // any decisions an estimator had already made.
   let projectId: string | null = null;
   {
     const { data: doc } = page.document_id
@@ -250,73 +262,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       : { data: null };
     projectId = (doc as { project_id?: string } | null)?.project_id ?? null;
   }
-  if (projectId) {
-    // Replace any previously auto-committed vision items for this page
-    // (re-running extraction — e.g. "refresh" or a revised sheet — should
-    // not pile up duplicate takeoff rows on top of the old ones).
-    await anyDb
-      .from("takeoff_items")
-      .delete()
-      .eq("tenant_id", tenantId)
-      .eq("project_id", projectId)
-      .eq("document_id", page.document_id ?? "")
-      .contains("meta", { extraction_method: "ai_vision", vision_page_id: body.page_id });
-  }
-  if (projectId && items.length > 0) {
-    const takeoffPayload = items.map((it) => ({
-      tenant_id: tenantId,
-      project_id: projectId,
-      label: it.description || "Vision-extracted item",
-      csi_code: it.cost_code ?? null,
-      division: it.cost_code ? it.cost_code.slice(0, 2) : null,
-      quantity: it.quantity,
-      unit: it.unit,
-      type: "takeoff_import",
-      page: (page as { page_number?: number }).page_number ?? 0,
-      document_id: page.document_id ?? null,
-      sheet_id: body.page_id,
-      // AI-vision items are a suggestion, not a verified quantity — they
-      // exist in the takeoff grid immediately (so the estimator can see
-      // and triage them), but review_status gates them out of
-      // syncTakeoffToEstimate until a human explicitly approves or
-      // rejects via PATCH /api/takeoff/items/[id]/review. created_by is
-      // intentionally null (no human created this row).
-      created_by: null,
-      review_status: "suggested",
-      source_method: "ai_vision",
-      confidence_score: it.confidence,
-      // Gemini vision reads text/schedules/callouts — it does not return
-      // pixel/vector geometry, so there is genuinely no drawing geometry
-      // to store. Leaving `geometry` null and flagging it explicitly
-      // (rather than fabricating a bounding box) satisfies "do not
-      // fabricate geometry when the extraction method cannot provide it —
-      // store an explicit unavailable state and flag it for review."
-      geometry: null,
-      meta: {
-        trade: null,
-        quantity_basis: it.raw_text ?? null,
-        drawing_ref: it.layer_hint ?? null,
-        location_tag: null,
-        extraction_method: "ai_vision",
-        vision_source: it.source,
-        vision_page_id: body.page_id,
+  if (projectId && page.document_id) {
+    const { error: rpcErr } = await anyDb.rpc("apply_vision_extraction_takeoff_items", {
+      p_tenant_id: tenantId,
+      p_project_id: projectId,
+      p_document_id: page.document_id,
+      p_page_id: body.page_id,
+      p_page_number: (page as { page_number?: number }).page_number ?? 0,
+      p_items: items.map((it) => ({
+        description: it.description,
+        quantity: it.quantity,
+        unit: it.unit,
+        cost_code: it.cost_code ?? null,
+        layer_hint: it.layer_hint ?? null,
+        source: it.source,
         confidence: it.confidence,
-        geometry_unavailable: true,
-      },
-    }));
-    const { data: insertedTakeoff, error: takeoffErr } = await anyDb.from("takeoff_items").insert(takeoffPayload).select("id");
-    if (takeoffErr) {
-      console.error("[vision-extract] takeoff_items insert failed", takeoffErr);
-    } else {
-      for (const row of insertedTakeoff ?? []) {
-        await recordTakeoffHistory(anyDb, {
-          tenantId, projectId, takeoffItemId: row.id, action: "created",
-          actorUserId: null, after: { source: "ai_vision", page_id: body.page_id },
-        });
-      }
-      // Do NOT sync to estimate here — pending_review items are excluded
-      // by buildEstimateImportRows anyway, but skip the wasted call.
-    }
+        raw_text: it.raw_text ?? null,
+      })),
+    });
+    if (rpcErr) console.error("[vision-extract] apply_vision_extraction_takeoff_items failed", rpcErr);
+    // Do NOT sync to estimate here — "suggested" items are excluded by
+    // buildEstimateImportRows anyway, so a sync call here would be wasted
+    // work (nothing new can be approved without a human action first).
   }
 
   // ── Background agents (fire-and-forget) ──────────────────────────────────
@@ -333,7 +300,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     visionItems: items,
   }).catch((e) => console.error("[agents]", e));
 
-  const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, body.page_id);
+  const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, page.document_id ?? null, body.page_id);
   return NextResponse.json({ result, cached: false, takeoffItems });
 }
 

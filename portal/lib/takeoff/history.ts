@@ -16,7 +16,17 @@ export interface TakeoffHistoryEntry {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function recordTakeoffHistory(db: any, entry: TakeoffHistoryEntry): Promise<void> {
-  const { error } = await db.from("takeoff_item_history").insert({
+  await recordTakeoffHistoryBatch(db, [entry]);
+}
+
+// Batched variant — a bulk takeoff save (e.g. hundreds of manual/
+// deterministic items in one request) previously called recordTakeoffHistory
+// once per row in a sequential await loop, costing one network round trip
+// per row. This does it in a single insert call instead.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function recordTakeoffHistoryBatch(db: any, entries: TakeoffHistoryEntry[]): Promise<void> {
+  if (entries.length === 0) return;
+  const { error } = await db.from("takeoff_item_history").insert(entries.map((entry) => ({
     tenant_id: entry.tenantId,
     project_id: entry.projectId,
     takeoff_item_id: entry.takeoffItemId,
@@ -24,6 +34,6 @@ export async function recordTakeoffHistory(db: any, entry: TakeoffHistoryEntry):
     actor_user_id: entry.actorUserId,
     before: entry.before ?? null,
     after: entry.after ?? null,
-  });
-  if (error) console.error("[recordTakeoffHistory]", error);
+  })));
+  if (error) console.error("[recordTakeoffHistoryBatch]", error);
 }
