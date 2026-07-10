@@ -632,12 +632,15 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     let res: Response;
     try {
       if (useStorageUpload) {
-        // Prefer Google Drive — no Supabase-style 50MB global size ceiling to
-        // fight, and it feeds the same async page-split pipeline Drive
-        // imports already use. Falls back to Supabase Storage only if Drive
-        // isn't connected for this workspace.
+        // Prefer direct Supabase Storage upload — no Google OAuth consent
+        // required, and now that the project is on the Pro plan (5GB global
+        // Storage ceiling, plans-bucket raised to 1GB) it comfortably covers
+        // real construction plan sets. Previously Drive was tried first to
+        // route around the Free tier's 50MB global ceiling; that constraint
+        // is gone. Falls back to Google Drive only if the Supabase upload
+        // itself fails (e.g. a single file over the 1GB bucket limit).
         setStatusMsg("Starting upload…");
-        const driveSessionRes = await fetch("/api/takeoff/drive-upload-session", {
+        const urlRes = await fetch("/api/takeoff/upload-url", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -647,10 +650,50 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
             content_type: file.type || "application/octet-stream",
           }),
         });
-        const driveSessionData = await driveSessionRes.json().catch(() => ({}));
+        const urlData = await urlRes.json().catch(() => ({}));
 
         let documentId: string;
-        if (driveSessionRes.ok && driveSessionData?.upload?.url) {
+        if (urlRes.ok && urlData?.upload?.url) {
+          setStatusMsg("Uploading to secure storage…");
+          const putRes = await fetch(urlData.upload.url, {
+            method: "PUT",
+            headers: {
+              "Content-Type": file.type || "application/octet-stream",
+              "x-upsert": "false",
+            },
+            body: file,
+          });
+          if (!putRes.ok) {
+            const detail = await putRes.text().catch(() => putRes.statusText);
+            setPhase("error");
+            setStatusMsg(`Storage upload failed (${putRes.status}): ${detail.slice(0, 200)}`);
+            return;
+          }
+          documentId = urlData.document_id;
+        } else {
+          // Fallback: Google Drive (handles files larger than the Supabase
+          // bucket limit, or covers a transient Storage error).
+          setStatusMsg("Starting Drive upload…");
+          const driveSessionRes = await fetch("/api/takeoff/drive-upload-session", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              project_id: projectId,
+              file_name: file.name,
+              size: file.size,
+              content_type: file.type || "application/octet-stream",
+            }),
+          });
+          const driveSessionData = await driveSessionRes.json().catch(() => ({}));
+          if (!driveSessionRes.ok || !driveSessionData?.upload?.url) {
+            setPhase("error");
+            setStatusMsg(
+              typeof urlData?.error === "string" ? urlData.error
+                : typeof driveSessionData?.error === "string" ? driveSessionData.error
+                : `Upload failed (${urlRes.status})`,
+            );
+            return;
+          }
           setStatusMsg("Uploading to Google Drive…");
           const putRes = await fetch(driveSessionData.upload.url, {
             method: "PUT",
@@ -676,45 +719,6 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
             setPhase("error"); setStatusMsg("Could not finalize the Drive upload — please retry."); return;
           }
           documentId = driveSessionData.document_id;
-        } else if (driveSessionData?.code === "NEED_GOOGLE") {
-          // Fallback: Supabase signed-upload-URL flow (works for files under
-          // Supabase's own global size ceiling — 50MB on the Free plan).
-          setStatusMsg("Uploading to secure storage…");
-          const urlRes = await fetch("/api/takeoff/upload-url", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              project_id: projectId,
-              file_name: file.name,
-              size: file.size,
-              content_type: file.type || "application/octet-stream",
-            }),
-          });
-          const urlData = await urlRes.json().catch(() => ({}));
-          if (!urlRes.ok) {
-            setPhase("error");
-            setStatusMsg(typeof urlData?.error === "string" ? urlData.error : `Upload URL failed (${urlRes.status})`);
-            return;
-          }
-          const putRes = await fetch(urlData.upload.url, {
-            method: "PUT",
-            headers: {
-              "Content-Type": file.type || "application/octet-stream",
-              "x-upsert": "false",
-            },
-            body: file,
-          });
-          if (!putRes.ok) {
-            const detail = await putRes.text().catch(() => putRes.statusText);
-            setPhase("error");
-            setStatusMsg(`Storage upload failed (${putRes.status}): ${detail.slice(0, 200)}`);
-            return;
-          }
-          documentId = urlData.document_id;
-        } else {
-          setPhase("error");
-          setStatusMsg(typeof driveSessionData?.error === "string" ? driveSessionData.error : `Upload failed (${driveSessionRes.status})`);
-          return;
         }
 
         // Run takeoff off the uploaded file — large PDFs may come back as an

@@ -56,9 +56,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!project_id || !file_name) {
       return NextResponse.json({ error: "project_id and file_name are required" }, { status: 400 });
     }
-    // Hard cap at 200 MB — anything larger should be split.
-    if (typeof body.size === "number" && body.size > 200 * 1024 * 1024) {
-      return NextResponse.json({ error: "File exceeds the 200 MB limit. Split the drawing set and retry." }, { status: 413 });
+    // Matches plans-bucket's file_size_limit (raised to 1GB after the
+    // Supabase Pro upgrade — was 200MB, capped to fit under the Free tier's
+    // 50MB global Storage ceiling that this route was originally built to
+    // route around).
+    if (typeof body.size === "number" && body.size > 1024 * 1024 * 1024) {
+      return NextResponse.json({ error: "File exceeds the 1GB limit. Split the drawing set and retry." }, { status: 413 });
     }
 
     const db = await createServiceClient();
