@@ -114,7 +114,17 @@ CSI_RULES: list[tuple[re.Pattern[str], str, str, str, str]] = [
     # ── Division 28 — Electronic Safety ──
     (re.compile(r"\b(fire alarm|smoke detector|pull station|notification|nac\b)\b"), "28", "28-31-00", "Fire Alarm", "EA"),
     # ── Division 31 — Earthwork ──
-    (re.compile(r"\b(excavat|grading|cut and fill|backfill|fill\b|earthwork)\b"), "31", "31-23-00", "Earthwork", "CY"),
+    # Ordered most-specific first so a generic "grading" note upstream doesn't
+    # swallow terms that belong to a distinct earthwork sub-scope (each maps to
+    # a different production rate / unit cost, so misclassifying these into
+    # one bucket understates estimating accuracy on civil-heavy sites).
+    (re.compile(r"\b(clear(ing)?\s*(and|&)?\s*grub(bing)?|remove\s+trees?|site\s+clearing)\b"), "31", "31-11-00", "Earthwork", "AC"),
+    (re.compile(r"\b(topsoil|strip(ping)?\s*(and)?\s*stockpil)\b"), "31", "31-14-13", "Earthwork", "CY"),
+    (re.compile(r"\b(recompact|scarify|scarification|moisture[\s-]?condition|subgrade\s+prep|ground\s+modification|building\s+pad\s+(treatment|prep))\b"), "31", "31-23-23", "Earthwork", "CY"),
+    (re.compile(r"\b(mass\s+excavat|cut\s*(/|to|and)\s*fill|cut[\s-]?fill|unclassified\s+excavat|common\s+excavat)\b"), "31", "31-23-16", "Earthwork", "CY"),
+    (re.compile(r"\b(erosion\s+control|sediment(ation)?\s+control|silt\s+fence|slope\s+protection|4:1|3:1|2:1)\b"), "31", "31-25-00", "Earthwork", "SF"),
+    (re.compile(r"\b(retaining\s+wall|\btw\b.{0,10}\bbw\b|top\s+of\s+wall|bottom\s+of\s+wall)\b"), "32", "32-32-00", "Sitework", "LF"),
+    (re.compile(r"\b(excavat|grading|backfill|fill\b|earthwork)\b"), "31", "31-23-00", "Earthwork", "CY"),
     # ── Division 32 — Exterior Improvements ──
     (re.compile(r"\b(asphalt|paving|sidewalk|curb|landscape|fencing)\b"), "32", "32-10-00", "Sitework", "SF"),
     # ── Division 33 — Utilities ──

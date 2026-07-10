@@ -133,7 +133,29 @@ const SYSTEM_PROMPT =
   "quantity_basis must state exactly how you got the number (e.g. 'Counted 14 type-A " +
   "luminaires on sheet E-201', 'Scaled 220 LF of 4-inch sanitary at 1/8\"=1ft'). " +
   "(4) Never invent quantities you cannot see — omit rather than guess. " +
-  "(5) Prefer EA for counts, LF for runs, SF/SY for areas, CY for volumes.";
+  "(5) Prefer EA for counts, LF for runs, SF/SY for areas, CY for volumes.\n\n" +
+  "CIVIL GRADING PLANS: if the sheet shows spot elevations, contour lines, or grading " +
+  "callouts (EX/EXIST = existing grade, PROP/FG = proposed/finish grade, TC/FL = top/flow " +
+  "line, TW/BW = top/bottom of wall), extract earthwork as SEPARATE line items by scope — " +
+  "do not lump everything into one generic 'earthwork' row: " +
+  "  - 31-11-00 Clearing & Grubbing (site vegetation removal, AC) " +
+  "  - 31-14-13 Topsoil Strip & Stockpile (strip depth if noted, else assume 6in over the " +
+  "    graded limits, CY) " +
+  "  - 31-23-16 Mass Excavation / Cut-Fill (net cut or fill volume — read every existing " +
+  "    and proposed spot elevation visible on the sheet, weight each by the area it " +
+  "    represents rather than a flat average of a few points, and state in quantity_basis " +
+  "    exactly which elevations and areas you used, e.g. 'Existing 617-628ft, proposed " +
+  "    620-625ft across ~X SF graded limit, area-weighted net cut ~Y ft'; CY) " +
+  "  - 31-23-23 Building Pad / Subgrade Preparation (ONLY if a geotechnical note specifies " +
+  "    recompaction/scarification depth and offset beyond the building footprint — quantify " +
+  "    as footprint-plus-offset area times the specified depth, CY) " +
+  "  - 31-25-00 Erosion Control (silt fence/slope protection LF or SF, if shown) " +
+  "  - 32-32-00 Retaining Walls (LF, using TW/BW elevation pairs where shown) " +
+  "Flag drawing_ref with the sheet number and location_tag with the zone/area described. " +
+  "If the sheet references a geotechnical report for specs (a common note: 'per geotechnical " +
+  "report') but the actual depth/offset values aren't visible on this sheet, omit the " +
+  "31-23-23 row rather than guessing a depth — the estimator should cross-reference the " +
+  "geotech report separately via the document Q&A tool.";
 
 const ROW_PROPERTIES = {
   trade:          "string",
