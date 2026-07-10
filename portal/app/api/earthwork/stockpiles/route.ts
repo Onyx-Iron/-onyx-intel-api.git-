@@ -62,7 +62,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     csi_code: "31-23-00",
     quantity: computed.ccy,
     unit: "CY",
-  }]);
+  }], userId);
 
   return NextResponse.json({ stockpile: data });
 }

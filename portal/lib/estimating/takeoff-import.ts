@@ -17,6 +17,13 @@ export interface TakeoffFingerprintInput {
 
 export interface TakeoffItemForEstimate extends TakeoffFingerprintInput {
   id: string;
+  // 'pending_review' (AI-sourced, not yet human-reviewed) and 'rejected'
+  // items must never reach the estimate — only 'approved' items flow
+  // through. Missing/null is treated as 'approved' for backward
+  // compatibility with rows inserted before this column existed (the
+  // migration itself backfills existing rows to 'approved' via its
+  // column default, so this fallback is a belt-and-suspenders match).
+  review_status?: "pending_review" | "approved" | "rejected" | null;
 }
 
 export interface TakeoffRowForSave extends TakeoffFingerprintInput {
@@ -66,6 +73,11 @@ export interface BuildEstimateImportInput {
 export interface BuildEstimateImportResult {
   rows: EstimateImportRow[];
   skipped: number;
+  // Count of takeoff items that exist but were excluded specifically
+  // because they aren't approved yet (pending_review or rejected) —
+  // distinct from `skipped` (already-imported duplicates), so callers can
+  // tell "nothing new" apart from "new items exist but need review".
+  blockedByReview: number;
 }
 
 export function takeoffFingerprint(item: TakeoffFingerprintInput): string {
@@ -126,11 +138,23 @@ export function buildEstimateImportRows(input: BuildEstimateImportInput): BuildE
   const costLookup = buildCostLookup(input.costCatalog);
   const rows: EstimateImportRow[] = [];
   let skipped = 0;
+  let blockedByReview = 0;
 
   for (const takeoff of input.takeoffItems) {
     const fingerprint = takeoffFingerprint(takeoff);
     if (existingKeys.has(`id:${takeoff.id}`) || existingKeys.has(`fp:${fingerprint}`)) {
       skipped++;
+      continue;
+    }
+
+    // Hard gate: pending/rejected AI-review items must never reach the
+    // estimate, no matter what pricing/dedup logic would otherwise do.
+    // This is the actual enforcement point for "unapproved AI quantities
+    // cannot affect approved estimate totals" — a status column alone
+    // (pricing_status: "review") is advisory, not a gate; excluding the
+    // row from ever being inserted is the gate.
+    if (takeoff.review_status === "pending_review" || takeoff.review_status === "rejected") {
+      blockedByReview++;
       continue;
     }
 
@@ -163,7 +187,7 @@ export function buildEstimateImportRows(input: BuildEstimateImportInput): BuildE
     });
   }
 
-  return { rows, skipped };
+  return { rows, skipped, blockedByReview };
 }
 
 function buildCostLookup(catalog: CostCatalogForImport[]): Map<string, number> {

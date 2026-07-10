@@ -96,7 +96,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       unit: "CY",
     },
   ];
-  await mirrorCivilItemsToTakeoff(anyDb, tenantId, body.project_id, body.page_id ?? null, "civil_pipe_runs", data?.id ?? "", takeoffRows);
+  await mirrorCivilItemsToTakeoff(anyDb, tenantId, body.project_id, body.page_id ?? null, "civil_pipe_runs", data?.id ?? "", takeoffRows, userId);
 
   return NextResponse.json({ run: data });
 }

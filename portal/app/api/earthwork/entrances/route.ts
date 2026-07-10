@@ -62,7 +62,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     csi_code: "31-25-00",
     quantity: computed.area_sf,
     unit: "SF",
-  }]);
+  }], userId);
 
   return NextResponse.json({ entrance: data });
 }

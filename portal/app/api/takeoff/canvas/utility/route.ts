@@ -147,7 +147,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       },
     ];
   });
-  await mirrorCivilItemsToTakeoff(anyDb, tenantId, projectId, items[0].page_id ?? null, "civil_utility_takeoffs", (data?.[0]?.id as string) ?? "", takeoffRows);
+  await mirrorCivilItemsToTakeoff(anyDb, tenantId, projectId, items[0].page_id ?? null, "civil_utility_takeoffs", (data?.[0]?.id as string) ?? "", takeoffRows, userId);
 
   void logEvent({
     projectId,

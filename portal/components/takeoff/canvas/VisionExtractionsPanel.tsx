@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 interface VisionItem {
   description: string;
@@ -20,6 +20,12 @@ interface VisionResult {
   model: string;
 }
 
+interface TakeoffItemRef {
+  id: string;
+  review_status: "pending_review" | "approved" | "rejected" | string;
+  rejected_reason: string | null;
+}
+
 interface Props {
   pageId: string;
   projectId: string;
@@ -33,17 +39,17 @@ interface Props {
  * Gemini pulled from the page, cross-referenced against vector-derived
  * findings from the CAD Vector Layer.
  *
- * Findings are committed automatically by the API into takeoff_items (and
- * from there into the estimate) as soon as extraction runs — no manual
- * per-item approval gate. Low-confidence / AI-vision items still land with
- * pricing_status "review" downstream so an estimator can catch a bad read
- * before it's treated as verified, but they don't require a click just to
- * exist in the takeoff.
+ * Every finding is committed into takeoff_items as soon as extraction runs
+ * (visible in the takeoff grid immediately), but with review_status
+ * "pending_review" — it is EXCLUDED from the estimate until a human
+ * explicitly approves or rejects it here. Rejected items stay in
+ * takeoff_items (permanently auditable) but can never reach the estimate.
  */
 export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onCommitted }: Props) {
   const [state, setState] = useState<{ result: VisionResult | null; loading: boolean; err: string | null }>({ result: null, loading: true, err: null });
+  const [takeoffItems, setTakeoffItems] = useState<TakeoffItemRef[]>([]);
   const [open, setOpen] = useState(true);
-  const notifiedKey = useRef<string | null>(null);
+  const [acting, setActing] = useState<string | null>(null);
 
   const runExtract = useCallback(async (force: boolean) => {
     setState((s) => ({ ...s, loading: true, err: null }));
@@ -54,12 +60,14 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
         body: JSON.stringify({ page_id: pageId, force }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? String(res.status));
-      const data = await res.json() as { result: VisionResult };
+      const data = await res.json() as { result: VisionResult; takeoffItems?: TakeoffItemRef[] };
       setState({ result: data.result, loading: false, err: null });
+      setTakeoffItems(data.takeoffItems ?? []);
+      if (onCommitted) for (const it of data.result.items) onCommitted(it);
     } catch (e) {
       setState({ result: null, loading: false, err: e instanceof Error ? e.message : String(e) });
     }
-  }, [pageId]);
+  }, [pageId, onCommitted]);
 
   // On mount: check cache; if missing, run extraction.
   useEffect(() => {
@@ -68,9 +76,12 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
       try {
         const cached = await fetch(`/api/takeoff/canvas/vision-extract?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
         if (!cached.ok) throw new Error(String(cached.status));
-        const data = await cached.json() as { result: VisionResult | null };
+        const data = await cached.json() as { result: VisionResult | null; takeoffItems?: TakeoffItemRef[] };
         if (data.result) {
-          if (!cancelled) setState({ result: data.result, loading: false, err: null });
+          if (!cancelled) {
+            setState({ result: data.result, loading: false, err: null });
+            setTakeoffItems(data.takeoffItems ?? []);
+          }
           return;
         }
         if (!cancelled) void runExtract(false);
@@ -81,27 +92,36 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
     return () => { cancelled = true; };
   }, [pageId, runExtract]);
 
-  // ── Cross-reference each vision item against vector descriptions ─────────
+  // ── Cross-reference each vision item against vector descriptions, and
+  // line it up with its takeoff_items row (same insertion order) ─────────
   const enriched = useMemo(() => {
     if (!state.result) return [];
     const vecKeywords = vectorDescriptions.map((d) => d.toLowerCase());
-    return state.result.items.map((it) => {
+    return state.result.items.map((it, i) => {
       const desc = it.description.toLowerCase();
       const matched = vecKeywords.some((v) => v && (desc.includes(v.slice(0, Math.min(20, v.length))) || v.includes(desc.slice(0, 20))));
-      return { ...it, cross_verified: matched };
+      return { ...it, cross_verified: matched, takeoffRef: takeoffItems[i] as TakeoffItemRef | undefined };
     });
-  }, [state.result, vectorDescriptions]);
+  }, [state.result, vectorDescriptions, takeoffItems]);
 
-  // The API auto-commits every item into takeoff_items as soon as extraction
-  // runs. Notify the parent once per result so the canvas shapes dock stays
-  // in sync without requiring a manual approve click.
-  useEffect(() => {
-    if (!state.result || !onCommitted) return;
-    const key = state.result.extracted_at;
-    if (notifiedKey.current === key) return;
-    notifiedKey.current = key;
-    for (const it of state.result.items) onCommitted(it);
-  }, [state.result, onCommitted]);
+  const review = useCallback(async (takeoffId: string, action: "approve" | "reject") => {
+    setActing(takeoffId);
+    try {
+      const res = await fetch(`/api/takeoff/items/${encodeURIComponent(takeoffId)}/review`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? String(res.status));
+      setTakeoffItems((prev) => prev.map((r) => r.id === takeoffId ? { ...r, review_status: action === "approve" ? "approved" : "rejected" } : r));
+    } catch {
+      // Leave state as-is on failure — the badge stays "pending review" so the user can retry.
+    } finally {
+      setActing(null);
+    }
+  }, []);
+
+  const pendingCount = takeoffItems.filter((r) => r.review_status === "pending_review").length;
 
   return (
     <div className="border-b border-white/10">
@@ -116,7 +136,8 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
             {state.loading ? "Reading page…" :
              state.err     ? "Extraction failed" :
              enriched.length === 0 ? "No takeoff items detected" :
-             `${enriched.length} finding${enriched.length === 1 ? "" : "s"} — added to takeoff`}
+             pendingCount > 0 ? `${enriched.length} finding${enriched.length === 1 ? "" : "s"} — ${pendingCount} awaiting review` :
+             `${enriched.length} finding${enriched.length === 1 ? "" : "s"} reviewed`}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -161,7 +182,8 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
               it.source === "image"    ? "text-orange-400" :
               it.source === "note"     ? "text-amber-400" :
                                          "text-white/50";
-            const needsReview = it.confidence < 0.65;
+            const status = it.takeoffRef?.review_status ?? "pending_review";
+            const isActing = it.takeoffRef && acting === it.takeoffRef.id;
             return (
               <div
                 key={`${it.description}-${i}`}
@@ -193,14 +215,35 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
                   {it.cost_code && (
                     <span className="text-[10px] font-mono text-white/40">{it.cost_code}</span>
                   )}
-                  <span
-                    className={`ml-auto rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-widest ${
-                      needsReview ? "bg-amber-400/20 text-amber-300" : "bg-[#CCFF00]/20 text-[#CCFF00]"
-                    }`}
-                    title={needsReview ? "Low-confidence AI read — flagged for review in the estimate" : "Added to takeoff"}
-                  >
-                    {needsReview ? "Needs review" : "Added"}
-                  </span>
+                  {status === "pending_review" && it.takeoffRef ? (
+                    <div className="ml-auto flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={isActing}
+                        onClick={() => void review(it.takeoffRef!.id, "reject")}
+                        className="rounded-full border border-white/15 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-widest text-white/50 hover:text-red-300 hover:border-red-300/40 disabled:opacity-40"
+                      >
+                        Reject
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isActing}
+                        onClick={() => void review(it.takeoffRef!.id, "approve")}
+                        className="rounded-full bg-[#CCFF00] px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-widest text-black hover:opacity-85 disabled:opacity-40"
+                      >
+                        {isActing ? "…" : "Approve"}
+                      </button>
+                    </div>
+                  ) : (
+                    <span
+                      className={`ml-auto rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-widest ${
+                        status === "rejected" ? "bg-red-400/20 text-red-300" : "bg-[#CCFF00]/20 text-[#CCFF00]"
+                      }`}
+                      title={status === "rejected" ? "Excluded from the estimate" : "Approved — included in the estimate"}
+                    >
+                      {status === "rejected" ? "Rejected" : "Approved"}
+                    </span>
+                  )}
                 </div>
               </div>
             );

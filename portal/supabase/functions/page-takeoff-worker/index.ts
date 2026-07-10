@@ -89,7 +89,7 @@ function fingerprint(label: string | null, csi: string | null, qty: number | nul
 // deno-lint-ignore no-explicit-any
 async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: string): Promise<void> {
   const [takeoff, existing, catalog] = await Promise.all([
-    db.from("takeoff_items").select("id,label,csi_code,division,quantity,unit,type,meta").eq("tenant_id", tenantId).eq("project_id", projectId),
+    db.from("takeoff_items").select("id,label,csi_code,division,quantity,unit,type,meta,review_status").eq("tenant_id", tenantId).eq("project_id", projectId),
     db.from("estimate_items").select("source_takeoff_id,source_fingerprint").eq("tenant_id", tenantId).eq("project_id", projectId),
     // Legacy per-tenant flat-rate catalog — fallback only, see below.
     db.from("cost_catalog").select("csi_code,uom,unit_cost").eq("tenant_id", tenantId),
@@ -152,6 +152,10 @@ async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: strin
   const rows: Record<string, unknown>[] = [];
   // deno-lint-ignore no-explicit-any
   for (const t of takeoff.data ?? []) {
+    // Hard gate: never let a pending/rejected AI suggestion reach the
+    // estimate (mirrors lib/estimating/takeoff-import.ts's identical check).
+    if (t.review_status === "pending_review" || t.review_status === "rejected") continue;
+
     const meta = (t.meta ?? {}) as Record<string, unknown>;
     const drawingRef = typeof meta.drawing_ref === "string" ? meta.drawing_ref : null;
     const locationTag = typeof meta.location_tag === "string" ? meta.location_tag : null;
@@ -251,6 +255,13 @@ Deno.serve(async (req) => {
         type: "takeoff_import",
         page: body.page_number,
         document_id: body.document_id,
+        // Deterministic rows (PDF table/DXF/IFC/XLSX math) are grounded in
+        // real source data and implicitly approved; ai_vision rows are an
+        // unverified suggestion and must wait for a human review action
+        // before they can reach the estimate (see syncTakeoffToEstimate
+        // below, which excludes non-approved rows).
+        created_by: null,
+        review_status: r.extraction_method === "ai_vision" ? "pending_review" : "approved",
         meta: {
           trade: r.trade ?? null,
           quantity_basis: r.quantity_basis ?? null,
@@ -259,8 +270,23 @@ Deno.serve(async (req) => {
           extraction_method: r.extraction_method ?? "deterministic",
         },
       }));
-      const { error: insErr } = await db.from("takeoff_items").insert(payload);
+      const { data: insertedRows, error: insErr } = await db.from("takeoff_items").insert(payload).select("id,review_status");
       if (insErr) throw new Error(`insert takeoff_items: ${insErr.message}`);
+
+      // Lifecycle audit trail (mirrors lib/takeoff/history.ts — Deno can't
+      // import that module, so this is a small inline equivalent).
+      if (insertedRows && insertedRows.length > 0) {
+        await db.from("takeoff_item_history").insert(
+          insertedRows.map((r: { id: string }) => ({
+            tenant_id: body.tenant_id,
+            project_id: body.project_id,
+            takeoff_item_id: r.id,
+            action: "created",
+            actor_user_id: null,
+            after: { source: "page_takeoff_worker" },
+          })),
+        );
+      }
 
       // ── 3b. Sync into estimate_items ───────────────────────────────────────
       // Mirrors lib/estimating/auto-sync.ts (Next.js) so large-document

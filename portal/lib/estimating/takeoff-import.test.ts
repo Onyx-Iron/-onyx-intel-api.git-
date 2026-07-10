@@ -223,4 +223,93 @@ describe("takeoff to estimate import quality", () => {
     assert.equal(result.rows[0].pricing_status, "review");
     assert.match(result.rows[0].notes, /Review required: AI vision quantity/);
   });
+
+  it("excludes pending_review AI takeoff items from the estimate entirely", () => {
+    const result = buildEstimateImportRows({
+      takeoffItems: [
+        {
+          id: "ai-takeoff-pending",
+          label: "Unreviewed AI quantity",
+          csi_code: "26-51-00",
+          quantity: 99,
+          unit: "EA",
+          review_status: "pending_review",
+          meta: { extraction_method: "ai_vision" },
+        },
+      ],
+      existingEstimateItems: [],
+      costCatalog: [{ csi_code: "26-51-00", uom: "EA", unit_cost: 325 }],
+      projectId: "project-1",
+    });
+
+    assert.equal(result.rows.length, 0);
+    assert.equal(result.blockedByReview, 1);
+    assert.equal(result.skipped, 0);
+  });
+
+  it("excludes rejected takeoff items from the estimate permanently, even with a valid price", () => {
+    const result = buildEstimateImportRows({
+      takeoffItems: [
+        {
+          id: "ai-takeoff-rejected",
+          label: "Rejected AI quantity",
+          csi_code: "26-51-00",
+          quantity: 5,
+          unit: "EA",
+          review_status: "rejected",
+          meta: { extraction_method: "ai_vision" },
+        },
+      ],
+      existingEstimateItems: [],
+      costCatalog: [{ csi_code: "26-51-00", uom: "EA", unit_cost: 325 }],
+      projectId: "project-1",
+    });
+
+    assert.equal(result.rows.length, 0);
+    assert.equal(result.blockedByReview, 1);
+  });
+
+  it("allows an approved AI takeoff item to flow into the estimate normally", () => {
+    const result = buildEstimateImportRows({
+      takeoffItems: [
+        {
+          id: "ai-takeoff-approved",
+          label: "Approved AI quantity",
+          csi_code: "26-51-00",
+          quantity: 14,
+          unit: "EA",
+          review_status: "approved",
+          meta: { extraction_method: "ai_vision" },
+        },
+      ],
+      existingEstimateItems: [],
+      costCatalog: [{ csi_code: "26-51-00", uom: "EA", unit_cost: 325 }],
+      projectId: "project-1",
+    });
+
+    assert.equal(result.rows.length, 1);
+    assert.equal(result.blockedByReview, 0);
+    assert.equal(result.rows[0].unit_cost, 325);
+  });
+
+  it("treats a missing review_status as approved (backward compatibility with pre-migration rows)", () => {
+    const result = buildEstimateImportRows({
+      takeoffItems: [
+        {
+          id: "legacy-takeoff",
+          label: "Pre-existing manual item",
+          csi_code: "03-30-00",
+          quantity: 10,
+          unit: "CY",
+          meta: {},
+        },
+      ],
+      existingEstimateItems: [],
+      costCatalog: [{ csi_code: "03-30-00", uom: "CY", unit_cost: 850 }],
+      projectId: "project-1",
+    });
+
+    assert.equal(result.rows.length, 1);
+    assert.equal(result.blockedByReview, 0);
+  });
 });

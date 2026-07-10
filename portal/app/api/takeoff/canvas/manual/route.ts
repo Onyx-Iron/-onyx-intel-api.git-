@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { logEvent } from "@/lib/activity";
 import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
+import { recordTakeoffHistory } from "@/lib/takeoff/history";
 
 export const runtime = "nodejs";
 
@@ -96,6 +97,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const takeoffPayload = items.map((it, i) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const geo = (it.geometry ?? {}) as Record<string, any>;
+    const isVisionSourced = geo.source === "vision_extraction";
     return {
       tenant_id: tenantId,
       project_id: it.project_id,
@@ -107,18 +109,35 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       type: "takeoff_import",
       page: 0,
       document_id: it.page_id ?? null,
+      geometry: it.geometry ?? null,
+      // A shape the user drew and clicked save on is human-verified even
+      // if its underlying quantity came from a vision suggestion — the
+      // act of saving it here IS the approval. created_by is only set for
+      // the human-drawn case; a vision-sourced row keeps null (no human
+      // authored the geometry itself).
+      created_by: isVisionSourced ? null : userId,
+      review_status: "approved" as const,
       meta: {
         trade: null,
         quantity_basis: null,
         drawing_ref: typeof geo.layer_hint === "string" ? geo.layer_hint : null,
         location_tag: null,
-        extraction_method: geo.source === "vision_extraction" ? "ai_vision" : "manual",
+        extraction_method: isVisionSourced ? "ai_vision" : "manual",
         manual_takeoff_id: data?.[i]?.id ?? null,
       },
     };
   });
-  const { error: takeoffErr } = await anyDb.from("takeoff_items").insert(takeoffPayload);
-  if (takeoffErr) console.error("[canvas/manual] takeoff_items mirror failed", takeoffErr);
+  const { data: insertedTakeoff, error: takeoffErr } = await anyDb.from("takeoff_items").insert(takeoffPayload).select("id");
+  if (takeoffErr) {
+    console.error("[canvas/manual] takeoff_items mirror failed", takeoffErr);
+  } else {
+    for (const row of insertedTakeoff ?? []) {
+      await recordTakeoffHistory(anyDb, {
+        tenantId, projectId, takeoffItemId: row.id, action: "created",
+        actorUserId: userId, after: { source: "manual_canvas" },
+      });
+    }
+  }
 
   void logEvent({
     projectId,

@@ -15,6 +15,10 @@ export interface AutoSyncResult {
   priced: number;
   unpriced: number;
   review: number;
+  // Takeoff items that exist but are still pending_review/rejected and were
+  // therefore excluded from this sync — visible so the UI can tell "nothing
+  // new to import" apart from "N items are waiting on your review".
+  pendingReview: number;
 }
 
 export async function syncTakeoffToEstimate(
@@ -28,7 +32,7 @@ export async function syncTakeoffToEstimate(
   const [takeoff, existing, catalog, project] = await Promise.all([
     anyDb
       .from("takeoff_items")
-      .select("id,label,csi_code,division,quantity,unit,type,meta")
+      .select("id,label,csi_code,division,quantity,unit,type,meta,review_status")
       .eq("tenant_id", tenantId)
       .eq("project_id", projectId)
       .order("created_at", { ascending: true }),
@@ -54,7 +58,7 @@ export async function syncTakeoffToEstimate(
 
   if (takeoff.error || existing.error || catalog.error) {
     console.error("[syncTakeoffToEstimate]", takeoff.error ?? existing.error ?? catalog.error);
-    return { imported: 0, skipped: 0, priced: 0, unpriced: 0, review: 0 };
+    return { imported: 0, skipped: 0, priced: 0, unpriced: 0, review: 0, pendingReview: 0 };
   }
 
   // Real pricing engine: cost_codes catalog + tenant overrides/actuals +
@@ -96,14 +100,15 @@ export async function syncTakeoffToEstimate(
   const priced = result.rows.filter((row) => row.pricing_status === "priced").length;
   const unpriced = result.rows.filter((row) => row.pricing_status === "unpriced").length;
   const review = result.rows.filter((row) => row.pricing_status === "review").length;
+  const pendingReview = result.blockedByReview;
 
-  if (result.rows.length === 0) return { imported: 0, skipped: result.skipped, priced, unpriced, review };
+  if (result.rows.length === 0) return { imported: 0, skipped: result.skipped, priced, unpriced, review, pendingReview };
 
   const payload = result.rows.map((row) => ({ ...row, tenant_id: tenantId }));
   const { data, error } = await anyDb.from("estimate_items").insert(payload).select("id");
   if (error) {
     console.error("[syncTakeoffToEstimate] insert failed", error);
-    return { imported: 0, skipped: result.skipped, priced: 0, unpriced: 0, review: 0 };
+    return { imported: 0, skipped: result.skipped, priced: 0, unpriced: 0, review: 0, pendingReview };
   }
-  return { imported: data?.length ?? 0, skipped: result.skipped, priced, unpriced, review };
+  return { imported: data?.length ?? 0, skipped: result.skipped, priced, unpriced, review, pendingReview };
 }

@@ -5,7 +5,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { headerSafe } from "@/lib/http";
 import { runScopeGapAgent } from "@/lib/agents/scope-gap";
 import { runRfiDrafterAgent } from "@/lib/agents/rfi-drafter";
-import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
+import { recordTakeoffHistory } from "@/lib/takeoff/history";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
@@ -56,15 +56,42 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data } = await (db as any)
+  const anyDb = db as any;
+  const { data } = await anyDb
     .from("document_pages")
     .select("vision_extractions, vision_extracted_at")
     .eq("id", pageId).eq("tenant_id", tenantId)
     .maybeSingle();
+
+  const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, pageId);
+
   return NextResponse.json({
     result: (data?.vision_extractions ?? null) as VisionResult | null,
     extracted_at: data?.vision_extracted_at ?? null,
+    takeoffItems,
   });
+}
+
+interface VisionTakeoffItemRef {
+  id: string;
+  review_status: string;
+  rejected_reason: string | null;
+}
+
+// Vision items are matched back to their takeoff_items row via
+// meta->>vision_page_id (set at insert time) — there's no other stable key
+// since the cached VisionResult itself doesn't store row ids.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function fetchVisionTakeoffItems(anyDb: any, tenantId: string, pageId: string): Promise<VisionTakeoffItemRef[]> {
+  const { data } = await anyDb
+    .from("takeoff_items")
+    .select("id, review_status, rejected_reason, created_at")
+    .eq("tenant_id", tenantId)
+    .contains("meta", { vision_page_id: pageId })
+    .order("created_at", { ascending: true });
+  return (data ?? []).map((r: { id: string; review_status: string; rejected_reason: string | null }) => ({
+    id: r.id, review_status: r.review_status, rejected_reason: r.rejected_reason,
+  }));
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -88,7 +115,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!page) return NextResponse.json({ error: "Page not found" }, { status: 404 });
 
   if (page.vision_extractions && !body.force) {
-    return NextResponse.json({ result: page.vision_extractions as VisionResult, cached: true });
+    const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, body.page_id);
+    return NextResponse.json({ result: page.vision_extractions as VisionResult, cached: true, takeoffItems });
   }
 
   // Download page PDF bytes
@@ -246,6 +274,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       type: "takeoff_import",
       page: (page as { page_number?: number }).page_number ?? 0,
       document_id: page.document_id ?? null,
+      // AI-vision items are a suggestion, not a verified quantity — they
+      // exist in the takeoff grid immediately (so the estimator can see
+      // and triage them), but review_status gates them out of
+      // syncTakeoffToEstimate until a human explicitly approves or
+      // rejects via PATCH /api/takeoff/items/[id]/review. created_by is
+      // intentionally null (no human created this row).
+      created_by: null,
+      review_status: "pending_review",
       meta: {
         trade: null,
         quantity_basis: it.raw_text ?? null,
@@ -257,11 +293,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         confidence: it.confidence,
       },
     }));
-    const { error: takeoffErr } = await anyDb.from("takeoff_items").insert(takeoffPayload);
+    const { data: insertedTakeoff, error: takeoffErr } = await anyDb.from("takeoff_items").insert(takeoffPayload).select("id");
     if (takeoffErr) {
       console.error("[vision-extract] takeoff_items insert failed", takeoffErr);
     } else {
-      void syncTakeoffToEstimate(tenantId, projectId).catch((e) => console.error("[vision-extract] estimate sync failed", e));
+      for (const row of insertedTakeoff ?? []) {
+        await recordTakeoffHistory(anyDb, {
+          tenantId, projectId, takeoffItemId: row.id, action: "created",
+          actorUserId: null, after: { source: "ai_vision", page_id: body.page_id },
+        });
+      }
+      // Do NOT sync to estimate here — pending_review items are excluded
+      // by buildEstimateImportRows anyway, but skip the wasted call.
     }
   }
 
@@ -279,7 +322,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     visionItems: items,
   }).catch((e) => console.error("[agents]", e));
 
-  return NextResponse.json({ result, cached: false });
+  const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, body.page_id);
+  return NextResponse.json({ result, cached: false, takeoffItems });
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

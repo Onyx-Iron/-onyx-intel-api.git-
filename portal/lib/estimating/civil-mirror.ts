@@ -1,4 +1,5 @@
 import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
+import { recordTakeoffHistory } from "@/lib/takeoff/history";
 
 export interface CivilMirrorRow {
   label: string;
@@ -28,6 +29,7 @@ export async function mirrorCivilItemsToTakeoff(
   sourceTable: string,
   sourceId: string,
   rows: CivilMirrorRow[],
+  actorUserId?: string | null,
 ): Promise<void> {
   if (rows.length === 0) return;
   const payload = rows.map((r) => ({
@@ -41,6 +43,12 @@ export async function mirrorCivilItemsToTakeoff(
     type: "takeoff_import",
     page: 0,
     document_id: pageId,
+    // Civil calculators (trench embedment, stockpile swell, entrance
+    // stone) are deterministic engineering math grounded in user-entered
+    // inputs, not an AI guess — implicitly approved, same as manual/
+    // deterministic takeoff rows.
+    created_by: actorUserId ?? null,
+    review_status: "approved" as const,
     meta: {
       trade: "Earthwork",
       quantity_basis: null,
@@ -51,10 +59,17 @@ export async function mirrorCivilItemsToTakeoff(
       civil_source_id: sourceId,
     },
   }));
-  const { error } = await db.from("takeoff_items").insert(payload);
+  const { data: inserted, error } = await db.from("takeoff_items").insert(payload).select("id");
   if (error) {
     console.error(`[civil-mirror] takeoff_items insert failed for ${sourceTable}`, error);
     return;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const row of (inserted ?? []) as any[]) {
+    await recordTakeoffHistory(db, {
+      tenantId, projectId, takeoffItemId: row.id, action: "created",
+      actorUserId: actorUserId ?? null, after: { source: sourceTable },
+    });
   }
   await syncTakeoffToEstimate(tenantId, projectId).catch((e) =>
     console.error(`[civil-mirror] estimate sync failed for ${sourceTable}`, e),

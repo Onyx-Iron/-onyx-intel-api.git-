@@ -7,6 +7,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { takeoffItemsSchema, parseBody } from "@/lib/validation";
+import { recordTakeoffHistory } from "@/lib/takeoff/history";
 import type { Json } from "@/lib/supabase/types";
 
 function jsonObject(value: Json | null | undefined): Record<string, unknown> | null {
@@ -63,9 +64,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const db = await createServiceClient();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyDb = db as any;
     const { data: existing, error: existingError } = await db
       .from("takeoff_items")
-      .select("id,label,csi_code,division,quantity,unit,type,meta")
+      .select("*")
       .eq("tenant_id", tenantId)
       .eq("project_id", project_id);
 
@@ -73,6 +76,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ error: `[POST /api/takeoff/items] ${existingError.message}` }, { status: 422 });
     }
 
+    const existingById = new Map((existing ?? []).map((row) => [row.id as string, row]));
     const existingRows = (existing ?? []).map((row) => ({
       id: row.id,
       label: row.label,
@@ -89,21 +93,30 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ items: [], skipped: prepared.skipped }, { status: 201 });
     }
 
-    const payload = prepared.rows.map((row) => ({
-      id: row.id ?? crypto.randomUUID(),
-      tenant_id: tenantId,
-      project_id,
-      label: row.label ?? "Untitled item",
-      csi_code: row.csi_code ?? null,
-      division: row.division ?? null,
-      quantity: row.quantity ?? null,
-      unit: row.unit ?? null,
-      rate: row.rate ?? null,
-      type: row.type ?? "general",
-      page: row.page ?? 0,
-      document_id: row.document_id ?? null,
-      meta: (row.meta ?? {}) as Json,
-    }));
+    const payload = prepared.rows.map((row) => {
+      const isUpdate = row.id != null && existingById.has(row.id);
+      return {
+        id: row.id ?? crypto.randomUUID(),
+        tenant_id: tenantId,
+        project_id,
+        label: row.label ?? "Untitled item",
+        csi_code: row.csi_code ?? null,
+        division: row.division ?? null,
+        quantity: row.quantity ?? null,
+        unit: row.unit ?? null,
+        rate: row.rate ?? null,
+        type: row.type ?? "general",
+        page: row.page ?? 0,
+        document_id: row.document_id ?? null,
+        meta: (row.meta ?? {}) as Json,
+        // Manual/deterministic saves through this route are either
+        // human-created or grounded in deterministic math — they don't
+        // need the AI-review gate, so they're implicitly approved. Only
+        // set created_by on genuinely new rows; preserve the original
+        // creator on an edit.
+        ...(isUpdate ? {} : { created_by: userId, review_status: "approved" as const }),
+      };
+    });
 
     const { data, error } = await db
       .from("takeoff_items")
@@ -113,6 +126,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     if (error) {
       return NextResponse.json({ error: `[POST /api/takeoff/items] ${error.message}` }, { status: 422 });
+    }
+
+    // Per-row history: "created" for genuinely new rows, "updated" (with
+    // before/after) for edits to an existing row — satisfies "edits and
+    // deletions preserve audit history".
+    for (const row of data ?? []) {
+      const before = existingById.get(row.id as string);
+      await recordTakeoffHistory(anyDb, {
+        tenantId, projectId: project_id, takeoffItemId: row.id as string,
+        action: before ? "updated" : "created",
+        actorUserId: userId,
+        before: before ?? null,
+        after: row as Record<string, unknown>,
+      });
     }
 
     void logEvent({
@@ -149,11 +176,24 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const db = await createServiceClient();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyDb = db as any;
+
+    const { data: before } = await db
+      .from("takeoff_items")
+      .select("*")
+      .eq("id", id).eq("tenant_id", tenantId).eq("project_id", project_id)
+      .maybeSingle();
 
     const query = db.from("takeoff_items").delete().eq("id", id).eq("tenant_id", tenantId).eq("project_id", project_id);
 
     const { error } = await query;
     if (error) return NextResponse.json({ error: error.message }, { status: 422 });
+
+    await recordTakeoffHistory(anyDb, {
+      tenantId, projectId: project_id, takeoffItemId: id, action: "deleted",
+      actorUserId: userId, before: before ?? null,
+    });
 
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
