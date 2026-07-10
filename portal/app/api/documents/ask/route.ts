@@ -1,4 +1,4 @@
-import { auth } from "@clerk/nextjs/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
@@ -28,6 +28,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const email = (await currentUser())?.primaryEmailAddress?.emailAddress;
 
     if (!GEMINI_API_KEY) {
       return NextResponse.json({ error: "AI is not configured (GEMINI_API_KEY missing).", code: "NO_PROVIDER" }, { status: 503 });
@@ -64,7 +65,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ answer: cached.answer, document: doc.file_name, question_id: cached.id, cached: true });
     }
 
-    const rl = await checkAiRateLimit(tenantId, "documents/ask", { windowMs: 60_000, max: 8 });
+    const rl = await checkAiRateLimit(tenantId, "documents/ask", { windowMs: 60_000, max: 8 }, email);
     if (!rl.ok) {
       return NextResponse.json(
         { error: "Too many document Q&A requests — please slow down." },

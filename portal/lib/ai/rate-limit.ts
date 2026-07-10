@@ -1,4 +1,5 @@
 import { createServiceClient } from "@/lib/supabase/server";
+import { isAdminEmail } from "@/lib/python-api";
 
 /**
  * Per-tenant rate limit for routes that trigger a paid LLM API call. Backed
@@ -9,12 +10,20 @@ import { createServiceClient } from "@/lib/supabase/server";
  * This is a coarse abuse guard, not a precision limiter: it counts rows
  * inserted in the trailing window rather than using a fixed bucket, so it's
  * a true sliding window at the cost of one extra round-trip per call.
+ *
+ * The admin account (justinatteberry@onyx-iron.com) bypasses this entirely,
+ * consistent with the same bypass already applied to the Railway takeoff
+ * service (see lib/python-api.ts's isAdminEmail/pythonApiSecret) and to
+ * billing/plan limits (tenants.comp_until — see lib/billing/gate.ts).
  */
 export async function checkAiRateLimit(
   tenantId: string,
   route: string,
   { windowMs, max }: { windowMs: number; max: number },
+  email?: string | null,
 ): Promise<{ ok: true } | { ok: false; retryAfterSeconds: number }> {
+  if (isAdminEmail(email)) return { ok: true };
+
   const db = await createServiceClient();
   const windowStart = new Date(Date.now() - windowMs).toISOString();
 

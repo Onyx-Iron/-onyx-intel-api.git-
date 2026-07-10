@@ -1,4 +1,4 @@
-import { auth } from "@clerk/nextjs/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
@@ -831,6 +831,7 @@ export async function POST(req: NextRequest): Promise<Response> {
   try {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const email = (await currentUser())?.primaryEmailAddress?.emailAddress;
 
     const body = await req.json() as {
       mode?: "assist" | "rag" | "agentic";
@@ -850,7 +851,7 @@ export async function POST(req: NextRequest): Promise<Response> {
 
     if (mode === "assist") {
       if (!body.prompt) return NextResponse.json({ error: "prompt is required" }, { status: 400 });
-      const assistRl = await checkAiRateLimit(authTenantKey(userId, orgId), "ai/chat:assist", { windowMs: 60_000, max: 20 });
+      const assistRl = await checkAiRateLimit(authTenantKey(userId, orgId), "ai/chat:assist", { windowMs: 60_000, max: 20 }, email);
       if (!assistRl.ok) {
         return NextResponse.json(
           { error: "Too many AI requests — please slow down." },
@@ -882,7 +883,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     const chatRl = await checkAiRateLimit(tenantId, `ai/chat:${mode}`, {
       windowMs: 60_000,
       max: mode === "agentic" ? 10 : 20,
-    });
+    }, email);
     if (!chatRl.ok) {
       return NextResponse.json(
         { error: "Too many AI requests — please slow down." },
