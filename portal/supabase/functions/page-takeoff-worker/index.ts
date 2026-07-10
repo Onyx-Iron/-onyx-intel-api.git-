@@ -75,6 +75,90 @@ interface TakeoffRow {
   extraction_method?: "deterministic" | "ai_vision";
 }
 
+// Mirrors lib/estimating/takeoff-import.ts's buildEstimateImportRows +
+// lib/estimating/auto-sync.ts's syncTakeoffToEstimate — duplicated here
+// rather than shared because this is a Deno Edge Function, a separate
+// runtime from the Next.js app. Keep the two in sync if the fingerprint or
+// pricing-resolution logic changes.
+function fingerprint(label: string | null, csi: string | null, qty: number | null, unit: string | null, drawingRef: string | null, locationTag: string | null): string {
+  const norm = (v: string | null) => (v ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+  const normNum = (v: number | null) => (v == null ? "" : String(v));
+  return [norm(label), norm(csi), normNum(qty), norm(unit), norm(drawingRef), norm(locationTag)].join("|");
+}
+
+// deno-lint-ignore no-explicit-any
+async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: string): Promise<void> {
+  const [takeoff, existing, catalog] = await Promise.all([
+    db.from("takeoff_items").select("id,label,csi_code,division,quantity,unit,type,meta").eq("tenant_id", tenantId).eq("project_id", projectId),
+    db.from("estimate_items").select("source_takeoff_id,source_fingerprint").eq("tenant_id", tenantId).eq("project_id", projectId),
+    db.from("cost_catalog").select("csi_code,uom,unit_cost").eq("tenant_id", tenantId),
+  ]);
+  if (takeoff.error || existing.error || catalog.error) {
+    console.error("[page-takeoff-worker] estimate sync query failed", takeoff.error ?? existing.error ?? catalog.error);
+    return;
+  }
+
+  const existingKeys = new Set<string>();
+  // deno-lint-ignore no-explicit-any
+  for (const item of existing.data ?? []) {
+    if (item.source_takeoff_id) existingKeys.add(`id:${item.source_takeoff_id}`);
+    if (item.source_fingerprint) existingKeys.add(`fp:${item.source_fingerprint}`);
+  }
+
+  const costLookup = new Map<string, number>();
+  // deno-lint-ignore no-explicit-any
+  for (const c of catalog.data ?? []) {
+    const cost = c.unit_cost ?? null;
+    if (!c.csi_code || cost == null || cost <= 0) continue;
+    const uom = (c.uom ?? "").toUpperCase();
+    if (uom && !costLookup.has(`${c.csi_code}|${uom}`)) costLookup.set(`${c.csi_code}|${uom}`, cost);
+    if (!costLookup.has(`${c.csi_code}|*`)) costLookup.set(`${c.csi_code}|*`, cost);
+  }
+
+  const rows: Record<string, unknown>[] = [];
+  // deno-lint-ignore no-explicit-any
+  for (const t of takeoff.data ?? []) {
+    const meta = (t.meta ?? {}) as Record<string, unknown>;
+    const drawingRef = typeof meta.drawing_ref === "string" ? meta.drawing_ref : null;
+    const locationTag = typeof meta.location_tag === "string" ? meta.location_tag : null;
+    const fp = fingerprint(t.label, t.csi_code, t.quantity, t.unit, drawingRef, locationTag);
+    if (existingKeys.has(`id:${t.id}`) || existingKeys.has(`fp:${fp}`)) continue;
+    existingKeys.add(`fp:${fp}`);
+
+    const uom = (t.unit ?? "").toUpperCase() || null;
+    const unitCost = t.csi_code
+      ? costLookup.get(`${t.csi_code}|${uom}`) ?? costLookup.get(`${t.csi_code}|*`) ?? null
+      : null;
+    const aiVision = meta.extraction_method === "ai_vision";
+
+    rows.push({
+      tenant_id: tenantId,
+      project_id: projectId,
+      description: t.label ?? "Takeoff item",
+      csi_code: t.csi_code ?? null,
+      trade: typeof meta.trade === "string" ? meta.trade : null,
+      item_type: "material",
+      quantity: t.quantity ?? null,
+      uom,
+      unit_cost: unitCost,
+      source_takeoff_id: t.id,
+      source_fingerprint: fp,
+      quantity_basis: typeof meta.quantity_basis === "string" ? meta.quantity_basis : null,
+      drawing_ref: drawingRef,
+      location_tag: locationTag,
+      pricing_status: aiVision ? "review" : unitCost != null ? "priced" : "unpriced",
+      notes: [
+        aiVision ? "Review required: AI vision quantity" : null,
+        drawingRef ? `Source: ${drawingRef}` : null,
+      ].filter(Boolean).join(" | ") || "Source: takeoff import",
+    });
+  }
+
+  if (rows.length === 0) return;
+  const { error } = await db.from("estimate_items").insert(rows);
+  if (error) console.error("[page-takeoff-worker] estimate_items insert failed", error);
+}
+
 Deno.serve(async (req) => {
   let body: Payload;
   try {
@@ -143,6 +227,13 @@ Deno.serve(async (req) => {
       }));
       const { error: insErr } = await db.from("takeoff_items").insert(payload);
       if (insErr) throw new Error(`insert takeoff_items: ${insErr.message}`);
+
+      // ── 3b. Sync into estimate_items ───────────────────────────────────────
+      // Mirrors lib/estimating/auto-sync.ts (Next.js) so large-document
+      // extraction (which never touches the portal's Node API) still keeps
+      // the estimate in sync automatically instead of requiring the
+      // estimator to hit "Import from Takeoff" for pages processed here.
+      await syncTakeoffToEstimate(db, body.tenant_id, body.project_id);
     }
 
     // ── 4. Done ───────────────────────────────────────────────────────────────

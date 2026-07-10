@@ -1,6 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { prepareTakeoffRowsForSave } from "@/lib/estimating/takeoff-import";
+import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
@@ -124,7 +125,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       meta: { item_count: (data ?? []).length, skipped: prepared.skipped },
     });
 
-    return NextResponse.json({ items: data ?? [], skipped: prepared.skipped }, { status: 201 });
+    // Keep the estimate in sync automatically — no manual "Import from
+    // Takeoff" click required. Idempotent (dedupes by source_takeoff_id /
+    // fingerprint), so this never double-imports.
+    const sync = await syncTakeoffToEstimate(tenantId, project_id);
+
+    return NextResponse.json({ items: data ?? [], skipped: prepared.skipped, estimate_synced: sync }, { status: 201 });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[POST /api/takeoff/items] ${msg}` }, { status: 500 });

@@ -5,6 +5,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { headerSafe } from "@/lib/http";
 import { runScopeGapAgent } from "@/lib/agents/scope-gap";
 import { runRfiDrafterAgent } from "@/lib/agents/rfi-drafter";
+import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
@@ -82,7 +83,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const anyDb = db as any;
   const { data: page } = await anyDb
     .from("document_pages")
-    .select("id, storage_path, page_number, vision_extractions")
+    .select("id, storage_path, page_number, vision_extractions, document_id")
     .eq("id", body.page_id).eq("tenant_id", tenantId).single();
   if (!page) return NextResponse.json({ error: "Page not found" }, { status: 404 });
 
@@ -206,6 +207,63 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     .from("document_pages")
     .update({ vision_extractions: result, vision_extracted_at: result.extracted_at })
     .eq("id", body.page_id).eq("tenant_id", tenantId);
+
+  // ── Auto-commit into takeoff_items ────────────────────────────────────────
+  // Vision findings used to require a manual per-item "Approve" click before
+  // becoming a real takeoff row. Every item still carries its confidence
+  // score and gets tagged extraction_method: "ai_vision", so downstream it
+  // lands in the estimate as pricing_status "review" rather than being
+  // silently treated as a verified quantity — but it no longer requires a
+  // human click just to exist in the takeoff.
+  let projectId: string | null = null;
+  {
+    const { data: doc } = page.document_id
+      ? await anyDb.from("documents").select("project_id").eq("id", page.document_id).eq("tenant_id", tenantId).maybeSingle()
+      : { data: null };
+    projectId = (doc as { project_id?: string } | null)?.project_id ?? null;
+  }
+  if (projectId) {
+    // Replace any previously auto-committed vision items for this page
+    // (re-running extraction — e.g. "refresh" or a revised sheet — should
+    // not pile up duplicate takeoff rows on top of the old ones).
+    await anyDb
+      .from("takeoff_items")
+      .delete()
+      .eq("tenant_id", tenantId)
+      .eq("project_id", projectId)
+      .eq("document_id", page.document_id ?? "")
+      .contains("meta", { extraction_method: "ai_vision", vision_page_id: body.page_id });
+  }
+  if (projectId && items.length > 0) {
+    const takeoffPayload = items.map((it) => ({
+      tenant_id: tenantId,
+      project_id: projectId,
+      label: it.description || "Vision-extracted item",
+      csi_code: it.cost_code ?? null,
+      division: it.cost_code ? it.cost_code.slice(0, 2) : null,
+      quantity: it.quantity,
+      unit: it.unit,
+      type: "takeoff_import",
+      page: (page as { page_number?: number }).page_number ?? 0,
+      document_id: page.document_id ?? null,
+      meta: {
+        trade: null,
+        quantity_basis: it.raw_text ?? null,
+        drawing_ref: it.layer_hint ?? null,
+        location_tag: null,
+        extraction_method: "ai_vision",
+        vision_source: it.source,
+        vision_page_id: body.page_id,
+        confidence: it.confidence,
+      },
+    }));
+    const { error: takeoffErr } = await anyDb.from("takeoff_items").insert(takeoffPayload);
+    if (takeoffErr) {
+      console.error("[vision-extract] takeoff_items insert failed", takeoffErr);
+    } else {
+      void syncTakeoffToEstimate(tenantId, projectId).catch((e) => console.error("[vision-extract] estimate sync failed", e));
+    }
+  }
 
   // ── Background agents (fire-and-forget) ──────────────────────────────────
   // Agents ONLY write to `ai_agent_audit_trails` with status

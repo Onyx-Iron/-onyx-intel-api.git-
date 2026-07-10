@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { logEvent } from "@/lib/activity";
+import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
 
 export const runtime = "nodejs";
 
@@ -83,10 +84,42 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }));
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (db as any).from("manual_takeoffs").insert(rows).select("id");
+  const anyDb = db as any;
+  const { data, error } = await anyDb.from("manual_takeoffs").insert(rows).select("id");
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   const projectId = items[0].project_id;
+
+  // Mirror into takeoff_items so this feeds the estimate the same way
+  // deterministic/AI-extracted takeoff rows do — manual canvas measurements
+  // and vision-approved items shouldn't require a second entry to price.
+  const takeoffPayload = items.map((it, i) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const geo = (it.geometry ?? {}) as Record<string, any>;
+    return {
+      tenant_id: tenantId,
+      project_id: it.project_id,
+      label: typeof geo.description === "string" ? geo.description : "Manual takeoff item",
+      csi_code: it.cost_code ?? null,
+      division: it.cost_code ? it.cost_code.slice(0, 2) : null,
+      quantity: it.quantity,
+      unit: it.unit ?? null,
+      type: "takeoff_import",
+      page: 0,
+      document_id: it.page_id ?? null,
+      meta: {
+        trade: null,
+        quantity_basis: null,
+        drawing_ref: typeof geo.layer_hint === "string" ? geo.layer_hint : null,
+        location_tag: null,
+        extraction_method: geo.source === "vision_extraction" ? "ai_vision" : "manual",
+        manual_takeoff_id: data?.[i]?.id ?? null,
+      },
+    };
+  });
+  const { error: takeoffErr } = await anyDb.from("takeoff_items").insert(takeoffPayload);
+  if (takeoffErr) console.error("[canvas/manual] takeoff_items mirror failed", takeoffErr);
+
   void logEvent({
     projectId,
     tenantId,
@@ -98,7 +131,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     meta: { count: items.length },
   });
 
-  return NextResponse.json({ ok: true, inserted: rows.length, ids: (data ?? []).map((d: { id: string }) => d.id) });
+  const sync = takeoffErr ? null : await syncTakeoffToEstimate(tenantId, projectId);
+
+  return NextResponse.json({ ok: true, inserted: rows.length, ids: (data ?? []).map((d: { id: string }) => d.id), estimate_synced: sync });
 }
 
 export async function DELETE(req: NextRequest): Promise<NextResponse> {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface VisionItem {
   description: string;
@@ -33,15 +33,17 @@ interface Props {
  * Gemini pulled from the page, cross-referenced against vector-derived
  * findings from the CAD Vector Layer.
  *
- * Anything that matches a vector-derived description gets a "verified" pill
- * so the estimator can trust it more; anything vision-only is clearly
- * source-tagged.
+ * Findings are committed automatically by the API into takeoff_items (and
+ * from there into the estimate) as soon as extraction runs — no manual
+ * per-item approval gate. Low-confidence / AI-vision items still land with
+ * pricing_status "review" downstream so an estimator can catch a bad read
+ * before it's treated as verified, but they don't require a click just to
+ * exist in the takeoff.
  */
-export default function VisionExtractionsPanel({ pageId, projectId, vectorDescriptions, onCommitted }: Props) {
+export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onCommitted }: Props) {
   const [state, setState] = useState<{ result: VisionResult | null; loading: boolean; err: string | null }>({ result: null, loading: true, err: null });
-  const [approving, setApproving] = useState<number | null>(null);
-  const [approvedIdx, setApprovedIdx] = useState<Set<number>>(new Set());
   const [open, setOpen] = useState(true);
+  const notifiedKey = useRef<string | null>(null);
 
   const runExtract = useCallback(async (force: boolean) => {
     setState((s) => ({ ...s, loading: true, err: null }));
@@ -90,46 +92,16 @@ export default function VisionExtractionsPanel({ pageId, projectId, vectorDescri
     });
   }, [state.result, vectorDescriptions]);
 
-  const approve = useCallback(async (idx: number) => {
-    const it = enriched[idx];
-    if (!it) return;
-    setApproving(idx);
-    try {
-      const takeoffType: "count" | "length" | "area" =
-        it.unit === "EA" ? "count" :
-        it.unit === "SF" || it.unit === "CY" ? "area" : "length";
-      const res = await fetch("/api/takeoff/canvas/manual", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          items: [{
-            project_id: projectId,
-            page_id: pageId,
-            cost_code: it.cost_code ?? null,
-            takeoff_type: takeoffType,
-            quantity: it.quantity,
-            unit: it.unit,
-            geometry: {
-              points: [],
-              source: "vision_extraction",
-              vision_source: it.source,
-              layer_hint: it.layer_hint,
-              raw_text: it.raw_text,
-              confidence: it.confidence,
-              cross_verified: it.cross_verified,
-              description: it.description,
-            },
-          }],
-        }),
-      });
-      if (res.ok) {
-        setApprovedIdx((prev) => new Set(prev).add(idx));
-        onCommitted?.(it);
-      }
-    } finally {
-      setApproving(null);
-    }
-  }, [enriched, projectId, pageId, onCommitted]);
+  // The API auto-commits every item into takeoff_items as soon as extraction
+  // runs. Notify the parent once per result so the canvas shapes dock stays
+  // in sync without requiring a manual approve click.
+  useEffect(() => {
+    if (!state.result || !onCommitted) return;
+    const key = state.result.extracted_at;
+    if (notifiedKey.current === key) return;
+    notifiedKey.current = key;
+    for (const it of state.result.items) onCommitted(it);
+  }, [state.result, onCommitted]);
 
   return (
     <div className="border-b border-white/10">
@@ -144,7 +116,7 @@ export default function VisionExtractionsPanel({ pageId, projectId, vectorDescri
             {state.loading ? "Reading page…" :
              state.err     ? "Extraction failed" :
              enriched.length === 0 ? "No takeoff items detected" :
-             `${enriched.length} finding${enriched.length === 1 ? "" : "s"}`}
+             `${enriched.length} finding${enriched.length === 1 ? "" : "s"} — added to takeoff`}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -153,7 +125,7 @@ export default function VisionExtractionsPanel({ pageId, projectId, vectorDescri
               type="button"
               onClick={(e) => { e.stopPropagation(); void runExtract(true); }}
               className="text-[9px] font-mono uppercase tracking-widest text-white/40 hover:text-[#CCFF00]"
-              title="Re-run vision extraction"
+              title="Re-run vision extraction (replaces previously added items for this page)"
             >
               refresh
             </button>
@@ -183,17 +155,17 @@ export default function VisionExtractionsPanel({ pageId, projectId, vectorDescri
             </div>
           )}
           {enriched.map((it, i) => {
-            const isApproved = approvedIdx.has(i);
             const tone =
               it.source === "schedule" ? "text-cyan-400" :
               it.source === "callout"  ? "text-[#CCFF00]" :
               it.source === "image"    ? "text-orange-400" :
               it.source === "note"     ? "text-amber-400" :
                                          "text-white/50";
+            const needsReview = it.confidence < 0.65;
             return (
               <div
                 key={`${it.description}-${i}`}
-                className={`rounded-lg border px-3 py-2 ${isApproved ? "border-[#CCFF00]/30 bg-[#CCFF00]/[0.03]" : "border-white/10 bg-white/[0.02]"}`}
+                className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2"
               >
                 <div className="flex items-center gap-2">
                   <span className={`text-[9px] uppercase tracking-widest font-mono ${tone}`}>{it.source}</span>
@@ -221,14 +193,14 @@ export default function VisionExtractionsPanel({ pageId, projectId, vectorDescri
                   {it.cost_code && (
                     <span className="text-[10px] font-mono text-white/40">{it.cost_code}</span>
                   )}
-                  <button
-                    type="button"
-                    disabled={isApproved || approving === i}
-                    onClick={() => approve(i)}
-                    className="ml-auto rounded-full bg-[#CCFF00] px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-widest text-black hover:opacity-85 disabled:opacity-40"
+                  <span
+                    className={`ml-auto rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-widest ${
+                      needsReview ? "bg-amber-400/20 text-amber-300" : "bg-[#CCFF00]/20 text-[#CCFF00]"
+                    }`}
+                    title={needsReview ? "Low-confidence AI read — flagged for review in the estimate" : "Added to takeoff"}
                   >
-                    {isApproved ? "Added" : approving === i ? "…" : "Approve"}
-                  </button>
+                    {needsReview ? "Needs review" : "Added"}
+                  </span>
                 </div>
               </div>
             );
