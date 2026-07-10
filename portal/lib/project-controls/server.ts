@@ -1,4 +1,5 @@
 import { createServiceClient } from "@/lib/supabase/server";
+import { seedStarterCostCatalog } from "@/lib/cost/starter-catalog";
 
 interface QueryError {
   message: string;
@@ -40,6 +41,16 @@ export async function getOrCreateTenant(orgId: string, orgName: string): Promise
     .single();
 
   if (error || !created) throw new Error(`[tenant] ${error?.message ?? "create failed"}`);
+
+  // Auto-seed starter cost rates so a brand-new tenant never silently sits
+  // with an empty cost_catalog until someone manually finds and clicks
+  // "Seed starter rates" — same failure mode the (now-seeded) global
+  // cost_codes catalog had. Best-effort: a seeding failure shouldn't block
+  // tenant creation.
+  void seedStarterCostCatalog(db, created.id).catch((e) =>
+    console.error("[getOrCreateTenant] starter catalog seed failed", e),
+  );
+
   return created.id;
 }
 
