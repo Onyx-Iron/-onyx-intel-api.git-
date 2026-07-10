@@ -22,8 +22,14 @@ interface VisionResult {
 
 interface TakeoffItemRef {
   id: string;
-  review_status: "pending_review" | "approved" | "rejected" | string;
+  review_status: "suggested" | "reviewed" | "approved" | "rejected" | string;
   rejected_reason: string | null;
+}
+
+// "suggested" and "reviewed" both still need an approve/reject decision —
+// neither can affect the estimate yet.
+function needsDecision(status: string): boolean {
+  return status === "suggested" || status === "reviewed";
 }
 
 interface Props {
@@ -41,9 +47,9 @@ interface Props {
  *
  * Every finding is committed into takeoff_items as soon as extraction runs
  * (visible in the takeoff grid immediately), but with review_status
- * "pending_review" — it is EXCLUDED from the estimate until a human
- * explicitly approves or rejects it here. Rejected items stay in
- * takeoff_items (permanently auditable) but can never reach the estimate.
+ * "suggested" — it is EXCLUDED from the estimate until a human explicitly
+ * approves or rejects it here. Rejected items stay in takeoff_items
+ * (permanently auditable) but can never reach the estimate.
  */
 export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onCommitted }: Props) {
   const [state, setState] = useState<{ result: VisionResult | null; loading: boolean; err: string | null }>({ result: null, loading: true, err: null });
@@ -121,7 +127,7 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
     }
   }, []);
 
-  const pendingCount = takeoffItems.filter((r) => r.review_status === "pending_review").length;
+  const pendingCount = takeoffItems.filter((r) => needsDecision(r.review_status)).length;
 
   return (
     <div className="border-b border-white/10">
@@ -182,7 +188,7 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
               it.source === "image"    ? "text-orange-400" :
               it.source === "note"     ? "text-amber-400" :
                                          "text-white/50";
-            const status = it.takeoffRef?.review_status ?? "pending_review";
+            const status = it.takeoffRef?.review_status ?? "suggested";
             const isActing = it.takeoffRef && acting === it.takeoffRef.id;
             return (
               <div
@@ -215,7 +221,7 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
                   {it.cost_code && (
                     <span className="text-[10px] font-mono text-white/40">{it.cost_code}</span>
                   )}
-                  {status === "pending_review" && it.takeoffRef ? (
+                  {needsDecision(status) && it.takeoffRef ? (
                     <div className="ml-auto flex items-center gap-1.5">
                       <button
                         type="button"

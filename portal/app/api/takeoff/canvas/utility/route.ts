@@ -1,7 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { logEvent } from "@/lib/activity";
 import { mirrorCivilItemsToTakeoff, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
@@ -89,6 +89,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const distinctProjectIds = [...new Set(items.map((it) => it.project_id))];
+  for (const pid of distinctProjectIds) {
+    try {
+      await assertProjectBelongsToTenant(pid, tenantId);
+    } catch {
+      return NextResponse.json({ error: `project_id ${pid} does not belong to this tenant` }, { status: 403 });
+    }
+  }
   const db = await createServiceClient();
 
   const rows = items.map((it) => {

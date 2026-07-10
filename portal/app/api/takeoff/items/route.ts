@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prepareTakeoffRowsForSave } from "@/lib/estimating/takeoff-import";
 import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { takeoffItemsSchema, parseBody } from "@/lib/validation";
@@ -63,6 +63,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const { project_id, rows } = validation.data;
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+
+    // project_id is client-supplied — never trust it without verifying it
+    // actually belongs to the caller's own tenant before using it to scope
+    // an insert (STEP 7: "do not trust tenant_id or project_id supplied by
+    // the browser without verification").
+    try {
+      await assertProjectBelongsToTenant(project_id, tenantId);
+    } catch {
+      return NextResponse.json({ error: "project_id does not belong to this tenant" }, { status: 403 });
+    }
+
     const db = await createServiceClient();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const anyDb = db as any;
@@ -109,12 +120,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         page: row.page ?? 0,
         document_id: row.document_id ?? null,
         meta: (row.meta ?? {}) as Json,
+        updated_by: userId,
         // Manual/deterministic saves through this route are either
         // human-created or grounded in deterministic math — they don't
         // need the AI-review gate, so they're implicitly approved. Only
-        // set created_by on genuinely new rows; preserve the original
-        // creator on an edit.
-        ...(isUpdate ? {} : { created_by: userId, review_status: "approved" as const }),
+        // set created_by/source_method on genuinely new rows; preserve
+        // the original creator on an edit.
+        ...(isUpdate ? {} : { created_by: userId, review_status: "approved" as const, source_method: "manual" }),
       };
     });
 

@@ -1,7 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { calcConstructionEntrance } from "@/lib/math/civil-scope";
 import { mirrorCivilItemsToTakeoff } from "@/lib/estimating/civil-mirror";
 
@@ -44,6 +44,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const computed  = calcConstructionEntrance({ length_ft, width_ft, depth_in, fabric_underlayment: fabric });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  try {
+    await assertProjectBelongsToTenant(body.project_id, tenantId);
+  } catch {
+    return NextResponse.json({ error: "project_id does not belong to this tenant" }, { status: 403 });
+  }
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;

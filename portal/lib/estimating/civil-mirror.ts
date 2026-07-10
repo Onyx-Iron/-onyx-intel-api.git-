@@ -43,12 +43,14 @@ export async function mirrorCivilItemsToTakeoff(
     type: "takeoff_import",
     page: 0,
     document_id: pageId,
+    sheet_id: pageId,
     // Civil calculators (trench embedment, stockpile swell, entrance
     // stone) are deterministic engineering math grounded in user-entered
     // inputs, not an AI guess — implicitly approved, same as manual/
     // deterministic takeoff rows.
     created_by: actorUserId ?? null,
     review_status: "approved" as const,
+    source_method: "civil_calculator",
     meta: {
       trade: "Earthwork",
       quantity_basis: null,

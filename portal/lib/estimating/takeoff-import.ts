@@ -17,13 +17,15 @@ export interface TakeoffFingerprintInput {
 
 export interface TakeoffItemForEstimate extends TakeoffFingerprintInput {
   id: string;
-  // 'pending_review' (AI-sourced, not yet human-reviewed) and 'rejected'
-  // items must never reach the estimate — only 'approved' items flow
-  // through. Missing/null is treated as 'approved' for backward
+  // Canonical 4-state lifecycle: suggested -> reviewed -> approved | rejected.
+  // Only 'approved' may flow into the estimate — 'suggested' and 'reviewed'
+  // are both still unapproved (an estimator has looked at a 'reviewed' item
+  // but has not yet made an approve/reject decision), and 'rejected' is
+  // permanent. Missing/null is treated as 'approved' for backward
   // compatibility with rows inserted before this column existed (the
-  // migration itself backfills existing rows to 'approved' via its
-  // column default, so this fallback is a belt-and-suspenders match).
-  review_status?: "pending_review" | "approved" | "rejected" | null;
+  // migration backfills existing rows to 'approved' via its column
+  // default, so this fallback is a belt-and-suspenders match).
+  review_status?: "suggested" | "reviewed" | "approved" | "rejected" | null;
 }
 
 export interface TakeoffRowForSave extends TakeoffFingerprintInput {
@@ -147,13 +149,14 @@ export function buildEstimateImportRows(input: BuildEstimateImportInput): BuildE
       continue;
     }
 
-    // Hard gate: pending/rejected AI-review items must never reach the
-    // estimate, no matter what pricing/dedup logic would otherwise do.
-    // This is the actual enforcement point for "unapproved AI quantities
-    // cannot affect approved estimate totals" — a status column alone
-    // (pricing_status: "review") is advisory, not a gate; excluding the
-    // row from ever being inserted is the gate.
-    if (takeoff.review_status === "pending_review" || takeoff.review_status === "rejected") {
+    // Hard gate: only 'approved' items may reach the estimate. 'suggested'
+    // and 'reviewed' are both still unapproved — a human having looked at
+    // an item (reviewed) is not the same as having approved it — and
+    // 'rejected' is permanent. This is the actual enforcement point for
+    // "unapproved AI quantities cannot affect approved estimate totals":
+    // a status column alone (pricing_status: "review") is advisory, not a
+    // gate; excluding the row from ever being inserted is the gate.
+    if (takeoff.review_status === "suggested" || takeoff.review_status === "reviewed" || takeoff.review_status === "rejected") {
       blockedByReview++;
       continue;
     }

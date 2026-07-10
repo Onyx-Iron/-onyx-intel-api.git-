@@ -73,6 +73,7 @@ interface TakeoffRow {
   drawing_ref?: string | null;
   location_tag?: string | null;
   extraction_method?: "deterministic" | "ai_vision";
+  confidence?: number | null;
 }
 
 // Mirrors lib/estimating/takeoff-import.ts's buildEstimateImportRows +
@@ -152,9 +153,10 @@ async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: strin
   const rows: Record<string, unknown>[] = [];
   // deno-lint-ignore no-explicit-any
   for (const t of takeoff.data ?? []) {
-    // Hard gate: never let a pending/rejected AI suggestion reach the
-    // estimate (mirrors lib/estimating/takeoff-import.ts's identical check).
-    if (t.review_status === "pending_review" || t.review_status === "rejected") continue;
+    // Hard gate: only 'approved' items reach the estimate (mirrors
+    // lib/estimating/takeoff-import.ts's identical check). 'suggested' and
+    // 'reviewed' are both still unapproved; 'rejected' is permanent.
+    if (t.review_status === "suggested" || t.review_status === "reviewed" || t.review_status === "rejected") continue;
 
     const meta = (t.meta ?? {}) as Record<string, unknown>;
     const drawingRef = typeof meta.drawing_ref === "string" ? meta.drawing_ref : null;
@@ -255,13 +257,16 @@ Deno.serve(async (req) => {
         type: "takeoff_import",
         page: body.page_number,
         document_id: body.document_id,
+        sheet_id: body.page_id,
         // Deterministic rows (PDF table/DXF/IFC/XLSX math) are grounded in
         // real source data and implicitly approved; ai_vision rows are an
         // unverified suggestion and must wait for a human review action
         // before they can reach the estimate (see syncTakeoffToEstimate
         // below, which excludes non-approved rows).
         created_by: null,
-        review_status: r.extraction_method === "ai_vision" ? "pending_review" : "approved",
+        review_status: r.extraction_method === "ai_vision" ? "suggested" : "approved",
+        source_method: r.extraction_method ?? "deterministic",
+        confidence_score: r.confidence ?? null,
         meta: {
           trade: r.trade ?? null,
           quantity_basis: r.quantity_basis ?? null,

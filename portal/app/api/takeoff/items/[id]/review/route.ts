@@ -5,18 +5,30 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { recordTakeoffHistory } from "@/lib/takeoff/history";
 import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
 import { logEvent } from "@/lib/activity";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
 /**
- * PATCH /api/takeoff/items/[id]/review { action: "approve" | "reject", reason? }
+ * PATCH /api/takeoff/items/[id]/review { action: "review" | "approve" | "reject", reason? }
  *
- * The human-control gate for AI-vision-sourced takeoff items. Approving
- * flips review_status to "approved" and immediately re-syncs the project's
- * estimate (the item was excluded from every prior sync while pending).
- * Rejecting flips it to "rejected" — the row stays in takeoff_items,
- * permanently auditable, but buildEstimateImportRows excludes it forever;
- * it can never flow into an estimate unless a human later approves it.
+ * The human-control gate for AI-vision-sourced takeoff items.
+ * - "review" flips review_status to "reviewed" — an estimator has looked at
+ *   it, but this is NOT approval; the item is still excluded from the
+ *   estimate exactly like "suggested".
+ * - "approve" flips it to "approved" and immediately re-syncs the project's
+ *   estimate (the item was excluded from every prior sync until now).
+ * - "reject" flips it to "rejected" — the row stays in takeoff_items,
+ *   permanently auditable, but buildEstimateImportRows excludes it forever;
+ *   it can never flow into an estimate unless a human later approves it.
+ *
+ * Approval requires the "financial" write permission (the same gate used
+ * for procurement/PO approval and the estimate matrix) — an authenticated
+ * session alone is not sufficient; the caller's role must be permitted to
+ * affect estimate totals. The client's request body has no way to bypass
+ * this: `id` is a path param scoped server-side by tenantId (derived from
+ * the Clerk session, never trusted from the request body), and the review
+ * decision is a fixed enum, not a client-supplied status string.
  */
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }): Promise<NextResponse> {
   try {
@@ -25,11 +37,19 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
     const { id } = await params;
     const body = await req.json().catch(() => ({})) as { action?: string; reason?: string };
-    if (body.action !== "approve" && body.action !== "reject") {
-      return NextResponse.json({ error: "action must be 'approve' or 'reject'" }, { status: 400 });
+    if (body.action !== "review" && body.action !== "approve" && body.action !== "reject") {
+      return NextResponse.json({ error: "action must be 'review', 'approve', or 'reject'" }, { status: 400 });
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+
+    try {
+      await assertPermission(tenantId, userId, "financial", "write");
+    } catch (e) {
+      if (e instanceof PermissionError) return NextResponse.json({ error: e.message }, { status: 403 });
+      throw e;
+    }
+
     const db = await createServiceClient();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const anyDb = db as any;
@@ -42,13 +62,15 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (beforeErr) return NextResponse.json({ error: beforeErr.message }, { status: 500 });
     if (!before) return NextResponse.json({ error: "Takeoff item not found" }, { status: 404 });
 
-    const reviewStatus = body.action === "approve" ? "approved" : "rejected";
+    const reviewStatus = body.action === "approve" ? "approved" : body.action === "reject" ? "rejected" : "reviewed";
     const patch: Record<string, unknown> = {
       review_status: reviewStatus,
       reviewed_by: userId,
       reviewed_at: new Date().toISOString(),
+      updated_by: userId,
       updated_at: new Date().toISOString(),
     };
+    if (body.action === "approve") { patch.approved_by = userId; patch.approved_at = new Date().toISOString(); }
     if (body.action === "reject") patch.rejected_reason = body.reason?.slice(0, 500) ?? null;
 
     const { data: updated, error } = await anyDb
@@ -59,9 +81,16 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       .single();
     if (error) return NextResponse.json({ error: error.message }, { status: 422 });
 
+    // "reviewed" isn't its own history action (the table's action CHECK is
+    // created/updated/deleted/approved/rejected) — recorded as "updated"
+    // instead; the before/after snapshot still shows review_status
+    // transitioning to "reviewed", so it's fully auditable either way.
+    const historyAction = reviewStatus === "approved" ? "approved" as const
+      : reviewStatus === "rejected" ? "rejected" as const
+      : "updated" as const;
     await recordTakeoffHistory(anyDb, {
       tenantId, projectId: before.project_id ?? null, takeoffItemId: id,
-      action: reviewStatus === "approved" ? "approved" : "rejected",
+      action: historyAction,
       actorUserId: userId, before, after: updated,
     });
 

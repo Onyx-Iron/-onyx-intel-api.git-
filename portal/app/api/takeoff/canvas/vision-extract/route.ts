@@ -274,6 +274,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       type: "takeoff_import",
       page: (page as { page_number?: number }).page_number ?? 0,
       document_id: page.document_id ?? null,
+      sheet_id: body.page_id,
       // AI-vision items are a suggestion, not a verified quantity — they
       // exist in the takeoff grid immediately (so the estimator can see
       // and triage them), but review_status gates them out of
@@ -281,7 +282,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // rejects via PATCH /api/takeoff/items/[id]/review. created_by is
       // intentionally null (no human created this row).
       created_by: null,
-      review_status: "pending_review",
+      review_status: "suggested",
+      source_method: "ai_vision",
+      confidence_score: it.confidence,
+      // Gemini vision reads text/schedules/callouts — it does not return
+      // pixel/vector geometry, so there is genuinely no drawing geometry
+      // to store. Leaving `geometry` null and flagging it explicitly
+      // (rather than fabricating a bounding box) satisfies "do not
+      // fabricate geometry when the extraction method cannot provide it —
+      // store an explicit unavailable state and flag it for review."
+      geometry: null,
       meta: {
         trade: null,
         quantity_basis: it.raw_text ?? null,
@@ -291,6 +301,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         vision_source: it.source,
         vision_page_id: body.page_id,
         confidence: it.confidence,
+        geometry_unavailable: true,
       },
     }));
     const { data: insertedTakeoff, error: takeoffErr } = await anyDb.from("takeoff_items").insert(takeoffPayload).select("id");

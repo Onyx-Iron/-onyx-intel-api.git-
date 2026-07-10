@@ -1,7 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { logEvent } from "@/lib/activity";
 import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
 import { recordTakeoffHistory } from "@/lib/takeoff/history";
@@ -69,6 +69,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+
+  // Every item must carry a project_id that actually belongs to this
+  // tenant — this was a confirmed gap (AUTHORIZATION_AUDIT.md #4): this
+  // route previously trusted the client-supplied project_id verbatim,
+  // letting an authenticated user attach fabricated takeoff rows to an
+  // arbitrary project_id, including one belonging to a different tenant.
+  const distinctProjectIds = [...new Set(items.map((it) => it.project_id))];
+  for (const pid of distinctProjectIds) {
+    try {
+      await assertProjectBelongsToTenant(pid, tenantId);
+    } catch {
+      return NextResponse.json({ error: `project_id ${pid} does not belong to this tenant` }, { status: 403 });
+    }
+  }
+
   const db = await createServiceClient();
 
   const rows = items.map((it) => ({
@@ -109,6 +124,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       type: "takeoff_import",
       page: 0,
       document_id: it.page_id ?? null,
+      sheet_id: it.page_id ?? null,
       geometry: it.geometry ?? null,
       // A shape the user drew and clicked save on is human-verified even
       // if its underlying quantity came from a vision suggestion — the
@@ -117,6 +133,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // authored the geometry itself).
       created_by: isVisionSourced ? null : userId,
       review_status: "approved" as const,
+      source_method: isVisionSourced ? "ai_vision" : "manual",
       meta: {
         trade: null,
         quantity_basis: null,

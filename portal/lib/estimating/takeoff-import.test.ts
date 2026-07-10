@@ -224,16 +224,16 @@ describe("takeoff to estimate import quality", () => {
     assert.match(result.rows[0].notes, /Review required: AI vision quantity/);
   });
 
-  it("excludes pending_review AI takeoff items from the estimate entirely", () => {
+  it("excludes suggested AI takeoff items from the estimate entirely", () => {
     const result = buildEstimateImportRows({
       takeoffItems: [
         {
-          id: "ai-takeoff-pending",
+          id: "ai-takeoff-suggested",
           label: "Unreviewed AI quantity",
           csi_code: "26-51-00",
           quantity: 99,
           unit: "EA",
-          review_status: "pending_review",
+          review_status: "suggested",
           meta: { extraction_method: "ai_vision" },
         },
       ],
@@ -245,6 +245,28 @@ describe("takeoff to estimate import quality", () => {
     assert.equal(result.rows.length, 0);
     assert.equal(result.blockedByReview, 1);
     assert.equal(result.skipped, 0);
+  });
+
+  it("excludes reviewed-but-not-yet-approved AI takeoff items from the estimate", () => {
+    const result = buildEstimateImportRows({
+      takeoffItems: [
+        {
+          id: "ai-takeoff-reviewed",
+          label: "Reviewed but undecided AI quantity",
+          csi_code: "26-51-00",
+          quantity: 99,
+          unit: "EA",
+          review_status: "reviewed",
+          meta: { extraction_method: "ai_vision" },
+        },
+      ],
+      existingEstimateItems: [],
+      costCatalog: [{ csi_code: "26-51-00", uom: "EA", unit_cost: 325 }],
+      projectId: "project-1",
+    });
+
+    assert.equal(result.rows.length, 0);
+    assert.equal(result.blockedByReview, 1);
   });
 
   it("excludes rejected takeoff items from the estimate permanently, even with a valid price", () => {
