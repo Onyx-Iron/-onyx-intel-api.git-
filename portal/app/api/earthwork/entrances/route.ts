@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { calcConstructionEntrance } from "@/lib/math/civil-scope";
+import { mirrorCivilItemsToTakeoff } from "@/lib/estimating/civil-mirror";
 
 export const runtime = "nodejs";
 
@@ -55,6 +56,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     computed,
   }).select("*").single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  await mirrorCivilItemsToTakeoff(anyDb, tenantId, body.project_id, null, "civil_construction_entrances", data?.id ?? "", [{
+    label: `Stabilized construction entrance: ${body.name}`,
+    csi_code: "31-25-00",
+    quantity: computed.area_sf,
+    unit: "SF",
+  }]);
+
   return NextResponse.json({ entrance: data });
 }
 

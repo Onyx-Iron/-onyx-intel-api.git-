@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { calcStockpile } from "@/lib/math/civil-scope";
+import { mirrorCivilItemsToTakeoff } from "@/lib/estimating/civil-mirror";
 
 export const runtime = "nodejs";
 
@@ -54,6 +55,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     reuse_planned: body.reuse_planned !== false,
   }).select("*").single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  const computed = calcStockpile({ volume_bcy: Number(body.volume_bcy ?? 0), swell_factor: Number(body.swell_factor ?? 1.15) });
+  await mirrorCivilItemsToTakeoff(anyDb, tenantId, body.project_id, null, "civil_stockpiles", data?.id ?? "", [{
+    label: `Stockpile: ${body.name} (${body.material_type})`,
+    csi_code: "31-23-00",
+    quantity: computed.ccy,
+    unit: "CY",
+  }]);
+
   return NextResponse.json({ stockpile: data });
 }
 

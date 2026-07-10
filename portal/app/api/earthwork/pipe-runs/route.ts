@@ -3,6 +3,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { calcPipeEmbedment, type PipeRunInput } from "@/lib/math/civil-scope";
+import { mirrorCivilItemsToTakeoff, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
+
+function csiForSystem(system: string): string {
+  const s = system.toLowerCase();
+  if (s.includes("sanitary")) return "33-30-00";
+  if (s.includes("storm")) return "33-40-00";
+  return "33-10-00"; // water / fire / other pressure systems
+}
 
 export const runtime = "nodejs";
 
@@ -73,6 +81,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     computed,
   }).select("*").single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  const takeoffRows: CivilMirrorRow[] = [
+    {
+      label: `${body.name} (${body.system} pipe, ${input.diameter_in}" dia)`,
+      csi_code: csiForSystem(body.system),
+      quantity: input.length_lf,
+      unit: "LF",
+    },
+    {
+      label: `${body.name} trench excavation`,
+      csi_code: "31-23-16",
+      quantity: computed.trench_excavation_bcy,
+      unit: "CY",
+    },
+  ];
+  await mirrorCivilItemsToTakeoff(anyDb, tenantId, body.project_id, body.page_id ?? null, "civil_pipe_runs", data?.id ?? "", takeoffRows);
+
   return NextResponse.json({ run: data });
 }
 

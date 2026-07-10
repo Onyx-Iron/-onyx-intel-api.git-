@@ -4,6 +4,14 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { logEvent } from "@/lib/activity";
+import { mirrorCivilItemsToTakeoff, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
+
+const SYSTEM_CSI: Record<string, string> = {
+  "Sanitary Sewer": "33-30-00",
+  "Storm Drain": "33-40-00",
+  "Water Line": "33-10-00",
+  "Fire Line": "33-10-00",
+};
 
 export const runtime = "nodejs";
 
@@ -110,10 +118,37 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (db as any).from("civil_utility_takeoffs").insert(rows).select("id");
+  const anyDb = db as any;
+  const { data, error } = await anyDb.from("civil_utility_takeoffs").insert(rows).select("id");
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   const projectId = items[0].project_id;
+
+  // Mirror into takeoff_items so pipe runs feed the estimate — this table
+  // exists to carry trench-engineering inputs an estimate line can't hold,
+  // but the computed excavation/pipe quantities themselves need to reach
+  // pricing the same way any other takeoff finding does.
+  const takeoffRows: CivilMirrorRow[] = rows.flatMap((r) => {
+    const csi = SYSTEM_CSI[r.system_type] ?? "33-10-00";
+    return [
+      {
+        label: `${r.system_type} pipe (${r.pipe_diameter_in}" dia)`,
+        csi_code: r.cost_code ?? csi,
+        quantity: r.run_length_lf,
+        unit: "LF",
+        drawing_ref: null,
+      },
+      {
+        label: `${r.system_type} trench excavation`,
+        csi_code: "31-23-16",
+        quantity: r.computed_trench_json.trench_excavation_bcy,
+        unit: "CY",
+        drawing_ref: null,
+      },
+    ];
+  });
+  await mirrorCivilItemsToTakeoff(anyDb, tenantId, projectId, items[0].page_id ?? null, "civil_utility_takeoffs", (data?.[0]?.id as string) ?? "", takeoffRows);
+
   void logEvent({
     projectId,
     tenantId,

@@ -91,6 +91,7 @@ async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: strin
   const [takeoff, existing, catalog] = await Promise.all([
     db.from("takeoff_items").select("id,label,csi_code,division,quantity,unit,type,meta").eq("tenant_id", tenantId).eq("project_id", projectId),
     db.from("estimate_items").select("source_takeoff_id,source_fingerprint").eq("tenant_id", tenantId).eq("project_id", projectId),
+    // Legacy per-tenant flat-rate catalog — fallback only, see below.
     db.from("cost_catalog").select("csi_code,uom,unit_cost").eq("tenant_id", tenantId),
   ]);
   if (takeoff.error || existing.error || catalog.error) {
@@ -106,6 +107,39 @@ async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: strin
   }
 
   const costLookup = new Map<string, number>();
+
+  // Real pricing engine: cost_codes + tenant cost_overrides + national
+  // cost_prices. Mirrors (a simplified version of) lib/cost/resolver.ts's
+  // resolveCostsBatch — skips regional-price/actuals precedence for brevity
+  // in this Deno runtime, but tenant overrides still win over national.
+  // deno-lint-ignore no-explicit-any
+  const distinctCodes = [...new Set((takeoff.data ?? []).map((t: any) => t.csi_code).filter(Boolean))] as string[];
+  if (distinctCodes.length > 0) {
+    const { data: codeRows } = await db.from("cost_codes").select("id,csi_code").in("csi_code", distinctCodes);
+    const codeIdByCsi = new Map<string, string>((codeRows ?? []).map((r: { id: string; csi_code: string }) => [r.csi_code, r.id]));
+    const codeIds = [...codeIdByCsi.values()];
+    if (codeIds.length > 0) {
+      const [overridesRes, nationalRes] = await Promise.all([
+        db.from("cost_overrides").select("cost_code_id,unit_cost,effective_from").eq("tenant_id", tenantId).in("cost_code_id", codeIds).order("effective_from", { ascending: false }),
+        db.from("cost_prices").select("cost_code_id,unit_cost").in("cost_code_id", codeIds).eq("region_type", "national").order("observed_at", { ascending: false }),
+      ]);
+      const overrideByCodeId = new Map<string, number>();
+      for (const r of overridesRes.data ?? []) {
+        if (!overrideByCodeId.has(r.cost_code_id) && r.unit_cost != null) overrideByCodeId.set(r.cost_code_id, Number(r.unit_cost));
+      }
+      const nationalByCodeId = new Map<string, number>();
+      for (const r of nationalRes.data ?? []) {
+        if (!nationalByCodeId.has(r.cost_code_id) && r.unit_cost != null) nationalByCodeId.set(r.cost_code_id, Number(r.unit_cost));
+      }
+      for (const [csi, codeId] of codeIdByCsi) {
+        const cost = overrideByCodeId.get(codeId) ?? nationalByCodeId.get(codeId);
+        if (cost != null && cost > 0) costLookup.set(`${csi}|*`, cost);
+      }
+    }
+  }
+
+  // Legacy per-tenant flat-rate catalog — only fills codes the resolver
+  // above couldn't price.
   // deno-lint-ignore no-explicit-any
   for (const c of catalog.data ?? []) {
     const cost = c.unit_cost ?? null;
