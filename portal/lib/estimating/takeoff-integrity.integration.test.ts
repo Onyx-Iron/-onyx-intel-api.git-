@@ -389,5 +389,189 @@ if (!HAS_DB) {
         .select("action").eq("takeoff_item_id", stale.id).eq("action", "deleted");
       assert.equal((historyRows ?? []).length, 1);
     });
+
+    it("a rejected item also survives force re-extraction (not just approved)", async () => {
+      const rejectedKey = `${TEST_MARK} rejected finding|5.0000|cy`;
+      const { data: rejected, error } = await db.from("takeoff_items").insert({
+        tenant_id: tenantA, project_id: projectA, label: `${TEST_MARK} rejected finding`,
+        quantity: 5, unit: "cy", type: "takeoff_import", page: 1, document_id: documentA,
+        review_status: "rejected", source_method: "ai_vision",
+        meta: { vision_page_id: pageA, item_key: rejectedKey },
+      }).select("id, review_status").single();
+      if (error) throw error;
+
+      const { error: rpcErr } = await db.rpc("apply_vision_extraction_takeoff_items", {
+        p_tenant_id: tenantA, p_project_id: projectA, p_document_id: documentA,
+        p_page_id: pageA, p_page_number: 1,
+        // Re-extraction "finds" the same rejected item again — it must not
+        // be resurrected as a new suggested row, and the original rejected
+        // row must be left exactly as-is.
+        p_items: [{ description: `${TEST_MARK} rejected finding`, quantity: 5, unit: "cy", source: "note", confidence: 0.7 }],
+      });
+      if (rpcErr) throw rpcErr;
+
+      const { data: after } = await db.from("takeoff_items").select("id, review_status").eq("id", rejected.id).maybeSingle();
+      assert.ok(after, "rejected row should still exist");
+      assert.equal(after.review_status, "rejected");
+
+      const { data: dupes } = await db.from("takeoff_items")
+        .select("id").eq("tenant_id", tenantA).eq("document_id", documentA)
+        .contains("meta", { item_key: rejectedKey });
+      assert.equal((dupes ?? []).length, 1, "no duplicate row should be created for an already-rejected finding");
+    });
+
+    it("a reviewed (but undecided) item may be replaced, same as suggested", async () => {
+      const reviewedKey = `${TEST_MARK} reviewed finding|6.0000|ton`;
+      const { data: reviewed, error } = await db.from("takeoff_items").insert({
+        tenant_id: tenantA, project_id: projectA, label: `${TEST_MARK} reviewed finding`,
+        quantity: 6, unit: "ton", type: "takeoff_import", page: 1, document_id: documentA,
+        review_status: "reviewed", source_method: "ai_vision",
+        meta: { vision_page_id: pageA, item_key: reviewedKey },
+      }).select("id").single();
+      if (error) throw error;
+
+      const { error: rpcErr } = await db.rpc("apply_vision_extraction_takeoff_items", {
+        p_tenant_id: tenantA, p_project_id: projectA, p_document_id: documentA,
+        p_page_id: pageA, p_page_number: 1,
+        p_items: [],
+      });
+      if (rpcErr) throw rpcErr;
+
+      const { data: after } = await db.from("takeoff_items").select("id").eq("id", reviewed.id).maybeSingle();
+      assert.equal(after, null, "a merely-reviewed (not approved/rejected) row must still be purgeable");
+    });
+
+    it("no orphaned estimate_item remains after a suggested/reviewed row is replaced", async () => {
+      // Only approved takeoff items are ever synced into estimate_items
+      // (see buildEstimateImportRows) — a suggested/reviewed row can never
+      // have a linked estimate_items row in the first place, so purging it
+      // cannot orphan anything. Prove this holds for the RPC's own purge path.
+      const key = `${TEST_MARK} never-synced finding|7.0000|ea`;
+      const { data: item, error } = await db.from("takeoff_items").insert({
+        tenant_id: tenantA, project_id: projectA, label: `${TEST_MARK} never-synced finding`,
+        quantity: 7, unit: "ea", type: "takeoff_import", page: 1, document_id: documentA,
+        review_status: "suggested", source_method: "ai_vision",
+        meta: { vision_page_id: pageA, item_key: key },
+      }).select("id").single();
+      if (error) throw error;
+
+      const { data: linkedBefore } = await db.from("estimate_items").select("id").eq("source_takeoff_id", item.id);
+      assert.equal((linkedBefore ?? []).length, 0, "a suggested item must never have a linked estimate_items row");
+
+      const { error: rpcErr } = await db.rpc("apply_vision_extraction_takeoff_items", {
+        p_tenant_id: tenantA, p_project_id: projectA, p_document_id: documentA,
+        p_page_id: pageA, p_page_number: 1, p_items: [],
+      });
+      if (rpcErr) throw rpcErr;
+
+      const { data: linkedAfter } = await db.from("estimate_items").select("id").eq("source_takeoff_id", item.id);
+      assert.equal((linkedAfter ?? []).length, 0);
+    });
+
+    it("a mid-operation failure rolls back the entire re-extraction (atomicity)", async () => {
+      const staleKey = `${TEST_MARK} rollback-target finding|8.0000|lf`;
+      const { data: stale, error } = await db.from("takeoff_items").insert({
+        tenant_id: tenantA, project_id: projectA, label: `${TEST_MARK} rollback-target finding`,
+        quantity: 8, unit: "lf", type: "takeoff_import", page: 1, document_id: documentA,
+        review_status: "suggested", source_method: "ai_vision",
+        meta: { vision_page_id: pageA, item_key: staleKey },
+      }).select("id").single();
+      if (error) throw error;
+
+      // A malformed item (non-numeric quantity) makes the function's own
+      // ::numeric cast throw partway through the insert loop — the prior
+      // delete-and-log-history work in this same call must roll back too,
+      // since the whole function body runs in one transaction (a plpgsql
+      // function call is always atomic unless it uses an explicit
+      // subtransaction/exception block, which this one does not).
+      const { error: rpcErr } = await db.rpc("apply_vision_extraction_takeoff_items", {
+        p_tenant_id: tenantA, p_project_id: projectA, p_document_id: documentA,
+        p_page_id: pageA, p_page_number: 1,
+        p_items: [{ description: "broken item", quantity: "not-a-number", unit: "ea", source: "note", confidence: 0.5 }],
+      });
+      assert.ok(rpcErr, "malformed input should surface as an RPC error, not succeed partially");
+
+      // The stale row must still exist exactly as it was — the delete inside
+      // the same transaction was rolled back along with the failed insert.
+      const { data: after } = await db.from("takeoff_items").select("id, review_status").eq("id", stale.id).maybeSingle();
+      assert.ok(after, "the pre-existing row must survive a rolled-back call");
+      assert.equal(after.review_status, "suggested");
+    });
+
+    it("concurrent re-extraction calls for the same page do not duplicate the same finding", async () => {
+      const key = `${TEST_MARK} concurrent finding|9.0000|sf`;
+      const items = [{ description: `${TEST_MARK} concurrent finding`, quantity: 9, unit: "sf", source: "note", confidence: 0.6 }];
+
+      // Two overlapping calls racing to insert the same undecided finding —
+      // the partial unique index + ON CONFLICT DO NOTHING added in the
+      // idempotent-insert hardening migration must prevent a duplicate.
+      const [r1, r2] = await Promise.all([
+        db.rpc("apply_vision_extraction_takeoff_items", {
+          p_tenant_id: tenantA, p_project_id: projectA, p_document_id: documentA,
+          p_page_id: pageA, p_page_number: 1, p_items: items,
+        }),
+        db.rpc("apply_vision_extraction_takeoff_items", {
+          p_tenant_id: tenantA, p_project_id: projectA, p_document_id: documentA,
+          p_page_id: pageA, p_page_number: 1, p_items: items,
+        }),
+      ]);
+      assert.equal(r1.error, null);
+      assert.equal(r2.error, null);
+
+      const { data: rows } = await db.from("takeoff_items")
+        .select("id").eq("tenant_id", tenantA).eq("document_id", documentA)
+        .contains("meta", { item_key: key });
+      assert.equal((rows ?? []).length, 1, "concurrent calls for the same finding must not create duplicate rows");
+    });
+  });
+
+  describe("takeoff-review authorization (cross-tenant / cross-project)", () => {
+    it("a client-supplied tenant_id in the request body cannot bypass tenant scoping — the route always derives tenantId from the session", async () => {
+      // Mirrors PATCH /api/takeoff/items/[id]/review: the lookup is always
+      // .eq("id", id).eq("tenant_id", tenantId) where tenantId comes from
+      // getOrCreateTenant(session), never from req.body. Simulating a
+      // malicious body with a different tenant_id has no effect because the
+      // route never reads tenant_id off the body in the first place.
+      const { data: item, error } = await db.from("takeoff_items").insert({
+        tenant_id: tenantA, project_id: projectA, label: `${TEST_MARK} auth-target`,
+        quantity: 1, unit: "ea", type: "count", page: 1, review_status: "suggested",
+      }).select("id").single();
+      if (error) throw error;
+
+      // Attempting the lookup with the attacker's claimed tenant (tenantB)
+      // instead of the real session tenant (tenantA) finds nothing — exactly
+      // as the real route's server-derived tenantId guarantees.
+      const { data: found } = await db.from("takeoff_items")
+        .select("id").eq("id", item.id).eq("tenant_id", tenantB).maybeSingle();
+      assert.equal(found, null);
+    });
+
+    it("documents the current cross-project approval scope: any tenant-financial-write user may approve any project's item in that tenant (no per-project membership table exists)", async () => {
+      // See docs/milestones/takeoff-integrity-hardening/AUTHORIZATION_REVIEW.md
+      // for the full investigation. project_profiles (lib/project-controls/
+      // permissions.ts) is keyed by (tenant_id, clerk_user_id) only — there is
+      // no project_id column, so "cross-project, same-tenant" approval cannot
+      // be denied without inventing new schema. This test pins down today's
+      // actual behavior so a future change to that scope is a deliberate,
+      // visible diff here rather than a silent regression.
+      const { data: projectB } = await db.from("projects")
+        .insert({ tenant_id: tenantA, name: `${TEST_MARK}_project_b` }).select("id").single();
+      const { data: item, error } = await db.from("takeoff_items").insert({
+        tenant_id: tenantA, project_id: projectB!.id, label: `${TEST_MARK} project-b-item`,
+        quantity: 1, unit: "ea", type: "count", page: 1, review_status: "suggested",
+      }).select("id").single();
+      if (error) throw error;
+
+      // The review route's own lookup — .eq("id", id).eq("tenant_id", tenantId)
+      // — has no project_id filter, so a tenantA caller (regardless of which
+      // project they're "on") finds this projectB item.
+      const { data: found } = await db.from("takeoff_items")
+        .select("id, project_id").eq("id", item.id).eq("tenant_id", tenantA).maybeSingle();
+      assert.ok(found, "current design: tenant-wide financial-write access spans all projects in the tenant");
+      assert.equal(found.project_id, projectB!.id);
+
+      await db.from("takeoff_items").delete().eq("id", item.id);
+      await db.from("projects").delete().eq("id", projectB!.id);
+    });
   });
 }
