@@ -69,6 +69,33 @@ const UNIT_COL_LABELS: Record<UnitKey, string> = {
   disposal_unit:      "Disposal $/u",
 };
 
+// Converts an authoritative estimate_items row (cost-category dollar totals)
+// into the grid's editable per-unit-rate shape. Division is exact (not
+// rounded) so a round-trip load -> save reproduces the same dollar totals.
+function itemToRow(it: {
+  id: string; cost_code: string | null; description: string | null; quantity: number | null; uom: string | null;
+  labor_cost: number; material_cost: number; equipment_cost: number; trucking_cost: number;
+  subcontract_cost: number; disposal_cost: number; notes: string | null; sort_order?: number;
+}, index: number): EstimateRow {
+  const q = it.quantity && it.quantity !== 0 ? it.quantity : 1;
+  return {
+    id: it.id,
+    cost_code: it.cost_code ?? "",
+    description: it.description ?? "",
+    quantity: it.quantity ?? 0,
+    unit: it.uom ?? "EA",
+    labor_unit: it.labor_cost / q,
+    material_unit: it.material_cost / q,
+    equipment_unit: it.equipment_cost / q,
+    subcontractor_unit: it.subcontract_cost / q,
+    trucking_unit: it.trucking_cost / q,
+    disposal_unit: it.disposal_cost / q,
+    notes: it.notes ?? "",
+    sort_order: it.sort_order ?? index,
+    _dirty: false,
+  };
+}
+
 export default function EstimateMatrix({ projectId, projectName }: Props) {
   const [rows, setRows] = useState<EstimateRow[]>([]);
   const [settings, setSettings] = useState<FinancialSettings>({ overhead_pct: 10, profit_pct: 15, contingency_pct: 5 });
@@ -77,9 +104,13 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   const [seedResult, setSeedResult] = useState<string | null>(null);
   const [assemblyModalOpen, setAssemblyModalOpen] = useState(false);
   const [role, setRole] = useState<string | null>(null);
+  const [versionId, setVersionId] = useState<string | null>(null);
+  const [versionNumber, setVersionNumber] = useState<number | null>(null);
+  const [versionStatus, setVersionStatus] = useState<string | null>(null);
   const saveTimer = useRef<number | null>(null);
 
   const pricingRestricted = role != null && RESTRICTED_ROLES.has(role);
+  const locked = versionStatus === "approved" || versionStatus === "superseded" || versionStatus === "void";
 
   useEffect(() => {
     fetch("/api/project-controls/role", { cache: "no-store" })
@@ -88,18 +119,43 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
       .catch(() => setRole(null));
   }, []);
 
-  // ── Initial load ──────────────────────────────────────────────────────────
+  // ── Initial load — resolves (or creates) the project's one authoritative
+  // estimate + its current version, then loads that version's items. ──────
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/estimate/matrix?project_id=${encodeURIComponent(projectId)}`, { cache: "no-store" });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json() as { rows: EstimateRow[]; settings: FinancialSettings };
-      setRows(data.rows.map((r) => ({ ...r, _dirty: false })));
+      const listRes = await fetch(`/api/estimate/versions?project_id=${encodeURIComponent(projectId)}`, { cache: "no-store" });
+      if (!listRes.ok) throw new Error(await listRes.text());
+      const list = await listRes.json() as { estimate: { id: string; current_version_id: string | null } | null; versions: { id: string; version_number: number; status: string }[] };
+
+      let activeVersionId = list.estimate?.current_version_id ?? null;
+      if (!activeVersionId) {
+        // No estimate exists yet for this project — create Version 1.
+        const createRes = await fetch("/api/estimate/versions", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project_id: projectId }),
+        });
+        if (createRes.ok) {
+          const created = await createRes.json() as { version: { id: string } };
+          activeVersionId = created.version.id;
+        }
+      }
+      if (!activeVersionId) { setLoading(false); return; }
+
+      const verRes = await fetch(`/api/estimate/versions/${encodeURIComponent(activeVersionId)}`, { cache: "no-store" });
+      if (!verRes.ok) throw new Error(await verRes.text());
+      const ver = await verRes.json() as {
+        version: { id: string; version_number: number; status: string; contingency_pct: number | null; overhead_pct: number | null; profit_pct: number | null };
+        items: Parameters<typeof itemToRow>[0][];
+      };
+      setVersionId(ver.version.id);
+      setVersionNumber(ver.version.version_number);
+      setVersionStatus(ver.version.status);
+      setRows(ver.items.map((it, i) => itemToRow(it, i)));
       setSettings({
-        overhead_pct: numericOr(data.settings.overhead_pct, 10),
-        profit_pct:   numericOr(data.settings.profit_pct, 15),
-        contingency_pct: numericOr(data.settings.contingency_pct, 5),
+        overhead_pct: numericOr(ver.version.overhead_pct, 10),
+        profit_pct:   numericOr(ver.version.profit_pct, 15),
+        contingency_pct: numericOr(ver.version.contingency_pct, 5),
       });
     } catch (e) {
       console.error("[estimate] load failed", e);
@@ -109,6 +165,33 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   }, [projectId]);
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, [load]);
+
+  // ── Create a new draft (from the current locked version) and switch to it ──
+  async function createNewDraft() {
+    if (!versionId) return;
+    setSaving(true);
+    try {
+      const res = await fetch("/api/estimate/versions", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_version_id: versionId }),
+      });
+      if (res.ok) await load();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function approveCurrentVersion() {
+    if (!versionId) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}/approve`, { method: "POST" });
+      if (res.ok) await load();
+      else setSeedResult(`Approve failed: ${(await res.json().catch(() => ({}))).error ?? res.status}`);
+    } finally {
+      setSaving(false);
+    }
+  }
 
   // ── Seed from takeoffs / manual ───────────────────────────────────────────
   async function seed() {
@@ -151,6 +234,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
 
   // ── Row edit helpers ──────────────────────────────────────────────────────
   function updateRow(idx: number, patch: Partial<EstimateRow>) {
+    if (locked) return; // approved/superseded/void versions are immutable — create a new draft to edit
     if (pricingRestricted) {
       // Belt-and-suspenders: strip unit-cost fields even if a disabled
       // input somehow still fired a change event.
@@ -162,6 +246,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   }
 
   function addRow() {
+    if (locked) return;
     setRows((prev) => [
       ...prev,
       {
@@ -186,7 +271,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   // ── Insert Assembly Mix — expands one composite spec into its nested
   // material resource rows (concrete, aggregate base, rebar) ──
   function insertAssembly(input: AssemblyMixInput) {
-    if (pricingRestricted) return; // FieldSuperintendent / ClientView can't add priced rows
+    if (pricingRestricted || locked) return; // FieldSuperintendent / ClientView can't add priced rows; locked versions can't be edited
     const areaSf = input.lengthFt * input.widthFt;
     const qty = calculateAssemblyQuantities({
       area_sf: areaSf,
@@ -247,41 +332,46 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   }
 
   async function removeRow(idx: number) {
+    if (locked) return; // approved/superseded/void — server would reject anyway; don't even try
     const r = rows[idx];
-    if (r.id) {
-      await fetch(`/api/estimate/matrix?id=${encodeURIComponent(r.id)}`, { method: "DELETE" });
+    if (r.id && versionId) {
+      await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}?item_id=${encodeURIComponent(r.id)}`, { method: "DELETE" });
     }
     setRows((prev) => prev.filter((_, i) => i !== idx));
   }
 
   const scheduleAutoSave = useCallback(() => {
+    if (locked) return;
     if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => { void saveAll(); }, 900);
-  }, []);
+  }, [locked]);
 
+  // Converts a row's edited per-unit rates back into cost-category dollar
+  // totals for the authoritative estimate_items shape. contingency/overhead/
+  // profit are intentionally omitted — the server derives them from the
+  // version's percentages (the sliders below), never trusted from here.
   async function saveAll(includeSettings = true) {
-    if (saving) return;
+    if (saving || locked || !versionId) return;
     const dirty = rows.filter((r) => r._dirty);
     if (dirty.length === 0 && !includeSettings) return;
     setSaving(true);
     try {
-      const res = await fetch("/api/estimate/matrix", {
-        method: "POST",
+      const res = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}`, {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          project_id: projectId,
-          rows: dirty.map((r, i) => ({
+          items: dirty.map((r, i) => ({
             id: r.id,
             cost_code: r.cost_code || null,
             description: r.description,
             quantity: r.quantity,
-            unit: r.unit,
-            labor_unit: r.labor_unit,
-            material_unit: r.material_unit,
-            equipment_unit: r.equipment_unit,
-            subcontractor_unit: r.subcontractor_unit,
-            trucking_unit: r.trucking_unit,
-            disposal_unit: r.disposal_unit,
+            uom: r.unit,
+            labor_cost: r.quantity * r.labor_unit,
+            material_cost: r.quantity * r.material_unit,
+            equipment_cost: r.quantity * r.equipment_unit,
+            subcontract_cost: r.quantity * r.subcontractor_unit,
+            trucking_cost: r.quantity * r.trucking_unit,
+            disposal_cost: r.quantity * r.disposal_unit,
             notes: r.notes,
             sort_order: i,
           })),
@@ -289,7 +379,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         }),
       });
       if (res.ok) {
-        await load(); // reload to pick up server-assigned IDs
+        await load(); // reload to pick up server-assigned IDs + recalculated totals
       }
     } finally {
       setSaving(false);
@@ -297,7 +387,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   }
 
   function updateSetting(key: keyof FinancialSettings, value: number) {
-    if (pricingRestricted) return; // markup sliders are locked for these roles
+    if (pricingRestricted || locked) return; // markup sliders are locked for these roles / locked versions
     setSettings((s) => ({ ...s, [key]: value }));
     if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => { void saveAll(); }, 400);
@@ -373,15 +463,36 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
           <div className="flex items-center gap-4">
             <Link href={`/dashboard/projects/${projectId}`} className="text-[11px] font-semibold uppercase tracking-widest text-white/50 hover:text-white">← Back</Link>
             <div>
-              <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Estimate · Pricing Matrix</div>
+              <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono text-white/40">
+                <span>Estimate · Pricing Matrix</span>
+                {versionNumber != null && (
+                  <span className={`rounded-full px-2 py-0.5 font-bold ${
+                    versionStatus === "approved" ? "bg-[#CCFF00]/20 text-[#CCFF00]" :
+                    versionStatus === "superseded" ? "bg-white/10 text-white/50" :
+                    versionStatus === "void" ? "bg-red-400/20 text-red-300" :
+                    "bg-amber-400/20 text-amber-300"
+                  }`}>
+                    v{versionNumber} · {versionStatus}
+                  </span>
+                )}
+              </div>
               <div className="text-sm font-semibold">{projectName}</div>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button type="button" onClick={seed} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white disabled:opacity-40">Load from Takeoffs</button>
-            <button type="button" onClick={addRow} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white">+ Row</button>
-            {!pricingRestricted && (
-              <button type="button" onClick={() => setAssemblyModalOpen(true)} className="inline-flex h-9 items-center rounded-full border border-[#00D2FF]/30 bg-[#00D2FF]/10 px-4 text-[11px] font-semibold uppercase tracking-widest text-[#00D2FF] hover:bg-[#00D2FF]/20">Insert Assembly Mix</button>
+            {locked ? (
+              <button type="button" onClick={createNewDraft} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-amber-400/40 bg-amber-400/10 px-4 text-[11px] font-semibold uppercase tracking-widest text-amber-300 hover:bg-amber-400/20 disabled:opacity-40">New Draft to Edit</button>
+            ) : (
+              <>
+                <button type="button" onClick={seed} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white disabled:opacity-40">Load from Takeoffs</button>
+                <button type="button" onClick={addRow} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white">+ Row</button>
+                {!pricingRestricted && (
+                  <button type="button" onClick={() => setAssemblyModalOpen(true)} className="inline-flex h-9 items-center rounded-full border border-[#00D2FF]/30 bg-[#00D2FF]/10 px-4 text-[11px] font-semibold uppercase tracking-widest text-[#00D2FF] hover:bg-[#00D2FF]/20">Insert Assembly Mix</button>
+                )}
+                {!pricingRestricted && (versionStatus === "draft" || versionStatus === "review") && (
+                  <button type="button" onClick={approveCurrentVersion} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-[#CCFF00]/40 bg-[#CCFF00]/10 px-4 text-[11px] font-semibold uppercase tracking-widest text-[#CCFF00] hover:bg-[#CCFF00]/20 disabled:opacity-40">Approve Version</button>
+                )}
+              </>
             )}
             <button type="button" onClick={exportProposal} className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85">Export XLSX</button>
           </div>
@@ -389,14 +500,19 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
 
         {/* Slider row — markup/profit multipliers are masked for field & client roles */}
         <div className="border-t border-white/5 px-4 py-2 grid grid-cols-3 gap-6">
-          <SliderControl label="Overhead" value={settings.overhead_pct} onChange={(v) => updateSetting("overhead_pct", v)} tone="text-[#CCFF00]" disabled={pricingRestricted} />
-          <SliderControl label="Profit" value={settings.profit_pct} onChange={(v) => updateSetting("profit_pct", v)} tone="text-[#00D2FF]" disabled={pricingRestricted} />
-          <SliderControl label="Contingency" value={settings.contingency_pct} onChange={(v) => updateSetting("contingency_pct", v)} tone="text-amber-400" disabled={pricingRestricted} />
+          <SliderControl label="Overhead" value={settings.overhead_pct} onChange={(v) => updateSetting("overhead_pct", v)} tone="text-[#CCFF00]" disabled={pricingRestricted || locked} />
+          <SliderControl label="Profit" value={settings.profit_pct} onChange={(v) => updateSetting("profit_pct", v)} tone="text-[#00D2FF]" disabled={pricingRestricted || locked} />
+          <SliderControl label="Contingency" value={settings.contingency_pct} onChange={(v) => updateSetting("contingency_pct", v)} tone="text-amber-400" disabled={pricingRestricted || locked} />
         </div>
 
         {pricingRestricted && (
           <div className="border-t border-white/5 bg-amber-900/10 px-4 py-1.5 text-[11px] text-amber-400/80">
             Pricing and markup controls are hidden for your role ({role}).
+          </div>
+        )}
+        {locked && (
+          <div className="border-t border-white/5 bg-white/[0.03] px-4 py-1.5 text-[11px] text-white/50">
+            This version is <b>{versionStatus}</b> and cannot be edited. Click <b>New Draft to Edit</b> to make changes — it will copy every item into a fresh draft version.
           </div>
         )}
 
