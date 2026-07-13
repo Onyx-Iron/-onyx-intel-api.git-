@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "tsx --test $(find . -path ./node_modules -prune -o -name '*.test.ts' -not -name '*.integration.test.ts' -print)",
+    "test:integration": "tsx --test $(find . -path ./node_modules -prune -o -name '*.integration.test.ts' -print)"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.5.9",
