@@ -136,14 +136,18 @@ jobs:
   integration-tests:
     name: Integration tests (tenant isolation, atomic writes, outbox worker)
     runs-on: ubuntu-latest
-    # Requires repo secrets NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY
-    # pointed at the real Supabase dev project (not a local stack — these
-    # tests exercise live RPCs/RLS/triggers that only exist there). Every
-    # test file in this suite already skips itself gracefully and reports
-    # "SKIPPED — no live DB credentials" if these secrets aren't configured,
-    # so this job stays green before they're added — it just isn't a real
-    # gate until they are. See the CI setup checkpoint for exactly which
-    # secrets to add and where.
+    # SAFETY: must target an ISOLATED Supabase branch / dedicated test
+    # project only — never production. Uses TEST_SUPABASE_URL /
+    # TEST_SUPABASE_SERVICE_ROLE_KEY repo secrets (distinct names from the
+    # production NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY secrets
+    # used by the build job) plus ALLOW_INTEGRATION_TESTS=true.
+    # lib/test-utils/integration-guard.ts fails closed (throws, does not
+    # skip) if TEST_SUPABASE_URL ever resolves to the production project ref,
+    # so even a misconfigured secret can't point this job at production.
+    # Every test file in this suite already skips itself gracefully and
+    # reports "SKIPPED — ALLOW_INTEGRATION_TESTS is not set" if these secrets
+    # aren't configured, so this job stays green before they're added — it
+    # just isn't a real gate until they are.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -154,5 +158,6 @@ jobs:
       - run: npm ci
       - run: npm run test:integration
         env:
-          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ALLOW_INTEGRATION_TESTS: "true"
+          TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}

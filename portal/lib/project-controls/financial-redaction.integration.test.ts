@@ -8,39 +8,30 @@
 // authorized role (Owner/Admin/Estimator/ProjectManager) — against real rows
 // in estimate_items, invoices, and change_order_items, not a mock.
 //
-// Requires NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY. Skips
-// gracefully if absent.
+// SAFETY: this test targets an isolated Supabase branch/test project ONLY —
+// never production. Requires ALLOW_INTEGRATION_TESTS=true plus
+// TEST_SUPABASE_URL/TEST_SUPABASE_SERVICE_ROLE_KEY (see .env.test.local.example
+// and lib/test-utils/integration-guard.ts). Fails closed (throws) if the
+// resolved project ref is the production project; self-skips for any other
+// reason it can't run.
 
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createClient } from "@supabase/supabase-js";
+import { loadIntegrationTestEnv } from "@/lib/test-utils/integration-guard";
 import type { Role } from "./permissions";
 import { redactFinancialFields } from "./permissions";
 import { ESTIMATE_FINANCIAL_FIELDS, CHANGE_ORDER_FINANCIAL_FIELDS, INVOICE_FINANCIAL_FIELDS } from "./financial-redaction";
 
-function loadEnvLocal(): void {
-  const envPath = resolve(__dirname, "../../.env.local");
-  if (!existsSync(envPath)) return;
-  for (const line of readFileSync(envPath, "utf8").split("\n")) {
-    const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
-    if (match && !process.env[match[1]]) process.env[match[1]] = match[2].trim();
-  }
-}
-loadEnvLocal();
+const ENV = loadIntegrationTestEnv();
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY;
-const HAS_DB = Boolean(SUPABASE_URL && SERVICE_KEY);
-
-if (!HAS_DB) {
-  describe("Financial-read gate (integration, SKIPPED — no live DB credentials)", () => {
+if (!ENV.ready) {
+  describe(`Financial-read gate (integration, SKIPPED — ${ENV.skipReason})`, () => {
     it("skipped", () => { /* no-op */ });
   });
 } else {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const db = createClient(SUPABASE_URL!, SERVICE_KEY!) as any;
+  const db = createClient(ENV.supabaseUrl!, ENV.serviceKey!) as any;
 
   const KNOWN_ROLES: readonly Role[] = [
     "Owner", "Admin", "Estimator", "ProjectManager", "FieldSuperintendent", "Subcontractor", "ClientView",
