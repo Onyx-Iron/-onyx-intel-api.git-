@@ -6,6 +6,20 @@ import CADVectorLayer from "./CADVectorLayer";
 import VisionExtractionsPanel from "./VisionExtractionsPanel";
 import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
+import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
+
+// Coordinate-space tag carried alongside each committed item (professional-
+// manual-takeoff milestone, PERMANENT RULE 1/2). 'page_space' points are
+// stable regardless of window size/zoom — see lib/takeoff/canvas/
+// coordinates.ts for why this matters: the previous version of this file
+// stored every drawn point in CURRENT-RENDER canvas-pixel coordinates,
+// which vary with window width, so reopening the same sheet in a
+// differently-sized window would render saved geometry in the wrong
+// location. Items saved before this milestone have no tag (undefined) and
+// are treated as 'legacy_pixel' — rendered exactly as before, never
+// reinterpreted, so existing takeoff data renders identically to how it
+// always has (RULE 15/17: preserve existing data, never fabricate).
+type CoordinateSpace = "page_space" | "legacy_pixel";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -16,8 +30,11 @@ interface Pt { x: number; y: number }
 
 interface Shape {
   key: string;                // client-side id
+  id?: string;                // server id once saved — required to PATCH an existing object
+  row_version?: number;       // optimistic-concurrency version last read from the server (see update_manual_takeoff_tx)
   tool: "count" | "length" | "area";
-  points: Pt[];               // canvas pixel coords
+  points: Pt[];               // coords in `coordinateSpace` (see toDisplayPoints)
+  coordinateSpace: CoordinateSpace;
   quantity: number;           // computed (count: N; length: LF; area: SF)
   unit: "EA" | "LF" | "SF";
   cost_code?: string;
@@ -44,7 +61,8 @@ interface TrenchYield {
 interface UtilityRun {
   key: string;
   id?: string;                // server id once saved
-  points: Pt[];                // canvas pixel coords
+  points: Pt[];                // coords in `coordinateSpace`
+  coordinateSpace: CoordinateSpace;
   run_length_lf: number;
   inputs: UtilityRunInputs;
   trench: TrenchYield;
@@ -52,9 +70,19 @@ interface UtilityRun {
   saved?: boolean;
 }
 
+// Page-space calibration model (manual-takeoff-calibration-hardening
+// milestone). `scale_ratio` is the OLD render-pixel-relative field, kept
+// only so a legacy row (created before this milestone) still renders/scales
+// using its original (render-scale-dependent) behavior — see the `scale`
+// useMemo below and LEGACY_MIGRATION_POLICY.md. `page_space_scale_factor` is
+// the new authoritative value: real-world units per PAGE-SPACE unit,
+// invariant to render scale/zoom/window size entirely.
 interface Calibration {
-  scale_ratio: number;        // real-units per canvas pixel
+  scale_ratio: number | null; // legacy: real-units per canvas pixel AT CALIBRATION TIME (render-scale-dependent — do not use for new calculations)
   unit_type: string;          // "LF"
+  page_space_scale_factor: number | null; // real-units per page-space-unit — render-scale-independent
+  status: "legacy_render_space" | "migrated" | "verified" | "needs_verification";
+  verified: boolean;
 }
 
 // ── Topographic contour / spot elevation nodes ──
@@ -62,7 +90,8 @@ interface TopoNode {
   key: string;
   id?: string;
   node_type: "contour_line" | "spot_elevation";
-  points: Pt[];               // canvas pixel coords
+  points: Pt[];               // coords in `coordinateSpace`
+  coordinateSpace: CoordinateSpace;
   elevation: number;
   layer_assignment?: string;  // "manual" or the matched CAD layer, e.g. "C-TOPO"
   saved?: boolean;
@@ -81,7 +110,8 @@ const DEPTH_APPLICABLE_KINDS: ReadonlySet<BoundaryKind> = new Set(["topsoil_stri
 interface AreaBound {
   key: string;
   id?: string;
-  points: Pt[];                // canvas pixel coords
+  points: Pt[];                // coords in `coordinateSpace`
+  coordinateSpace: CoordinateSpace;
   boundary_kind: BoundaryKind;
   area_sf: number;
   depth_in?: number;
@@ -106,6 +136,19 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [pdfUrl, setPdfUrl]         = useState<string | null>(null);
   const [renderSize, setRenderSize] = useState<{ w: number; h: number } | null>(null);
+  // The pdf.js viewport scale actually used for the CURRENT render — distinct
+  // from `calibration.scale_ratio` (real-world-units-per-pixel). This is what
+  // varies with window width; page-space geometry is this render's pixel
+  // coordinates divided by this value (see lib/takeoff/canvas/coordinates.ts).
+  const [renderScale, setRenderScale] = useState<number>(1);
+  // Render-time projection: page_space items are stored viewport-independent
+  // and must be projected through the CURRENT renderScale to draw at the
+  // right screen pixels; legacy_pixel items are already in this render's
+  // pixel space (their old, viewport-dependent behavior — unchanged) so they
+  // pass through untouched.
+  const toDisplayPoints = useCallback((points: Pt[], coordinateSpace: CoordinateSpace): Pt[] => {
+    return coordinateSpace === "page_space" ? pointsToScreenSpace(points, renderScale) : points;
+  }, [renderScale]);
   const [tool, setTool]             = useState<Tool>("pan");
   const [shapes, setShapes]         = useState<Shape[]>([]);
   const [draftPoints, setDraftPoints] = useState<Pt[]>([]);   // in-progress polygon/line points
@@ -114,6 +157,11 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [loadError, setLoadError]   = useState<string | null>(null);
   const [saving, setSaving]         = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  // Whole-object drag state for an already-SAVED Shape (count/length/area) —
+  // manual-takeoff-productivity milestone, STEP 4/2 (core geometry editing +
+  // optimistic concurrency). Vertex-level editing, and dragging for utility
+  // runs/topo nodes/area bounds, is deferred — see REMAINING_RISKS.md.
+  const [dragState, setDragState] = useState<{ key: string; startClient: Pt; originalPoints: Pt[]; originalRowVersion: number } | null>(null);
   const [vectorDescriptions, setVectorDescriptions] = useState<string[]>([]);
   const [utilityRuns, setUtilityRuns] = useState<UtilityRun[]>([]);
   const [utilityDraftPts, setUtilityDraftPts] = useState<Pt[]>([]);
@@ -153,12 +201,18 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           if (!cancelled) setCalibration(calData.calibration);
         }
         if (mtRes.ok) {
-          const mtData = await mtRes.json() as { items: Array<{ id: string; takeoff_type: "count" | "length" | "area"; cost_code: string | null; quantity: number; unit: string | null; geometry: { points?: Pt[] } }> };
+          const mtData = await mtRes.json() as { items: Array<{ id: string; takeoff_type: "count" | "length" | "area"; cost_code: string | null; quantity: number; unit: string | null; row_version?: number; geometry: { points?: Pt[]; coordinate_space?: string } }> };
           if (!cancelled) {
             setShapes(mtData.items.map((it) => ({
               key: `saved-${it.id}`,
+              id: it.id,
+              row_version: it.row_version ?? 1,
               tool: it.takeoff_type,
               points: Array.isArray(it.geometry?.points) ? it.geometry.points : [],
+              // Absent/unrecognized tag → 'legacy_pixel' (rows saved before
+              // this milestone) — never assumed to be page_space, so old
+              // geometry keeps rendering exactly as it always has.
+              coordinateSpace: (it.geometry?.coordinate_space === "page_space" ? "page_space" : "legacy_pixel") as CoordinateSpace,
               quantity: Number(it.quantity),
               unit: (it.unit ?? (it.takeoff_type === "count" ? "EA" : it.takeoff_type === "length" ? "LF" : "SF")) as Shape["unit"],
               cost_code: it.cost_code ?? undefined,
@@ -171,7 +225,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             id: string; system_type: string; pipe_diameter_in: number;
             invert_elevation_start: number | null; invert_elevation_end: number | null;
             trench_width_ft: number; run_length_lf: number;
-            cost_code: string | null; geometry: { points?: Pt[] } | null;
+            cost_code: string | null; geometry: { points?: Pt[]; coordinate_space?: string } | null;
             computed_trench_json: { trench_excavation_bcy?: number; common_backfill_cy?: number; totals?: { aggregate_import_cy?: number } } | null;
           };
           const utData = await utRes.json() as { items: SavedUtilityRow[] };
@@ -180,6 +234,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               key: `saved-${it.id}`,
               id: it.id,
               points: Array.isArray(it.geometry?.points) ? it.geometry!.points! : [],
+              coordinateSpace: (it.geometry?.coordinate_space === "page_space" ? "page_space" : "legacy_pixel") as CoordinateSpace,
               run_length_lf: Number(it.run_length_lf),
               inputs: {
                 system_type: it.system_type as SystemType,
@@ -199,12 +254,13 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           }
         }
         if (topoRes.ok) {
-          type SavedTopoRow = { id: string; node_type: "contour_line" | "spot_elevation"; elevation: number; layer_assignment: string | null; geometry: { points?: Pt[] } | null };
+          type SavedTopoRow = { id: string; node_type: "contour_line" | "spot_elevation"; elevation: number; layer_assignment: string | null; geometry: { points?: Pt[]; coordinate_space?: string } | null };
           const topoData = await topoRes.json() as { items: SavedTopoRow[] };
           if (!cancelled) {
             setTopoNodes(topoData.items.map((it) => ({
               key: `saved-${it.id}`, id: it.id, node_type: it.node_type,
               points: Array.isArray(it.geometry?.points) ? it.geometry!.points! : [],
+              coordinateSpace: (it.geometry?.coordinate_space === "page_space" ? "page_space" : "legacy_pixel") as CoordinateSpace,
               elevation: Number(it.elevation),
               layer_assignment: it.layer_assignment ?? undefined,
               saved: true,
@@ -214,13 +270,14 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         if (areaRes.ok) {
           type SavedAreaRow = {
             id: string; boundary_kind: BoundaryKind; area_sf: number; stripping_depth_in: number | null;
-            excavation_volume_cy: number | null; target_cost_code: string | null; boundary_geometry: { points?: Pt[] } | null;
+            excavation_volume_cy: number | null; target_cost_code: string | null; boundary_geometry: { points?: Pt[]; coordinate_space?: string } | null;
           };
           const areaData = await areaRes.json() as { items: SavedAreaRow[] };
           if (!cancelled) {
             setAreaBounds(areaData.items.map((it) => ({
               key: `saved-${it.id}`, id: it.id,
               points: Array.isArray(it.boundary_geometry?.points) ? it.boundary_geometry!.points! : [],
+              coordinateSpace: (it.boundary_geometry?.coordinate_space === "page_space" ? "page_space" : "legacy_pixel") as CoordinateSpace,
               boundary_kind: it.boundary_kind,
               area_sf: Number(it.area_sf),
               depth_in: it.stripping_depth_in != null ? Number(it.stripping_depth_in) : undefined,
@@ -268,7 +325,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         const ctx = cvs.getContext("2d");
         if (!ctx) return;
         await page.render({ canvasContext: ctx, viewport, canvas: cvs }).promise;
-        if (!cancelled) setRenderSize({ w: viewport.width, h: viewport.height });
+        if (!cancelled) {
+          setRenderSize({ w: viewport.width, h: viewport.height });
+          setRenderScale(scale);
+        }
 
         // ── PDF vector extraction (once per page) ─────────────────────────
         // Check if vectors already exist server-side; if not, extract + PUT.
@@ -313,7 +373,24 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }, [renderSize]);
 
   // ── Geometry helpers ──────────────────────────────────────────────────────
-  const scale = calibration?.scale_ratio ?? 1;
+  // `scale` is real-world-units per CURRENT-RENDER pixel — every existing
+  // `pixelDistance(...) * scale` / `polygonArea(...) * scale * scale` call
+  // site below is left untouched; this derivation is what makes them
+  // correct at any render scale. For a page-space-calibrated sheet,
+  // page_space_scale_factor (real-units per PAGE-SPACE unit, fixed
+  // regardless of window size) is divided by the CURRENT renderScale to
+  // yield the correct per-CURRENT-pixel value dynamically — so resizing the
+  // window or reopening in a different-sized window automatically keeps
+  // every quantity calculation correct without touching the formulas
+  // themselves. A legacy (render-pixel) calibration falls back to its
+  // original render-scale-dependent scale_ratio unchanged (STEP 4 — never
+  // fabricate a page-space factor for a calibration that predates one).
+  const scale = useMemo(() => {
+    if (calibration?.page_space_scale_factor != null && renderScale > 0) {
+      return calibration.page_space_scale_factor / renderScale;
+    }
+    return calibration?.scale_ratio ?? 1;
+  }, [calibration, renderScale]);
   const pixelDistance = (a: Pt, b: Pt) => Math.hypot(b.x - a.x, b.y - a.y);
   const totalLen = (pts: Pt[]) => {
     let s = 0;
@@ -352,7 +429,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           const feet = Number(raw);
           if (Number.isFinite(feet) && feet > 0) {
             const px = pixelDistance(next[0], next[1]);
-            if (px > 0) saveCalibration(feet / px);
+            // Convert the two CURRENT-render-pixel click points to page
+            // space before sending — the server computes and stores
+            // page_space_scale_factor from these page-space points itself,
+            // never from a render-pixel ratio (STEP 2: never fabricate
+            // calibration from current_render_pixels * historical scale).
+            if (px > 0) saveCalibration(toPageSpace(next[0], renderScale), toPageSpace(next[1], renderScale), feet);
           }
         }
         setCalibPts([]);
@@ -369,6 +451,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         key: `c-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         tool: "count",
         points: [p],
+        // Freshly drawn this session — already in the CURRENT render's pixel
+        // space, so it renders directly with no page-space conversion until
+        // saveAllUnsaved converts it for persistence.
+        coordinateSpace: "legacy_pixel",
         quantity: 1,
         unit: "EA",
       };
@@ -393,6 +479,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             key: `spot-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             node_type: "spot_elevation",
             points: [p],
+            coordinateSpace: "legacy_pixel",
             elevation,
             layer_assignment: "manual",
           }]);
@@ -432,6 +519,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     const run: UtilityRun = {
       key: `u-${Date.now()}`,
       points: utilityModalPts,
+      coordinateSpace: "legacy_pixel",
       run_length_lf: lengthLf,
       inputs,
       trench: {
@@ -455,6 +543,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           key: `contour-${Date.now()}`,
           node_type: "contour_line",
           points: contourDraftPts,
+          coordinateSpace: "legacy_pixel",
           elevation,
           layer_assignment: "manual",
         }]);
@@ -478,6 +567,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     setAreaBounds((prev) => [...prev, {
       key: `area-${Date.now()}`,
       points: areaDraftPts,
+      coordinateSpace: "legacy_pixel",
       boundary_kind: areaBoundaryKind,
       area_sf: sf,
       depth_in: DEPTH_APPLICABLE_KINDS.has(areaBoundaryKind) ? areaDepthIn : undefined,
@@ -497,6 +587,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         key: `l-${Date.now()}`,
         tool: "length",
         points: draftPoints,
+        coordinateSpace: "legacy_pixel",
         quantity,
         unit: "LF",
       }]);
@@ -506,6 +597,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         key: `a-${Date.now()}`,
         tool: "area",
         points: draftPoints,
+        coordinateSpace: "legacy_pixel",
         quantity,
         unit: "SF",
       }]);
@@ -524,15 +616,22 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }, [finishDraft]);
 
   // ── Persistence ───────────────────────────────────────────────────────────
-  async function saveCalibration(ratio: number) {
+  async function saveCalibration(pointA: Pt, pointB: Pt, knownDistanceFt: number) {
     const res = await fetch("/api/takeoff/canvas/calibration", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ page_id: pageId, scale_ratio: ratio, unit_type: "LF" }),
+      body: JSON.stringify({
+        project_id: projectId, page_id: pageId,
+        point_a: pointA, point_b: pointB,
+        known_distance: knownDistanceFt, known_unit: "LF",
+      }),
     });
     if (res.ok) {
       const data = await res.json() as { calibration: Calibration };
       setCalibration(data.calibration);
+    } else {
+      const err = await res.json().catch(() => ({}));
+      alert(`Calibration failed: ${err.error ?? res.status}`);
     }
   }
 
@@ -563,6 +662,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           key: `auto-${nodeType}-${matched}-${Date.now()}`,
           node_type: nodeType,
           points,
+          coordinateSpace: "legacy_pixel",
           elevation,
           layer_assignment: v.layer,
         });
@@ -575,6 +675,93 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
   }
 
+  // ── Whole-object drag (move) for an already-saved Shape ──────────────────
+  // Translation never changes length/area/count, so no quantity recompute
+  // is needed during the drag itself — only the geometry moves. Dragging is
+  // only offered for already-saved objects (s.id/s.row_version present);
+  // a not-yet-saved draft shape has no server row to PATCH against yet.
+  const beginShapeDrag = useCallback((e: React.MouseEvent, s: Shape) => {
+    if (tool !== "pan" || !s.saved || !s.id || s.row_version == null) return;
+    e.stopPropagation();
+    setSelectedKey(s.key);
+    setDragState({ key: s.key, startClient: { x: e.clientX, y: e.clientY }, originalPoints: s.points, originalRowVersion: s.row_version });
+  }, [tool]);
+
+  const commitShapeDrag = useCallback(async (drag: { key: string; originalPoints: Pt[]; originalRowVersion: number }) => {
+    const s = shapes.find((x) => x.key === drag.key);
+    if (!s || !s.id) return;
+    // No actual movement (e.g. a click that never crossed drag threshold) —
+    // nothing to persist.
+    if (JSON.stringify(s.points) === JSON.stringify(drag.originalPoints)) return;
+
+    const res = await fetch("/api/takeoff/canvas/manual", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: s.id, row_version: drag.originalRowVersion,
+        quantity: s.quantity, unit: s.unit, cost_code: s.cost_code || null,
+        geometry: { points: s.points, coordinate_space: "page_space" },
+      }),
+    });
+
+    if (res.status === 409) {
+      const body = await res.json().catch(() => ({}));
+      // Minimal conflict UX (STEP 2's required pair: reload server / discard
+      // local) — a fuller side-by-side diff modal with "save as new object"
+      // and "retry after review" is deferred, see REMAINING_RISKS.md.
+      const reload = window.confirm(
+        "This measurement was changed by someone else (or another tab) since you loaded it.\n\n" +
+        "OK = reload the server's current version (discarding your drag)\n" +
+        "Cancel = keep your local change (not saved yet — drag it again to retry)",
+      );
+      if (reload && body.server_state) {
+        const serverState = body.server_state as { points?: Pt[]; quantity: number; row_version: number };
+        setShapes((prev) => prev.map((x) => (x.key === drag.key
+          ? { ...x, points: serverState.points ?? drag.originalPoints, quantity: serverState.quantity, row_version: serverState.row_version }
+          : x)));
+      }
+      // else: keep the local drag position as-is (still tagged saved:true
+      // but with an unpersisted position) — the user's next drag or edit on
+      // this object will attempt to PATCH again with the same
+      // row_version and either succeed (if nothing else changed) or
+      // conflict again correctly.
+      return;
+    }
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(`Move failed: ${err.error ?? res.status}`);
+      setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, points: drag.originalPoints } : x)));
+      return;
+    }
+
+    const body = await res.json() as { manual_takeoff: { row_version: number }; quantity: number };
+    setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, row_version: body.manual_takeoff.row_version, quantity: body.quantity } : x)));
+  }, [shapes]);
+
+  useEffect(() => {
+    if (!dragState) return;
+    const onMove = (e: MouseEvent) => {
+      const dx = e.clientX - dragState.startClient.x;
+      const dy = e.clientY - dragState.startClient.y;
+      setShapes((prev) => prev.map((s) => {
+        if (s.key !== dragState.key) return s;
+        // Drag delta is measured in CURRENT-render screen pixels (raw
+        // clientX/Y deltas) — apply it in display space, then convert back
+        // to the shape's own storage space, mirroring the
+        // toDisplayPoints/toPersistedPoints pattern used everywhere else.
+        const originalDisplay = toDisplayPoints(dragState.originalPoints, s.coordinateSpace);
+        const movedDisplay = originalDisplay.map((p) => ({ x: p.x + dx, y: p.y + dy }));
+        const movedStorage = s.coordinateSpace === "page_space" ? pointsToPageSpace(movedDisplay, renderScale) : movedDisplay;
+        return { ...s, points: movedStorage };
+      }));
+    };
+    const onUp = () => { void commitShapeDrag(dragState); setDragState(null); };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp, { once: true });
+    return () => window.removeEventListener("mousemove", onMove);
+  }, [dragState, renderScale, commitShapeDrag, toDisplayPoints]);
+
   async function saveAllUnsaved() {
     const unsaved = shapes.filter((s) => !s.saved);
     const unsavedRuns = utilityRuns.filter((r) => !r.saved);
@@ -585,6 +772,21 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     try {
       const requests: Promise<Response>[] = [];
 
+      // Freshly-drawn items are tagged 'legacy_pixel' at creation — this
+      // render's current pixel space (see toDisplayPoints/CoordinateSpace
+      // above) — so pointsToPageSpace(points, renderScale) converts them
+      // correctly. An item can also already be 'page_space' here (e.g. a
+      // previously-saved item marked unsaved again by a cost-code edit) —
+      // re-running pointsToPageSpace on already-page-space points would
+      // divide by renderScale a second time and corrupt them, so those pass
+      // through untouched. Persisted geometry is always tagged 'page_space'
+      // going forward so it survives window-size/zoom changes on reload
+      // (PERMANENT RULE 1/2); `client_key` is the item's own stable id, used
+      // by the API for upsert-on-retry idempotency (RULE 13).
+      const toPersistedPoints = (points: Pt[], coordinateSpace: CoordinateSpace): Pt[] =>
+        coordinateSpace === "page_space" ? points : pointsToPageSpace(points, renderScale);
+
+      let manualSaveRequest: Promise<Response> | null = null;
       if (unsaved.length > 0) {
         const items = unsaved.map((s) => ({
           project_id: projectId,
@@ -593,13 +795,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           takeoff_type: s.tool,
           quantity: Number(s.quantity.toFixed(3)),
           unit: s.unit,
-          geometry: { points: s.points, page_number: pageNumber },
+          client_key: s.key,
+          geometry: { points: toPersistedPoints(s.points, s.coordinateSpace), coordinate_space: "page_space", page_number: pageNumber },
         }));
-        requests.push(fetch("/api/takeoff/canvas/manual", {
+        manualSaveRequest = fetch("/api/takeoff/canvas/manual", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ items }),
-        }));
+        });
+        requests.push(manualSaveRequest);
       }
 
       if (unsavedRuns.length > 0) {
@@ -613,7 +817,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           invert_elevation_end: r.inputs.invert_elevation_end,
           trench_width_ft: r.inputs.trench_width_ft,
           run_length_lf: r.run_length_lf,
-          geometry: { points: r.points, page_number: pageNumber },
+          client_key: r.key,
+          geometry: { points: toPersistedPoints(r.points, r.coordinateSpace), coordinate_space: "page_space", page_number: pageNumber },
         }));
         requests.push(fetch("/api/takeoff/canvas/utility", {
           method: "POST",
@@ -629,7 +834,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           node_type: n.node_type,
           elevation: n.elevation,
           layer_assignment: n.layer_assignment ?? "manual",
-          geometry: { points: n.points, page_number: pageNumber },
+          client_key: n.key,
+          geometry: { points: toPersistedPoints(n.points, n.coordinateSpace), coordinate_space: "page_space", page_number: pageNumber },
         }));
         requests.push(fetch("/api/takeoff/canvas/topo", {
           method: "POST",
@@ -647,7 +853,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           stripping_depth_in: a.depth_in ?? null,
           excavation_volume_cy: a.volume_cy ?? null,
           target_cost_code: a.target_cost_code || null,
-          boundary_geometry: { points: a.points, page_number: pageNumber },
+          client_key: a.key,
+          boundary_geometry: { points: toPersistedPoints(a.points, a.coordinateSpace), coordinate_space: "page_space", page_number: pageNumber },
         }));
         requests.push(fetch("/api/takeoff/canvas/area-bounds", {
           method: "POST",
@@ -659,10 +866,22 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       const results = await Promise.all(requests);
       const allOk = results.every((r) => r.ok);
       if (allOk) {
-        setShapes((prev) => prev.map((s) => (s.saved ? s : { ...s, saved: true })));
-        setUtilityRuns((prev) => prev.map((r) => (r.saved ? r : { ...r, saved: true })));
-        setTopoNodes((prev) => prev.map((n) => (n.saved ? n : { ...n, saved: true })));
-        setAreaBounds((prev) => prev.map((a) => (a.saved ? a : { ...a, saved: true })));
+        // Local state must match what was actually persisted: both the
+        // points AND the coordinateSpace tag flip together, or a later
+        // re-save (e.g. a cost-code edit marking this item unsaved again)
+        // would re-run toPersistedPoints on already-page-space points using
+        // a still-'legacy_pixel' tag and divide by renderScale a second time.
+        let byClientKey = new Map<string, { id: string; row_version: number }>();
+        if (manualSaveRequest) {
+          const manualData = await (await manualSaveRequest).json().catch(() => ({})) as { items?: Array<{ id: string; client_key: string; row_version: number }> };
+          byClientKey = new Map((manualData.items ?? []).map((it) => [it.client_key, { id: it.id, row_version: it.row_version }]));
+        }
+        setShapes((prev) => prev.map((s) => (s.saved
+          ? s
+          : { ...s, points: toPersistedPoints(s.points, s.coordinateSpace), coordinateSpace: "page_space", saved: true, ...(byClientKey.get(s.key) ?? {}) })));
+        setUtilityRuns((prev) => prev.map((r) => (r.saved ? r : { ...r, points: toPersistedPoints(r.points, r.coordinateSpace), coordinateSpace: "page_space", saved: true })));
+        setTopoNodes((prev) => prev.map((n) => (n.saved ? n : { ...n, points: toPersistedPoints(n.points, n.coordinateSpace), coordinateSpace: "page_space", saved: true })));
+        setAreaBounds((prev) => prev.map((a) => (a.saved ? a : { ...a, points: toPersistedPoints(a.points, a.coordinateSpace), coordinateSpace: "page_space", saved: true })));
       } else {
         const failed = results.find((r) => !r.ok);
         const err = failed ? await failed.json().catch(() => ({})) : {};
@@ -702,7 +921,11 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (topoNodes.length === 0) return;
     setCompilingMesh(true);
     try {
-      const coordinateMesh = topoNodes.flatMap((n) => n.points.map((p) => ({
+      // `scale` (calibration.scale_ratio) converts CURRENT-RENDER pixels to
+      // real-world feet — page_space points must be projected to this
+      // render's pixel space first, or a page_space node would be scaled as
+      // if it were already in pixels (wrong by a factor of renderScale).
+      const coordinateMesh = topoNodes.flatMap((n) => toDisplayPoints(n.points, n.coordinateSpace).map((p) => ({
         x: Number((p.x * scale).toFixed(2)),
         y: Number((p.y * scale).toFixed(2)),
         elevation: n.elevation,
@@ -710,11 +933,14 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       })));
       const spotElevations = topoNodes
         .filter((n) => n.node_type === "spot_elevation")
-        .map((n) => ({
-          x: Number((n.points[0].x * scale).toFixed(2)),
-          y: Number((n.points[0].y * scale).toFixed(2)),
-          elevation: n.elevation,
-        }));
+        .map((n) => {
+          const p = toDisplayPoints(n.points, n.coordinateSpace)[0];
+          return {
+            x: Number((p.x * scale).toFixed(2)),
+            y: Number((p.y * scale).toFixed(2)),
+            elevation: n.elevation,
+          };
+        });
       const res = await fetch("/api/earthwork/surfaces", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -817,10 +1043,42 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             ))}
           </div>
 
-          <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">
-            {calibration
-              ? <>Scale · <span className="text-[#CCFF00]">{calibration.scale_ratio.toFixed(4)} ft/px</span></>
-              : <span className="text-amber-400">Not calibrated — pick <b>calibrate</b> tool</span>}
+          <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono text-white/40">
+            {calibration ? (
+              <>
+                {calibration.status === "verified" ? (
+                  <span className="text-[#CCFF00]" title="Page-space calibration — stable across zoom, resize, and reload">
+                    ✓ Verified · {calibration.page_space_scale_factor?.toFixed(4)} {calibration.unit_type}/page-unit
+                  </span>
+                ) : (
+                  <span className="text-amber-400" title="This calibration predates the page-space model and is render-scale-dependent — recalibrate before approving new measurements or syncing to the estimate">
+                    ⚠ Legacy scale — needs recalibration
+                    {calibration.scale_ratio != null && <> ({calibration.scale_ratio.toFixed(4)} ft/px at save time)</>}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    // Existing saved measurements each store their OWN
+                    // computed quantity independently — recalibrating never
+                    // retroactively changes them (approved quantities can
+                    // never silently change, STEP 5). It only changes what
+                    // scale NEW draws use going forward, so the confirmation
+                    // here is about that distinction, not a batch recompute.
+                    if (!window.confirm(
+                      "Recalibrating sets the scale for NEW measurements drawn from now on.\n\n" +
+                      "Existing saved measurements keep their already-computed quantities unchanged — recalibration never silently alters them.\n\nContinue?",
+                    )) return;
+                    setTool("calibrate"); setDraftPoints([]); setCalibPts([]);
+                  }}
+                  className="rounded-full border border-white/10 px-2 py-0.5 text-white/60 hover:text-white hover:bg-white/[0.06] normal-case tracking-normal"
+                >
+                  Recalibrate
+                </button>
+              </>
+            ) : (
+              <span className="text-amber-400">Not calibrated — pick <b>calibrate</b> tool</span>
+            )}
           </div>
         </div>
 
@@ -880,26 +1138,28 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               {shapes.map((s) => {
                 const isSel = s.key === selectedKey;
                 const color = s.tool === "count" ? "#CCFF00" : s.tool === "length" ? "#00D2FF" : "#f97316";
+                const sPts = toDisplayPoints(s.points, s.coordinateSpace);
+                const cursorClass = tool === "pan" && s.saved && s.id ? "cursor-move" : "";
                 if (s.tool === "count") {
-                  const p = s.points[0];
+                  const p = sPts[0];
                   return (
-                    <g key={s.key} onClick={(e) => { e.stopPropagation(); setSelectedKey(s.key); }}>
+                    <g key={s.key} className={cursorClass} onClick={(e) => { e.stopPropagation(); setSelectedKey(s.key); }} onMouseDown={(e) => beginShapeDrag(e, s)}>
                       <circle cx={p.x} cy={p.y} r={isSel ? 9 : 7} fill={color} stroke="#000" strokeWidth={2} />
                     </g>
                   );
                 }
                 if (s.tool === "length") {
-                  const d = s.points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+                  const d = sPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
                   return (
-                    <g key={s.key} onClick={(e) => { e.stopPropagation(); setSelectedKey(s.key); }}>
+                    <g key={s.key} className={cursorClass} onClick={(e) => { e.stopPropagation(); setSelectedKey(s.key); }} onMouseDown={(e) => beginShapeDrag(e, s)}>
                       <path d={d} stroke={color} strokeWidth={isSel ? 4 : 3} fill="none" strokeLinecap="round" strokeLinejoin="round" />
                     </g>
                   );
                 }
                 // area
-                const d = s.points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z";
+                const d = sPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z";
                 return (
-                  <g key={s.key} onClick={(e) => { e.stopPropagation(); setSelectedKey(s.key); }}>
+                  <g key={s.key} className={cursorClass} onClick={(e) => { e.stopPropagation(); setSelectedKey(s.key); }} onMouseDown={(e) => beginShapeDrag(e, s)}>
                     <path d={d} fill={`${color}44`} stroke={color} strokeWidth={isSel ? 3 : 2} />
                   </g>
                 );
@@ -907,11 +1167,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
               {/* Committed utility pipe runs */}
               {utilityRuns.map((u) => {
-                const d = u.points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+                const uPts = toDisplayPoints(u.points, u.coordinateSpace);
+                const d = uPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
                 return (
                   <g key={u.key}>
                     <path d={d} stroke="#a855f7" strokeWidth={4} fill="none" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="10 4" />
-                    {u.points.map((p, i) => (
+                    {uPts.map((p, i) => (
                       <circle key={i} cx={p.x} cy={p.y} r={3.5} fill="#a855f7" stroke="#000" strokeWidth={1} />
                     ))}
                   </g>
@@ -936,8 +1197,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
               {/* Committed topo nodes (contours + spot elevations) */}
               {topoNodes.map((n) => {
+                const nPts = toDisplayPoints(n.points, n.coordinateSpace);
                 if (n.node_type === "spot_elevation") {
-                  const p = n.points[0];
+                  const p = nPts[0];
                   return (
                     <g key={n.key}>
                       <line x1={p.x - 7} y1={p.y} x2={p.x + 7} y2={p.y} stroke="#22d3ee" strokeWidth={2} />
@@ -947,8 +1209,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                     </g>
                   );
                 }
-                const d = n.points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
-                const mid = n.points[Math.floor(n.points.length / 2)];
+                const d = nPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+                const mid = nPts[Math.floor(nPts.length / 2)];
                 return (
                   <g key={n.key}>
                     <path d={d} stroke="#22d3ee" strokeWidth={2.5} fill="none" strokeLinecap="round" strokeLinejoin="round" />
@@ -972,7 +1234,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
               {/* Committed area bounds polygons */}
               {areaBounds.map((a) => {
-                const d = a.points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z";
+                const d = toDisplayPoints(a.points, a.coordinateSpace).map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z";
                 return (
                   <g key={a.key}>
                     <path d={d} fill="#f9731633" stroke="#f97316" strokeWidth={2} />
@@ -1025,7 +1287,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             pageId={pageId}
             projectId={projectId}
             canvasSize={renderSize}
-            scaleRatio={calibration?.scale_ratio ?? 1}
+            scaleRatio={scale}
             onVectorsLoaded={setVectorDescriptions}
             onCommitted={(m) => {
               // Mirror an approved CAD vector into the local shapes dock so
@@ -1036,6 +1298,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 points: Array.isArray((m.geometry as { points?: { x: number; y: number }[] })?.points)
                   ? ((m.geometry as { points: { x: number; y: number }[] }).points)
                   : [],
+                coordinateSpace: "legacy_pixel",
                 quantity: m.quantity,
                 unit: m.unit,
                 cost_code: m.cost_code,
@@ -1114,6 +1377,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               key: `vision-${Date.now()}`,
               tool: vi.unit === "EA" ? "count" : vi.unit === "SF" || vi.unit === "CY" ? "area" : "length",
               points: [],
+              coordinateSpace: "legacy_pixel",
               quantity: vi.quantity,
               unit: (vi.unit === "EA" || vi.unit === "SF" || vi.unit === "LF") ? vi.unit as "EA"|"SF"|"LF" : "EA",
               cost_code: vi.cost_code,

@@ -96,3 +96,40 @@ export async function assertProjectBelongsToTenant(projectId: string, tenantId: 
     throw new Error("project_id does not belong to this tenant");
   }
 }
+
+/**
+ * Verifies a `document_pages.id` (a "sheet") actually belongs to the given
+ * project, under the given tenant — via its parent `documents` row
+ * (document_pages has no project_id of its own; project ownership is
+ * inherited through documents.project_id). Confirmed gap (professional-
+ * manual-takeoff milestone, STEP 25/PERMANENT RULE 6/10): the manual-takeoff
+ * canvas routes validated project_id ownership but never validated that the
+ * client-supplied page_id actually belonged to that project — a caller could
+ * attach a takeoff row to a page/document from a different project (or a
+ * different tenant entirely) with no server-side check. Throws if the page
+ * doesn't exist, or exists but under a different tenant/document/project.
+ */
+export async function assertPageBelongsToProject(pageId: string, projectId: string, tenantId: string): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const db = (await createServiceClient()) as any;
+  const { data: page, error: pageErr } = await db
+    .from("document_pages")
+    .select("id, document_id, tenant_id")
+    .eq("id", pageId)
+    .eq("tenant_id", tenantId)
+    .single();
+  if (pageErr || !page) {
+    throw new Error("page_id does not belong to this tenant");
+  }
+
+  const { data: doc, error: docErr } = await db
+    .from("documents")
+    .select("id")
+    .eq("id", page.document_id)
+    .eq("tenant_id", tenantId)
+    .eq("project_id", projectId)
+    .single();
+  if (docErr || !doc) {
+    throw new Error("page_id does not belong to this project");
+  }
+}
