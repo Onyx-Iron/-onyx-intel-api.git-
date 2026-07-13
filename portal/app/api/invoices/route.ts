@@ -2,6 +2,8 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { getUserRole, redactFinancialFields } from "@/lib/project-controls/permissions";
+import { INVOICE_FINANCIAL_FIELDS } from "@/lib/project-controls/financial-redaction";
 import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
@@ -49,7 +51,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const { data, error, count } = await q.order("created_at", { ascending: false }).range(offset, offset + limit - 1);
 
     if (error) return NextResponse.json({ error: `[GET /api/invoices] ${error.message}` }, { status: 500 });
-    return NextResponse.json({ items: data ?? [], pagination: paginationMeta(count ?? 0, page, limit) });
+
+    const role = await getUserRole(tenantId, userId);
+    const items = redactFinancialFields((data ?? []) as unknown as Record<string, unknown>[], role, INVOICE_FINANCIAL_FIELDS);
+
+    return NextResponse.json({ items, pagination: paginationMeta(count ?? 0, page, limit) });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }

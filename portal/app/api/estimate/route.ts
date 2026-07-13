@@ -2,6 +2,8 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getUserRole, redactFinancialFields } from "@/lib/project-controls/permissions";
+import { ESTIMATE_FINANCIAL_FIELDS } from "@/lib/project-controls/financial-redaction";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { uuidSchema } from "@/lib/validation";
@@ -31,8 +33,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       .range(offset, offset + limit - 1);
 
     if (error) return NextResponse.json({ error: `[GET /api/estimate] ${error.message}` }, { status: 500 });
+
+    // Financial-read gate (frontend-backend-reconciliation, item 4): a
+    // restricted role (ClientView, Subcontractor, FieldSuperintendent) must
+    // never receive cost/markup/profit values in the response body itself —
+    // redacted here, server-side, before the JSON is ever sent, not just
+    // hidden in the UI.
+    const role = await getUserRole(tenantId, userId);
+    const items = redactFinancialFields((data ?? []) as unknown as Record<string, unknown>[], role, ESTIMATE_FINANCIAL_FIELDS);
+
     return NextResponse.json({
-      items: data ?? [],
+      items,
       pagination: paginationMeta(count ?? 0, page, limit),
     });
   } catch (err: unknown) {

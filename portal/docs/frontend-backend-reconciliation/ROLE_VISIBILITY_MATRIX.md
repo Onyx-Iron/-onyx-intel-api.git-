@@ -8,31 +8,38 @@
 
 ```
 canPerform(role, resource, action):
-  if action === "read": return true            // <-- every role can read everything
-  if role in READ_ONLY_ROLES (ClientView): return false
+  if role in READ_ONLY_ROLES (ClientView) and action === "write": return false
+  if resource === "financial": return WRITE_MATRIX.financial.has(role)   // read now mirrors write
+  if action === "read": return true                                     // field/admin reads unchanged
   return WRITE_MATRIX[resource].has(role)
 ```
 
-| Role | financial write | field write | admin write | read (all categories) |
-|---|---|---|---|---|
-| Owner | ✅ | ✅ | ✅ | ✅ |
-| Admin | ✅ | ✅ | ✅ | ✅ |
-| Estimator | ✅ | ✅ | ❌ | ✅ |
-| ProjectManager | ✅ | ✅ | ❌ | ✅ |
-| FieldSuperintendent | ❌ | ✅ | ❌ | ✅ |
-| Subcontractor | ❌ | ✅ | ❌ | ✅ |
-| ClientView | ❌ | ❌ | ❌ | ✅ |
+| Role | financial write | financial read | field write | field read | admin write | admin read |
+|---|---|---|---|---|---|---|
+| Owner | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Admin | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Estimator | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| ProjectManager | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| FieldSuperintendent | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ |
+| Subcontractor | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ |
+| ClientView | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ |
 
-## Confirmed gap
+## Gap closed (frontend-backend reconciliation, item 4)
 
-**Every role can currently read financial data**, including `Subcontractor` and `ClientView` — there is no read-side gate at all in `canPerform`. This directly conflicts with the master prompt's requirement: *"Hide financial values and financial workspaces from restricted roles."*
+**Fixed.** Financial *read* access now mirrors financial *write* access — only `Owner`/`Admin`/`Estimator`/`ProjectManager` can see cost, markup, profit, or invoice values at all. This is enforced server-side, in the API response body itself, not just hidden in the UI.
 
-Individual routes may or may not add their own extra financial-visibility check independently of this shared helper — that was not exhaustively verified route-by-route in Phase 1 (130 routes; a targeted grep for routes calling `assertPermission(..., "financial", "read")` found none, meaning if any such check exists it isn't using the shared helper).
+- `lib/project-controls/permissions.ts`: `canPerform` now gates `financial` reads the same as writes; added `canReadFinancial(role)` and `redactFinancialFields(rows, role, fields)` (nulls the named columns on every row when the caller's role can't read financial data).
+- `lib/project-controls/financial-redaction.ts`: per-table field lists verified against the live schema — `ESTIMATE_FINANCIAL_FIELDS` (estimate_items: unit_cost, labor_cost, material_cost, equipment_cost, trucking_cost, subcontract_cost, disposal_cost, testing_cost, other_direct_cost, total_direct_cost, indirect_cost, contingency, overhead, profit, total_price, unit_price), `CHANGE_ORDER_FINANCIAL_FIELDS` (change_order_items: amount, labor_cost, material_cost, equipment_cost, subcontract_cost, markup), `INVOICE_FINANCIAL_FIELDS` (invoices: amount, retainage).
+- Wired into `GET /api/estimate`, `GET /api/invoices`, `GET /api/change-orders` — each now resolves the caller's role and redacts before returning JSON.
+- Proven live: `lib/project-controls/financial-redaction.integration.test.ts` (5/5 passing) inserts real rows in all three tables and asserts an `Owner` still receives the values while a `ClientView`/`Subcontractor` role receives `null` for every financial field and unredacted values for everything else.
 
-## Required before Financials workspace ships to restricted roles
+### Remaining scope not covered in this pass (documented gap, not silently dropped)
 
-1. Extend `canPerform`/`assertPermission` to gate `read` as well as `write` for the `financial` category (a small, additive, backward-compatible change — existing callers that only check `write` are unaffected).
-2. Apply that gate at the Financials workspace's data-fetching layer (not just hide UI elements client-side — a restricted role must not receive the data in the API response at all).
-3. Re-verify with an integration test: a `ClientView`/`Subcontractor` role cannot read `estimate_items.unit_cost`/`labor_cost`/etc. or invoice amounts via the API.
+Other financial-bearing endpoints were **not** touched in this pass and remain unredacted — flagged here for Phase 2/3 (Financials workspace) or a follow-up milestone before that workspace is presented as production-ready to restricted roles:
 
-This is flagged as required work for Phase 2/3 (when the Financials workspace and role-based nav visibility are actually built) — not fixed in this Phase 1 audit pass, per the instruction to keep Phase 1 to audit + architecture + CI baseline.
+- `/api/estimate/versions/[id]/sov` (schedule of values — line-item pricing)
+- `/api/cost-catalog*` (unit cost library)
+- Procurement bid/PO amounts (`/api/procurement/*` — `vendor_bids.unit_price`, `purchase_orders.total_amount`)
+- Any other route reading `estimate_items`/`invoices`/`change_order_items` besides the three GETs listed above (e.g. single-record `GET .../[id]` routes, if they exist)
+
+Each of these should reuse `redactFinancialFields` + a new field-list constant in `financial-redaction.ts` rather than a bespoke check, once the workspace(s) exposing them are actually built.

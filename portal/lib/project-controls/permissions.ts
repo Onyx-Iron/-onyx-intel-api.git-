@@ -62,10 +62,47 @@ export async function getUserRole(tenantId: string, clerkUserId: string): Promis
   return (role && (KNOWN_ROLES as readonly string[]).includes(role)) ? (role as Role) : DEFAULT_ROLE;
 }
 
+// Financial-read gate (frontend-backend-reconciliation, item 4). Every role
+// could previously READ financial data — only writes were gated — which
+// meant a ClientView or Subcontractor caller could pull unit_cost,
+// labor_cost, markup, profit, and invoice amounts through any route that
+// didn't add its own extra check. Read access to `financial` now mirrors
+// write access to it: only the roles that can price/quote a project
+// (Owner/Admin/Estimator/ProjectManager) can see the numbers at all.
+// `field`/`admin` reads are unchanged (still universal) — this only
+// tightens the one category the master prompt called out explicitly.
 export function canPerform(role: Role, resource: ResourceCategory, action: Action): boolean {
+  if (READ_ONLY_ROLES.has(role) && action === "write") return false;
+  if (resource === "financial") return WRITE_MATRIX.financial.has(role);
   if (action === "read") return true;
-  if (READ_ONLY_ROLES.has(role)) return false;
   return WRITE_MATRIX[resource].has(role);
+}
+
+/** True if this role may see financial values (cost/markup/profit/invoice amounts) at all — used to redact fields server-side, not just hide UI. */
+export function canReadFinancial(role: Role): boolean {
+  return canPerform(role, "financial", "read");
+}
+
+/**
+ * Nulls out the given field names on every row when the caller's role
+ * cannot read financial data — applied server-side, in the API route,
+ * BEFORE the response is sent. This is what makes the restriction real
+ * rather than cosmetic: a restricted role never receives the values in the
+ * JSON payload at all, regardless of what the client does with them.
+ */
+export function redactFinancialFields<T extends Record<string, unknown>>(
+  rows: T[],
+  role: Role,
+  fields: readonly string[],
+): T[] {
+  if (canReadFinancial(role)) return rows;
+  return rows.map((row) => {
+    const redacted = { ...row };
+    for (const field of fields) {
+      if (field in redacted) (redacted as Record<string, unknown>)[field] = null;
+    }
+    return redacted;
+  });
 }
 
 /**
