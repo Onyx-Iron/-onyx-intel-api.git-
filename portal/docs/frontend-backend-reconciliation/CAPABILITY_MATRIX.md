@@ -60,18 +60,18 @@ Evidence-based inventory of the production codebase (`Onyx-Iron/-onyx-intel-api.
 | Acceptance test | Import approved takeoff → priced draft → approve → immutable → buyer adjustment opens new draft → proposal/SOV generate |
 | Nav | No global entry point yet |
 
-## 5. Change Orders — **Broken (feature-flagged off)**
+## 5. Change Orders — **Complete but buried (correction: not actually broken)**
 
 | | |
 |---|---|
 | User objective | Track scope/price changes against contract |
-| Frontend | `ProjectControlsTab` renders a Change Orders sub-view |
-| API | `GET/POST /api/change-orders`, `PUT/DELETE /api/change-orders/[id]` — **all return HTTP 503 "unavailable" unconditionally**, per direct route inspection |
-| DB | `project_change_orders` table exists and is populated with schema (migration confirms it) |
-| Status | **Broken** — the UI and table both exist, but the API layer is deliberately disabled. This is a real, user-visible dead end: a PM can navigate to the Change Orders tab and it will not function. |
-| Missing work | Determine why it was disabled (likely an in-progress migration to the financial rollup model) and either re-enable or clearly label the tab "Unavailable" instead of presenting a broken form |
-| Acceptance test | Currently fails immediately — any create attempt 503s |
-| Nav | Inside Project Controls grouping (per target IA) |
+| Frontend | `ProjectControlsTab` renders a fully wired `ChangeOrderTable`/`ChangeOrderForm` calling `/api/change-orders` for list/create/update/delete |
+| API | `GET/POST /api/change-orders`, `PUT/DELETE /api/change-orders/[id]` |
+| DB | `change_order_items` (not `project_change_orders` — corrected table name) |
+| Status | **CORRECTED FINDING.** The Phase 1 audit's "Broken (all routes unconditionally return 503)" classification was **wrong** — it came from a research pass that misread the routes' `if (error) return ...503` fallback branch as unconditional. Direct code reading + a live-database test (`lib/project-controls/change-orders.integration.test.ts`, 10/10 passing) proves creation, listing, status-cycle updates, deletion, tenant isolation, and the financial pending/approved-value rollup (`getControlSummary`, consumed by `/api/overview` and surfaced in `ProjectTabs.tsx`'s stat cards) all work correctly today, using the exact payload the real route builds. Nothing needed "restoring" — the 503 branch is a legitimate, never-triggered defensive fallback, the same pattern used elsewhere in this codebase (e.g. RFIs/Submittals). |
+| Missing work | None found. Reclassified from "Broken" to "Complete but buried" — same gap as RFIs/Submittals (3 levels deep, no global cross-project view). |
+| Acceptance test | Verified live: create → list → cycle status draft→pending→approved → rollup sums correctly, excluding drafts → delete. See `change-orders.integration.test.ts`. |
+| Nav | Inside Project Controls grouping (per target IA) — already reachable today via `ProjectControlsTab`, just nested |
 
 ## 6. RFIs / Submittals
 

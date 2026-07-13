@@ -8,7 +8,7 @@ Concise route → domain → status index. Full per-route detail (methods, table
 | Documents | `/api/documents*`, `/api/parse/*`, `/api/generated-docs` | 8 | Complete but buried |
 | Takeoff canvas + extraction | `/api/takeoff/*` | 16 | Complete & exposed (project-level) |
 | Estimating | `/api/estimate*` | 13 | Complete & exposed (project-level) |
-| Change Orders | `/api/change-orders*` | 2 | **Broken (503 stub)** |
+| Change Orders | `/api/change-orders*` | 2 | Complete but buried (corrected — see `CAPABILITY_MATRIX.md` item 5) |
 | RFIs / Submittals | `/api/rfis*`, `/api/submittals*` | 6 | Complete but buried |
 | Daily/Weekly Logs, Schedule, Punch, To-Do, Staff | `/api/daily-logs*`, `/api/weekly-logs*`, `/api/schedule*`, `/api/punch-list*`, `/api/todo-items*`, `/api/staff*` | 6 | Complete but buried |
 | Invoicing / Lien Waivers | `/api/invoices*`, `/api/lien-waivers*` | 4 | Partially connected (no budget/actuals model) |
