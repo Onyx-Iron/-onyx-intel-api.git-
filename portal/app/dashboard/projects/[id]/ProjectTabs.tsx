@@ -45,6 +45,7 @@ import OpenInvoicesTab          from "@/components/invoicing/OpenInvoicesTab";
 import ClosedInvoicesTab        from "@/components/invoicing/ClosedInvoicesTab";
 import LienWaiversTab           from "@/components/invoicing/LienWaiversTab";
 import CutFillTab               from "@/components/cut-fill/CutFillTab";
+import ProcurementBoard         from "@/components/procurement/ProcurementBoard";
 
 type Phase = "Pre-Construction" | "Project Setup" | "Project Management" | "Invoicing" | "Closeout";
 
@@ -52,7 +53,7 @@ interface SubTabDef {
   id: string;
   label: string;
   icon: JSX.Element;
-  render: (projectId: string) => JSX.Element;
+  render: (projectId: string, projectName: string) => JSX.Element;
 }
 
 const PHASES: { id: Phase; subtabs: SubTabDef[] }[] = [
@@ -69,10 +70,14 @@ const PHASES: { id: Phase; subtabs: SubTabDef[] }[] = [
   {
     id: "Project Setup",
     subtabs: [
-      { id: "materials",  label: "Material Vendors",     icon: <PackageOpen size={13} />, render: (p) => <MaterialVendorsTab projectId={p} /> },
-      { id: "equipment",  label: "Equipment Suppliers",  icon: <Truck size={13} />,       render: (p) => <EquipmentSuppliersTab projectId={p} /> },
-      { id: "subs",       label: "Subcontractors",       icon: <Hammer size={13} />,      render: (p) => <ContactsTab projectId={p} /> },
-      { id: "staff",      label: "Staff",                icon: <HardHat size={13} />,     render: (p) => <StaffTab projectId={p} /> },
+      { id: "materials",    label: "Material Vendors",     icon: <PackageOpen size={13} />, render: (p) => <MaterialVendorsTab projectId={p} /> },
+      { id: "equipment",    label: "Equipment Suppliers",  icon: <Truck size={13} />,       render: (p) => <EquipmentSuppliersTab projectId={p} /> },
+      { id: "subs",         label: "Subcontractors",       icon: <Hammer size={13} />,      render: (p) => <ContactsTab projectId={p} /> },
+      { id: "staff",        label: "Staff",                icon: <HardHat size={13} />,     render: (p) => <StaffTab projectId={p} /> },
+      // Wired in per frontend-backend-reconciliation Phase-1 audit finding:
+      // ProcurementBoard + its full RFQ -> vendor bid -> award -> PO backend
+      // already existed at this route with zero navigation path to it.
+      { id: "procurement",  label: "Procurement",          icon: <Truck size={13} />,       render: (p, n) => <ProcurementBoard projectId={p} projectName={n} /> },
     ],
   },
   {
@@ -106,9 +111,10 @@ const PHASES: { id: Phase; subtabs: SubTabDef[] }[] = [
 
 interface ProjectTabsProps {
   projectId: string;
+  projectName?: string;
 }
 
-export default function ProjectTabs({ projectId }: ProjectTabsProps) {
+export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps) {
   const [activePhase, setActivePhase] = useState<Phase | null>(null);
   const [activeSubId, setActiveSubId] = useState<string>("overview");
 
@@ -190,7 +196,7 @@ export default function ProjectTabs({ projectId }: ProjectTabsProps) {
         {activePhase === null ? (
           <OverviewTab projectId={projectId} />
         ) : activeSub ? (
-          activeSub.render(projectId)
+          activeSub.render(projectId, projectName ?? "")
         ) : null}
       </div>
     </div>
