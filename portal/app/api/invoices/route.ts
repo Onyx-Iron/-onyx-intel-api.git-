@@ -25,8 +25,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+    // project_id is optional so the global Financials workspace can roll up
+    // invoices across every project for the tenant; every project-scoped
+    // caller still passes it explicitly.
     const projectId = req.nextUrl.searchParams.get("project_id");
-    if (!projectId) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
     const direction = req.nextUrl.searchParams.get("direction");
     const status = req.nextUrl.searchParams.get("status");
@@ -38,8 +40,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let q: any = db.from(TABLE as any)
       .select("*", { count: "exact" })
-      .eq("tenant_id", tenantId)
-      .eq("project_id", projectId);
+      .eq("tenant_id", tenantId);
+    if (projectId) q = q.eq("project_id", projectId);
 
     if (direction && VALID_DIRECTIONS.has(direction)) q = q.eq("direction", direction);
     if (status && status !== "all") {
