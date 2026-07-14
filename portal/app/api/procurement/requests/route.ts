@@ -19,19 +19,23 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+  // project_id is optional so the global Procurement workspace can roll up
+  // RFQs/bids/POs across every project for the tenant; every project-scoped
+  // caller still passes it explicitly.
   const projectId = req.nextUrl.searchParams.get("project_id");
-  if (!projectId) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
 
-  const { data: requests, error } = await anyDb
+  let requestsQuery = anyDb
     .from("marketplace_requests")
     .select("*")
-    .eq("tenant_id", tenantId).eq("project_id", projectId)
+    .eq("tenant_id", tenantId)
     .order("created_at", { ascending: false });
+  if (projectId) requestsQuery = requestsQuery.eq("project_id", projectId);
+  const { data: requests, error } = await requestsQuery;
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   const requestIds = (requests ?? []).map((r: { id: string }) => r.id);
@@ -39,9 +43,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     ? await anyDb.from("vendor_bids").select("*").in("request_id", requestIds).order("unit_price", { ascending: true })
     : { data: [] };
 
-  const { data: pos } = requestIds.length > 0
-    ? await anyDb.from("purchase_orders").select("*").eq("project_id", projectId)
-    : { data: [] };
+  let posQuery = anyDb.from("purchase_orders").select("*").eq("tenant_id", tenantId);
+  if (projectId) posQuery = posQuery.eq("project_id", projectId);
+  const { data: pos } = requestIds.length > 0 ? await posQuery : { data: [] };
 
   // Group requests by batch_id so the UI can render one RFQ card with
   // multiple line items instead of one card per row.
