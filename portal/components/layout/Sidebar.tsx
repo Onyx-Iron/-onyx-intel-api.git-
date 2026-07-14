@@ -6,9 +6,14 @@ import { usePathname } from "next/navigation";
 import { UserButton } from "@clerk/nextjs";
 import {
   BookOpen,
+  Bot,
+  Calculator,
   FileText,
   FolderKanban,
   LayoutDashboard,
+  Megaphone,
+  Ruler,
+  Settings,
   Users,
   X,
 } from "lucide-react";
@@ -20,15 +25,44 @@ interface NavItem {
   exact?: boolean;
 }
 
+// Live, fully-wired workspaces only. Per the reconciliation's explicit rule:
+// a workspace is only presented as production-ready when its underlying
+// workflow is actually connected and verified — every route below loads
+// real, tenant-scoped data from a real API, not a placeholder.
 const WORKSPACE_NAV: NavItem[] = [
-  { href: "/dashboard", label: "Overview", icon: <LayoutDashboard size={15} />, exact: true },
+  { href: "/dashboard", label: "Command Center", icon: <LayoutDashboard size={15} />, exact: true },
   { href: "/dashboard/projects", label: "Projects", icon: <FolderKanban size={15} /> },
+  { href: "/dashboard/takeoff", label: "Takeoff", icon: <Ruler size={15} /> },
+  { href: "/dashboard/estimating", label: "Estimating", icon: <Calculator size={15} /> },
   { href: "/dashboard/documents", label: "Documents", icon: <FileText size={15} /> },
-  { href: "/dashboard/contacts", label: "Contacts", icon: <Users size={15} /> },
+  { href: "/dashboard/contacts", label: "Contacts & Companies", icon: <Users size={15} /> },
   { href: "/dashboard/price-book", label: "Price Book", icon: <BookOpen size={15} /> },
+  { href: "/dashboard/marketing", label: "Marketing", icon: <Megaphone size={15} /> },
+  { href: "/dashboard/agents/pending", label: "AI Workforce", icon: <Bot size={15} /> },
 ];
 
-function NavLink({ item, onNavigate }: { item: NavItem; onNavigate?: () => void }) {
+const SETTINGS_NAV: NavItem[] = [
+  { href: "/dashboard/settings/team", label: "Team", icon: <Users size={13} /> },
+  { href: "/dashboard/settings/billing", label: "Billing", icon: <Calculator size={13} /> },
+  { href: "/dashboard/settings/cost-overrides", label: "Cost Overrides", icon: <BookOpen size={13} /> },
+];
+
+// Target-IA workspaces with no real backend workflow wired up yet
+// (Preconstruction, global Project Management roll-up, Financials, global
+// Procurement, global Civil Intelligence, Reports). Listed so the full
+// intended IA is visible, but deliberately non-navigable rather than an
+// empty page pretending to be finished — "label incomplete modules as
+// experimental or unavailable" rather than ship a shell.
+const COMING_SOON = [
+  "Preconstruction",
+  "Project Management",
+  "Financials",
+  "Procurement",
+  "Civil Intelligence",
+  "Reports",
+];
+
+function NavLink({ item, onNavigate, small }: { item: NavItem; onNavigate?: () => void; small?: boolean }) {
   const pathname = usePathname();
   const active = item.exact ? pathname === item.href : pathname.startsWith(item.href);
 
@@ -36,7 +70,7 @@ function NavLink({ item, onNavigate }: { item: NavItem; onNavigate?: () => void 
     <Link
       href={item.href}
       onClick={onNavigate}
-      className={`group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
+      className={`group relative flex items-center gap-3 rounded-lg px-3 text-sm font-medium transition-colors ${small ? "py-2 text-xs" : "py-2.5"} ${
         active
           ? "bg-white/5 text-white"
           : "text-white/40 hover:bg-white/4 hover:text-white/80"
@@ -53,6 +87,19 @@ function NavLink({ item, onNavigate }: { item: NavItem; onNavigate?: () => void 
   );
 }
 
+function ComingSoonRow({ label }: { label: string }) {
+  return (
+    <div
+      className="flex cursor-default items-center gap-3 rounded-lg px-3 py-2 text-xs text-white/20"
+      title={`${label} — not yet available. Backend workflow isn't connected/verified yet.`}
+    >
+      <Settings size={13} className="text-white/15" />
+      <span className="flex-1">{label}</span>
+      <span className="rounded border border-white/10 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-widest text-white/25">Soon</span>
+    </div>
+  );
+}
+
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <>
@@ -63,6 +110,20 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
           <p className="mb-3 px-3 text-[9px] font-bold uppercase tracking-[0.22em] text-white/25">Workspace</p>
           {WORKSPACE_NAV.map((item) => (
             <NavLink key={item.label} item={item} onNavigate={onNavigate} />
+          ))}
+        </div>
+
+        <div className="mt-6 space-y-0.5">
+          <p className="mb-3 px-3 text-[9px] font-bold uppercase tracking-[0.22em] text-white/25">Settings & Administration</p>
+          {SETTINGS_NAV.map((item) => (
+            <NavLink key={item.label} item={item} onNavigate={onNavigate} small />
+          ))}
+        </div>
+
+        <div className="mt-6 space-y-0.5">
+          <p className="mb-3 px-3 text-[9px] font-bold uppercase tracking-[0.22em] text-white/25">Coming Soon</p>
+          {COMING_SOON.map((label) => (
+            <ComingSoonRow key={label} label={label} />
           ))}
         </div>
       </nav>
