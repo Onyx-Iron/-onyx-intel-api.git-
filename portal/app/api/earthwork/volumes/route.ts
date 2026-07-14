@@ -14,18 +14,22 @@ export const runtime = "nodejs";
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  // project_id is optional so the global Civil Intelligence workspace can
+  // roll up earthwork volumes across every project for the tenant; every
+  // project-scoped caller still passes it explicitly.
   const projectId = req.nextUrl.searchParams.get("project_id");
-  if (!projectId) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
 
-  const { data, error } = await anyDb.from("earthwork_volumes")
+  let query = anyDb.from("earthwork_volumes")
     .select("*")
-    .eq("tenant_id", tenantId).eq("project_id", projectId)
+    .eq("tenant_id", tenantId)
     .order("layer_name");
+  if (projectId) query = query.eq("project_id", projectId);
+  const { data, error } = await query;
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   interface Row {
