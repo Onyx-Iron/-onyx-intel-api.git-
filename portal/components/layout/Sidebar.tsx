@@ -8,12 +8,15 @@ import {
   BookOpen,
   Bot,
   Calculator,
+  DollarSign,
   FileText,
   FolderKanban,
   LayoutDashboard,
   Megaphone,
+  Mountain,
   Ruler,
   Settings,
+  Truck,
   Users,
   X,
 } from "lucide-react";
@@ -37,6 +40,9 @@ const WORKSPACE_NAV: NavItem[] = [
   { href: "/dashboard/documents", label: "Documents", icon: <FileText size={15} /> },
   { href: "/dashboard/contacts", label: "Contacts & Companies", icon: <Users size={15} /> },
   { href: "/dashboard/price-book", label: "Price Book", icon: <BookOpen size={15} /> },
+  { href: "/dashboard/procurement", label: "Procurement", icon: <Truck size={15} /> },
+  { href: "/dashboard/financials", label: "Financials", icon: <DollarSign size={15} /> },
+  { href: "/dashboard/civil-intelligence", label: "Civil Intelligence", icon: <Mountain size={15} /> },
   { href: "/dashboard/marketing", label: "Marketing", icon: <Megaphone size={15} /> },
   { href: "/dashboard/agents/pending", label: "AI Workforce", icon: <Bot size={15} /> },
 ];
@@ -47,18 +53,15 @@ const SETTINGS_NAV: NavItem[] = [
   { href: "/dashboard/settings/cost-overrides", label: "Cost Overrides", icon: <BookOpen size={13} /> },
 ];
 
-// Target-IA workspaces with no real backend workflow wired up yet
-// (Preconstruction, global Project Management roll-up, Financials, global
-// Procurement, global Civil Intelligence, Reports). Listed so the full
-// intended IA is visible, but deliberately non-navigable rather than an
-// empty page pretending to be finished — "label incomplete modules as
-// experimental or unavailable" rather than ship a shell.
+// Target-IA workspaces with no real backend workflow wired up yet. Listed so
+// the full intended IA is visible, but deliberately non-navigable rather
+// than an empty page pretending to be finished — "label incomplete modules
+// as experimental or unavailable" rather than ship a shell. See
+// docs/frontend-backend-reconciliation/PHASE_4_GAP_ANALYSIS.md for the exact
+// missing APIs/tables/workflows behind each of these.
 const COMING_SOON = [
   "Preconstruction",
   "Project Management",
-  "Financials",
-  "Procurement",
-  "Civil Intelligence",
   "Reports",
 ];
 
