@@ -156,7 +156,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const db = await createServiceClient();
 
     const { data } = await db
-      .from("project_risk_digests" as "projects") // cast — not in generated types yet
+      .from("project_risk_digests")
       .select("id, risk_level, bullets, generated_at, data_snapshot")
       .eq("project_id", project_id)
       .eq("tenant_id", tenantId)

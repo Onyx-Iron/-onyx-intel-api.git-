@@ -158,6 +158,9 @@ export async function POST(
     const accessToken = body.access_token; // optional — server falls back to stored token
 
     tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    // Narrowed const, since `tenantId` is captured by the markError() closure above,
+    // which blocks TS's normal control-flow narrowing of the `let` for the rest of this function.
+    const resolvedTenantId: string = tenantId;
     const db = await createServiceClient();
 
     const { data: doc, error: docErr } = await db
@@ -272,7 +275,7 @@ export async function POST(
     if (pages.length > 0) {
       const pageRows: TablesInsert<"pages">[] = pages.map((p) => ({
         document_id: docId,
-        tenant_id: tenantId,
+        tenant_id: resolvedTenantId,
         page_number: p.page_number,
         extracted_text: [p.summary, (p.key_terms ?? []).join(", ")].filter(Boolean).join("\n"),
       }));
@@ -295,7 +298,7 @@ export async function POST(
             const values = await embedText(chunk);
             chunkRows.push({
               document_id: docId,
-              tenant_id: tenantId,
+              tenant_id: resolvedTenantId,
               project_id: projectId,
               page_number: page.page_number,
               content: chunk,

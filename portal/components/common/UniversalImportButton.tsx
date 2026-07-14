@@ -22,9 +22,10 @@ interface UniversalImportButtonProps {
   label?: string;
   caption?: string;
   disabled?: boolean;
+  accept?: string;
 }
 
-const ACCEPT = ".xlsx,.xls,.csv,.docx,.pdf,.tiff,.tif,.png,.jpg,.jpeg,.dwg,.dxf";
+const DEFAULT_ACCEPT = ".xlsx,.xls,.csv,.docx,.pdf,.tiff,.tif,.png,.jpg,.jpeg,.dwg,.dxf";
 
 export function UniversalImportButton({
   onParsed,
@@ -32,6 +33,7 @@ export function UniversalImportButton({
   label = "Import",
   caption = "Excel, Sheets, Word, PDF, TIFF, CAD",
   disabled,
+  accept,
 }: UniversalImportButtonProps) {
   const { toast } = useToast();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -108,7 +110,7 @@ export function UniversalImportButton({
       <input
         ref={inputRef}
         type="file"
-        accept={ACCEPT}
+        accept={accept || DEFAULT_ACCEPT}
         aria-label="Choose file to import"
         className="hidden"
         onChange={(e) => {

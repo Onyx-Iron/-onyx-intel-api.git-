@@ -36,16 +36,14 @@ export async function PUT(req: NextRequest, ctx: RouteContext): Promise<NextResp
     // Snapshot old values for the audit log before mutation (pricing_status
     // changes are effectively estimate item approval/rejection).
     const { data: before } = await db
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .from("estimate_items" as any)
+      .from("estimate_items")
       .select("*")
       .eq("id", id).eq("tenant_id", tenantId).eq("project_id", project_id)
       .maybeSingle();
 
     const { data, error } = await db
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .from("estimate_items" as any)
-      .update(updates)
+      .from("estimate_items")
+      .update(updates as never)
       .eq("id", id)
       .eq("tenant_id", tenantId)
       .eq("project_id", project_id)
@@ -83,8 +81,7 @@ export async function DELETE(req: NextRequest, ctx: RouteContext): Promise<NextR
 
      
     const { data: before } = await db
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .from("estimate_items" as any)
+      .from("estimate_items")
       .select("*")
       .eq("id", id).eq("tenant_id", tenantId).eq("project_id", project_id)
       .maybeSingle();

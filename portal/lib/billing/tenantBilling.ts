@@ -21,15 +21,14 @@ export async function getTenantBilling(
   tenantId: string,
 ): Promise<TenantBilling | null> {
   const supabase = await createServiceClient();
-  // Cast to any: billing columns aren't in generated supabase types yet.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (supabase.from("tenants") as any)
+  const { data, error } = await supabase
+    .from("tenants")
     .select(BILLING_COLS)
     .eq("id", tenantId)
     .maybeSingle();
 
   if (error || !data) return null;
-  return data as TenantBilling;
+  return data as unknown as TenantBilling;
 }
 
 export async function setTenantBilling(
@@ -37,9 +36,9 @@ export async function setTenantBilling(
   patch: Partial<TenantBilling>,
 ): Promise<void> {
   const supabase = await createServiceClient();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { error } = await (supabase.from("tenants") as any)
-    .update(patch)
+  const { error } = await supabase
+    .from("tenants")
+    .update(patch as never)
     .eq("id", tenantId);
   if (error) {
     throw new Error(`setTenantBilling failed: ${error.message}`);

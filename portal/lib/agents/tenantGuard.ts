@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createServiceClient } from "@/lib/supabase/server";
+import type { Json } from "@/lib/supabase/types";
 
 export interface TenantGuardFinding {
   file: string;
@@ -152,7 +153,7 @@ export async function runTenantGuard(
       .from("agent_runs")
       .update({
         status: "succeeded",
-        output: { findings, files_scanned: scanned },
+        output: { findings, files_scanned: scanned } as unknown as Json,
         finished_at: new Date().toISOString(),
       })
       .eq("id", runId);

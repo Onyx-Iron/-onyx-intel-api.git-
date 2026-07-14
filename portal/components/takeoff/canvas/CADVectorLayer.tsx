@@ -308,7 +308,7 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
                         setEditingPoints((prev) => {
                           if (!prev) return prev;
                           const next = prev.map((p) => [...p] as [number, number]);
-                          next[idx] = [startWorld[0] + dx * scaleFactor(v), startWorld[1] - dy * scaleFactor(v)];
+                          next[idx] = [startWorld[0] + dx * scaleFactor(), startWorld[1] - dy * scaleFactor()];
                           return next;
                         });
                       };

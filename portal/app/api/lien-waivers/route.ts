@@ -13,7 +13,7 @@ const LIEN_WAIVER_FINANCIAL_FIELDS = ["amount"] as const;
 
 export const runtime = "nodejs";
 
-const TABLE = "lien_waivers";
+const TABLE = "lien_waivers" as const;
 const FIELDS = [
   "vendor_name", "waiver_type", "draw_number", "amount", "through_date",
   "state", "document_id", "signed_at", "signed_by", "status", "notes",
@@ -83,8 +83,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     insert.status = status;
 
     const { data, error } = await db
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .from(TABLE as any)
+      .from(TABLE)
       .insert(insert)
       .select()
       .single();

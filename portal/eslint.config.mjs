@@ -12,6 +12,11 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Deno Edge Functions: separate runtime (Deno globals, esm.sh URL
+    // imports) from the rest of the portal. Linted/typechecked separately
+    // under Deno's own tooling, not this Next.js/Node config -- same
+    // reasoning as their tsconfig.json exclusion.
+    "supabase/functions/**",
   ]),
 ]);
 

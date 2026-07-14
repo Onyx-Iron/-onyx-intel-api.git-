@@ -10,7 +10,7 @@ import { parsePagination, paginationMeta } from "@/lib/pagination";
 
 export const runtime = "nodejs";
 
-const TABLE = "invoices";
+const TABLE = "invoices" as const;
 const FIELDS = [
   "direction", "invoice_number", "vendor_or_customer", "description",
   "amount", "retainage", "invoice_date", "due_date", "paid_date",
@@ -98,8 +98,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (insert.amount == null) insert.amount = 0;
 
     const { data, error } = await db
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .from(TABLE as any)
+      .from(TABLE)
       .insert(insert)
       .select()
       .single();
