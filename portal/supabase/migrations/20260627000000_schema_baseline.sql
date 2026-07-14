@@ -27,8 +27,13 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE EXTENSION IF NOT EXISTS "vector";
-CREATE EXTENSION IF NOT EXISTS "postgis";
-CREATE EXTENSION IF NOT EXISTS "postgis_topology";
+-- Production has PostGIS installed into a non-default `topology` schema
+-- (confirmed via pg_type: the `geometry` type lives in `topology`, not
+-- `public`/`extensions`) -- matched here so takeoff_items.geom_* columns
+-- resolve to the same type production uses.
+CREATE SCHEMA IF NOT EXISTS topology;
+CREATE EXTENSION IF NOT EXISTS postgis SCHEMA topology;
+CREATE EXTENSION IF NOT EXISTS postgis_topology SCHEMA topology;
 
 -- ── tenants (root of the multi-tenant model) ──────────────────────────────
 CREATE TABLE IF NOT EXISTS public.tenants (
@@ -222,7 +227,7 @@ CREATE TABLE IF NOT EXISTS public.chunks (
   content text NOT NULL,
   embedding vector(768),
   created_at timestamp with time zone DEFAULT now() NOT NULL,
-  fts tsvector DEFAULT to_tsvector('english'::regconfig, COALESCE(content, ''::text)),
+  fts tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, COALESCE(content, ''::text))) STORED,
   PRIMARY KEY (id)
 );
 
