@@ -9,7 +9,10 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS drive_file_id text;
 CREATE TABLE IF NOT EXISTS document_pages (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id     uuid NOT NULL,
-  document_id   uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  -- documents.id is text (not uuid, unlike every other table's PK) --
+  -- verified against production; corrected here after branch-replay found
+  -- the mismatch (see docs/frontend-backend-reconciliation/MIGRATION_DRIFT_SWEEP.md).
+  document_id   text NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   page_number   integer NOT NULL,
   storage_path  text NOT NULL,        -- plans-bucket/pages/{document_id}/page-{n}.pdf
   status        text NOT NULL DEFAULT 'pending',  -- pending | processing | done | error
@@ -29,7 +32,8 @@ CREATE INDEX IF NOT EXISTS idx_document_pages_tenant_status
 CREATE TABLE IF NOT EXISTS document_chunks (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id     uuid NOT NULL,
-  document_id   uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  -- documents.id is text -- see note on document_pages.document_id above.
+  document_id   text NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   page_id       uuid REFERENCES document_pages(id) ON DELETE CASCADE,
   page_number   integer,
   chunk_index   integer NOT NULL,
