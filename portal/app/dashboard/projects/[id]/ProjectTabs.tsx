@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Award,
@@ -173,11 +173,30 @@ export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps
 
   const activeSub = currentSubtabs.find((s) => s.id === activeSubId);
 
+  const pillScrollRef = useRef<HTMLDivElement>(null);
+  const [pillsOverflow, setPillsOverflow] = useState(false);
+
+  useEffect(() => {
+    const el = pillScrollRef.current;
+    if (!el) return;
+    const checkOverflow = () => setPillsOverflow(el.scrollWidth > el.clientWidth + 1);
+    checkOverflow();
+    const ro = new ResizeObserver(checkOverflow);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   return (
     <div>
-      {/* Section pills */}
-      <div className="border-b border-white/8 px-4 py-4 sm:px-6">
-        <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide">
+      {/* Section pills. On narrow viewports the 10 pills don't all fit --
+          they scroll horizontally, with a right-edge fade shown only while
+          there's actually more to scroll to (checked via ResizeObserver,
+          not assumed). */}
+      <div
+        className="border-b border-white/8 px-4 py-4 sm:px-6"
+        style={pillsOverflow ? { maskImage: "linear-gradient(to right, black calc(100% - 28px), transparent 100%)", WebkitMaskImage: "linear-gradient(to right, black calc(100% - 28px), transparent 100%)" } : undefined}
+      >
+        <div ref={pillScrollRef} className="flex items-center gap-2 overflow-x-auto scrollbar-hide">
           {PHASES.map((phase) => (
             <button
               key={phase.id}
