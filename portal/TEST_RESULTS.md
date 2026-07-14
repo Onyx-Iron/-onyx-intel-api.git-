@@ -7,7 +7,7 @@ for the incident this log exists to prevent a repeat of.
 | Date | Suite(s) | Environment | Project ref | Notes |
 |---|---|---|---|---|
 | 2026-07-12 | procurement/workflow, project-controls/change-orders, project-controls/financial-redaction | **Production** (via `.env.local`) | `vvnigrbdsipriufhrwbs` | Mistake — see incident doc. Verified no residual data afterward. |
-| _pending_ | same three suites | Isolated Supabase branch (pending creation/approval) | _pending_ | Re-run planned once `.env.test.local` points at the isolated branch. |
+| 2026-07-13 | procurement/workflow (6/6), project-controls/change-orders (10/10), project-controls/financial-redaction (5/5) | Isolated Supabase branch `frontend-backend-reconciliation-test` | `wjngtkkezeytyymamlmm` | **21/21 passing.** Guard correctly resolved the branch (did not throw). Post-run verified zero residual rows across tenants/projects/project_profiles/estimate_items/invoices/change_order_items/marketplace_requests/vendor_bids/purchase_orders. |
 
 ## Rule
 
