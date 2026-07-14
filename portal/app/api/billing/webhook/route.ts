@@ -1,28 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPaddleConfig, verifyWebhookSignature } from "@/lib/billing/paddle";
 import { getTenantBilling, setTenantBilling } from "@/lib/billing/tenantBilling";
-import { PLANS } from "@/lib/billing/plans";
+import { PLANS, type PlanTier } from "@/lib/billing/plans";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-type PlanTier = "free" | "solo" | "crew" | "business";
 
 function planTierFromPriceId(priceId: string): {
   plan_tier: PlanTier;
   ai_credits: number;
 } | null {
-  for (const [tier, def] of Object.entries(PLANS as Record<string, unknown>)) {
-    if (!def || typeof def !== "object") continue;
-    const d = def as {
-      paddle_price_ids?: Record<string, string>;
-      ai_credits_monthly?: number;
-    };
-    const ids = d.paddle_price_ids ?? {};
-    if (Object.values(ids).includes(priceId)) {
+  for (const def of PLANS) {
+    if (def.paddlePriceIdMonthly === priceId || def.paddlePriceIdYearly === priceId) {
       return {
-        plan_tier: tier as PlanTier,
-        ai_credits: d.ai_credits_monthly ?? 0,
+        plan_tier: def.tier,
+        ai_credits: def.aiCreditsPerMonth,
       };
     }
   }
@@ -161,7 +153,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
         await setTenantBilling(tenantId, {
           subscription_status: "canceled",
-          ...(periodEnded ? { plan_tier: "free" as PlanTier } : {}),
+          ...(periodEnded ? { plan_tier: "trial" as PlanTier } : {}),
         });
         break;
       }

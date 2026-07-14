@@ -110,17 +110,44 @@ jobs:
         working-directory: portal
         if: always()
 
+  python:
+    name: Python takeoff engine (compile + tests)
+    runs-on: ubuntu-latest
+    # Lives at the repo root, not portal/ — overrides the global
+    # working-directory default for its own steps.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        working-directory: .
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Compile check (every root-level Python module)
+        working-directory: .
+        run: python -m py_compile takeoff_api.py takeoff_extract.py takeoff_parser.py takeoff_validator.py enhanced_takeoff_system.py google_integration.py rate_limiting.py cost_supabase.py
+      - name: Run tests
+        working-directory: .
+        run: pytest -v
+
   integration-tests:
     name: Integration tests (tenant isolation, atomic writes, outbox worker)
     runs-on: ubuntu-latest
-    # Requires repo secrets NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY
-    # pointed at the real Supabase dev project (not a local stack — these
-    # tests exercise live RPCs/RLS/triggers that only exist there). Every
-    # test file in this suite already skips itself gracefully and reports
-    # "SKIPPED — no live DB credentials" if these secrets aren't configured,
-    # so this job stays green before they're added — it just isn't a real
-    # gate until they are. See the CI setup checkpoint for exactly which
-    # secrets to add and where.
+    # SAFETY: must target an ISOLATED Supabase branch / dedicated test
+    # project only — never production. Uses TEST_SUPABASE_URL /
+    # TEST_SUPABASE_SERVICE_ROLE_KEY repo secrets (distinct names from the
+    # production NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY secrets
+    # used by the build job) plus ALLOW_INTEGRATION_TESTS=true.
+    # lib/test-utils/integration-guard.ts fails closed (throws, does not
+    # skip) if TEST_SUPABASE_URL ever resolves to the production project ref,
+    # so even a misconfigured secret can't point this job at production.
+    # Every test file in this suite already skips itself gracefully and
+    # reports "SKIPPED — ALLOW_INTEGRATION_TESTS is not set" if these secrets
+    # aren't configured, so this job stays green before they're added — it
+    # just isn't a real gate until they are.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -131,5 +158,6 @@ jobs:
       - run: npm ci
       - run: npm run test:integration
         env:
-          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ALLOW_INTEGRATION_TESTS: "true"
+          TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}

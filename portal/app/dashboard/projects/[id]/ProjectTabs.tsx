@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Award,
@@ -45,72 +45,123 @@ import OpenInvoicesTab          from "@/components/invoicing/OpenInvoicesTab";
 import ClosedInvoicesTab        from "@/components/invoicing/ClosedInvoicesTab";
 import LienWaiversTab           from "@/components/invoicing/LienWaiversTab";
 import CutFillTab               from "@/components/cut-fill/CutFillTab";
+import ProcurementBoard         from "@/components/procurement/ProcurementBoard";
 
-type Phase = "Pre-Construction" | "Project Setup" | "Project Management" | "Invoicing" | "Closeout";
+// Target 10-section IA (docs/frontend-backend-reconciliation/INFORMATION_ARCHITECTURE.md)
+// replacing the prior 5-phase/~21-subtab structure. This recomposes the same
+// existing *Tab.tsx components into fewer top-level sections -- none of the
+// underlying tab components were rewritten, only regrouped.
+type Phase =
+  | "Overview"
+  | "Documents"
+  | "Takeoff"
+  | "Estimate & Budget"
+  | "Schedule"
+  | "Project Controls"
+  | "Procurement"
+  | "Financials"
+  | "Field"
+  | "Closeout";
 
 interface SubTabDef {
   id: string;
   label: string;
   icon: JSX.Element;
-  render: (projectId: string) => JSX.Element;
+  render: (projectId: string, projectName: string) => JSX.Element;
 }
 
 const PHASES: { id: Phase; subtabs: SubTabDef[] }[] = [
   {
-    id: "Pre-Construction",
+    id: "Overview",
     subtabs: [
-      { id: "takeoff",   label: "Takeoff",         icon: <Layers size={13} />,        render: (p) => <TakeoffTab projectId={p} /> },
-      { id: "estimates", label: "Estimates",       icon: <Calculator size={13} />,    render: (p) => <EstimateTab projectId={p} /> },
-      { id: "rfis",      label: "RFIs & Controls", icon: <FileStack size={13} />,     render: (p) => <ProjectControlsTab projectId={p} /> },
-      { id: "risk",      label: "Risk Assessment", icon: <AlertTriangle size={13} />, render: (p) => <RiskAssessmentTab projectId={p} /> },
-      { id: "cutfill",   label: "Cut / Fill",      icon: <Layers size={13} />,        render: (p) => <CutFillTab projectId={p} /> },
+      { id: "summary", label: "Summary",         icon: <LayoutGrid size={13} />,    render: (p) => <OverviewTab projectId={p} /> },
+      { id: "risk",    label: "Risk Assessment", icon: <AlertTriangle size={13} />, render: (p) => <RiskAssessmentTab projectId={p} /> },
     ],
   },
   {
-    id: "Project Setup",
+    id: "Documents",
     subtabs: [
-      { id: "materials",  label: "Material Vendors",     icon: <PackageOpen size={13} />, render: (p) => <MaterialVendorsTab projectId={p} /> },
-      { id: "equipment",  label: "Equipment Suppliers",  icon: <Truck size={13} />,       render: (p) => <EquipmentSuppliersTab projectId={p} /> },
-      { id: "subs",       label: "Subcontractors",       icon: <Hammer size={13} />,      render: (p) => <ContactsTab projectId={p} /> },
-      { id: "staff",      label: "Staff",                icon: <HardHat size={13} />,     render: (p) => <StaffTab projectId={p} /> },
+      { id: "documents", label: "Documents", icon: <FileText size={13} />, render: (p) => <DocumentsTab projectId={p} /> },
     ],
   },
   {
-    id: "Project Management",
+    id: "Takeoff",
     subtabs: [
-      { id: "daily-log",  label: "Daily Log",   icon: <ClipboardList size={13} />, render: (p) => <DailyLogTab projectId={p} /> },
-      { id: "weekly-log", label: "Weekly Log",  icon: <FileText size={13} />,      render: (p) => <WeeklyLogTab projectId={p} /> },
-      { id: "scheduling", label: "Scheduling",  icon: <CalendarDays size={13} />,  render: (p) => <ScheduleTab projectId={p} /> },
-      { id: "todo",       label: "To Do List",  icon: <ListChecks size={13} />,    render: (p) => <TodoTab projectId={p} /> },
+      { id: "takeoff", label: "Takeoff",    icon: <Layers size={13} />, render: (p) => <TakeoffTab projectId={p} /> },
+      { id: "cutfill", label: "Cut / Fill", icon: <Layers size={13} />, render: (p) => <CutFillTab projectId={p} /> },
     ],
   },
   {
-    id: "Invoicing",
+    id: "Estimate & Budget",
     subtabs: [
-      { id: "ar",            label: "Accounts Receivable", icon: <Banknote size={13} />,    render: (p) => <AccountsReceivableTab projectId={p} /> },
-      { id: "ap",            label: "Accounts Payable",    icon: <Receipt size={13} />,     render: (p) => <AccountsPayableTab projectId={p} /> },
-      { id: "open",          label: "Open Invoices",       icon: <Coins size={13} />,       render: (p) => <OpenInvoicesTab projectId={p} /> },
-      { id: "closed",        label: "Closed Invoices",     icon: <FileCheck size={13} />,   render: (p) => <ClosedInvoicesTab projectId={p} /> },
-      { id: "lien-waivers",  label: "Lien Waivers",        icon: <ShieldCheck size={13} />, render: (p) => <LienWaiversTab projectId={p} /> },
+      { id: "estimates", label: "Estimate & Budget", icon: <Calculator size={13} />, render: (p) => <EstimateTab projectId={p} /> },
+    ],
+  },
+  {
+    id: "Schedule",
+    subtabs: [
+      { id: "scheduling", label: "Schedule", icon: <CalendarDays size={13} />, render: (p) => <ScheduleTab projectId={p} /> },
+    ],
+  },
+  {
+    id: "Project Controls",
+    subtabs: [
+      // ProjectControlsTab already covers RFIs, Submittals, and Change
+      // Orders in one component -- see item 3 of this reconciliation
+      // (confirmed live and working, not the "broken" state Phase 1
+      // originally mischaracterized it as).
+      { id: "controls", label: "RFIs, Submittals & Change Orders", icon: <FileStack size={13} />, render: (p) => <ProjectControlsTab projectId={p} /> },
+    ],
+  },
+  {
+    id: "Procurement",
+    subtabs: [
+      // Wired in per frontend-backend-reconciliation Phase-1 audit finding:
+      // ProcurementBoard + its full RFQ -> vendor bid -> award -> PO backend
+      // already existed at this route with zero navigation path to it.
+      { id: "procurement", label: "Vendor Bids & POs",     icon: <Truck size={13} />,       render: (p, n) => <ProcurementBoard projectId={p} projectName={n} /> },
+      { id: "materials",   label: "Material Vendors",      icon: <PackageOpen size={13} />, render: (p) => <MaterialVendorsTab projectId={p} /> },
+      { id: "equipment",   label: "Equipment Suppliers",   icon: <Truck size={13} />,       render: (p) => <EquipmentSuppliersTab projectId={p} /> },
+      { id: "subs",        label: "Subcontractors",        icon: <Hammer size={13} />,      render: (p) => <ContactsTab projectId={p} /> },
+    ],
+  },
+  {
+    id: "Financials",
+    subtabs: [
+      { id: "ar",           label: "Accounts Receivable", icon: <Banknote size={13} />,    render: (p) => <AccountsReceivableTab projectId={p} /> },
+      { id: "ap",           label: "Accounts Payable",    icon: <Receipt size={13} />,     render: (p) => <AccountsPayableTab projectId={p} /> },
+      { id: "open",         label: "Open Invoices",       icon: <Coins size={13} />,       render: (p) => <OpenInvoicesTab projectId={p} /> },
+      { id: "closed",       label: "Closed Invoices",     icon: <FileCheck size={13} />,   render: (p) => <ClosedInvoicesTab projectId={p} /> },
+      { id: "lien-waivers", label: "Lien Waivers",        icon: <ShieldCheck size={13} />, render: (p) => <LienWaiversTab projectId={p} /> },
+    ],
+  },
+  {
+    id: "Field",
+    subtabs: [
+      { id: "daily-log",  label: "Daily Log",  icon: <ClipboardList size={13} />, render: (p) => <DailyLogTab projectId={p} /> },
+      { id: "weekly-log", label: "Weekly Log", icon: <FileText size={13} />,      render: (p) => <WeeklyLogTab projectId={p} /> },
+      { id: "todo",       label: "To Do List", icon: <ListChecks size={13} />,    render: (p) => <TodoTab projectId={p} /> },
+      { id: "staff",      label: "Staff",      icon: <HardHat size={13} />,       render: (p) => <StaffTab projectId={p} /> },
     ],
   },
   {
     id: "Closeout",
     subtabs: [
-      { id: "punchlist",  label: "Punchlist",                 icon: <ListChecks size={13} />, render: (p) => <PunchListTab projectId={p} /> },
-      { id: "co",         label: "Certificate of Occupancy",  icon: <Award size={13} />,      render: (p) => <CertificateOfOccupancyTab projectId={p} /> },
-      { id: "final-docs", label: "Final Docs",                icon: <FileText size={13} />,   render: (p) => <DocumentsTab projectId={p} /> },
+      { id: "punchlist",  label: "Punchlist",                icon: <ListChecks size={13} />, render: (p) => <PunchListTab projectId={p} /> },
+      { id: "co",         label: "Certificate of Occupancy", icon: <Award size={13} />,      render: (p) => <CertificateOfOccupancyTab projectId={p} /> },
+      { id: "final-docs", label: "Final Docs",               icon: <FileText size={13} />,   render: (p) => <DocumentsTab projectId={p} /> },
     ],
   },
 ];
 
 interface ProjectTabsProps {
   projectId: string;
+  projectName?: string;
 }
 
-export default function ProjectTabs({ projectId }: ProjectTabsProps) {
-  const [activePhase, setActivePhase] = useState<Phase | null>(null);
-  const [activeSubId, setActiveSubId] = useState<string>("overview");
+export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps) {
+  const [activePhase, setActivePhase] = useState<Phase>("Overview");
+  const [activeSubId, setActiveSubId] = useState<string>("summary");
 
   const selectPhase = (phase: Phase) => {
     setActivePhase(phase);
@@ -118,33 +169,34 @@ export default function ProjectTabs({ projectId }: ProjectTabsProps) {
     if (first) setActiveSubId(first.id);
   };
 
-  const selectOverview = () => {
-    setActivePhase(null);
-    setActiveSubId("overview");
-  };
-
-  const currentSubtabs = activePhase
-    ? PHASES.find((p) => p.id === activePhase)?.subtabs ?? []
-    : [];
+  const currentSubtabs = PHASES.find((p) => p.id === activePhase)?.subtabs ?? [];
 
   const activeSub = currentSubtabs.find((s) => s.id === activeSubId);
 
+  const pillScrollRef = useRef<HTMLDivElement>(null);
+  const [pillsOverflow, setPillsOverflow] = useState(false);
+
+  useEffect(() => {
+    const el = pillScrollRef.current;
+    if (!el) return;
+    const checkOverflow = () => setPillsOverflow(el.scrollWidth > el.clientWidth + 1);
+    checkOverflow();
+    const ro = new ResizeObserver(checkOverflow);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   return (
     <div>
-      {/* Phase pills */}
-      <div className="border-b border-white/8 px-4 py-4 sm:px-6">
-        <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide">
-          <button
-            onClick={selectOverview}
-            className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-full border px-5 text-xs font-bold uppercase tracking-[0.18em] transition-colors ${
-              activePhase === null
-                ? "border-[#CCFF00]/40 bg-[#CCFF00]/10 text-[#CCFF00]"
-                : "border-white/10 bg-white/5 text-white/60 hover:text-white/80"
-            }`}
-          >
-            <LayoutGrid size={13} />
-            Overview
-          </button>
+      {/* Section pills. On narrow viewports the 10 pills don't all fit --
+          they scroll horizontally, with a right-edge fade shown only while
+          there's actually more to scroll to (checked via ResizeObserver,
+          not assumed). */}
+      <div
+        className="border-b border-white/8 px-4 py-4 sm:px-6"
+        style={pillsOverflow ? { maskImage: "linear-gradient(to right, black calc(100% - 28px), transparent 100%)", WebkitMaskImage: "linear-gradient(to right, black calc(100% - 28px), transparent 100%)" } : undefined}
+      >
+        <div ref={pillScrollRef} className="flex items-center gap-2 overflow-x-auto scrollbar-hide">
           {PHASES.map((phase) => (
             <button
               key={phase.id}
@@ -155,6 +207,7 @@ export default function ProjectTabs({ projectId }: ProjectTabsProps) {
                   : "border-white/10 bg-white/5 text-white/60 hover:text-white/80"
               }`}
             >
+              {phase.id === "Overview" && <LayoutGrid size={13} />}
               {phase.id}
             </button>
           ))}
@@ -162,7 +215,7 @@ export default function ProjectTabs({ projectId }: ProjectTabsProps) {
       </div>
 
       {/* Sub-tabs */}
-      {activePhase && currentSubtabs.length > 0 && (
+      {currentSubtabs.length > 1 && (
         <div className="border-b border-white/8 px-4 sm:px-6">
           <div className="flex items-end overflow-x-auto scrollbar-hide">
             {currentSubtabs.map((sub) => (
@@ -187,11 +240,7 @@ export default function ProjectTabs({ projectId }: ProjectTabsProps) {
 
       {/* Tab content */}
       <div className="px-4 py-6 sm:px-6 sm:py-8">
-        {activePhase === null ? (
-          <OverviewTab projectId={projectId} />
-        ) : activeSub ? (
-          activeSub.render(projectId)
-        ) : null}
+        {activeSub ? activeSub.render(projectId, projectName ?? "") : null}
       </div>
     </div>
   );

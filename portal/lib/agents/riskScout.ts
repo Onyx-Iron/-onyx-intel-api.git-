@@ -7,6 +7,7 @@
 import { generateText } from "@/lib/ai/providers";
 import { getControlDb, type ControlDb } from "@/lib/project-controls/server";
 import { createServiceClient } from "@/lib/supabase/server";
+import type { Json } from "@/lib/supabase/types";
 
 export interface RiskFinding {
   title: string;
@@ -159,7 +160,7 @@ export async function runRiskScout(
       .from("agent_runs")
       .update({
         status: "succeeded",
-        output: { findings, snapshot },
+        output: { findings, snapshot } as unknown as Json,
         finished_at: new Date().toISOString(),
       })
       .eq("id", runId);

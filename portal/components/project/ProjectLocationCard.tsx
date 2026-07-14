@@ -17,34 +17,7 @@ interface Props {
   initial: LocationData;
 }
 
-// Minimal Google Places types — avoid a hard dep on @types/google.maps.
-type PlacesAutocomplete = {
-  addListener: (event: string, cb: () => void) => void;
-  getPlace: () => {
-    address_components?: Array<{
-      long_name: string;
-      short_name: string;
-      types: string[];
-    }>;
-    geometry?: { location?: { lat: () => number; lng: () => number } };
-    formatted_address?: string;
-  };
-};
-
-declare global {
-  interface Window {
-    google?: {
-      maps?: {
-        places?: {
-          Autocomplete: new (
-            input: HTMLInputElement,
-            opts?: { types?: string[]; componentRestrictions?: { country?: string | string[] } },
-          ) => PlacesAutocomplete;
-        };
-      };
-    };
-  }
-}
+import type { GooglePlacesAutocomplete } from "@/lib/google/window";
 
 export default function ProjectLocationCard({ projectId, initial }: Props) {
   const { toast } = useToast();
@@ -53,7 +26,7 @@ export default function ProjectLocationCard({ projectId, initial }: Props) {
   const [data, setData] = useState<LocationData>(initial);
   const [draft, setDraft] = useState<LocationData>(initial);
   const addressInputRef = useRef<HTMLInputElement | null>(null);
-  const autocompleteRef = useRef<PlacesAutocomplete | null>(null);
+  const autocompleteRef = useRef<GooglePlacesAutocomplete | null>(null);
 
   // Attach Google Places Autocomplete when editing opens, if available.
   useEffect(() => {

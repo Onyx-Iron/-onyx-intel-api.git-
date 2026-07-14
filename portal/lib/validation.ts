@@ -34,7 +34,7 @@ export const scheduleTaskCreateSchema = z.object({
   critical: z.boolean().optional(),
   parent_id: z.string().uuid().nullable().optional(),
   dependencies: z.array(z.string().uuid()).max(50).optional(),
-  meta: z.record(z.unknown()).optional(),
+  meta: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const scheduleTaskUpdateSchema = scheduleTaskCreateSchema.partial().omit({ project_id: true });
@@ -52,7 +52,7 @@ export const takeoffRowSchema = z.object({
   type: z.string().max(100).nullable().optional(),
   page: z.number().int().nonnegative().nullable().optional(),
   document_id: z.string().uuid().nullable().optional(),
-  meta: z.record(z.unknown()).optional(),
+  meta: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const takeoffItemsSchema = z.object({
@@ -72,7 +72,7 @@ export const estimateItemCreateSchema = z.object({
   unit_cost: z.number().nonnegative().optional(),
   total: z.number().optional(),
   category: z.string().max(100).nullable().optional(),
-  meta: z.record(z.unknown()).optional(),
+  meta: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const estimateItemUpdateSchema = estimateItemCreateSchema.partial().omit({ project_id: true });
@@ -89,7 +89,7 @@ export const permitCreateSchema = z.object({
   approved_at: dateSchema.nullable().optional(),
   expires_at: dateSchema.nullable().optional(),
   notes: z.string().max(5000).nullable().optional(),
-  meta: z.record(z.unknown()).optional(),
+  meta: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const permitUpdateSchema = permitCreateSchema.partial().omit({ project_id: true });
@@ -105,7 +105,7 @@ export const punchListCreateSchema = z.object({
   assigned_to: z.string().max(255).nullable().optional(),
   location: z.string().max(255).nullable().optional(),
   due_date: dateSchema.nullable().optional(),
-  meta: z.record(z.unknown()).optional(),
+  meta: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const punchListUpdateSchema = punchListCreateSchema.partial().omit({ project_id: true });
@@ -120,7 +120,7 @@ export const contactCreateSchema = z.object({
   email: z.string().email().max(255).nullable().optional(),
   phone: z.string().max(50).nullable().optional(),
   notes: z.string().max(5000).nullable().optional(),
-  meta: z.record(z.unknown()).optional(),
+  meta: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const contactUpdateSchema = contactCreateSchema.partial().omit({ project_id: true });
@@ -138,7 +138,7 @@ export const procurementCreateSchema = z.object({
   ordered_at: dateSchema.nullable().optional(),
   expected_at: dateSchema.nullable().optional(),
   notes: z.string().max(5000).nullable().optional(),
-  meta: z.record(z.unknown()).optional(),
+  meta: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const procurementUpdateSchema = procurementCreateSchema.partial().omit({ project_id: true });
@@ -153,7 +153,7 @@ export const changeOrderCreateSchema = z.object({
   amount: z.number().nullable().optional(),
   reason: z.string().max(2000).nullable().optional(),
   number: z.number().int().positive().nullable().optional(),
-  meta: z.record(z.unknown()).optional(),
+  meta: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const changeOrderUpdateSchema = changeOrderCreateSchema.partial().omit({ project_id: true });
@@ -168,7 +168,7 @@ export const dailyLogCreateSchema = z.object({
   notes: z.string().max(20_000).nullable().optional(),
   work_performed: z.string().max(20_000).nullable().optional(),
   issues: z.string().max(10_000).nullable().optional(),
-  meta: z.record(z.unknown()).optional(),
+  meta: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const dailyLogUpdateSchema = dailyLogCreateSchema.partial().omit({ project_id: true });
@@ -179,7 +179,7 @@ export const noteCreateSchema = z.object({
   project_id: z.string().uuid(),
   content: z.string().min(1).max(50_000),
   title: z.string().max(500).nullable().optional(),
-  meta: z.record(z.unknown()).optional(),
+  meta: z.record(z.string(), z.unknown()).optional(),
 });
 
 // ── Query params ─────────────────────────────────────────────────────────────
@@ -197,7 +197,7 @@ export function parseBody<T>(schema: z.ZodType<T>, body: unknown):
   | { success: false; error: string } {
   const result = schema.safeParse(body);
   if (result.success) return { success: true, data: result.data };
-  const first = result.error.errors[0];
+  const first = result.error.issues[0];
   return {
     success: false,
     error: first ? `${first.path.join(".")}: ${first.message}` : "Invalid request body",

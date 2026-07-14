@@ -7,6 +7,7 @@
 import { generateText } from "@/lib/ai/providers";
 import { getControlDb, type ControlDb } from "@/lib/project-controls/server";
 import { createServiceClient } from "@/lib/supabase/server";
+import type { Json } from "@/lib/supabase/types";
 
 export interface DailyLogDraft {
   date: string;
@@ -176,7 +177,7 @@ export async function runDailyLogAssistant(
       .from("agent_runs")
       .update({
         status: "succeeded",
-        output: { draft, context_used: context },
+        output: { draft, context_used: context } as unknown as Json,
         finished_at: new Date().toISOString(),
       })
       .eq("id", runId);

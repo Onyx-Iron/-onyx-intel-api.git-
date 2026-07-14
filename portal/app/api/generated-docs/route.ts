@@ -21,8 +21,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const db = await createServiceClient();
     const { data, error } = await db
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .from("generated_documents" as any)
+      .from("generated_documents")
       .select("*").eq("tenant_id", tenantId).eq("project_id", projectId)
       .order("created_at", { ascending: false });
     if (error) return NextResponse.json({ error: `[GET /api/generated-docs] ${error.message}` }, { status: 500 });
@@ -111,8 +110,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const title = body.title?.trim() || `${docType.toUpperCase()} — ${new Date().toLocaleDateString("en-US")}`;
 
     const { data, error } = await db
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .from("generated_documents" as any)
+      .from("generated_documents")
       .insert({
         tenant_id: tenantId, project_id: body.project_id,
         doc_type: docType, title, content: result.text,
@@ -142,8 +140,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         drive_saved_at: new Date().toISOString(),
       };
       const { data: updated } = await db
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .from("generated_documents" as any)
+        .from("generated_documents")
         .update({ meta: newMeta } as never)
         .eq("id", (data as { id: string }).id)
         .select()

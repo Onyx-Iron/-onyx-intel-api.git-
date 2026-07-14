@@ -41,13 +41,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ error: "Invalid billing_cycle" }, { status: 400 });
     }
 
-    const planDef = (PLANS as Record<string, unknown>)[plan];
-    if (!planDef || typeof planDef !== "object") {
+    const planDef = PLANS.find((p) => p.tier === plan);
+    if (!planDef) {
       return NextResponse.json({ error: "Unknown plan" }, { status: 400 });
     }
-    const priceIds = (planDef as { paddle_price_ids?: Record<string, string> })
-      .paddle_price_ids;
-    const priceId = priceIds?.[cycle];
+    const priceId = cycle === "yearly" ? planDef.paddlePriceIdYearly : planDef.paddlePriceIdMonthly;
     if (!priceId) {
       return NextResponse.json(
         { error: `No Paddle price configured for ${plan}/${cycle}` },

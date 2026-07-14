@@ -9,7 +9,11 @@
 --
 -- Run that once from the Supabase SQL editor (not committed anywhere).
 CREATE EXTENSION IF NOT EXISTS pg_cron;
-CREATE EXTENSION IF NOT EXISTS pg_net;
+-- pg_net is installed into `extensions`, matching every other non-platform-
+-- managed extension in this schema (confirmed via production's
+-- pg_extension.extnamespace) -- pg_net doesn't support ALTER EXTENSION ...
+-- SET SCHEMA, so getting the schema right at creation time matters here.
+CREATE EXTENSION IF NOT EXISTS pg_net SCHEMA extensions;
 
 SELECT cron.schedule(
   'sync-commodity-indexes-monthly',

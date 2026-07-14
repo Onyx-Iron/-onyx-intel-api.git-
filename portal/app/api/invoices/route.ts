@@ -2,13 +2,15 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { getUserRole, redactFinancialFields } from "@/lib/project-controls/permissions";
+import { INVOICE_FINANCIAL_FIELDS } from "@/lib/project-controls/financial-redaction";
 import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 
 export const runtime = "nodejs";
 
-const TABLE = "invoices";
+const TABLE = "invoices" as const;
 const FIELDS = [
   "direction", "invoice_number", "vendor_or_customer", "description",
   "amount", "retainage", "invoice_date", "due_date", "paid_date",
@@ -23,8 +25,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+    // project_id is optional so the global Financials workspace can roll up
+    // invoices across every project for the tenant; every project-scoped
+    // caller still passes it explicitly.
     const projectId = req.nextUrl.searchParams.get("project_id");
-    if (!projectId) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
     const direction = req.nextUrl.searchParams.get("direction");
     const status = req.nextUrl.searchParams.get("status");
@@ -36,8 +40,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let q: any = db.from(TABLE as any)
       .select("*", { count: "exact" })
-      .eq("tenant_id", tenantId)
-      .eq("project_id", projectId);
+      .eq("tenant_id", tenantId);
+    if (projectId) q = q.eq("project_id", projectId);
 
     if (direction && VALID_DIRECTIONS.has(direction)) q = q.eq("direction", direction);
     if (status && status !== "all") {
@@ -49,7 +53,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const { data, error, count } = await q.order("created_at", { ascending: false }).range(offset, offset + limit - 1);
 
     if (error) return NextResponse.json({ error: `[GET /api/invoices] ${error.message}` }, { status: 500 });
-    return NextResponse.json({ items: data ?? [], pagination: paginationMeta(count ?? 0, page, limit) });
+
+    const role = await getUserRole(tenantId, userId);
+    const items = redactFinancialFields((data ?? []) as unknown as Record<string, unknown>[], role, INVOICE_FINANCIAL_FIELDS);
+
+    return NextResponse.json({ items, pagination: paginationMeta(count ?? 0, page, limit) });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
@@ -90,8 +98,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (insert.amount == null) insert.amount = 0;
 
     const { data, error } = await db
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .from(TABLE as any)
+      .from(TABLE)
       .insert(insert)
       .select()
       .single();

@@ -6,14 +6,22 @@ import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 
 type DocStatus = "pending" | "processing" | "complete" | "error";
+type PipelineStatus = "pending" | "processing" | "done" | "error" | "partially_completed" | "skipped";
 
 interface Document {
   id: string;
   file_name: string;
   status: DocStatus;
   pages: number | null;
+  page_count: number | null;
   uploaded_at: string | null;
   project_id: string | null;
+  split_status: PipelineStatus | null;
+  ocr_status: PipelineStatus | null;
+  vector_status: PipelineStatus | null;
+  takeoff_status: PipelineStatus | null;
+  last_error: string | null;
+  last_error_step: string | null;
 }
 
 const STATUS_STYLES: Record<DocStatus, string> = {
@@ -22,6 +30,25 @@ const STATUS_STYLES: Record<DocStatus, string> = {
   complete:   "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
   error:      "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
 };
+
+const PIPELINE_DOT: Record<PipelineStatus, string> = {
+  pending: "bg-white/15",
+  processing: "bg-[#00D2FF] animate-pulse",
+  done: "bg-[#CCFF00]",
+  error: "bg-[#E50914]",
+  partially_completed: "bg-[#F5A623]",
+  skipped: "bg-white/10",
+};
+
+function PipelineStage({ label, status }: { label: string; status: PipelineStatus | null }) {
+  const key = (status ?? "pending") as PipelineStatus;
+  return (
+    <span className="inline-flex items-center gap-1" title={`${label}: ${status ?? "pending"}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${PIPELINE_DOT[key] ?? "bg-white/15"}`} />
+      <span className="text-[9px] uppercase tracking-wider text-white/35">{label}</span>
+    </span>
+  );
+}
 
 function fmt(d: string | null): string {
   if (!d) return "—";
@@ -73,7 +100,7 @@ export default function DocumentsPage() {
       <PageHero
         eyebrow="Workspace"
         title="Documents"
-        description="All processed plan files"
+        description="Every file's ingestion pipeline status, across all projects"
         compact
       />
 
@@ -81,7 +108,7 @@ export default function DocumentsPage() {
       {error && <div className="mb-4"><ErrorState message={error} onRetry={loadDocuments} /></div>}
       <div className="mb-4 flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
         <Info size={12} className="shrink-0" />
-        <span>Upload documents from a project&apos;s Documents tab — workspace view is read-only and aggregates across all projects.</span>
+        <span>Upload documents from a project&apos;s Documents tab — this view is read-only, aggregates across all projects, and tracks each file through split → OCR → vector → takeoff.</span>
       </div>
       <div className="rounded-xl border border-white/8 bg-[#0E0F12] overflow-hidden">
         <div className="overflow-x-auto">
@@ -91,6 +118,7 @@ export default function DocumentsPage() {
                 <th className="text-left text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3">File Name</th>
                 <th className="text-left text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3">Project</th>
                 <th className="text-left text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3">Status</th>
+                <th className="text-left text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3">Pipeline</th>
                 <th className="text-right text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3">Pages</th>
                 <th className="text-left text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3">Uploaded</th>
               </tr>
@@ -100,7 +128,7 @@ export default function DocumentsPage() {
                 <SkeletonRows />
               ) : documents.length === 0 && !error ? (
                 <tr>
-                  <td colSpan={5}>
+                  <td colSpan={6}>
                     <div className="py-4">
                       <EmptyState
                         icon={<FileText className="w-6 h-6" />}
@@ -131,9 +159,22 @@ export default function DocumentsPage() {
                         <span className={`inline-flex items-center px-2 py-0.5 rounded border text-[9px] font-bold tracking-widest uppercase ${STATUS_STYLES[statusKey]}`} aria-label={`Status: ${doc.status}`}>
                           {doc.status}
                         </span>
+                        {doc.last_error && (
+                          <p className="mt-1 max-w-[16rem] truncate text-[9px] text-[#E50914]" title={doc.last_error}>
+                            {doc.last_error_step ? `${doc.last_error_step}: ` : ""}{doc.last_error}
+                          </p>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap gap-x-3 gap-y-1">
+                          <PipelineStage label="Split" status={doc.split_status} />
+                          <PipelineStage label="OCR" status={doc.ocr_status} />
+                          <PipelineStage label="Vector" status={doc.vector_status} />
+                          <PipelineStage label="Takeoff" status={doc.takeoff_status} />
+                        </div>
                       </td>
                       <td className="px-4 py-3 text-right text-gray-400 font-mono text-xs">
-                        {doc.pages != null ? doc.pages : "—"}
+                        {doc.page_count != null ? doc.page_count : doc.pages != null ? doc.pages : "—"}
                       </td>
                       <td className="px-4 py-3 text-gray-400 text-xs">{fmt(doc.uploaded_at)}</td>
                     </tr>

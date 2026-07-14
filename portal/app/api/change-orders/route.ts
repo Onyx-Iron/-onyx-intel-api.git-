@@ -10,6 +10,8 @@ import {
   requireProjectId,
 } from "@/lib/project-controls/server";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
+import { getUserRole, redactFinancialFields } from "@/lib/project-controls/permissions";
+import { CHANGE_ORDER_FINANCIAL_FIELDS } from "@/lib/project-controls/financial-redaction";
 import { logEvent } from "@/lib/activity";
 import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
@@ -38,8 +40,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       .range(offset, offset + limit - 1);
 
     if (error) return NextResponse.json({ items: [], pagination: paginationMeta(0, page, limit) });
+
+    const role = await getUserRole(tenantId, userId);
+    const items = redactFinancialFields((data ?? []) as Record<string, unknown>[], role, CHANGE_ORDER_FINANCIAL_FIELDS);
+
     return NextResponse.json({
-      items: data ?? [],
+      items,
       pagination: paginationMeta(count ?? 0, page, limit),
     });
   } catch (err: unknown) {

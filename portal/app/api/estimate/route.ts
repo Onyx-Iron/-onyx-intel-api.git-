@@ -2,6 +2,8 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getUserRole, redactFinancialFields } from "@/lib/project-controls/permissions";
+import { ESTIMATE_FINANCIAL_FIELDS } from "@/lib/project-controls/financial-redaction";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { uuidSchema } from "@/lib/validation";
@@ -14,25 +16,36 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const projectId = req.nextUrl.searchParams.get("project_id");
-    if (!projectId) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const { page, limit, offset } = parsePagination(req.nextUrl.searchParams);
     const db = await createServiceClient();
 
-    const { data, error, count } = await db
+    // project_id is optional here so the global Estimating workspace can
+    // roll up items across every project for the tenant; every
+    // project-scoped caller still passes it explicitly.
+    let query = db
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .from("estimate_items" as any)
       .select("*", { count: "exact" })
       .eq("tenant_id", tenantId)
-      .eq("project_id", projectId)
       .order("sort_order", { ascending: true })
-      .order("created_at", { ascending: true })
-      .range(offset, offset + limit - 1);
+      .order("created_at", { ascending: true });
+    if (projectId) query = query.eq("project_id", projectId);
+    const { data, error, count } = await query.range(offset, offset + limit - 1);
 
     if (error) return NextResponse.json({ error: `[GET /api/estimate] ${error.message}` }, { status: 500 });
+
+    // Financial-read gate (frontend-backend-reconciliation, item 4): a
+    // restricted role (ClientView, Subcontractor, FieldSuperintendent) must
+    // never receive cost/markup/profit values in the response body itself —
+    // redacted here, server-side, before the JSON is ever sent, not just
+    // hidden in the UI.
+    const role = await getUserRole(tenantId, userId);
+    const items = redactFinancialFields((data ?? []) as unknown as Record<string, unknown>[], role, ESTIMATE_FINANCIAL_FIELDS);
+
     return NextResponse.json({
-      items: data ?? [],
+      items,
       pagination: paginationMeta(count ?? 0, page, limit),
     });
   } catch (err: unknown) {

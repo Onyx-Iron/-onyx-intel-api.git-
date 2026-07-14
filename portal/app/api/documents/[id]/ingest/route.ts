@@ -4,12 +4,13 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { getAccessToken } from "@/lib/google/oauth";
 import { logEvent } from "@/lib/activity";
+import { requireEnv } from "@/lib/env";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
+const GEMINI_API_KEY = requireEnv("GEMINI_API_KEY");
 const EMBED_MODEL = "text-embedding-004";
 const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
 
@@ -141,10 +142,14 @@ export async function POST(
   let geminiName: string | null = null;
   let tenantId: string | null = null;
 
-  const markError = async () => {
+  const markError = async (message: string, step: string) => {
     try {
       const db = await createServiceClient();
-      let q = db.from("documents").update({ status: "error" }).eq("id", docId);
+      let q = db.from("documents").update({
+        status: "error",
+        last_error: message.slice(0, 2000),
+        last_error_step: step,
+      }).eq("id", docId);
       if (tenantId) q = q.eq("tenant_id", tenantId);
       await q;
     } catch { /* best effort */ }
@@ -158,6 +163,9 @@ export async function POST(
     const accessToken = body.access_token; // optional — server falls back to stored token
 
     tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    // Narrowed const, since `tenantId` is captured by the markError() closure above,
+    // which blocks TS's normal control-flow narrowing of the `let` for the rest of this function.
+    const resolvedTenantId: string = tenantId;
     const db = await createServiceClient();
 
     const { data: doc, error: docErr } = await db
@@ -194,7 +202,7 @@ export async function POST(
         { headers: { Authorization: `Bearer ${driveToken}` } },
       );
       if (!driveRes.ok) {
-        await markError();
+        await markError(`Drive download failed (${driveRes.status})`, "download");
         return NextResponse.json({ error: `Drive download failed (${driveRes.status})` }, { status: 502 });
       }
       pdfBytes = Buffer.from(await driveRes.arrayBuffer());
@@ -204,12 +212,12 @@ export async function POST(
         .from("project-documents")
         .createSignedUrl(storagePath!, 300);
       if (signErr || !signed?.signedUrl) {
-        await markError();
+        await markError(signErr?.message ?? "Could not access stored file", "download");
         return NextResponse.json({ error: "Could not access stored file" }, { status: 500 });
       }
       const storageRes = await fetch(signed.signedUrl);
       if (!storageRes.ok) {
-        await markError();
+        await markError(`Storage download failed (${storageRes.status})`, "download");
         return NextResponse.json({ error: `Storage download failed (${storageRes.status})` }, { status: 502 });
       }
       pdfBytes = Buffer.from(await storageRes.arrayBuffer());
@@ -272,7 +280,7 @@ export async function POST(
     if (pages.length > 0) {
       const pageRows: TablesInsert<"pages">[] = pages.map((p) => ({
         document_id: docId,
-        tenant_id: tenantId,
+        tenant_id: resolvedTenantId,
         page_number: p.page_number,
         extracted_text: [p.summary, (p.key_terms ?? []).join(", ")].filter(Boolean).join("\n"),
       }));
@@ -295,7 +303,7 @@ export async function POST(
             const values = await embedText(chunk);
             chunkRows.push({
               document_id: docId,
-              tenant_id: tenantId,
+              tenant_id: resolvedTenantId,
               project_id: projectId,
               page_number: page.page_number,
               content: chunk,
@@ -336,8 +344,8 @@ export async function POST(
     return NextResponse.json({ ok: true, doc_type: docType, page_count: pageCount, chunk_count: chunkRows.length });
   } catch (err: unknown) {
     if (geminiName) await deleteGeminiFile(geminiName);
-    await markError();
     const msg = err instanceof Error ? err.message : String(err);
+    await markError(msg, "ingest");
     console.error(`[ingest ${docId}] ${msg}`);
     return NextResponse.json(
       { error: `[POST /api/documents/${docId}/ingest] ${msg}` },

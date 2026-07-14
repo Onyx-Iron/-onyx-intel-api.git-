@@ -22,20 +22,20 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     }
 
     const projectId = req.nextUrl.searchParams.get("project_id");
-    if (!projectId) {
-      return NextResponse.json({ error: "project_id is required" }, { status: 400 });
-    }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const { page, limit, offset } = parsePagination(req.nextUrl.searchParams, 100);
     const db = await createServiceClient();
-    const { data, error, count } = await db
+    // project_id is optional here so the global Takeoff workspace can roll
+    // up items across every project for the tenant; every project-scoped
+    // caller still passes it explicitly.
+    let query = db
       .from("takeoff_items")
       .select("*", { count: "exact" })
       .eq("tenant_id", tenantId)
-      .eq("project_id", projectId)
-      .order("created_at", { ascending: true })
-      .range(offset, offset + limit - 1);
+      .order("created_at", { ascending: true });
+    if (projectId) query = query.eq("project_id", projectId);
+    const { data, error, count } = await query.range(offset, offset + limit - 1);
 
     if (error) {
       return NextResponse.json({ error: `[GET /api/takeoff/items] ${error.message}` }, { status: 500 });

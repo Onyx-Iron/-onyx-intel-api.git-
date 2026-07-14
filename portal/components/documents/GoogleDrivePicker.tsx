@@ -17,52 +17,7 @@ interface Props {
   children: React.ReactNode;
 }
 
-declare global {
-  interface Window {
-    gapi?: {
-      load: (api: string, cb: () => void) => void;
-    };
-    google?: {
-      accounts?: {
-        oauth2?: {
-          initTokenClient: (opts: {
-            client_id: string;
-            scope: string;
-            callback: (resp: { access_token?: string; expires_in?: number; error?: string }) => void;
-            error_callback?: (err: { type?: string; message?: string }) => void;
-          }) => { requestAccessToken: (overrides?: { prompt?: string }) => void };
-        };
-      };
-      picker?: {
-        PickerBuilder: new () => PickerBuilder;
-        DocsView: new () => DocsView;
-        Action: { PICKED: string; CANCEL: string };
-        Feature: { MULTISELECT_ENABLED: string };
-      };
-    };
-    __gapiLoaded?: boolean;
-    __gisLoaded?: boolean;
-  }
-}
-
-interface PickerBuilder {
-  addView(view: DocsView): PickerBuilder;
-  enableFeature(feature: string): PickerBuilder;
-  setOAuthToken(token: string): PickerBuilder;
-  setDeveloperKey(key: string): PickerBuilder;
-  setCallback(cb: (data: PickerResponse) => void): PickerBuilder;
-  setTitle(title: string): PickerBuilder;
-  build(): { setVisible: (v: boolean) => void };
-}
-
-interface DocsView {
-  setMimeTypes(types: string): DocsView;
-}
-
-interface PickerResponse {
-  action: string;
-  docs?: Array<{ id: string; name: string; mimeType: string; sizeBytes?: number }>;
-}
+import type { GooglePickerResponse } from "@/lib/google/window";
 
 const CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? "";
 const API_KEY   = process.env.NEXT_PUBLIC_GOOGLE_API_KEY ?? "";
@@ -122,7 +77,7 @@ export default function GoogleDrivePicker({ onFilesSelected, disabled, children 
       .setOAuthToken(token)
       .setDeveloperKey(API_KEY)
       .setTitle("Select plan files")
-      .setCallback((data: PickerResponse) => {
+      .setCallback((data: GooglePickerResponse) => {
         if (data.action === pickerApi.Action.PICKED && data.docs?.length) {
           onFilesRef.current(
             data.docs.map((d) => ({ id: d.id, name: d.name, mimeType: d.mimeType, sizeBytes: d.sizeBytes })),

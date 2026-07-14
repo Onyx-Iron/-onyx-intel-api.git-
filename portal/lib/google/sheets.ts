@@ -16,12 +16,6 @@ interface TokenClient {
   requestAccessToken: (overrides?: { prompt?: string }) => void;
 }
 
-declare global {
-  interface Window {
-    __gisLoaded?: boolean;
-  }
-}
-
 function loadGis(): Promise<void> {
   return new Promise((resolve) => {
     if (window.__gisLoaded) return resolve();

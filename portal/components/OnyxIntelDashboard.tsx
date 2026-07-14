@@ -20,6 +20,8 @@ import {
 import GoogleConnect from "@/components/google/GoogleConnect";
 import GoogleCalendarCard from "@/components/dashboard/GoogleCalendarCard";
 import GmailInboxCard from "@/components/dashboard/GmailInboxCard";
+import RecentContactsCard from "@/components/dashboard/RecentContactsCard";
+import AuditActivityCard from "@/components/dashboard/AuditActivityCard";
 import AIProviderPicker from "@/components/ai/AIProviderPicker";
 import BrandMark from "@/components/brand/BrandMark";
 import GlobalSearch from "@/components/search/GlobalSearch";
@@ -690,6 +692,8 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
             />
             <DocumentIntelligence data={data} loading={dataLoading} />
             <ActivityFeed items={data?.activity ?? []} loading={dataLoading} />
+            <RecentContactsCard />
+            <AuditActivityCard />
           </div>
         </div>
 

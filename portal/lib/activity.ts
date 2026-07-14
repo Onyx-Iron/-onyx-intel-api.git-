@@ -3,11 +3,12 @@ import { createServiceClient } from "@/lib/supabase/server";
 export type EntityType =
   | "rfi" | "schedule" | "document" | "estimate" | "takeoff"
   | "permit" | "punch_list" | "contact" | "procurement"
-  | "change_order" | "daily_log" | "note" | "ai_chat" | "ai_digest" | "project";
+  | "change_order" | "daily_log" | "note" | "ai_chat" | "ai_digest" | "project"
+  | "co_inspection" | "todo_item" | "weekly_log";
 
 export type EventAction =
   | "created" | "updated" | "deleted" | "status_changed"
-  | "uploaded" | "processed" | "generated" | "submitted";
+  | "uploaded" | "processed" | "generated" | "submitted" | "queued";
 
 export interface LogEventParams {
   projectId: string;

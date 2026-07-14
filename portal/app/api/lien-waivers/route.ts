@@ -2,12 +2,18 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getUserRole, redactFinancialFields } from "@/lib/project-controls/permissions";
 import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
 
+// lien_waivers.amount is financial data -- closes the same gap documented
+// as remaining scope in docs/frontend-backend-reconciliation/ROLE_VISIBILITY_MATRIX.md
+// (item 4), now that this workspace surfaces it to restricted roles too.
+const LIEN_WAIVER_FINANCIAL_FIELDS = ["amount"] as const;
+
 export const runtime = "nodejs";
 
-const TABLE = "lien_waivers";
+const TABLE = "lien_waivers" as const;
 const FIELDS = [
   "vendor_name", "waiver_type", "draw_number", "amount", "through_date",
   "state", "document_id", "signed_at", "signed_by", "status", "notes",
@@ -20,8 +26,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+    // project_id is optional so the global Financials workspace can roll up
+    // lien waivers across every project for the tenant; every project-scoped
+    // caller still passes it explicitly.
     const projectId = req.nextUrl.searchParams.get("project_id");
-    if (!projectId) return NextResponse.json({ error: "project_id required" }, { status: 400 });
     const status = req.nextUrl.searchParams.get("status");
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
@@ -30,13 +38,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let q: any = db.from(TABLE as any)
       .select("*")
-      .eq("tenant_id", tenantId)
-      .eq("project_id", projectId);
+      .eq("tenant_id", tenantId);
+    if (projectId) q = q.eq("project_id", projectId);
     if (status && VALID_STATUSES.has(status)) q = q.eq("status", status);
 
     const { data, error } = await q.order("created_at", { ascending: false });
     if (error) return NextResponse.json({ error: `[GET /api/lien-waivers] ${error.message}` }, { status: 500 });
-    return NextResponse.json({ items: data ?? [] });
+
+    const role = await getUserRole(tenantId, userId);
+    const items = redactFinancialFields((data ?? []) as Record<string, unknown>[], role, LIEN_WAIVER_FINANCIAL_FIELDS);
+    return NextResponse.json({ items });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
@@ -72,8 +83,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     insert.status = status;
 
     const { data, error } = await db
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .from(TABLE as any)
+      .from(TABLE)
       .insert(insert)
       .select()
       .single();

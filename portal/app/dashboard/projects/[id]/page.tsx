@@ -87,7 +87,7 @@ export default async function ProjectDetailPage({ params }: PageProps) {
         </div>
       </div>
 
-      <ProjectTabs projectId={id} />
+      <ProjectTabs projectId={id} projectName={project.name} />
     </div>
   );
 }
