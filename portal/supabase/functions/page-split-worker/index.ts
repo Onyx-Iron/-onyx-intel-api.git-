@@ -232,8 +232,12 @@ Deno.serve(async (req) => {
   } catch (err: any) {
     console.error("[page-split-worker]", err);
     await db.from("documents")
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .update({ status: "error", error: String(err?.message ?? err).slice(0, 500) } as any)
+      .update({
+        status: "error",
+        split_status: "error",
+        last_error: String(err?.message ?? err).slice(0, 2000),
+        last_error_step: "split",
+      })
       .eq("id", body.document_id)
       .eq("tenant_id", body.tenant_id);
     return new Response(JSON.stringify({ error: String(err?.message ?? err) }), { status: 500 });

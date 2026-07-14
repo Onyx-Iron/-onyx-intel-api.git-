@@ -142,10 +142,14 @@ export async function POST(
   let geminiName: string | null = null;
   let tenantId: string | null = null;
 
-  const markError = async () => {
+  const markError = async (message: string, step: string) => {
     try {
       const db = await createServiceClient();
-      let q = db.from("documents").update({ status: "error" }).eq("id", docId);
+      let q = db.from("documents").update({
+        status: "error",
+        last_error: message.slice(0, 2000),
+        last_error_step: step,
+      }).eq("id", docId);
       if (tenantId) q = q.eq("tenant_id", tenantId);
       await q;
     } catch { /* best effort */ }
@@ -198,7 +202,7 @@ export async function POST(
         { headers: { Authorization: `Bearer ${driveToken}` } },
       );
       if (!driveRes.ok) {
-        await markError();
+        await markError(`Drive download failed (${driveRes.status})`, "download");
         return NextResponse.json({ error: `Drive download failed (${driveRes.status})` }, { status: 502 });
       }
       pdfBytes = Buffer.from(await driveRes.arrayBuffer());
@@ -208,12 +212,12 @@ export async function POST(
         .from("project-documents")
         .createSignedUrl(storagePath!, 300);
       if (signErr || !signed?.signedUrl) {
-        await markError();
+        await markError(signErr?.message ?? "Could not access stored file", "download");
         return NextResponse.json({ error: "Could not access stored file" }, { status: 500 });
       }
       const storageRes = await fetch(signed.signedUrl);
       if (!storageRes.ok) {
-        await markError();
+        await markError(`Storage download failed (${storageRes.status})`, "download");
         return NextResponse.json({ error: `Storage download failed (${storageRes.status})` }, { status: 502 });
       }
       pdfBytes = Buffer.from(await storageRes.arrayBuffer());
@@ -340,8 +344,8 @@ export async function POST(
     return NextResponse.json({ ok: true, doc_type: docType, page_count: pageCount, chunk_count: chunkRows.length });
   } catch (err: unknown) {
     if (geminiName) await deleteGeminiFile(geminiName);
-    await markError();
     const msg = err instanceof Error ? err.message : String(err);
+    await markError(msg, "ingest");
     console.error(`[ingest ${docId}] ${msg}`);
     return NextResponse.json(
       { error: `[POST /api/documents/${docId}/ingest] ${msg}` },
