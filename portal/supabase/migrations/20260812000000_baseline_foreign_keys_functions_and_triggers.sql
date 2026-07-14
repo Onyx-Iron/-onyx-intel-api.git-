@@ -321,6 +321,16 @@ BEGIN
 END;
 $function$;
 
+-- rls_auto_enable is created for the first time in THIS replay right above
+-- (it's phantom -- no tracked migration creates it), so unlike
+-- current_tenant_id (whose own REVOKE in 20260714_restrict_security_definer_functions.sql
+-- runs after a tracked CREATE), there is no earlier point in a from-scratch
+-- replay where this REVOKE could have run. Confirmed via
+-- has_function_privilege() against production: anon_exec=false,
+-- auth_exec=false for this function -- both must be revoked here, right
+-- after its first creation.
+REVOKE EXECUTE ON FUNCTION public.rls_auto_enable() FROM anon, authenticated, PUBLIC;
+
 DROP EVENT TRIGGER IF EXISTS ensure_rls;
 CREATE EVENT TRIGGER ensure_rls ON ddl_command_end EXECUTE FUNCTION public.rls_auto_enable();
 
@@ -474,3 +484,26 @@ CREATE INDEX IF NOT EXISTS idx_takeoff_project ON public.takeoff_items USING btr
 CREATE INDEX IF NOT EXISTS idx_takeoff_tenant ON public.takeoff_items USING btree (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tenants_paddle_customer_id ON public.tenants USING btree (paddle_customer_id) WHERE (paddle_customer_id IS NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_tenants_paddle_subscription_id ON public.tenants USING btree (paddle_subscription_id) WHERE (paddle_subscription_id IS NOT NULL);
+
+-- ── Final RLS-enable catch-all ────────────────────────────────────────────
+-- Confirmed against production: every public table has relrowsecurity=true,
+-- no exceptions. The baseline's own explicit ENABLE pass (see
+-- 20260627000000_schema_baseline.sql) only covers the 40 originally-phantom
+-- tables — tables created by TRACKED migrations before this point (e.g.
+-- agent_runs, invoices, cost_codes, weekly_logs — created in
+-- 20260630_billing.sql through 20260702_cost_catalog_v2.sql) have the same
+-- gap: their own migration files never explicitly ENABLE ROW LEVEL SECURITY,
+-- relying on the `rls_auto_enable()` event trigger installed by THIS file,
+-- which doesn't exist yet when they're created during a from-scratch
+-- replay. Dynamic (not a hardcoded table list) so it can never miss one.
+DO $$
+DECLARE
+  r record;
+BEGIN
+  FOR r IN
+    SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public' AND c.relkind = 'r' AND NOT c.relrowsecurity
+  LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', r.relname);
+  END LOOP;
+END $$;

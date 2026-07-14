@@ -24,9 +24,13 @@
 --     pg_repack, pg_walinspect, postgres_fdw, wrappers, pg_cron — pg_cron and
 --     pg_net are already tracked in 20260707_schedule_commodity_sync.sql).
 
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";
-CREATE EXTENSION IF NOT EXISTS "vector";
+-- Production installs its non-platform-managed extensions into the
+-- `extensions` schema (Supabase's convention), not `public` -- confirmed via
+-- pg_extension.extnamespace directly against production.
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp" SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS "pgcrypto" SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS "vector" SCHEMA extensions;
 -- Production has PostGIS installed into a non-default `topology` schema
 -- (confirmed via pg_type: the `geometry` type lives in `topology`, not
 -- `public`/`extensions`) -- matched here so takeoff_items.geom_* columns
@@ -821,3 +825,32 @@ CREATE TABLE IF NOT EXISTS public.cost_catalog (
   updated_at timestamp with time zone DEFAULT now() NOT NULL,
   PRIMARY KEY (id)
 );
+
+-- ── Enable RLS on every baseline table (confirmed via pg_class.relrowsecurity
+-- against production: all 40 have RLS enabled, no exceptions). Policies for
+-- these tables are added by later tracked migrations (rls_tenant_isolation,
+-- backfill_rls_policies, etc.) which only issue FORCE ROW LEVEL SECURITY —
+-- they assume ENABLE already happened via the rls_auto_enable() event
+-- trigger, which doesn't exist yet at this point in a from-scratch replay
+-- (it's installed in the closing migration, after tables it needs to watch
+-- already exist). Enabling explicitly here closes that ordering gap —
+-- caught by the branch's security advisor reporting "policy exists, RLS
+-- disabled" on every one of these tables after a full replay.
+DO $$
+DECLARE
+  tbl text;
+BEGIN
+  FOREACH tbl IN ARRAY ARRAY[
+    'tenants','companies','roles','company_users','projects','documents','pages','sheets',
+    'sheet_corrections','chunks','document_intelligence','document_processing_events','memories',
+    'conversations','messages','takeoff_items','estimate_items','change_order_items','rfi_items',
+    'submittal_items','punch_list_items','permit_items','procurement_items','daily_logs',
+    'schedule_tasks','contacts','project_notes','project_events','project_risk_digests',
+    'civil_construction_entrances','civil_material_ledger','civil_pipe_runs','civil_stockpiles',
+    'civil_surfaces','earthwork_volumes','audit_logs','ai_agent_audit_trails','google_connections',
+    'generated_documents','cost_catalog'
+  ]
+  LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', tbl);
+  END LOOP;
+END $$;

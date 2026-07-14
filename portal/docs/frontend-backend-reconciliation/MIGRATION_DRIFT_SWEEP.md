@@ -77,6 +77,34 @@ directly and do use `uuid` for that parameter, so those are not mismatches.)
 None found. Every mismatch above was resolvable by a single direct production
 introspection query.
 
+## AMBIGUOUS — app-logic questions, not migration-replay blockers
+
+A third independent sweep covering the remaining files
+(`20260707_commodity_escalation.sql` through `20260811_soft_delete_locked_estimate_fix.sql`)
+found no further schema-breaking mismatches, but surfaced three items that
+are genuinely unresolvable from SQL introspection alone (per the standing
+instruction not to guess at these — reported, not fixed):
+
+- **Procurement schema duplication**: `20260710_procurement_marketplace.sql`
+  creates `marketplace_requests`/`vendor_bids`/`purchase_orders` (the RFQ→
+  bid→award→PO model this reconciliation's item 1 wired into the UI). A
+  separate, simpler `procurement_items` table also exists in production.
+  Both are live; which one (if not both) the app actually uses in practice
+  is a question about the Next.js/Python route code, not the schema itself.
+- **`catalog_pricing_history`**: exists, matches its migration, has RLS — but
+  no migration in the swept range shows what actually writes to it. Runtime
+  question, not a schema one.
+- **Two RLS tenant-scoping patterns** coexist (`tenant_id = current_tenant_id()`
+  vs. `tenant_id IN (SELECT id FROM tenants WHERE clerk_org_id =
+  current_setting('app.clerk_org_id'))`) — both confirmed to match their
+  respective migrations exactly, so not drift, but reconciling *why* two
+  patterns exist requires knowing how `app.clerk_org_id` vs. the JWT claim
+  are each populated at runtime.
+
+None of these affect migration replay correctness — they're pre-existing
+application-design questions, out of scope for "make the schema reproducible
+from migrations."
+
 ## Independent cross-check
 
 A second, independently-run sweep (background agent, 59 tool calls against
