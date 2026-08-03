@@ -8,7 +8,7 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { createServiceClient } from "@/lib/supabase/server";
 import type { Json } from "@/lib/supabase/types";
 
@@ -25,7 +25,6 @@ export interface TenantGuardResult {
   files_scanned: number;
 }
 
-const PORTAL_ROOT = resolve(process.cwd());
 const TENANT_EQ_RE = /\.eq\(\s*["']tenant_id["']/;
 // Match a Supabase .from("table").<op> chain — captures the op
 const FROM_OP_RE = /\.from\(\s*["']([a-zA-Z_][\w]*)["']\s*\)([\s\S]{0,800}?)\.(select|update|delete|insert)\s*\(/g;
@@ -37,13 +36,14 @@ const EXEMPT_TABLES = new Set([
   "conversations",
   "pages",
 ]);
+const SCANNABLE_ROOTS = new Set(["app", "components", "lib"]);
 
 function listChangedFiles(): string[] {
   try {
     const out = execFileSync(
       "git",
       ["log", "--since=7 days ago", "--name-only", "--pretty=format:"],
-      { cwd: PORTAL_ROOT, encoding: "utf8", timeout: 15_000 },
+      { cwd: process.cwd(), encoding: "utf8", timeout: 15_000 },
     );
     const set = new Set<string>();
     for (const line of out.split(/\r?\n/)) {
@@ -104,6 +104,38 @@ function isSourceFile(path: string): boolean {
     !path.includes(".test.");
 }
 
+function normalizeSourceFile(path: string): string | null {
+  const normalized = path
+    .replaceAll("\\", "/")
+    .replace(/^\.?\//, "")
+    .replace(/^portal\//, "");
+  const parts = normalized.split("/").filter(Boolean);
+
+  if (parts.length < 2) return null;
+  if (parts.some((part) => part === "." || part === "..")) return null;
+  if (!SCANNABLE_ROOTS.has(parts[0])) return null;
+
+  const rel = parts.join("/");
+  return isSourceFile(rel) ? rel : null;
+}
+
+function resolveSourceFile(path: string): { rel: string; abs: string } | null {
+  const rel = normalizeSourceFile(path);
+  if (!rel) return null;
+
+  const [root, ...rest] = rel.split("/");
+  switch (root) {
+    case "app":
+      return { rel, abs: join(process.cwd(), "app", ...rest) };
+    case "components":
+      return { rel, abs: join(process.cwd(), "components", ...rest) };
+    case "lib":
+      return { rel, abs: join(process.cwd(), "lib", ...rest) };
+    default:
+      return null;
+  }
+}
+
 export async function runTenantGuard(
   tenantId: string,
   suppliedFiles?: string[],
@@ -133,20 +165,19 @@ export async function runTenantGuard(
     const candidates = (suppliedFiles && suppliedFiles.length > 0
       ? suppliedFiles
       : listChangedFiles()
-    ).filter(isSourceFile);
+    ).map(resolveSourceFile).filter((file): file is { rel: string; abs: string } => file != null);
 
     const findings: TenantGuardFinding[] = [];
     let scanned = 0;
-    for (const rel of candidates) {
-      const abs = join(PORTAL_ROOT, rel.replace(/^portal\//, ""));
+    for (const candidate of candidates) {
       let source: string;
       try {
-        source = readFileSync(abs, "utf8");
+        source = readFileSync(candidate.abs, "utf8");
       } catch {
         continue;
       }
       scanned++;
-      findings.push(...scanFileForTenantOmissions(rel, source));
+      findings.push(...scanFileForTenantOmissions(candidate.rel, source));
     }
 
     await db

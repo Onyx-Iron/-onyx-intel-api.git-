@@ -1,5 +1,5 @@
 // Integration tests for the manual-takeoff-calibration-hardening milestone —
-// run against the LIVE Supabase dev database. Unlike
+// run against the isolated Supabase test database. Unlike
 // manual-canvas-persistence.integration.test.ts (which reproduces route
 // logic against plain tables), these tests call the actual
 // `save_manual_takeoff_tx` / `soft_delete_manual_takeoff_tx` Postgres RPCs
@@ -14,33 +14,24 @@
 // lib/takeoff/canvas/quantity.ts formulas (server-side would use the exact
 // same functions against calibration.page_space_scale_factor).
 //
-// Requires NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY. Skips
-// gracefully if absent. Cleans up all rows it creates.
+// Requires TEST_SUPABASE_URL + TEST_SUPABASE_SERVICE_ROLE_KEY in
+// .env.test.local. Skips gracefully if absent and refuses production. Cleans
+// up all rows it creates.
 
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createClient } from "@supabase/supabase-js";
+import { loadIntegrationTestEnv } from "@/lib/test-utils/integration-guard";
 import { calculateLinearLength, calculatePolygonArea, calculateCount } from "./canvas/quantity";
 import { pointsToPageSpace } from "./canvas/coordinates";
 
-function loadEnvLocal(): void {
-  const envPath = resolve(__dirname, "../../.env.local");
-  if (!existsSync(envPath)) return;
-  for (const line of readFileSync(envPath, "utf8").split("\n")) {
-    const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
-    if (match && !process.env[match[1]]) process.env[match[1]] = match[2].trim();
-  }
-}
-loadEnvLocal();
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY;
-const HAS_DB = Boolean(SUPABASE_URL && SERVICE_KEY);
+const integrationEnv = loadIntegrationTestEnv();
+const SUPABASE_URL = integrationEnv.supabaseUrl;
+const SERVICE_KEY = integrationEnv.serviceKey;
+const HAS_DB = integrationEnv.ready;
 
 if (!HAS_DB) {
-  describe("calibration + atomic writes (integration, SKIPPED — no live DB credentials)", () => {
+  describe(`calibration + atomic writes (integration, SKIPPED - ${integrationEnv.skipReason})`, () => {
     it("skipped", () => { /* no-op */ });
   });
 } else {

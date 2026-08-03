@@ -8,8 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "test:unit": "tsx --test $(find . -path ./node_modules -prune -o -name '*.test.ts' -not -name '*.integration.test.ts' -print)",
-    "test:integration": "tsx --test $(find . -path ./node_modules -prune -o -name '*.integration.test.ts' -print)"
+    "test:unit": "node scripts/run-tests.mjs unit",
+    "test:integration": "node scripts/run-tests.mjs integration"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.5.9",
@@ -18,22 +18,34 @@
     "jszip": "^3.10.1",
     "lucide-react": "^1.21.0",
     "mammoth": "^1.6.0",
-    "next": "16.2.9",
-    "pdfjs-dist": "^4.7.76",
+    "next": "^16.2.12",
+    "pdfjs-dist": "^5.4.624",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "tus-js-client": "^4.3.1",
-    "xlsx": "^0.18.5",
+    "xlsx": "npm:@e965/xlsx@^0.20.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4",
+    "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.2.9",
+    "eslint-config-next": "^16.2.12",
     "tailwindcss": "^4",
+    "tsx": "^4.23.5",
     "typescript": "^5"
+  },
+  "overrides": {
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": {
+        "brace-expansion": "5.0.9"
+      }
+    },
+    "postcss": "8.5.25",
+    "next": {
+      "sharp": "0.35.3"
+    }
   }
 }

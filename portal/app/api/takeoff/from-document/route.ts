@@ -108,7 +108,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     if (localPath) {
       // Local-mode: the file lives on this machine's disk.
       const { readFile } = await import("node:fs/promises");
-      bytes = await readFile(localPath);
+      bytes = await readFile(/* turbopackIgnore: true */ localPath);
     } else if (storagePath) {
       const { data: fileData, error: dlErr } = await db.storage.from(BUCKET).download(storagePath);
       if (dlErr || !fileData) return NextResponse.json({ error: `Could not load file: ${dlErr?.message}` }, { status: 502 });

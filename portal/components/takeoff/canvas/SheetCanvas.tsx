@@ -324,7 +324,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         cvs.height = viewport.height;
         const ctx = cvs.getContext("2d");
         if (!ctx) return;
-        await page.render({ canvasContext: ctx, viewport }).promise;
+        await page.render({ canvas: cvs, canvasContext: ctx, viewport }).promise;
         if (!cancelled) {
           setRenderSize({ w: viewport.width, h: viewport.height });
           setRenderScale(scale);

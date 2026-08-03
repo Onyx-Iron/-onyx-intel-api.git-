@@ -1,5 +1,5 @@
 // Integration tests for the takeoff-integrity milestone — run against the
-// LIVE Supabase dev database (project vvnigrbdsipriufhrwbs), using the same
+// isolated Supabase test database, using the same
 // service-role client the app itself uses. This is deliberate: per
 // docs/milestones/takeoff-integrity/TEST_PLAN.md, the review-status gate and
 // tenant-isolation guarantees are database-backed behavior that a pure
@@ -7,10 +7,9 @@
 // already exhaustively unit-tested in takeoff-import.test.ts, but this file
 // proves the real insert -> sync -> read round trip against Postgres.
 //
-// Requires NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY in the
-// environment (already present in portal/.env.local for local dev). Skips
-// itself gracefully (does not fail the run) if they're absent, e.g. in a CI
-// environment with no database access configured — see REMAINING_RISKS.md.
+// Requires TEST_SUPABASE_URL + TEST_SUPABASE_SERVICE_ROLE_KEY in
+// .env.test.local. Skips itself gracefully if they're absent and fails closed
+// if the guard resolves the production project.
 //
 // Every row this file creates is deleted in an `after` hook, in dependency
 // order (estimate_items -> takeoff_item_history -> takeoff_items ->
@@ -18,30 +17,17 @@
 
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createClient } from "@supabase/supabase-js";
+import { loadIntegrationTestEnv } from "@/lib/test-utils/integration-guard";
 import { buildEstimateImportRows } from "./takeoff-import";
 
-// Minimal .env.local loader — this file runs via `node --test`, outside the
-// Next.js runtime, so process.env isn't pre-populated the way it is for the
-// app itself.
-function loadEnvLocal(): void {
-  const envPath = resolve(__dirname, "../../.env.local");
-  if (!existsSync(envPath)) return;
-  for (const line of readFileSync(envPath, "utf8").split("\n")) {
-    const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
-    if (match && !process.env[match[1]]) process.env[match[1]] = match[2].trim();
-  }
-}
-loadEnvLocal();
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const HAS_DB = Boolean(SUPABASE_URL && SERVICE_KEY);
+const integrationEnv = loadIntegrationTestEnv();
+const SUPABASE_URL = integrationEnv.supabaseUrl;
+const SERVICE_KEY = integrationEnv.serviceKey;
+const HAS_DB = integrationEnv.ready;
 
 if (!HAS_DB) {
-  describe("takeoff integrity (integration, SKIPPED — no live DB credentials)", () => {
+  describe(`takeoff integrity (integration, SKIPPED - ${integrationEnv.skipReason})`, () => {
     it("skipped", () => { /* no-op */ });
   });
 } else {

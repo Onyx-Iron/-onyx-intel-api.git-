@@ -8,10 +8,12 @@ import {
   BookOpen,
   Bot,
   Calculator,
+  ClipboardList,
   DollarSign,
   FileText,
   FolderKanban,
   LayoutDashboard,
+  ListChecks,
   Megaphone,
   Mountain,
   Ruler,
@@ -35,6 +37,7 @@ interface NavItem {
 const WORKSPACE_NAV: NavItem[] = [
   { href: "/dashboard", label: "Command Center", icon: <LayoutDashboard size={15} />, exact: true },
   { href: "/dashboard/projects", label: "Projects", icon: <FolderKanban size={15} /> },
+  { href: "/dashboard/project-management", label: "Project Management", icon: <ListChecks size={15} /> },
   { href: "/dashboard/takeoff", label: "Takeoff", icon: <Ruler size={15} /> },
   { href: "/dashboard/estimating", label: "Estimating", icon: <Calculator size={15} /> },
   { href: "/dashboard/documents", label: "Documents", icon: <FileText size={15} /> },
@@ -44,6 +47,7 @@ const WORKSPACE_NAV: NavItem[] = [
   { href: "/dashboard/financials", label: "Financials", icon: <DollarSign size={15} /> },
   { href: "/dashboard/civil-intelligence", label: "Civil Intelligence", icon: <Mountain size={15} /> },
   { href: "/dashboard/marketing", label: "Marketing", icon: <Megaphone size={15} /> },
+  { href: "/dashboard/reports", label: "Reports", icon: <ClipboardList size={15} /> },
   { href: "/dashboard/agents/pending", label: "AI Workforce", icon: <Bot size={15} /> },
 ];
 
@@ -61,8 +65,6 @@ const SETTINGS_NAV: NavItem[] = [
 // missing APIs/tables/workflows behind each of these.
 const COMING_SOON = [
   "Preconstruction",
-  "Project Management",
-  "Reports",
 ];
 
 function NavLink({ item, onNavigate, small }: { item: NavItem; onNavigate?: () => void; small?: boolean }) {

@@ -16,6 +16,8 @@
 DO $$
 DECLARE
   tbl text;
+  tenant_expr constant text :=
+    'tenant_id IN (SELECT t.id FROM public.tenants t WHERE t.clerk_org_id = (SELECT current_setting(''app.clerk_org_id'', true)))';
 BEGIN
   FOREACH tbl IN ARRAY ARRAY[
     'chunks', 'contacts', 'conversations', 'cost_catalog', 'daily_logs',
@@ -27,8 +29,8 @@ BEGIN
   LOOP
     EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', 'tenant_isolation_' || tbl, tbl);
     EXECUTE format(
-      'CREATE POLICY %I ON public.%I FOR ALL USING (tenant_id IN (SELECT tenants.id FROM public.tenants WHERE tenants.clerk_org_id = current_setting(''app.clerk_org_id'', true)))',
-      'tenant_isolation_' || tbl, tbl
+      'CREATE POLICY %I ON public.%I FOR ALL TO authenticated USING (%s) WITH CHECK (%s)',
+      'tenant_isolation_' || tbl, tbl, tenant_expr, tenant_expr
     );
   END LOOP;
 END $$;
@@ -38,12 +40,14 @@ END $$;
 -- ("tenant_isolation") -- both harmless duplicates of the one above, kept
 -- for exact parity since dropping either isn't part of this reconciliation.
 DROP POLICY IF EXISTS tenant_isolation ON public.contacts;
-CREATE POLICY tenant_isolation ON public.contacts FOR ALL
-  USING (tenant_id IN (SELECT tenants.id FROM public.tenants WHERE tenants.clerk_org_id = current_setting('app.clerk_org_id', true)));
+CREATE POLICY tenant_isolation ON public.contacts FOR ALL TO authenticated
+  USING (tenant_id IN (SELECT t.id FROM public.tenants t WHERE t.clerk_org_id = (SELECT current_setting('app.clerk_org_id', true))))
+  WITH CHECK (tenant_id IN (SELECT t.id FROM public.tenants t WHERE t.clerk_org_id = (SELECT current_setting('app.clerk_org_id', true))));
 
 DROP POLICY IF EXISTS tenant_isolation ON public.project_notes;
-CREATE POLICY tenant_isolation ON public.project_notes FOR ALL
-  USING (tenant_id IN (SELECT tenants.id FROM public.tenants WHERE tenants.clerk_org_id = current_setting('app.clerk_org_id', true)));
+CREATE POLICY tenant_isolation ON public.project_notes FOR ALL TO authenticated
+  USING (tenant_id IN (SELECT t.id FROM public.tenants t WHERE t.clerk_org_id = (SELECT current_setting('app.clerk_org_id', true))))
+  WITH CHECK (tenant_id IN (SELECT t.id FROM public.tenants t WHERE t.clerk_org_id = (SELECT current_setting('app.clerk_org_id', true))));
 
 -- document_processing_events, sheet_corrections, sheets: service-role-only
 -- (no tenant-scoped read path — these are worker/pipeline-internal tables).
@@ -55,7 +59,7 @@ BEGIN
   LOOP
     EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', tbl || '_service_role_only', tbl);
     EXECUTE format(
-      'CREATE POLICY %I ON public.%I FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')',
+      'CREATE POLICY %I ON public.%I FOR ALL TO service_role USING (true) WITH CHECK (true)',
       tbl || '_service_role_only', tbl
     );
   END LOOP;

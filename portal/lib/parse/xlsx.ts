@@ -1,11 +1,15 @@
 /**
- * XLSX/XLS parser via SheetJS (`xlsx`). Reads the first non-empty sheet,
- * uses row 1 as headers (falling back to `col_N`) and returns rows[].
+ * XLSX/XLS parser via SheetJS-compatible `xlsx`. Reads the first non-empty sheet, uses row 1
+ * as headers (falling back to `col_N`) and returns rows[].
  */
 import * as XLSX from "xlsx";
 import type { ParseResult } from "./index";
 
 type Row = Record<string, string | number | null>;
+
+const MAX_SPREADSHEET_BYTES = 15 * 1024 * 1024;
+const MAX_ROWS = 5000;
+const MAX_COLUMNS = 200;
 
 export async function parseXlsx(
   bytes: Buffer,
@@ -13,6 +17,13 @@ export async function parseXlsx(
 ): Promise<ParseResult> {
   if (!bytes || bytes.length === 0) {
     return { kind: "error", ...base, error: "Empty spreadsheet file." };
+  }
+  if (bytes.length > MAX_SPREADSHEET_BYTES) {
+    return {
+      kind: "error",
+      ...base,
+      error: `Spreadsheet exceeds ${MAX_SPREADSHEET_BYTES / (1024 * 1024)} MB parser limit.`,
+    };
   }
   let wb: XLSX.WorkBook;
   try {
@@ -38,7 +49,7 @@ export async function parseXlsx(
     defval: null,
     blankrows: false,
     raw: true,
-  });
+  }).slice(0, MAX_ROWS).map((row) => row.slice(0, MAX_COLUMNS));
 
   if (matrix.length === 0) {
     return { kind: "error", ...base, error: "Spreadsheet has no rows." };

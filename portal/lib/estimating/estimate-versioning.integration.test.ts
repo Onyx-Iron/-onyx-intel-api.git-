@@ -1,32 +1,22 @@
 // Integration tests for the estimating-core-consolidation milestone — run
-// against the LIVE Supabase dev database, exercising the real
+// against the isolated Supabase test database, exercising the real
 // estimates/estimate_versions/estimate_items schema, the
 // prevent_locked_estimate_item_write trigger, and the versioning helper
 // functions. Mirrors the pattern established in
-// takeoff-integrity.integration.test.ts (live DB, before/after cleanup,
+// takeoff-integrity.integration.test.ts (test DB, before/after cleanup,
 // graceful skip without credentials).
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createClient } from "@supabase/supabase-js";
+import { loadIntegrationTestEnv } from "@/lib/test-utils/integration-guard";
 import { calculateEstimateTotals } from "./calculations";
 
-function loadEnvLocal(): void {
-  const envPath = resolve(__dirname, "../../.env.local");
-  if (!existsSync(envPath)) return;
-  for (const line of readFileSync(envPath, "utf8").split("\n")) {
-    const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
-    if (match && !process.env[match[1]]) process.env[match[1]] = match[2].trim();
-  }
-}
-loadEnvLocal();
+const integrationEnv = loadIntegrationTestEnv();
+const SUPABASE_URL = integrationEnv.supabaseUrl;
+const SERVICE_KEY = integrationEnv.serviceKey;
+const HAS_DB = integrationEnv.ready;
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const HAS_DB = Boolean(SUPABASE_URL && SERVICE_KEY);
-
-describe("estimate versioning (live database)", { skip: !HAS_DB && "no Supabase credentials in environment" }, () => {
+describe("estimate versioning (live database)", { skip: !HAS_DB && integrationEnv.skipReason }, () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const db = createClient(SUPABASE_URL as string, SERVICE_KEY as string) as any;
   const TEST_MARK = `evt_${Date.now()}`;
@@ -188,7 +178,7 @@ describe("estimate versioning (live database)", { skip: !HAS_DB && "no Supabase 
 
       // Mirrors loadVersionForTenant's exact query shape.
       const { data: found } = await db.from("estimate_versions")
-        .select("*, estimates!inner(tenant_id, project_id, id)")
+        .select("*, estimates!estimate_versions_estimate_id_fkey!inner(tenant_id, project_id, id)")
         .eq("id", version.id)
         .eq("estimates.tenant_id", otherTenant.id)
         .maybeSingle();

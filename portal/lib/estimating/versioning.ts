@@ -50,7 +50,7 @@ export interface EstimateVersionRow {
 export async function loadVersionForTenant(db: AnyDb, versionId: string, tenantId: string): Promise<EstimateVersionRow> {
   const { data, error } = await db
     .from("estimate_versions")
-    .select("*, estimates!inner(tenant_id, project_id, id)")
+    .select("*, estimates!estimate_versions_estimate_id_fkey!inner(tenant_id, project_id, id)")
     .eq("id", versionId)
     .eq("estimates.tenant_id", tenantId)
     .maybeSingle();

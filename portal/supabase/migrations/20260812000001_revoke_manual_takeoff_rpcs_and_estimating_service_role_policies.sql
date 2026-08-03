@@ -36,7 +36,7 @@ BEGIN
     EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY', tbl);
     EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', tbl || '_service_role_only', tbl);
     EXECUTE format(
-      'CREATE POLICY %I ON public.%I FOR ALL USING (auth.role() = ''service_role'') WITH CHECK (auth.role() = ''service_role'')',
+      'CREATE POLICY %I ON public.%I FOR ALL TO service_role USING (true) WITH CHECK (true)',
       tbl || '_service_role_only', tbl
     );
   END LOOP;

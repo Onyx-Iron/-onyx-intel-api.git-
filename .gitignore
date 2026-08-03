@@ -18,7 +18,10 @@ portal/supabase/.temp/
 # Node / Portal
 node_modules/
 portal/node_modules/
+portal/node_modules-locked-*/
+portal/node_modules-*/
 portal/.next/
+portal/.next-*/
 portal/.env.local
 portal/.env*.local
 
@@ -34,3 +37,6 @@ portal/public/
 *.egg-info/
 dist/
 build/
+
+.vercel
+.env*

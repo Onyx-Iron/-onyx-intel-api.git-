@@ -1,6 +1,6 @@
 // Integration tests for the professional-manual-takeoff milestone's
-// "Foundation" scope — run against the LIVE Supabase dev database (project
-// vvnigrbdsipriufhrwbs), following the same pattern as
+// "Foundation" scope — run against the isolated Supabase test database,
+// following the same pattern as
 // lib/estimating/takeoff-integrity.integration.test.ts: reproduce the real
 // route's DB operations directly (upsert/soft-delete/history-write SQL is
 // exactly what app/api/takeoff/canvas/manual/route.ts issues), since the
@@ -12,34 +12,24 @@
 // isolation, project/sheet relationship validation, and estimate-link
 // safety (draft vs. approved version immutability).
 //
-// Requires NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (present in
-// portal/.env.local for local dev). Skips gracefully if absent. Every row
-// this file creates is deleted in an `after` hook in FK-safe order.
+// Requires TEST_SUPABASE_URL + TEST_SUPABASE_SERVICE_ROLE_KEY in
+// .env.test.local. Skips gracefully if absent and refuses production. Every
+// row this file creates is deleted in an `after` hook in FK-safe order.
 
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createClient } from "@supabase/supabase-js";
+import { loadIntegrationTestEnv } from "@/lib/test-utils/integration-guard";
 import { pointsToPageSpace, pointsToScreenSpace, type Point } from "./canvas/coordinates";
 import { getOrCreateDraftVersion, approveVersion } from "@/lib/estimating/versioning";
 
-function loadEnvLocal(): void {
-  const envPath = resolve(__dirname, "../../.env.local");
-  if (!existsSync(envPath)) return;
-  for (const line of readFileSync(envPath, "utf8").split("\n")) {
-    const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
-    if (match && !process.env[match[1]]) process.env[match[1]] = match[2].trim();
-  }
-}
-loadEnvLocal();
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY;
-const HAS_DB = Boolean(SUPABASE_URL && SERVICE_KEY);
+const integrationEnv = loadIntegrationTestEnv();
+const SUPABASE_URL = integrationEnv.supabaseUrl;
+const SERVICE_KEY = integrationEnv.serviceKey;
+const HAS_DB = integrationEnv.ready;
 
 if (!HAS_DB) {
-  describe("manual takeoff canvas persistence (integration, SKIPPED — no live DB credentials)", () => {
+  describe(`manual takeoff canvas persistence (integration, SKIPPED - ${integrationEnv.skipReason})`, () => {
     it("skipped", () => { /* no-op */ });
   });
 } else {
