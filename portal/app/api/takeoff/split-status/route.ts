@@ -33,7 +33,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const { data: docRow, error: docErr } = await anyDb
     .from("documents")
-    .select("id, status, page_count, project_id, error")
+    .select("id, status, page_count, project_id, last_error")
     .eq("id", documentId).eq("tenant_id", tenantId)
     .maybeSingle();
   if (docErr) return NextResponse.json({ error: docErr.message }, { status: 500 });
@@ -62,7 +62,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       pages_done: 0,
       pages_error: 0,
       finished: docRow.status === "error" || docRow.status === "failed",
-      error: docRow.error ?? null,
+      error: docRow.last_error ?? null,
     });
   }
 
