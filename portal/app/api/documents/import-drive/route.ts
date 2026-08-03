@@ -7,6 +7,7 @@ import { buildDocumentRevisionMeta } from "@/lib/documents/revisions";
 import { logEvent } from "@/lib/activity";
 import { headerSafe } from "@/lib/http";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
+import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
@@ -141,6 +142,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       original_path: originalPath,
       access_token: accessToken,
       user_id: userId,
+    }).then(async () => {
+      await logDocumentProcessingEvent({
+        tenantId,
+        projectId: body.project_id,
+        documentId,
+        step: "split",
+        status: "started",
+        worker: "portal:import-drive",
+      });
     }).catch(async (err) => {
       console.error("[import-drive] worker invoke failed", err);
       const detail = err instanceof Error ? err.message : String(err);
@@ -151,6 +161,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           last_error_step: "page_split_worker_invoke",
         } as never)
         .eq("id", documentId).eq("tenant_id", tenantId);
+      await logDocumentProcessingEvent({
+        tenantId,
+        projectId: body.project_id,
+        documentId,
+        step: "split",
+        status: "failed",
+        worker: "portal:import-drive",
+        errorCode: "worker_invoke_failed",
+        errorMessage: detail,
+      });
     });
 
     // 202 Accepted — request received, processing continues async.

@@ -5,6 +5,8 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { getAccessToken } from "@/lib/google/oauth";
 import { logEvent } from "@/lib/activity";
 import { requireEnv } from "@/lib/env";
+import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
+import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
@@ -13,6 +15,7 @@ export const maxDuration = 300;
 const GEMINI_API_KEY = requireEnv("GEMINI_API_KEY");
 const EMBED_MODEL = "text-embedding-004";
 const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
+const PLANS_BUCKET = "plans-bucket";
 
 const EXTRACTION_PROMPT = `Analyze this construction document and return ONLY a JSON object with this exact structure — no markdown, no explanation:
 {
@@ -75,7 +78,7 @@ async function uploadToGeminiFiles(
     Buffer.from(`\r\n--${boundary}--`),
   ]);
 
-  const res = await fetch(
+  const res = await fetchGemini(
     `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=multipart`,
     {
       method: "POST",
@@ -86,10 +89,10 @@ async function uploadToGeminiFiles(
       },
       body,
     },
+    { label: "Gemini Files upload", timeoutMs: 60_000 },
   );
   if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`Gemini Files upload failed (${res.status}): ${txt.slice(0, 300)}`);
+    await readGeminiError(res, "Gemini Files upload");
   }
   const data = (await res.json()) as { file: { name: string; uri: string; state: string } };
   return { uri: data.file.uri, name: data.file.name };
@@ -98,9 +101,10 @@ async function uploadToGeminiFiles(
 async function waitForActive(geminiName: string, maxMs = 60_000): Promise<void> {
   const deadline = Date.now() + maxMs;
   while (Date.now() < deadline) {
-    const res = await fetch(
+    const res = await fetchGemini(
       `https://generativelanguage.googleapis.com/v1beta/${geminiName}`,
       { headers: { "X-Goog-Api-Key": GEMINI_API_KEY } },
+      { label: "Gemini file status", timeoutMs: 20_000 },
     );
     const data = (await res.json()) as { state: string };
     if (data.state === "ACTIVE") return;
@@ -118,7 +122,7 @@ async function deleteGeminiFile(geminiName: string): Promise<void> {
 }
 
 async function embedText(text: string): Promise<number[]> {
-  const res = await fetch(
+  const res = await fetchGemini(
     `https://generativelanguage.googleapis.com/v1beta/models/${EMBED_MODEL}:embedContent?key=${GEMINI_API_KEY}`,
     {
       method: "POST",
@@ -128,8 +132,9 @@ async function embedText(text: string): Promise<number[]> {
         taskType: "RETRIEVAL_DOCUMENT",
       }),
     },
+    { label: "Gemini embedding", timeoutMs: 45_000 },
   );
-  if (!res.ok) throw new Error(`Embedding failed (${res.status})`);
+  if (!res.ok) await readGeminiError(res, "Gemini embedding");
   const data = (await res.json()) as { embedding: { values: number[] } };
   return data.embedding.values;
 }
@@ -167,6 +172,13 @@ export async function POST(
     // which blocks TS's normal control-flow narrowing of the `let` for the rest of this function.
     const resolvedTenantId: string = tenantId;
     const db = await createServiceClient();
+    await logDocumentProcessingEvent({
+      tenantId: resolvedTenantId,
+      documentId: docId,
+      step: "indexing",
+      status: "started",
+      worker: "portal:documents-ingest",
+    });
 
     const { data: doc, error: docErr } = await db
       .from("documents")
@@ -209,7 +221,7 @@ export async function POST(
     } else {
       // Local file stored in Supabase Storage
       const { data: signed, error: signErr } = await db.storage
-        .from("project-documents")
+        .from(PLANS_BUCKET)
         .createSignedUrl(storagePath!, 300);
       if (signErr || !signed?.signedUrl) {
         await markError(signErr?.message ?? "Could not access stored file", "download");
@@ -231,7 +243,7 @@ export async function POST(
     await waitForActive(geminiName);
 
     // 4. Extract text + classify
-    const extractRes = await fetch(
+    const extractRes = await fetchGemini(
       `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
       {
         method: "POST",
@@ -246,10 +258,10 @@ export async function POST(
           generationConfig: { responseMimeType: "application/json" },
         }),
       },
+      { label: "Gemini document extraction", timeoutMs: 60_000 },
     );
     if (!extractRes.ok) {
-      const txt = await extractRes.text();
-      throw new Error(`Gemini extraction failed (${extractRes.status}): ${txt.slice(0, 300)}`);
+      await readGeminiError(extractRes, "Gemini document extraction");
     }
     const extractData = (await extractRes.json()) as {
       candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
@@ -329,6 +341,14 @@ export async function POST(
     // 9. Cleanup Gemini file (best effort)
     await deleteGeminiFile(geminiName);
     geminiName = null;
+    await logDocumentProcessingEvent({
+      tenantId: resolvedTenantId,
+      projectId,
+      documentId: docId,
+      step: "indexing",
+      status: "succeeded",
+      worker: "portal:documents-ingest",
+    });
 
     void logEvent({
       projectId: projectId,
@@ -346,6 +366,17 @@ export async function POST(
     if (geminiName) await deleteGeminiFile(geminiName);
     const msg = err instanceof Error ? err.message : String(err);
     await markError(msg, "ingest");
+    if (tenantId) {
+      await logDocumentProcessingEvent({
+        tenantId,
+        documentId: docId,
+        step: "indexing",
+        status: "failed",
+        worker: "portal:documents-ingest",
+        errorCode: "ingest_failed",
+        errorMessage: msg,
+      });
+    }
     console.error(`[ingest ${docId}] ${msg}`);
     return NextResponse.json(
       { error: `[POST /api/documents/${docId}/ingest] ${msg}` },

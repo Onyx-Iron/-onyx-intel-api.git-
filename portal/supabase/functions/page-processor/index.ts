@@ -35,15 +35,19 @@ const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 // Gemini calls occasionally 429/5xx under load; retry with exponential
 // backoff rather than failing the whole page on a transient blip.
-async function fetchWithRetry(url: string, options: RequestInit, maxAttempts = 3): Promise<Response> {
+async function fetchWithRetry(url: string, options: RequestInit, maxAttempts = 3, timeoutMs = 45_000): Promise<Response> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(`timeout after ${timeoutMs} ms`), timeoutMs);
     try {
-      const res = await fetch(url, options);
+      const res = await fetch(url, { ...options, signal: controller.signal });
       if (res.ok || (res.status !== 429 && res.status < 500)) return res;
       lastErr = new Error(`HTTP ${res.status}`);
     } catch (err) {
       lastErr = err;
+    } finally {
+      clearTimeout(timeout);
     }
     if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 500 * 2 ** (attempt - 1)));
   }
@@ -69,11 +73,25 @@ Deno.serve(async (req) => {
   const db = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+  async function recordEvent(step: "ocr" | "embedding", status: "started" | "succeeded" | "failed" | "skipped", errorMessage?: string): Promise<void> {
+    await db.from("document_processing_events").insert({
+      tenant_id: body.tenant_id,
+      project_id: null,
+      document_id: body.document_id,
+      document_page_id: body.page_id,
+      step,
+      status,
+      worker: "page-processor",
+      error_message: errorMessage?.slice(0, 2000) ?? null,
+      completed_at: status === "started" ? null : new Date().toISOString(),
+    }).then(() => {}).catch(() => {});
+  }
 
   await db.from("document_pages")
     .update({ status: "processing" })
     .eq("id", body.page_id)
     .eq("tenant_id", body.tenant_id);
+  await recordEvent("ocr", "started");
 
   try {
     // ── 1. Download page bytes ──────────────────────────────────────────────
@@ -121,10 +139,13 @@ Deno.serve(async (req) => {
       await db.from("document_pages")
         .update({ status: "done", ocr_text: text || null, updated_at: new Date().toISOString() })
         .eq("id", body.page_id);
+      await recordEvent("ocr", "succeeded");
+      await recordEvent("embedding", "skipped", "no chunks extracted");
       return new Response(JSON.stringify({ ok: true, page_id: body.page_id, chunks: 0 }), { status: 200 });
     }
 
     // ── 4. Embed (batched — text-embedding-004 supports batch mode) ─────────
+    await recordEvent("embedding", "started");
     const embeddings = await embedBatch(chunks);
 
     // ── 5. Insert chunks ────────────────────────────────────────────────────
@@ -145,11 +166,15 @@ Deno.serve(async (req) => {
     await db.from("document_pages")
       .update({ status: "done", ocr_text: text, updated_at: new Date().toISOString() })
       .eq("id", body.page_id);
+    await recordEvent("ocr", "succeeded");
+    await recordEvent("embedding", "succeeded");
 
     return new Response(JSON.stringify({ ok: true, page_id: body.page_id, chunks: rows.length }), { status: 200 });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
     console.error("[page-processor]", err);
+    const message = String(err?.message ?? err);
+    await recordEvent("ocr", "failed", message);
     await db.from("document_pages")
       .update({ status: "error", error: String(err?.message ?? err).slice(0, 500), updated_at: new Date().toISOString() })
       .eq("id", body.page_id);

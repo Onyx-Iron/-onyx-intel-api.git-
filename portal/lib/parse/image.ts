@@ -4,6 +4,7 @@
  * vendors, line items, etc., biased by the optional hint).
  */
 import type { ParseResult, ParseContext, ParseEntity } from "./index";
+import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
 const VISION_MODEL = process.env.GEMINI_VISION_MODEL ?? "gemini-2.0-flash-001";
@@ -51,7 +52,7 @@ contact, phone, email, address, line_item, quantity, unit_price, total, date,
 rfi_id, submittal_id, room, drawing_title.
 Skip purely decorative items. If nothing readable, return an empty entities array.`;
 
-  const res = await fetch(
+  const res = await fetchGemini(
     `https://generativelanguage.googleapis.com/v1beta/models/${VISION_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
     {
       method: "POST",
@@ -66,11 +67,11 @@ Skip purely decorative items. If nothing readable, return an empty entities arra
         generationConfig: { responseMimeType: "application/json" },
       }),
     },
+    { label: "Gemini vision extraction", timeoutMs: 60_000 },
   );
 
   if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`Gemini vision failed (${res.status}): ${txt.slice(0, 300)}`);
+    await readGeminiError(res, "Gemini vision extraction");
   }
 
   const data = (await res.json()) as {

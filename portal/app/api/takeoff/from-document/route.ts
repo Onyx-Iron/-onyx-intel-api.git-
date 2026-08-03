@@ -6,6 +6,7 @@ import { getAccessToken } from "@/lib/google/oauth";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { pythonApiHeaders } from "@/lib/python-api";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
+import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 
 const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
 // Aligned with the Supabase Edge Functions — see `page-split-worker/index.ts`.
@@ -86,6 +87,15 @@ export async function POST(req: NextRequest): Promise<Response> {
           drive_file_id: driveFileId,
           access_token: gToken,
           user_id: userId,
+        }).then(async () => {
+          await logDocumentProcessingEvent({
+            tenantId,
+            projectId: project_id,
+            documentId: document_id,
+            step: "split",
+            status: "started",
+            worker: "portal:from-document",
+          });
         }).catch(async (err) => {
           console.error("[from-document] page-split-worker invoke failed", err);
           const detail = err instanceof Error ? err.message : String(err);
@@ -96,6 +106,16 @@ export async function POST(req: NextRequest): Promise<Response> {
               last_error_step: "page_split_worker_invoke",
             } as never)
             .eq("id", document_id).eq("tenant_id", tenantId);
+          await logDocumentProcessingEvent({
+            tenantId,
+            projectId: project_id,
+            documentId: document_id,
+            step: "split",
+            status: "failed",
+            worker: "portal:from-document",
+            errorCode: "worker_invoke_failed",
+            errorMessage: detail,
+          });
         });
       } else {
         void invokePageSplitWorker({
@@ -105,6 +125,15 @@ export async function POST(req: NextRequest): Promise<Response> {
           original_path: storagePath!,
           is_local_upload: true,
           user_id: userId,
+        }).then(async () => {
+          await logDocumentProcessingEvent({
+            tenantId,
+            projectId: project_id,
+            documentId: document_id,
+            step: "split",
+            status: "started",
+            worker: "portal:from-document",
+          });
         }).catch(async (err) => {
           console.error("[from-document] page-split-worker invoke failed", err);
           const detail = err instanceof Error ? err.message : String(err);
@@ -115,6 +144,16 @@ export async function POST(req: NextRequest): Promise<Response> {
               last_error_step: "page_split_worker_invoke",
             } as never)
             .eq("id", document_id).eq("tenant_id", tenantId);
+          await logDocumentProcessingEvent({
+            tenantId,
+            projectId: project_id,
+            documentId: document_id,
+            step: "split",
+            status: "failed",
+            worker: "portal:from-document",
+            errorCode: "worker_invoke_failed",
+            errorMessage: detail,
+          });
         });
       }
 

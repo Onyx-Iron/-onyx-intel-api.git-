@@ -42,15 +42,19 @@ const PLANS_BUCKET       = Deno.env.get("PLANS_BUCKET") ?? "plans-bucket";
 
 // Google Drive occasionally 429/5xx's under load; retry with exponential
 // backoff rather than failing the whole document on a transient blip.
-async function fetchWithRetry(url: string, options: RequestInit, maxAttempts = 3): Promise<Response> {
+async function fetchWithRetry(url: string, options: RequestInit, maxAttempts = 3, timeoutMs = 45_000): Promise<Response> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(`timeout after ${timeoutMs} ms`), timeoutMs);
     try {
-      const res = await fetch(url, options);
+      const res = await fetch(url, { ...options, signal: controller.signal });
       if (res.ok || (res.status !== 429 && res.status < 500)) return res;
       lastErr = new Error(`HTTP ${res.status}`);
     } catch (err) {
       lastErr = err;
+    } finally {
+      clearTimeout(timeout);
     }
     if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 500 * 2 ** (attempt - 1)));
   }
@@ -91,11 +95,26 @@ Deno.serve(async (req) => {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
+  async function recordEvent(status: "started" | "succeeded" | "failed" | "skipped", errorMessage?: string): Promise<void> {
+    await db.from("document_processing_events").insert({
+      tenant_id: body.tenant_id,
+      project_id: body.project_id,
+      document_id: body.document_id,
+      document_page_id: null,
+      step: "split",
+      status,
+      worker: "page-split-worker",
+      error_message: errorMessage?.slice(0, 2000) ?? null,
+      completed_at: status === "started" ? null : new Date().toISOString(),
+    }).then(() => {}).catch(() => {});
+  }
+
   // Mark the document as processing right away so the UI can reflect status.
   await db.from("documents")
     .update({ status: "processing" })
     .eq("id", body.document_id)
     .eq("tenant_id", body.tenant_id);
+  await recordEvent("started");
 
   try {
     // ── 1. Get original PDF bytes ────────────────────────────────────────────
@@ -183,7 +202,7 @@ Deno.serve(async (req) => {
     const base = SUPABASE_URL.replace(/\/$/, "");
     const processorUrl = `${base}/functions/v1/page-processor`;
     const takeoffWorkerUrl = `${base}/functions/v1/page-takeoff-worker`;
-    await Promise.allSettled(pageRows.flatMap((p) => [
+    const fanoutResults = await Promise.allSettled(pageRows.flatMap((p) => [
       fetch(processorUrl, {
         method: "POST",
         headers: {
@@ -214,12 +233,17 @@ Deno.serve(async (req) => {
         }),
       }),
     ]));
+    const fanoutFailures = fanoutResults.filter((r) => r.status === "rejected").length;
+    if (fanoutFailures > 0) {
+      await recordEvent("failed", `fan-out rejected for ${fanoutFailures} page jobs`);
+    }
 
     // Mark documents.status="split" — pages are now the unit of work.
     await db.from("documents")
       .update({ status: "split" })
       .eq("id", body.document_id)
       .eq("tenant_id", body.tenant_id);
+    await recordEvent("succeeded");
 
     return new Response(JSON.stringify({
       ok: true,
@@ -231,6 +255,7 @@ Deno.serve(async (req) => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
     console.error("[page-split-worker]", err);
+    await recordEvent("failed", String(err?.message ?? err));
     await db.from("documents")
       .update({
         status: "error",

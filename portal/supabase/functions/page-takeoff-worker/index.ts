@@ -48,15 +48,19 @@ interface Payload {
 
 // Railway service occasionally cold-starts or briefly 5xx's under load;
 // retry with exponential backoff rather than failing the whole page.
-async function fetchWithRetry(url: string, options: RequestInit, maxAttempts = 3): Promise<Response> {
+async function fetchWithRetry(url: string, options: RequestInit, maxAttempts = 3, timeoutMs = 60_000): Promise<Response> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(`timeout after ${timeoutMs} ms`), timeoutMs);
     try {
-      const res = await fetch(url, options);
+      const res = await fetch(url, { ...options, signal: controller.signal });
       if (res.ok || (res.status !== 429 && res.status < 500)) return res;
       lastErr = new Error(`HTTP ${res.status}`);
     } catch (err) {
       lastErr = err;
+    } finally {
+      clearTimeout(timeout);
     }
     if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 500 * 2 ** (attempt - 1)));
   }
@@ -210,11 +214,25 @@ Deno.serve(async (req) => {
   const db = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+  async function recordEvent(status: "started" | "succeeded" | "failed" | "skipped", errorMessage?: string): Promise<void> {
+    await db.from("document_processing_events").insert({
+      tenant_id: body.tenant_id,
+      project_id: body.project_id,
+      document_id: body.document_id,
+      document_page_id: body.page_id,
+      step: "takeoff",
+      status,
+      worker: "page-takeoff-worker",
+      error_message: errorMessage?.slice(0, 2000) ?? null,
+      completed_at: status === "started" ? null : new Date().toISOString(),
+    }).then(() => {}).catch(() => {});
+  }
 
   await db.from("document_pages")
     .update({ takeoff_status: "processing" })
     .eq("id", body.page_id)
     .eq("tenant_id", body.tenant_id);
+  await recordEvent("started");
 
   try {
     if (!PYTHON_API_URL) throw new Error("PYTHON_API_URL is not configured for this function");
@@ -306,6 +324,7 @@ Deno.serve(async (req) => {
       .update({ takeoff_status: "done", updated_at: new Date().toISOString() })
       .eq("id", body.page_id)
       .eq("tenant_id", body.tenant_id);
+    await recordEvent("succeeded");
 
     return new Response(JSON.stringify({ ok: true, page_id: body.page_id, rows: rows.length }), {
       status: 200, headers: { "Content-Type": "application/json" },
@@ -313,6 +332,8 @@ Deno.serve(async (req) => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
     console.error("[page-takeoff-worker]", err);
+    const message = String(err?.message ?? err);
+    await recordEvent("failed", message);
     await db.from("document_pages")
       .update({ takeoff_status: "error", takeoff_error: String(err?.message ?? err).slice(0, 500), updated_at: new Date().toISOString() })
       .eq("id", body.page_id)

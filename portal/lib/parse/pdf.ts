@@ -4,6 +4,7 @@
  * Mirrors the upload/wait helpers used by app/api/documents/[id]/ingest.
  */
 import type { ParseResult, ParseContext, ParseEntity } from "./index";
+import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
 const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
@@ -28,7 +29,7 @@ async function uploadPdf(pdf: Buffer, fileName: string): Promise<{ uri: string; 
     pdf,
     Buffer.from(`\r\n--${boundary}--`),
   ]);
-  const res = await fetch(
+  const res = await fetchGemini(
     `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=multipart`,
     {
       method: "POST",
@@ -39,10 +40,10 @@ async function uploadPdf(pdf: Buffer, fileName: string): Promise<{ uri: string; 
       },
       body,
     },
+    { label: "Gemini Files upload", timeoutMs: 60_000 },
   );
   if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`Gemini Files upload failed (${res.status}): ${txt.slice(0, 300)}`);
+    await readGeminiError(res, "Gemini Files upload");
   }
   const data = (await res.json()) as { file: { name: string; uri: string; state: string } };
   return { uri: data.file.uri, name: data.file.name };
@@ -51,9 +52,10 @@ async function uploadPdf(pdf: Buffer, fileName: string): Promise<{ uri: string; 
 async function waitForActive(name: string, maxMs = 60_000): Promise<void> {
   const deadline = Date.now() + maxMs;
   while (Date.now() < deadline) {
-    const res = await fetch(
+    const res = await fetchGemini(
       `https://generativelanguage.googleapis.com/v1beta/${name}`,
       { headers: { "X-Goog-Api-Key": GEMINI_API_KEY } },
+      { label: "Gemini file status", timeoutMs: 20_000 },
     );
     const data = (await res.json()) as { state: string };
     if (data.state === "ACTIVE") return;
@@ -92,7 +94,7 @@ submittal_id, room, drawing_title. Omit purely decorative items.`;
   const { uri, name } = await uploadPdf(bytes, base.filename);
   try {
     await waitForActive(name);
-    const res = await fetch(
+    const res = await fetchGemini(
       `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
       {
         method: "POST",
@@ -107,10 +109,10 @@ submittal_id, room, drawing_title. Omit purely decorative items.`;
           generationConfig: { responseMimeType: "application/json" },
         }),
       },
+      { label: "Gemini PDF extraction", timeoutMs: 60_000 },
     );
     if (!res.ok) {
-      const txt = await res.text();
-      throw new Error(`Gemini PDF extraction failed (${res.status}): ${txt.slice(0, 300)}`);
+      await readGeminiError(res, "Gemini PDF extraction");
     }
     const data = (await res.json()) as {
       candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
