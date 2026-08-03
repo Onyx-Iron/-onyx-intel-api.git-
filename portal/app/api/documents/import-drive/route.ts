@@ -6,6 +6,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { buildDocumentRevisionMeta } from "@/lib/documents/revisions";
 import { logEvent } from "@/lib/activity";
 import { headerSafe } from "@/lib/http";
+import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
@@ -140,8 +141,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       original_path: originalPath,
       access_token: accessToken,
       user_id: userId,
-    }).catch((err) => {
+    }).catch(async (err) => {
       console.error("[import-drive] worker invoke failed", err);
+      const detail = err instanceof Error ? err.message : String(err);
+      await db.from("documents")
+        .update({
+          status: "failed",
+          last_error: detail.slice(0, 1000),
+          last_error_step: "page_split_worker_invoke",
+        } as never)
+        .eq("id", documentId).eq("tenant_id", tenantId);
     });
 
     // 202 Accepted — request received, processing continues async.
@@ -153,34 +162,4 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[POST /api/documents/import-drive] ${msg}` }, { status: 500 });
   }
-}
-
-// ── Worker invocation --------------------------------------------------------
-
-async function invokePageSplitWorker(payload: {
-  document_id: string;
-  tenant_id: string;
-  project_id: string;
-  drive_file_id: string;
-  original_path: string;
-  access_token: string;
-  user_id: string;
-}): Promise<void> {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
-  const serviceKey  = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceKey) {
-    throw new Error("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set");
-  }
-
-  const url = `${supabaseUrl.replace(/\/$/, "")}/functions/v1/page-split-worker`;
-  // Note: we deliberately do NOT await the body. Edge Function boots + acknowledges;
-  // heavy work continues in background there.
-  await fetch(url, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${serviceKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
 }

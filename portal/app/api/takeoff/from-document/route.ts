@@ -5,6 +5,7 @@ import { headerSafe } from "@/lib/http";
 import { getAccessToken } from "@/lib/google/oauth";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { pythonApiHeaders } from "@/lib/python-api";
+import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 
 const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
 // Aligned with the Supabase Edge Functions — see `page-split-worker/index.ts`.
@@ -85,8 +86,16 @@ export async function POST(req: NextRequest): Promise<Response> {
           drive_file_id: driveFileId,
           access_token: gToken,
           user_id: userId,
-        }).catch((err) => {
+        }).catch(async (err) => {
           console.error("[from-document] page-split-worker invoke failed", err);
+          const detail = err instanceof Error ? err.message : String(err);
+          await db.from("documents")
+            .update({
+              status: "failed",
+              last_error: detail.slice(0, 1000),
+              last_error_step: "page_split_worker_invoke",
+            } as never)
+            .eq("id", document_id).eq("tenant_id", tenantId);
         });
       } else {
         void invokePageSplitWorker({
@@ -96,8 +105,16 @@ export async function POST(req: NextRequest): Promise<Response> {
           original_path: storagePath!,
           is_local_upload: true,
           user_id: userId,
-        }).catch((err) => {
+        }).catch(async (err) => {
           console.error("[from-document] page-split-worker invoke failed", err);
+          const detail = err instanceof Error ? err.message : String(err);
+          await db.from("documents")
+            .update({
+              status: "failed",
+              last_error: detail.slice(0, 1000),
+              last_error_step: "page_split_worker_invoke",
+            } as never)
+            .eq("id", document_id).eq("tenant_id", tenantId);
         });
       }
 
@@ -222,26 +239,4 @@ export async function POST(req: NextRequest): Promise<Response> {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[from-document] ${msg}` }, { status: 500 });
   }
-}
-
-// ── Async worker invocation (mirrors /api/documents/import-drive) ───────────
-type PageSplitPayload =
-  | { document_id: string; tenant_id: string; project_id: string; original_path: string; is_local_upload: true; user_id: string }
-  | { document_id: string; tenant_id: string; project_id: string; original_path: string; drive_file_id: string; access_token: string; user_id: string };
-
-async function invokePageSplitWorker(payload: PageSplitPayload): Promise<void> {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
-  const serviceKey  = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceKey) {
-    throw new Error("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set");
-  }
-  const url = `${supabaseUrl.replace(/\/$/, "")}/functions/v1/page-split-worker`;
-  await fetch(url, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${serviceKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
 }
