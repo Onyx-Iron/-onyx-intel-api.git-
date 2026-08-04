@@ -18,12 +18,11 @@ export const metadata: Metadata = {
   description: "AI-native construction workspace",
 };
 
-const clerkSignInUrl = process.env.NEXT_PUBLIC_CLERK_SIGN_IN_URL || "/sign-in";
-const clerkSignUpUrl = process.env.NEXT_PUBLIC_CLERK_SIGN_UP_URL || "/sign-up";
-const clerkAfterSignInUrl =
-  process.env.NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL || "/dashboard";
-const clerkAfterSignUpUrl =
-  process.env.NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL || "/dashboard";
+const appOrigin = process.env.NEXT_PUBLIC_APP_URL || "https://app.onyx-iron.com";
+const clerkSignInUrl = `${appOrigin}/sign-in`;
+const clerkSignUpUrl = `${appOrigin}/sign-up`;
+const clerkAfterSignInUrl = `${appOrigin}/dashboard`;
+const clerkAfterSignUpUrl = `${appOrigin}/dashboard`;
 
 export default function RootLayout({
   children,

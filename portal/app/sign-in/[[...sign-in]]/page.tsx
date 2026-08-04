@@ -1,10 +1,9 @@
 import { SignIn } from "@clerk/nextjs";
 
-const signUpUrl = process.env.NEXT_PUBLIC_CLERK_SIGN_UP_URL || "/sign-up";
-const fallbackRedirectUrl =
-  process.env.NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL || "/dashboard";
-const signUpFallbackRedirectUrl =
-  process.env.NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL || "/dashboard";
+const appOrigin = process.env.NEXT_PUBLIC_APP_URL || "https://app.onyx-iron.com";
+const signUpUrl = `${appOrigin}/sign-up`;
+const fallbackRedirectUrl = `${appOrigin}/dashboard`;
+const signUpFallbackRedirectUrl = `${appOrigin}/dashboard`;
 
 export default function SignInPage() {
   return (
