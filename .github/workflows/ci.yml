@@ -86,6 +86,34 @@ jobs:
           NEXT_PUBLIC_GOOGLE_API_KEY: placeholder
           NEXT_PUBLIC_STORAGE_MODE: supabase
 
+  launch-audit:
+    name: Launch audit (repo config)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: portal/package-lock.json
+      - run: npm ci
+      - run: node scripts/launch-audit.mjs
+        working-directory: portal
+
+  launch-smoke:
+    name: Launch smoke (production auth surface)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: portal/package-lock.json
+      - run: npm ci
+      - run: node scripts/launch-smoke.mjs
+        working-directory: portal
+
   migrations:
     name: Migration safety (apply all to a fresh local Supabase stack)
     runs-on: ubuntu-latest
