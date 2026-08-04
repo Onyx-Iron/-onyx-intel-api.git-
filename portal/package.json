@@ -8,6 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
+    "launch:audit": "node scripts/launch-audit.mjs",
+    "launch:smoke": "node scripts/launch-smoke.mjs",
     "test:unit": "node scripts/run-tests.mjs unit",
     "test:integration": "node scripts/run-tests.mjs integration"
   },
