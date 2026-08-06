@@ -8,6 +8,7 @@ import { requireEnv } from "@/lib/env";
 import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import type { TablesInsert } from "@/lib/supabase/types";
+import { resolveDocumentStorageBucket } from "@/lib/documents/upload";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -15,7 +16,6 @@ export const maxDuration = 300;
 const GEMINI_API_KEY = requireEnv("GEMINI_API_KEY");
 const EMBED_MODEL = "text-embedding-004";
 const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
-const PLANS_BUCKET = "plans-bucket";
 
 const EXTRACTION_PROMPT = `Analyze this construction document and return ONLY a JSON object with this exact structure — no markdown, no explanation:
 {
@@ -221,7 +221,7 @@ export async function POST(
     } else {
       // Local file stored in Supabase Storage
       const { data: signed, error: signErr } = await db.storage
-        .from(PLANS_BUCKET)
+        .from(resolveDocumentStorageBucket(meta))
         .createSignedUrl(storagePath!, 300);
       if (signErr || !signed?.signedUrl) {
         await markError(signErr?.message ?? "Could not access stored file", "download");

@@ -100,7 +100,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       meta: buildDocumentRevisionMeta(file_name, {
         source: "local_upload",
         storage: "supabase",
+        storage_bucket: BUCKET,
         storage_path: storagePath,
+        pending_upload: true,
         size: body.size ?? null,
         content_type,
       }),
@@ -127,5 +129,39 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[takeoff/upload-url] ${msg}` }, { status: 500 });
+  }
+}
+
+/** Remove an incomplete direct upload so failed browser PUTs do not leave
+ * permanent queued documents. Only pending uploads owned by this tenant can
+ * be removed. */
+export async function DELETE(req: NextRequest): Promise<NextResponse> {
+  try {
+    const { userId, orgId, orgSlug } = await auth();
+    if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const { document_id } = await req.json().catch(() => ({})) as { document_id?: string };
+    if (!document_id) return NextResponse.json({ error: "document_id required" }, { status: 400 });
+
+    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const db = await createServiceClient();
+    const { data: doc } = await db.from("documents")
+      .select("id, meta")
+      .eq("id", document_id).eq("tenant_id", tenantId)
+      .maybeSingle();
+    if (!doc) return NextResponse.json({ ok: true, deduped: true });
+
+    const meta = (doc.meta as Record<string, unknown> | null) ?? {};
+    if (meta.pending_upload !== true) {
+      return NextResponse.json({ error: "Completed uploads cannot be canceled here" }, { status: 409 });
+    }
+    const storagePath = typeof meta.storage_path === "string" ? meta.storage_path : null;
+    if (storagePath) await db.storage.from(BUCKET).remove([storagePath]);
+    const { error } = await db.from("documents")
+      .delete().eq("id", document_id).eq("tenant_id", tenantId);
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ ok: true });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: `[takeoff/upload-url cancel] ${msg}` }, { status: 500 });
   }
 }

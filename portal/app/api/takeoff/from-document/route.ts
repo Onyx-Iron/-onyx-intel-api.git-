@@ -1,5 +1,5 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { headerSafe } from "@/lib/http";
 import { getAccessToken } from "@/lib/google/oauth";
@@ -49,9 +49,12 @@ export async function POST(req: NextRequest): Promise<Response> {
 
     const { data: doc, error } = await db
       .from("documents")
-      .select("id, file_name, meta")
+      .select("id, file_name, project_id, meta")
       .eq("id", document_id).eq("tenant_id", tenantId).single();
     if (error || !doc) return NextResponse.json({ error: "Document not found" }, { status: 404 });
+    if (doc.project_id !== project_id) {
+      return NextResponse.json({ error: "Document does not belong to this project" }, { status: 403 });
+    }
 
     const meta = (doc.meta as Record<string, unknown> | null) ?? {};
     const storagePath = meta.storage_path as string | undefined;
@@ -60,6 +63,21 @@ export async function POST(req: NextRequest): Promise<Response> {
     const fileSize = typeof meta.size === "number" ? meta.size : null;
     const isPdf = doc.file_name.toLowerCase().endsWith(".pdf");
 
+    if (storagePath && meta.pending_upload === true) {
+      const { data: objectInfo, error: infoErr } = await db.storage.from(BUCKET).info(storagePath);
+      if (infoErr || !objectInfo) {
+        return NextResponse.json({
+          error: "The upload has not finished reaching secure storage. Retry the upload before starting extraction.",
+          code: "UPLOAD_INCOMPLETE",
+        }, { status: 409 });
+      }
+      const { pending_upload: _pendingUpload, ...completedMeta } = meta;
+      void _pendingUpload;
+      await db.from("documents")
+        .update({ meta: completedMeta as never, status: "queued" } as never)
+        .eq("id", document_id).eq("tenant_id", tenantId);
+    }
+
     // ── Large PDF → async page-split pipeline ────────────────────────────────
     // Applies whether the original lives in Supabase Storage (older local
     // uploads) or Google Drive (current default for new local uploads — see
@@ -67,25 +85,26 @@ export async function POST(req: NextRequest): Promise<Response> {
     // just with a different fetch source for the original bytes.
     const isLargePdf = isPdf && fileSize != null && fileSize >= ASYNC_THRESHOLD_BYTES;
     if (isLargePdf && (storagePath || driveFileId)) {
+      const driveToken = driveFileId ? await getAccessToken(tenantId, userId) : null;
+      if (driveFileId && !driveToken) {
+        return NextResponse.json({
+          error: "This plan is in Google Drive, but Google is not connected for this workspace yet. Connect Google or reopen the file from Drive.",
+          code: "NEED_GOOGLE",
+        }, { status: 412 });
+      }
       await db.from("documents")
         .update({ status: "queued", updated_at: new Date().toISOString() } as never)
         .eq("id", document_id).eq("tenant_id", tenantId);
 
-      if (driveFileId) {
-        const gToken = await getAccessToken(tenantId, userId);
-        if (!gToken) {
-          return NextResponse.json({
-            error: "This plan is in Google Drive, but Google is not connected for this workspace yet. Connect Google or reopen the file from Drive.",
-            code: "NEED_GOOGLE",
-          }, { status: 412 });
-        }
-        void invokePageSplitWorker({
+      const dispatchPageSplit = async () => {
+        if (driveFileId) {
+          await invokePageSplitWorker({
           document_id,
           tenant_id: tenantId,
           project_id,
           original_path: `originals/${document_id}.pdf`,
           drive_file_id: driveFileId,
-          access_token: gToken,
+          access_token: driveToken!,
           user_id: userId,
         }).then(async () => {
           await logDocumentProcessingEvent({
@@ -117,8 +136,8 @@ export async function POST(req: NextRequest): Promise<Response> {
             errorMessage: detail,
           });
         });
-      } else {
-        void invokePageSplitWorker({
+        } else {
+          await invokePageSplitWorker({
           document_id,
           tenant_id: tenantId,
           project_id,
@@ -155,7 +174,12 @@ export async function POST(req: NextRequest): Promise<Response> {
             errorMessage: detail,
           });
         });
-      }
+        }
+      };
+
+      // Keep the worker invocation alive after the 202 response. Floating
+      // promises are routinely terminated by serverless runtimes.
+      after(dispatchPageSplit);
 
       return NextResponse.json({ status: "queued", async: true, document_id }, { status: 202 });
     }

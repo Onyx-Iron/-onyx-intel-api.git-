@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { finalSplitStatus, isSplitStartStale } from "@/lib/takeoff/pipeline-status";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,7 +34,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const { data: docRow, error: docErr } = await anyDb
     .from("documents")
-    .select("id, status, page_count, project_id, last_error")
+    .select("id, status, page_count, project_id, last_error, updated_at, uploaded_at")
     .eq("id", documentId).eq("tenant_id", tenantId)
     .maybeSingle();
   if (docErr) return NextResponse.json({ error: docErr.message }, { status: 500 });
@@ -55,6 +56,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // Not split yet (page-split-worker hasn't inserted document_pages rows —
   // still downloading/bursting the original PDF, or it failed before that).
   if (total === 0) {
+    if (isSplitStartStale({ status: docRow.status, updatedAt: docRow.updated_at, uploadedAt: docRow.uploaded_at })) {
+      const timeoutMessage = "Takeoff page splitting did not start within 8 minutes. Retry the upload; the previous attempt is safe to replace.";
+      await anyDb.from("documents")
+        .update({ status: "failed", last_error: timeoutMessage, last_error_step: "split_timeout" })
+        .eq("id", documentId).eq("tenant_id", tenantId);
+      docRow.status = "failed";
+      docRow.last_error = timeoutMessage;
+    }
     return NextResponse.json({
       document_status: docRow.status,
       page_count: docRow.page_count ?? null,
@@ -67,8 +76,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   }
 
   // Finalize documents.status once every page has a terminal takeoff_status.
-  if (settled === total && docRow.status !== "done" && docRow.status !== "failed") {
-    const finalStatus = errored === total ? "failed" : "done";
+  const computedFinalStatus = finalSplitStatus(done, errored, total);
+  if (computedFinalStatus && docRow.status !== "done" && docRow.status !== "failed") {
+    const finalStatus = computedFinalStatus;
     await anyDb.from("documents")
       .update({ status: finalStatus, processed_at: new Date().toISOString() })
       .eq("id", documentId).eq("tenant_id", tenantId);

@@ -91,6 +91,19 @@ function fingerprint(label: string | null, csi: string | null, qty: number | nul
   return [norm(label), norm(csi), normNum(qty), norm(unit), norm(drawingRef), norm(locationTag)].join("|");
 }
 
+async function stableTakeoffId(pageId: string, row: TakeoffRow, index: number): Promise<string> {
+  const input = JSON.stringify([
+    pageId, index, row.description ?? "", row.cost_code ?? "",
+    row.total_qty ?? null, row.uom ?? "", row.drawing_ref ?? "", row.location_tag ?? "",
+  ]);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input)));
+  // UUID-compatible deterministic identifier (version/variant bits normalized).
+  digest[6] = (digest[6] & 0x0f) | 0x50;
+  digest[8] = (digest[8] & 0x3f) | 0x80;
+  const hex = [...digest.slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
 // deno-lint-ignore no-explicit-any
 async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: string): Promise<void> {
   const [takeoff, existing, catalog] = await Promise.all([
@@ -214,18 +227,30 @@ Deno.serve(async (req) => {
   const db = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+  const { data: pageState } = await db.from("document_pages")
+    .select("takeoff_status")
+    .eq("id", body.page_id)
+    .eq("tenant_id", body.tenant_id)
+    .maybeSingle();
+  if (pageState?.takeoff_status === "done") {
+    return new Response(JSON.stringify({ ok: true, page_id: body.page_id, deduped: true }), {
+      status: 200, headers: { "Content-Type": "application/json" },
+    });
+  }
   async function recordEvent(status: "started" | "succeeded" | "failed" | "skipped", errorMessage?: string): Promise<void> {
-    await db.from("document_processing_events").insert({
-      tenant_id: body.tenant_id,
-      project_id: body.project_id,
-      document_id: body.document_id,
-      document_page_id: body.page_id,
-      step: "takeoff",
-      status,
-      worker: "page-takeoff-worker",
-      error_message: errorMessage?.slice(0, 2000) ?? null,
-      completed_at: status === "started" ? null : new Date().toISOString(),
-    }).then(() => {}).catch(() => {});
+    try {
+      await db.from("document_processing_events").insert({
+        tenant_id: body.tenant_id,
+        project_id: body.project_id,
+        document_id: body.document_id,
+        document_page_id: body.page_id,
+        step: "takeoff",
+        status,
+        worker: "page-takeoff-worker",
+        error_message: errorMessage?.slice(0, 2000) ?? null,
+        completed_at: status === "started" ? null : new Date().toISOString(),
+      });
+    } catch { /* best-effort telemetry */ }
   }
 
   await db.from("document_pages")
@@ -263,8 +288,8 @@ Deno.serve(async (req) => {
 
     // ── 3. Insert into takeoff_items ─────────────────────────────────────────
     if (rows.length > 0) {
-      const payload = rows.map((r) => ({
-        id: crypto.randomUUID(),
+      const payload = await Promise.all(rows.map(async (r, index) => ({
+        id: await stableTakeoffId(body.page_id, r, index),
         tenant_id: body.tenant_id,
         project_id: body.project_id,
         label: r.description || r.trade || "Untitled item",
@@ -292,15 +317,20 @@ Deno.serve(async (req) => {
           location_tag: r.location_tag ?? null,
           extraction_method: r.extraction_method ?? "deterministic",
         },
-      }));
-      const { data: insertedRows, error: insErr } = await db.from("takeoff_items").insert(payload).select("id,review_status");
+      })));
+      const payloadIds = payload.map((row) => row.id);
+      const { data: existingRows } = await db.from("takeoff_items").select("id").in("id", payloadIds);
+      const existingIds = new Set((existingRows ?? []).map((row: { id: string }) => row.id));
+      const { data: insertedRows, error: insErr } = await db.from("takeoff_items")
+        .upsert(payload, { onConflict: "id" }).select("id,review_status");
       if (insErr) throw new Error(`insert takeoff_items: ${insErr.message}`);
 
       // Lifecycle audit trail (mirrors lib/takeoff/history.ts — Deno can't
       // import that module, so this is a small inline equivalent).
       if (insertedRows && insertedRows.length > 0) {
-        await db.from("takeoff_item_history").insert(
-          insertedRows.map((r: { id: string }) => ({
+        const newlyInsertedRows = insertedRows.filter((r: { id: string }) => !existingIds.has(r.id));
+        if (newlyInsertedRows.length > 0) await db.from("takeoff_item_history").insert(
+          newlyInsertedRows.map((r: { id: string }) => ({
             tenant_id: body.tenant_id,
             project_id: body.project_id,
             takeoff_item_id: r.id,

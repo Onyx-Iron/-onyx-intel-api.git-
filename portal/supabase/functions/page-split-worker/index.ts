@@ -96,17 +96,19 @@ Deno.serve(async (req) => {
   });
 
   async function recordEvent(status: "started" | "succeeded" | "failed" | "skipped", errorMessage?: string): Promise<void> {
-    await db.from("document_processing_events").insert({
-      tenant_id: body.tenant_id,
-      project_id: body.project_id,
-      document_id: body.document_id,
-      document_page_id: null,
-      step: "split",
-      status,
-      worker: "page-split-worker",
-      error_message: errorMessage?.slice(0, 2000) ?? null,
-      completed_at: status === "started" ? null : new Date().toISOString(),
-    }).then(() => {}).catch(() => {});
+    try {
+      await db.from("document_processing_events").insert({
+        tenant_id: body.tenant_id,
+        project_id: body.project_id,
+        document_id: body.document_id,
+        document_page_id: null,
+        step: "split",
+        status,
+        worker: "page-split-worker",
+        error_message: errorMessage?.slice(0, 2000) ?? null,
+        completed_at: status === "started" ? null : new Date().toISOString(),
+      });
+    } catch { /* best-effort telemetry */ }
   }
 
   // Mark the document as processing right away so the UI can reflect status.
@@ -193,8 +195,23 @@ Deno.serve(async (req) => {
     }
 
     if (pageRows.length > 0) {
-      const { error: insErr } = await db.from("document_pages").insert(pageRows);
+      const { error: insErr } = await db.from("document_pages")
+        .upsert(pageRows, { onConflict: "document_id,page_number", ignoreDuplicates: true });
       if (insErr) throw new Error(`insert document_pages: ${insErr.message}`);
+    }
+
+    // A retry may have reused existing rows. Reload their canonical IDs before
+    // dispatching; never send the new throwaway UUIDs from an ignored insert.
+    const { data: persistedPages, error: persistedPagesErr } = await db
+      .from("document_pages")
+      .select("id, tenant_id, document_id, page_number, storage_path")
+      .eq("tenant_id", body.tenant_id)
+      .eq("document_id", body.document_id)
+      .order("page_number", { ascending: true });
+    if (persistedPagesErr) throw new Error(`reload document_pages: ${persistedPagesErr.message}`);
+    const dispatchPages = persistedPages ?? [];
+    if (dispatchPages.length !== pageCount) {
+      throw new Error(`expected ${pageCount} persisted pages, found ${dispatchPages.length}`);
     }
 
     // ── 6. Fan out: fire-and-forget each page to page-processor (OCR/embed
@@ -202,7 +219,7 @@ Deno.serve(async (req) => {
     const base = SUPABASE_URL.replace(/\/$/, "");
     const processorUrl = `${base}/functions/v1/page-processor`;
     const takeoffWorkerUrl = `${base}/functions/v1/page-takeoff-worker`;
-    const fanoutResults = await Promise.allSettled(pageRows.flatMap((p) => [
+    const fanoutResults = await Promise.allSettled(dispatchPages.flatMap((p) => [
       fetch(processorUrl, {
         method: "POST",
         headers: {
@@ -233,9 +250,11 @@ Deno.serve(async (req) => {
         }),
       }),
     ]));
-    const fanoutFailures = fanoutResults.filter((r) => r.status === "rejected").length;
+    const fanoutFailures = fanoutResults.filter(
+      (r) => r.status === "rejected" || (r.status === "fulfilled" && !r.value.ok),
+    ).length;
     if (fanoutFailures > 0) {
-      await recordEvent("failed", `fan-out rejected for ${fanoutFailures} page jobs`);
+      throw new Error(`fan-out failed for ${fanoutFailures} page jobs`);
     }
 
     // Mark documents.status="split" — pages are now the unit of work.
@@ -249,7 +268,7 @@ Deno.serve(async (req) => {
       ok: true,
       document_id: body.document_id,
       page_count: pageCount,
-      pages_enqueued: pageRows.length,
+      pages_enqueued: dispatchPages.length,
       elapsed_ms: Date.now() - started,
     }), { status: 200, headers: { "Content-Type": "application/json" } });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
