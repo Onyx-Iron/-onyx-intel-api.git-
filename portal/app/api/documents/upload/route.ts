@@ -51,7 +51,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (uploadStorageType === "supabase") {
       const requestLength = Number(req.headers.get("content-length") ?? 0);
       if (Number.isFinite(requestLength) && requestLength > LOCAL_DOCUMENT_MAX_BYTES + 1024 * 1024) {
-        return NextResponse.json({ error: "File is larger than the 200 MB upload limit.", code: "FILE_TOO_LARGE" }, { status: 413 });
+        return NextResponse.json({ error: "File is larger than the 1GB upload limit.", code: "FILE_TOO_LARGE" }, { status: 413 });
       }
       const form = await req.formData();
       const file = form.get("file");
@@ -67,7 +67,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       if (!project_id) return NextResponse.json({ error: "project_id required" }, { status: 400 });
       if (file.size === 0) return NextResponse.json({ error: "The selected file is empty.", code: "EMPTY_FILE" }, { status: 400 });
       if (file.size > LOCAL_DOCUMENT_MAX_BYTES) {
-        return NextResponse.json({ error: "File is larger than the 200 MB upload limit.", code: "FILE_TOO_LARGE" }, { status: 413 });
+        return NextResponse.json({ error: "File is larger than the 1GB upload limit.", code: "FILE_TOO_LARGE" }, { status: 413 });
       }
 
       const { data: project, error: projErr } = await db

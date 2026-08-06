@@ -2,8 +2,9 @@ import type { TablesInsert } from "@/lib/supabase/types";
 import { buildDocumentRevisionMeta } from "./revisions.ts";
 
 export type DocumentUploadStorageType = "drive" | "supabase";
-export const LOCAL_DOCUMENT_BUCKET = "project-documents";
-export const LOCAL_DOCUMENT_MAX_BYTES = 200 * 1024 * 1024;
+export const LOCAL_DOCUMENT_BUCKET = "plans-bucket";
+export const LOCAL_DOCUMENT_MAX_BYTES = 1024 * 1024 * 1024;
+const LEGACY_LOCAL_DOCUMENT_BUCKET = "project-documents";
 
 export interface UploadRequestInfo {
   contentType: string;
@@ -48,6 +49,6 @@ export function resolveDocumentStorageBucket(meta: Record<string, unknown>): str
   // Backward compatibility: local uploads historically omitted the bucket,
   // while Drive imports copied into Storage used plans-bucket.
   return meta.source === "local_upload" || meta.storage === "supabase"
-    ? LOCAL_DOCUMENT_BUCKET
+    ? LEGACY_LOCAL_DOCUMENT_BUCKET
     : "plans-bucket";
 }

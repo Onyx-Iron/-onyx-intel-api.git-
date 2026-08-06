@@ -29,7 +29,7 @@ describe("document upload helpers", () => {
     assert.equal(row.project_id, "project-1");
     assert.equal(row.status, "pending");
     assert.equal((row.meta as Record<string, unknown>).storage_path, "tenant-1/project-1/site-plan.pdf");
-    assert.equal((row.meta as Record<string, unknown>).storage_bucket, "project-documents");
+    assert.equal((row.meta as Record<string, unknown>).storage_bucket, "plans-bucket");
   });
 
   it("resolves current and legacy document storage buckets", () => {
