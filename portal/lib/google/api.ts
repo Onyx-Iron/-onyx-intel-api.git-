@@ -14,7 +14,7 @@ async function getOrCreateTenant(orgId: string, orgName: string): Promise<string
 }
 
 export type TokenResult =
-  | { ok: true; token: string; userId: string }
+  | { ok: true; token: string; userId: string; tenantId: string }
   | { ok: false; error: string; status: number; code?: string };
 
 /**
@@ -26,11 +26,11 @@ export async function requireGoogleToken(req?: Request): Promise<TokenResult> {
   const { userId, orgId, orgSlug } = await auth();
   if (!userId) return { ok: false, error: "Unauthorized", status: 401 };
 
-  const headerToken = req?.headers.get("x-google-token");
-  if (headerToken) return { ok: true, token: headerToken, userId };
-
   const tenantId = await getOrCreateTenant(orgId ?? `user_${userId}`, orgSlug ?? userId);
+  const headerToken = req?.headers.get("x-google-token");
+  if (headerToken) return { ok: true, token: headerToken, userId, tenantId };
+
   const token = await getAccessToken(tenantId, userId);
   if (!token) return { ok: false, error: "Google account isn't connected. Click 'Connect Google' first.", status: 412, code: "NOT_CONNECTED" };
-  return { ok: true, token, userId };
+  return { ok: true, token, userId, tenantId };
 }

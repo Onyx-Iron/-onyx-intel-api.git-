@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireGoogleToken } from "@/lib/google/api";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { auditInsert } from "@/lib/audit";
 
 export const runtime = "nodejs";
 
@@ -14,6 +16,11 @@ const FOLDER_MIME = "application/vnd.google-apps.folder";
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const t = await requireGoogleToken(req);
   if (!t.ok) return NextResponse.json({ error: t.error, code: t.code }, { status: t.status });
+  try {
+    await assertPermission(t.tenantId, t.userId, "field", "write");
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: error instanceof PermissionError ? 403 : 500 });
+  }
 
   const authHeader = { Authorization: `Bearer ${t.token}` };
 
@@ -64,6 +71,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         }).catch(() => undefined),
       ),
     );
+    if (keep) {
+      auditInsert({ tenant_id: t.tenantId, user_id: t.userId, table_name: "external_google_drive_folder", record_id: keep, new_values: { name: FOLDER_NAME } });
+    }
     return NextResponse.json({ folder_id: keep, created: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
