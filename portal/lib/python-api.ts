@@ -11,12 +11,6 @@
 
 import { headerSafe } from "@/lib/http";
 
-const ADMIN_EMAIL = "justinatteberry@onyx-iron.com";
-
-export function isAdminEmail(email: string | null | undefined): boolean {
-  return !!email && email.trim().toLowerCase() === ADMIN_EMAIL;
-}
-
 /**
  * Returns the value to send as `X-Onyx-Secret` when calling the Railway
  * Python API. The email argument is retained for API compatibility, but must

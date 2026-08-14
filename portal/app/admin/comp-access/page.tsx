@@ -4,8 +4,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useUser } from "@clerk/nextjs";
 import PageHero from "@/components/layout/PageHero";
 
-const ADMIN_EMAIL = "justinatteberry@onyx-iron.com";
-
 interface CompTenant {
   id: string;
   name: string | null;
@@ -26,8 +24,7 @@ function formatCompUntil(value: string | null): string {
 
 export default function CompAccessAdminPage() {
   const { isLoaded, user } = useUser();
-  const email = user?.primaryEmailAddress?.emailAddress ?? "";
-  const isAuthorized = email === ADMIN_EMAIL;
+  const isAuthorized = Boolean(user);
 
   const [search, setSearch] = useState("");
   const [days, setDays] = useState("30");
