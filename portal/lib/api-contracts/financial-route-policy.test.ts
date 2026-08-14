@@ -22,13 +22,16 @@ const ROUTES: Array<{ file: string; permissions: string[] }> = [
   { file: "app/api/material-vendors/[id]/route.ts", permissions: ['"financial", "write"'] },
   { file: "app/api/staff/route.ts", permissions: ['"financial", "write"'] },
   { file: "app/api/staff/[id]/route.ts", permissions: ['"financial", "write"'] },
+  { file: "app/api/takeoff/approval-preview/[id]/confirm/route.ts", permissions: ['"financial", "write"'] },
+  { file: "app/api/agents/audit-trails/[id]/decide/route.ts", permissions: ['"financial", "write"'] },
+  { file: "app/api/reports/route.ts", permissions: ['"financial", "read"'] },
 ];
 
 describe("financial API authorization policy", () => {
   for (const route of ROUTES) {
     it(`${route.file} enforces its financial permission`, () => {
       const source = readFileSync(resolve(process.cwd(), route.file), "utf8");
-      assert.ok(source.includes("assertPermission("));
+      assert.ok(source.includes("assertPermission(") || source.includes("hasPermission("));
       for (const permission of route.permissions) assert.ok(source.includes(permission));
     });
   }

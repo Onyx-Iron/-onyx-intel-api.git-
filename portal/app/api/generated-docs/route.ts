@@ -2,9 +2,10 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { generateText, NoProviderError, availableProviders } from "@/lib/ai/providers";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { getDocTypeByKey } from "@/lib/ai/generatedDocTypes";
 import { createGoogleDocInProjectFolder } from "@/lib/google/projectFolder";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -44,6 +45,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!body.project_id) {
       return NextResponse.json({ error: "project_id is required" }, { status: 400 });
     }
+    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
+    await assertProjectBelongsToTenant(body.project_id, tenantId);
 
     const docType = body.doc_type ?? "other";
     const typeDef = getDocTypeByKey(docType);
@@ -60,11 +64,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           .from("documents")
           .select("file_name, doc_type, meta, page_count")
           .eq("id", body.source_document_id)
+          .eq("tenant_id", tenantId)
+          .eq("project_id", body.project_id)
           .single();
         const { data: pages } = await ctxDb
           .from("pages")
           .select("page_number, extracted_text")
           .eq("document_id", body.source_document_id)
+          .eq("tenant_id", tenantId)
           .order("page_number")
           .limit(50);
         if (src) {
@@ -105,7 +112,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       throw e;
     }
 
-    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const db = await createServiceClient();
     const title = body.title?.trim() || `${docType.toUpperCase()} — ${new Date().toLocaleDateString("en-US")}`;
 
@@ -151,6 +157,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ doc: docOut, drive_saved: !!drive }, { status: 201 });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[POST /api/generated-docs] ${msg}` }, { status: 502 });
+    return NextResponse.json({ error: `[POST /api/generated-docs] ${msg}` }, { status: err instanceof PermissionError || msg.includes("does not belong") ? 403 : 502 });
   }
 }

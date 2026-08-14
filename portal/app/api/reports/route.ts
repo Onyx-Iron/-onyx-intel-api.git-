@@ -5,6 +5,7 @@ import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { authTenantKey, authTenantName, getOrCreateTenant } from "@/lib/project-controls/server";
 import { generateProjectStatusReport } from "@/lib/reports/project-status";
 import { createServiceClient } from "@/lib/supabase/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -23,6 +24,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "financial", "read");
     const projectId = req.nextUrl.searchParams.get("project_id");
     const { page, limit, offset } = parsePagination(req.nextUrl.searchParams, 50);
     const db = await createServiceClient();
@@ -45,7 +47,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[GET /api/reports] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[GET /api/reports] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -61,6 +63,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!VALID_TYPES.has(reportType)) return NextResponse.json({ error: "Unsupported report_type" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "financial", "read");
     const db = await createServiceClient();
 
     let generated;
@@ -111,6 +114,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ report: data }, { status: 201 });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[POST /api/reports] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[POST /api/reports] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { hashApprovalPayload } from "@/lib/takeoff/approval-preview";
 import { authTenantKey, authTenantName, getOrCreateTenant } from "@/lib/project-controls/server";
 import { createServiceClient } from "@/lib/supabase/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -12,6 +13,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     const { id } = await params;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "financial", "write");
     const db = await createServiceClient();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const anyDb = db as any;
@@ -24,6 +26,6 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     if (error) return NextResponse.json({ error: error.message }, { status: /permission|required/i.test(error.message) ? 403 : 409 });
     return NextResponse.json({ confirmation: data });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: error instanceof PermissionError ? 403 : 500 });
   }
 }

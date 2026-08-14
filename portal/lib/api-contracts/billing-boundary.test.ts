@@ -11,3 +11,12 @@ describe("billing state authority", () => {
     assert.ok(patchHandler.includes('"admin", "write"'));
   });
 });
+
+describe("generated document source boundary", () => {
+  it("scopes source documents and pages to the active tenant and project", () => {
+    const source = readFileSync(resolve(process.cwd(), "app/api/generated-docs/route.ts"), "utf8");
+    assert.ok(source.includes('.eq("tenant_id", tenantId)'));
+    assert.ok(source.includes('.eq("project_id", body.project_id)'));
+    assert.ok(source.includes("assertProjectBelongsToTenant(body.project_id, tenantId)"));
+  });
+});

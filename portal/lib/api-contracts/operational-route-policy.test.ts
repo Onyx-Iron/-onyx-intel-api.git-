@@ -36,6 +36,9 @@ const FIELD_WRITE_ROUTES = [
   "app/api/cut-fill/compute/route.ts",
   "app/api/cut-fill/surfaces/route.ts",
   "app/api/cut-fill/surfaces/[id]/route.ts",
+  "app/api/contacts/route.ts",
+  "app/api/contacts/[id]/route.ts",
+  "app/api/generated-docs/route.ts",
 ];
 
 describe("operational API authorization policy", () => {
