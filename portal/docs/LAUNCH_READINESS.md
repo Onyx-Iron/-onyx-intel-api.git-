@@ -8,11 +8,13 @@ Updated: 2026-08-14
 - Automated takeoff preserves source revision, geometry/text evidence, deterministic recomputation, immutable approvals, review state, and idempotent estimate import.
 - Estimating separates markup from margin, saves versions atomically, rejects stale writes, requires approved price provenance, and supports governed price review.
 - Reports, project management, procurement, financials, civil intelligence, preconstruction, documents, field operations, and administrative workspaces have real routes and persisted backends.
+- Financial mutations now enforce financial-write roles; project administration enforces admin-write roles; core field and document/takeoff mutations enforce field-write roles. Project-scoped creates verify tenant ownership before persistence or worker dispatch.
 - Project synchronization, document processing status/retry, estimate migration, and project knowledge snapshots are wired into the application.
 - AI-assisted output carries a persistent user disclaimer and does not become approved quantity or financial evidence without review.
 - Operational-role bootstrap is least privilege: personal owners become `Owner`, Clerk organization admins become `Admin`, and unassigned organization members become `ClientView`.
 - The isolated Supabase branch has zero security-advisor findings, zero unindexed foreign keys, zero duplicate indexes, and zero duplicate-policy warnings.
-- Current working-tree checks pass: TypeScript, ESLint, unit tests, production build, and the four governed browser acceptance tests.
+- Public Terms and Privacy pages are present and linked from the authenticated workspace; the construction-specific AI limitation notice remains persistent.
+- Current working-tree checks pass: TypeScript, ESLint, unit tests, the complete isolated database integration suite, a 116-route production build, and the four governed browser acceptance tests.
 - `npm run launch` is fail-closed and includes type, lint, unit, isolated integration, browser, Python, takeoff certification, build, configuration audit, and live smoke checks.
 
 ## Release blockers
@@ -25,7 +27,7 @@ The product must not be represented as production-ready until every item below i
 - Deploy this branch to a Vercel preview, run authenticated desktop/tablet/mobile workflow QA, and complete an actual document upload through storage, page splitting, extraction, review, approval, estimate import, and estimate approval.
 - Verify Railway document/takeoff service configuration and outage recovery from the preview environment.
 - Apply pending database migrations to production only after the isolated tests and preview canary pass. Production has not been migrated by this work.
-- Complete legal/commercial launch requirements: Terms, Privacy, AI limitation language, refund/cancellation policy, support contact, tax setup, and production account ownership.
+- Complete the remaining legal/commercial launch requirements: counsel review of the published Terms and Privacy drafts, refund/cancellation policy confirmation, official support contact, tax setup, and production account ownership.
 
 ## Release sequence
 

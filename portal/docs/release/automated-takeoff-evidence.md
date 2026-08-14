@@ -1,8 +1,8 @@
 # Automated Takeoff Release Evidence
 
-**Evidence captured:** 2026-08-14T07:37:31Z  
+**Evidence captured:** 2026-08-14T10:00:42Z  
 **Branch:** `codex/upload-pipeline-reliability`  
-**Tested implementation commit:** `1641d4d00b35172a1ab11b55e761b88a2871a3fc`  
+**Tested implementation commit:** `1927ed6495f54cd81997bae0169087dfd45ae2e6`  
 **Release decision:** **NOT APPROVED** — software gates pass, but estimator-reviewed fixtures and canary runtime evidence are incomplete.
 
 ## Release gate matrix
@@ -25,13 +25,13 @@
 
 - `python -m pytest test_takeoff_extract.py -q`: 7 passed.
 - `npm run test:unit`: passed with no failures, cancellations, or skips counted as evidence.
-- `npm run test:integration:takeoff`: passed against the isolated Supabase project; 34 required schema boundaries verified.
-- `npm run test:browser -- automated-takeoff.spec.ts`: 2 Chromium scenarios passed.
+- `npm run test:integration`: passed in full against isolated Supabase `wjngtkkezeytyymamlmm`; 40 required takeoff schema boundaries verified and no integration suite was skipped.
+- `npm run test:browser`: all 4 governed Chromium scenarios passed, including the 2 automated-takeoff scenarios.
 - `npm run evaluate:takeoff`: generated 0 certified, 0 provisional, and 6 blocked boundaries.
 - `node tests/load/takeoff-load.mjs`: passed the local deterministic-service load threshold.
 - `npm run typecheck`: passed.
 - `npm run lint`: passed.
-- `NEXT_DIST_DIR=.next-verify-4 npm run build`: production build passed and generated 112 static pages.
+- `npm run build`: production build passed and generated 116 application routes/pages.
 - `npm run launch:smoke`: all public signed-out production checks passed.
 - `npm run launch:audit`: correctly failed because capability certification is incomplete. `CRON_SECRET` was subsequently configured as a sensitive Vercel variable for Preview and Production; deployment verification remains pending.
 
