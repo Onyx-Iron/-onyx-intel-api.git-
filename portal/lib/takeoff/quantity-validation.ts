@@ -64,3 +64,63 @@ export function validateQuantityCandidate(input: QuantityCandidateInput): Quanti
   })).digest("hex");
   return { status: "validated", quantity, formulaVersion, calculationChecksum };
 }
+
+export type TextQuantitySource = "schedule" | "note" | "callout" | "text";
+
+export interface TextQuantityCandidateInput {
+  sourceChecksum: string;
+  authoritativeChecksum: string;
+  manifestVersion: number;
+  authoritativeManifestVersion: number;
+  unit: string;
+  submittedQuantity: number;
+  rawText: string;
+  sourceKind: TextQuantitySource;
+  pageNumber: number;
+}
+
+type TextBlockReason = "missing_unit" | "stale_revision" | "invalid_quantity" | "missing_source_quote" | "quantity_not_quoted" | "unsupported_source" | "invalid_page";
+export type TextQuantityValidationResult =
+  | { status: "blocked"; reason: TextBlockReason }
+  | { status: "validated"; quantity: number; formulaVersion: "source-text-v1"; calculationChecksum: string };
+
+const TEXT_SOURCES = new Set<TextQuantitySource>(["schedule", "note", "callout", "text"]);
+
+/**
+ * Validates quantities explicitly printed on a source sheet. This is not a
+ * geometry measurement: the exact source quote is mandatory and must contain
+ * the submitted numeric value. It therefore remains independently auditable
+ * without pretending that vision supplied a verified drawing scale.
+ */
+export function validateTextQuantityCandidate(input: TextQuantityCandidateInput): TextQuantityValidationResult {
+  const unit = input.unit.trim().toUpperCase();
+  if (!unit) return { status: "blocked", reason: "missing_unit" };
+  if (input.manifestVersion !== input.authoritativeManifestVersion || input.sourceChecksum !== input.authoritativeChecksum) {
+    return { status: "blocked", reason: "stale_revision" };
+  }
+  if (!Number.isFinite(input.submittedQuantity) || input.submittedQuantity < 0) return { status: "blocked", reason: "invalid_quantity" };
+  if (!Number.isInteger(input.pageNumber) || input.pageNumber < 1) return { status: "blocked", reason: "invalid_page" };
+  if (!TEXT_SOURCES.has(input.sourceKind)) return { status: "blocked", reason: "unsupported_source" };
+  const rawText = input.rawText.trim();
+  if (!rawText) return { status: "blocked", reason: "missing_source_quote" };
+
+  const quotedNumbers = [...rawText.matchAll(/[-+]?\d[\d,]*(?:\.\d+)?/g)]
+    .map((match) => Number(match[0].replaceAll(",", "")))
+    .filter(Number.isFinite);
+  const tolerance = Math.max(1e-6, Math.abs(input.submittedQuantity) * 0.001);
+  if (!quotedNumbers.some((value) => Math.abs(value - input.submittedQuantity) <= tolerance)) {
+    return { status: "blocked", reason: "quantity_not_quoted" };
+  }
+
+  const formulaVersion = "source-text-v1" as const;
+  const calculationChecksum = createHash("sha256").update(JSON.stringify({
+    formulaVersion,
+    sourceChecksum: input.sourceChecksum,
+    pageNumber: input.pageNumber,
+    sourceKind: input.sourceKind,
+    rawText,
+    quantity: input.submittedQuantity,
+    unit,
+  })).digest("hex");
+  return { status: "validated", quantity: input.submittedQuantity, formulaVersion, calculationChecksum };
+}

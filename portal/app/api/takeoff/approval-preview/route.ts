@@ -19,8 +19,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const db = await createServiceClient();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const anyDb = db as any;
-    const { data: job } = await anyDb.from("takeoff_jobs").select("id,created_by").eq("id", body.jobId).eq("project_id", body.projectId).eq("tenant_id", tenantId).maybeSingle();
+    const { data: job } = await anyDb.from("takeoff_jobs").select("id,created_by,state").eq("id", body.jobId).eq("project_id", body.projectId).eq("tenant_id", tenantId).maybeSingle();
     if (!job) return NextResponse.json({ error: "Takeoff job not found" }, { status: 404 });
+    if (job.state !== "review_ready") return NextResponse.json({ error: "Takeoff job is not ready for approval" }, { status: 409 });
     let { data: membership } = await anyDb.from("project_memberships").select("id,project_role").eq("tenant_id", tenantId).eq("project_id", body.projectId).eq("clerk_user_id", userId).eq("active", true).maybeSingle();
     if (!membership && job.created_by === userId) {
       const created = await anyDb.from("project_memberships").upsert({ tenant_id: tenantId, project_id: body.projectId, clerk_user_id: userId, project_role: "estimator", granted_by: userId }, { onConflict: "tenant_id,project_id,clerk_user_id" }).select("id,project_role").single();
@@ -29,12 +30,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!membership || !["owner", "approver", "estimator"].includes(membership.project_role)) return NextResponse.json({ error: "Active project approval membership required" }, { status: 403 });
 
     const { data: candidates, error: candidateError } = await anyDb.from("takeoff_items")
-      .select("id,row_version,quantity,unit,label,csi_code,document_id,sheet_id,page,source_manifest_version,source_checksum,is_stale,review_status,meta")
+      .select("id,row_version,quantity,unit,label,csi_code,document_id,sheet_id,page,takeoff_job_id,source_manifest_id,source_manifest_version,source_checksum,is_stale,review_status,quantity_validation_status,quantity_validation_reason,formula_version,calculation_checksum,source_provenance,meta")
       .eq("tenant_id", tenantId).eq("project_id", body.projectId).in("id", candidateIds);
     if (candidateError) throw candidateError;
     if (candidates.length !== candidateIds.length) return NextResponse.json({ error: "One or more candidates were not found" }, { status: 409 });
-    if (candidates.some((candidate: Record<string, unknown>) => candidate.is_stale || !candidate.source_manifest_version || !candidate.source_checksum)) {
-      return NextResponse.json({ error: "Every candidate must reference the current authoritative source revision" }, { status: 409 });
+    if (candidates.some((candidate: Record<string, unknown>) => candidate.takeoff_job_id !== body.jobId || candidate.is_stale || !candidate.source_manifest_id || !candidate.source_manifest_version || !candidate.source_checksum || candidate.quantity_validation_status !== "validated")) {
+      return NextResponse.json({ error: "Every candidate must be validated by this job against the current source revision" }, { status: 409 });
+    }
+    const manifestIds = [...new Set(candidates.map((candidate: Record<string, unknown>) => candidate.source_manifest_id as string))];
+    const { data: manifests, error: manifestError } = await anyDb.from("takeoff_source_manifests")
+      .select("id,authority_status,source_checksum,manifest_version").eq("tenant_id", tenantId).eq("project_id", body.projectId).in("id", manifestIds);
+    if (manifestError) throw manifestError;
+    if (manifests.length !== manifestIds.length || manifests.some((manifest: Record<string, unknown>) => manifest.authority_status !== "authoritative")) {
+      return NextResponse.json({ error: "A selected candidate references a proposed or superseded drawing revision" }, { status: 409 });
     }
     const payload = {
       jobId: body.jobId,
@@ -43,7 +51,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         id: candidate.id, version: candidate.row_version, sourceManifestVersion: candidate.source_manifest_version,
         sourceChecksum: candidate.source_checksum, quantity: candidate.quantity, unit: candidate.unit,
         label: candidate.label, csiCode: candidate.csi_code, documentId: candidate.document_id,
-        sheetId: candidate.sheet_id, page: candidate.page, formulaVersion: (candidate.meta as Record<string, unknown> | null)?.formula_version ?? null,
+        sheetId: candidate.sheet_id, page: candidate.page, formulaVersion: candidate.formula_version,
+        calculationChecksum: candidate.calculation_checksum, sourceProvenance: candidate.source_provenance,
       })).sort((a: { id: string }, b: { id: string }) => a.id.localeCompare(b.id)),
       estimateEffect: { targetStatus: "draft", approvedVersionsMutable: false },
     };

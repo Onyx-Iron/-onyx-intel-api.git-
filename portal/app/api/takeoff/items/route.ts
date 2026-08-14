@@ -1,7 +1,6 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { prepareTakeoffRowsForSave } from "@/lib/estimating/takeoff-import";
-import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
@@ -9,6 +8,7 @@ import { logEvent } from "@/lib/activity";
 import { takeoffItemsSchema, parseBody } from "@/lib/validation";
 import { recordTakeoffHistory, recordTakeoffHistoryBatch } from "@/lib/takeoff/history";
 import type { Json } from "@/lib/supabase/types";
+import { automatedIntakeControlFields } from "@/lib/takeoff/intake-policy";
 
 function jsonObject(value: Json | null | undefined): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
@@ -106,6 +106,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const payload = prepared.rows.map((row) => {
       const isUpdate = row.id != null && existingById.has(row.id);
+      const meta = (row.meta ?? {}) as Record<string, unknown>;
       return {
         id: row.id ?? crypto.randomUUID(),
         tenant_id: tenantId,
@@ -119,14 +120,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         type: row.type ?? "general",
         page: row.page ?? 0,
         document_id: row.document_id ?? null,
-        meta: (row.meta ?? {}) as Json,
+        meta: meta as Json,
         updated_by: userId,
-        // Manual/deterministic saves through this route are either
-        // human-created or grounded in deterministic math — they don't
-        // need the AI-review gate, so they're implicitly approved. Only
-        // set created_by/source_method on genuinely new rows; preserve
-        // the original creator on an edit.
-        ...(isUpdate ? {} : { created_by: userId, review_status: "approved" as const, source_method: "manual" }),
+        // This endpoint is automated/bulk intake. A browser-provided
+        // extraction_method is never sufficient evidence for financial
+        // approval; every create or edit returns to the governed review gate.
+        ...automatedIntakeControlFields(meta.extraction_method),
+        reviewed_by: null,
+        reviewed_at: null,
+        ...(isUpdate ? {} : { created_by: userId }),
       };
     });
 
@@ -166,12 +168,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       meta: { item_count: (data ?? []).length, skipped: prepared.skipped },
     });
 
-    // Keep the estimate in sync automatically — no manual "Import from
-    // Takeoff" click required. Idempotent (dedupes by source_takeoff_id /
-    // fingerprint), so this never double-imports.
-    const sync = await syncTakeoffToEstimate(tenantId, project_id);
-
-    return NextResponse.json({ items: data ?? [], skipped: prepared.skipped, estimate_synced: sync }, { status: 201 });
+    return NextResponse.json({ items: data ?? [], skipped: prepared.skipped, estimate_synced: null, approval_required: true }, { status: 201 });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[POST /api/takeoff/items] ${msg}` }, { status: 500 });
