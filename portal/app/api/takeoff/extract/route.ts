@@ -10,7 +10,7 @@ const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localho
 
 // ── AI vision provider config (used only when ?ai_fallback=true) ─────────────
 const GEMINI_API_KEY    = headerSafe(process.env.GEMINI_API_KEY);
-const GEMINI_MODEL      = process.env.GEMINI_MODEL ?? "gemini-2.5-pro";
+const GEMINI_MODEL      = process.env.GEMINI_MODEL ?? "gemini-3.6-flash";
 const ANTHROPIC_API_KEY = headerSafe(process.env.ANTHROPIC_API_KEY);
 const ANTHROPIC_MODEL   = process.env.TAKEOFF_AI_MODEL ?? "claude-sonnet-4-6";
 

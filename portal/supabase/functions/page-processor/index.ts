@@ -11,15 +11,15 @@
 //      `display_name` field — Gemini's REST schema doesn't accept it and
 //      rejects the whole request if present.
 //   3. Chunk the extracted text (~1200 chars, 200-char overlap).
-//   4. Embed each chunk with text-embedding-004.
+//   4. Embed each chunk with Gemini Embedding 2 at 768 dimensions.
 //   5. Insert into `document_chunks` with page_id + page_number.
 //   6. Update `document_pages.status="done"` and stash `ocr_text`.
 //
 // Env vars:
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GEMINI_API_KEY,
 //   PLANS_BUCKET (default "plans-bucket"),
-//   GEMINI_TEXT_MODEL  (default "gemini-2.5-pro"),
-//   GEMINI_EMBED_MODEL (default "text-embedding-004").
+//   GEMINI_TEXT_MODEL  (default "gemini-3.5-flash-lite"),
+//   GEMINI_EMBED_MODEL (default "gemini-embedding-2").
 
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
@@ -28,8 +28,8 @@ const SUPABASE_URL       = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY   = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GEMINI_API_KEY     = Deno.env.get("GEMINI_API_KEY")!;
 const PLANS_BUCKET       = Deno.env.get("PLANS_BUCKET") ?? "plans-bucket";
-const TEXT_MODEL         = Deno.env.get("GEMINI_TEXT_MODEL") ?? "gemini-2.5-pro";
-const EMBED_MODEL        = Deno.env.get("GEMINI_EMBED_MODEL") ?? "text-embedding-004";
+const TEXT_MODEL         = Deno.env.get("GEMINI_TEXT_MODEL") ?? "gemini-3.5-flash-lite";
+const EMBED_MODEL        = Deno.env.get("GEMINI_EMBED_MODEL") ?? "gemini-embedding-2";
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -111,7 +111,7 @@ Deno.serve(async (req) => {
           { inlineData: { mimeType: "application/pdf", data: b64 } },
         ],
       }],
-      generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
+      generationConfig: { maxOutputTokens: 8192 },
     };
 
     const genRes = await fetchWithRetry(
@@ -144,7 +144,7 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ ok: true, page_id: body.page_id, chunks: 0 }), { status: 200 });
     }
 
-    // ── 4. Embed (batched — text-embedding-004 supports batch mode) ─────────
+    // ── 4. Embed in a fixed-size pgvector-compatible space ─────────────────
     await recordEvent("embedding", "started");
     const embeddings = await embedBatch(chunks);
 
@@ -221,7 +221,7 @@ async function embedBatch(inputs: string[]): Promise<Array<number[] | null>> {
       // Pin the output size so a future model swap/version bump on Google's
       // side can't silently change vector length and break the pgvector
       // column dimension check on `document_chunks.embedding`.
-      outputDimensionality: 768,
+      embedContentConfig: { outputDimensionality: 768 },
     })),
   };
   const res = await fetchWithRetry(

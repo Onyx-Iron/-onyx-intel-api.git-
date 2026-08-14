@@ -14,9 +14,9 @@ export const MODEL_COOKIE    = "onyx_ai_model";
 // server-side. Keys stay short so they fit in cookies (<4 KB per RFC 6265).
 export const MODEL_OPTIONS: Record<Provider, ReadonlyArray<{ id: string; label: string; hint?: string }>> = {
   gemini: [
-    { id: "gemini-2.5-pro",   label: "Gemini 2.5 Pro",   hint: "Highest quality · slower" },
-    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", hint: "Fast · lower cost" },
-    { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash", hint: "Cheapest" },
+    { id: "gemini-3.6-flash",      label: "Gemini 3.6 Flash",      hint: "Best construction reasoning" },
+    { id: "gemini-3.5-flash",      label: "Gemini 3.5 Flash",      hint: "Balanced" },
+    { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite", hint: "Fast · lower cost" },
   ],
   openai: [
     { id: "gpt-4o",           label: "GPT-4o",           hint: "Balanced" },

@@ -20,9 +20,9 @@ export const maxDuration = 120;
 // =============================================================================
 
 const GEMINI_API_KEY = headerSafe(process.env.GEMINI_API_KEY);
-const EMBED_MODEL = "text-embedding-004";
-const CHAT_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-pro";
-const SUMMARY_MODEL = process.env.GEMINI_DIGEST_MODEL ?? "gemini-2.0-flash";
+const EMBED_MODEL = "gemini-embedding-2";
+const CHAT_MODEL = process.env.GEMINI_MODEL ?? "gemini-3.6-flash";
+const SUMMARY_MODEL = process.env.GEMINI_DIGEST_MODEL ?? "gemini-3.5-flash-lite";
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 const HISTORY_WINDOW = 12;
@@ -151,7 +151,7 @@ async function embedText(text: string): Promise<number[]> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         content: { parts: [{ text }] },
-        taskType: "RETRIEVAL_QUERY",
+        embedContentConfig: { outputDimensionality: 768 },
       }),
     },
   );

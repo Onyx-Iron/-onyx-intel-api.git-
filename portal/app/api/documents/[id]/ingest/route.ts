@@ -16,8 +16,8 @@ export const maxDuration = 300;
 // so at module load makes the entire app undeployable in environments where
 // document AI is intentionally disabled or configured after the first build.
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? "";
-const EMBED_MODEL = "text-embedding-004";
-const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
+const EMBED_MODEL = "gemini-embedding-2";
+const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-3.5-flash-lite";
 
 const EXTRACTION_PROMPT = `Analyze this construction document and return ONLY a JSON object with this exact structure — no markdown, no explanation:
 {
@@ -131,7 +131,7 @@ async function embedText(text: string): Promise<number[]> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         content: { parts: [{ text }] },
-        taskType: "RETRIEVAL_DOCUMENT",
+        embedContentConfig: { outputDimensionality: 768 },
       }),
     },
     { label: "Gemini embedding", timeoutMs: 45_000 },

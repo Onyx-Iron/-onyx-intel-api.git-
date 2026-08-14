@@ -12,7 +12,7 @@ export const maxDuration = 60;
 const GEMINI_API_KEY = headerSafe(process.env.GEMINI_API_KEY);
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 // Use flash for batch generation — faster and cheaper
-const DIGEST_MODEL = process.env.GEMINI_DIGEST_MODEL ?? "gemini-2.0-flash";
+const DIGEST_MODEL = process.env.GEMINI_DIGEST_MODEL ?? "gemini-3.5-flash-lite";
 
 interface DigestResult {
   risk_level: "low" | "medium" | "high" | "critical";
