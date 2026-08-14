@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import { buildRetryDocumentUpdate, canRetryDocument } from "@/lib/documents/retry";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,6 +34,7 @@ export async function POST(
 
     const { id: documentId } = (await params) as { id: string };
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     const { data: document, error: documentError } = await db
@@ -86,6 +88,6 @@ export async function POST(
     return NextResponse.json({ ok: true, document_id: documentId, status: "processing" });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[POST /api/documents/:id/retry] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[POST /api/documents/:id/retry] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

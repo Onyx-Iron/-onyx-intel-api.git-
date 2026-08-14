@@ -156,3 +156,13 @@ export async function assertPermission(
   }
   return role;
 }
+
+/** Checks a permission while preserving infrastructure failures for the caller to surface. */
+export async function hasPermission(
+  tenantId: string,
+  clerkUserId: string,
+  resource: ResourceCategory,
+  action: Action,
+): Promise<boolean> {
+  return canPerform(await getUserRole(tenantId, clerkUserId), resource, action);
+}

@@ -1,7 +1,8 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -22,6 +23,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!projectId) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
+    await assertProjectBelongsToTenant(projectId, tenantId);
 
     const form = await req.formData();
     const file = form.get("file");
@@ -51,6 +54,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ path, url: signed?.signedUrl ?? null });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[POST /api/daily-logs/photo] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[POST /api/daily-logs/photo] ${msg}` }, { status: err instanceof PermissionError || msg.includes("does not belong") ? 403 : 500 });
   }
 }

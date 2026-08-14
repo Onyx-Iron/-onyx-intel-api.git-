@@ -9,6 +9,7 @@ import { headerSafe } from "@/lib/http";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import type { TablesInsert } from "@/lib/supabase/types";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -56,6 +57,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
 
     // Resolve access token: prefer the server-stored refresh-token minted token
     // over a client-supplied one — server-stored means the worker can refresh
@@ -180,6 +182,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[POST /api/documents/import-drive] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[POST /api/documents/import-drive] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

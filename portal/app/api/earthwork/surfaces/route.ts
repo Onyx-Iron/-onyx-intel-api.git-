@@ -1,7 +1,8 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { hasPermission } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -44,6 +45,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!body.coordinate_mesh) return NextResponse.json({ error: "coordinate_mesh required" }, { status: 400 });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  if (!(await hasPermission(tenantId, userId, "field", "write"))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  try { await assertProjectBelongsToTenant(body.project_id, tenantId); } catch { return NextResponse.json({ error: "project_id does not belong to this tenant" }, { status: 403 }); }
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
@@ -69,6 +72,7 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  if (!(await hasPermission(tenantId, userId, "field", "write"))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;

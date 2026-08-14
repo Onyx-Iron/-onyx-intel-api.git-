@@ -22,13 +22,27 @@ const FIELD_WRITE_ROUTES = [
   "app/api/takeoff/extract/route.ts",
   "app/api/takeoff/items/route.ts",
   "app/api/takeoff/canvas/vision-extract/route.ts",
+  "app/api/documents/route.ts",
+  "app/api/documents/import-drive/route.ts",
+  "app/api/documents/upload-url/route.ts",
+  "app/api/documents/[id]/retry/route.ts",
+  "app/api/daily-logs/photo/route.ts",
+  "app/api/earthwork/entrances/route.ts",
+  "app/api/earthwork/ledger/route.ts",
+  "app/api/earthwork/pipe-runs/route.ts",
+  "app/api/earthwork/stockpiles/route.ts",
+  "app/api/earthwork/surfaces/route.ts",
+  "app/api/earthwork/volumes/route.ts",
+  "app/api/cut-fill/compute/route.ts",
+  "app/api/cut-fill/surfaces/route.ts",
+  "app/api/cut-fill/surfaces/[id]/route.ts",
 ];
 
 describe("operational API authorization policy", () => {
   for (const file of FIELD_WRITE_ROUTES) {
     it(`${file} requires field write permission`, () => {
       const source = readFileSync(resolve(process.cwd(), file), "utf8");
-      assert.ok(source.includes("assertPermission("));
+      assert.ok(source.includes("assertPermission(") || source.includes("hasPermission("));
       assert.ok(source.includes('"field", "write"'));
     });
   }

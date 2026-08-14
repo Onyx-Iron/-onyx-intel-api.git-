@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { fallbackRoleForIdentity } from "./permissions";
+import { canPerform, fallbackRoleForIdentity } from "./permissions";
 
 describe("operational role bootstrap", () => {
   it("makes the authenticated personal-workspace user its owner", () => {
@@ -40,5 +40,20 @@ describe("operational role bootstrap", () => {
       orgId: null,
       orgRole: null,
     }), "ClientView");
+  });
+});
+
+describe("resource permission matrix", () => {
+  it("keeps financial and administrative writes restricted", () => {
+    assert.equal(canPerform("Estimator", "financial", "write"), true);
+    assert.equal(canPerform("FieldSuperintendent", "financial", "read"), false);
+    assert.equal(canPerform("ProjectManager", "admin", "write"), false);
+    assert.equal(canPerform("Admin", "admin", "write"), true);
+  });
+
+  it("allows field operators to write field records but keeps client viewers read-only", () => {
+    assert.equal(canPerform("FieldSuperintendent", "field", "write"), true);
+    assert.equal(canPerform("Subcontractor", "field", "write"), true);
+    assert.equal(canPerform("ClientView", "field", "write"), false);
   });
 });

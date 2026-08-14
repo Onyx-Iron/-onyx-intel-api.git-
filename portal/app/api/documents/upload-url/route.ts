@@ -5,6 +5,7 @@ import { logEvent } from "@/lib/activity";
 import { buildLocalDocumentInsert, LOCAL_DOCUMENT_BUCKET, LOCAL_DOCUMENT_MAX_BYTES } from "@/lib/documents/upload";
 import { authTenantKey, authTenantName, getOrCreateTenant } from "@/lib/project-controls/server";
 import { createServiceClient } from "@/lib/supabase/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -21,6 +22,7 @@ async function tenantContext() {
     authTenantKey(userId, orgId),
     authTenantName(userId, orgSlug),
   );
+  await assertPermission(tenantId, userId, "field", "write");
   return { userId, tenantId };
 }
 
@@ -120,7 +122,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error("[documents/upload-url] create failed", { message });
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: error instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -181,7 +183,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error("[documents/upload-url] finalize failed", { message });
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: error instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -215,6 +217,6 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error("[documents/upload-url] cancel failed", { message });
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: error instanceof PermissionError ? 403 : 500 });
   }
 }

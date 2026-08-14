@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { calcPipeEmbedment, type PipeRunInput } from "@/lib/math/civil-scope";
 import { mirrorCivilItemsToTakeoff, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
+import { hasPermission } from "@/lib/project-controls/permissions";
 
 function csiForSystem(system: string): string {
   const s = system.toLowerCase();
@@ -56,6 +57,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const computed = calcPipeEmbedment(input);
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  if (!(await hasPermission(tenantId, userId, "field", "write"))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   try {
     await assertProjectBelongsToTenant(body.project_id, tenantId);
   } catch {
@@ -114,6 +116,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   const body = await req.json().catch(() => ({})) as Body;
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  if (!(await hasPermission(tenantId, userId, "field", "write"))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
@@ -142,6 +145,7 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   const id = req.nextUrl.searchParams.get("id");
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  if (!(await hasPermission(tenantId, userId, "field", "write"))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
