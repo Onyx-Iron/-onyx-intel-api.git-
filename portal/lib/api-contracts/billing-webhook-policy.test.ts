@@ -28,4 +28,10 @@ describe("billing webhook delivery policy", () => {
     assert.ok(migration.includes("USING (false)"));
     assert.ok(migration.includes("WITH CHECK (false)"));
   });
+
+  it("applies subscription state in Paddle occurrence order", () => {
+    assert.ok(route.includes("Missing or invalid occurred_at"));
+    assert.ok(route.includes("setTenantBillingFromEvent("));
+    assert.ok(!route.includes("setTenantBilling(tenantId"));
+  });
 });

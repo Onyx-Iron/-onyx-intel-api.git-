@@ -59,7 +59,17 @@ const requiredLaunchEnv = [
   "PADDLE_ENV",
   "PADDLE_API_KEY",
   "PADDLE_WEBHOOK_SECRET",
+  "PADDLE_PRICE_SOLO_MONTHLY",
+  "PADDLE_PRICE_SOLO_YEARLY",
+  "PADDLE_PRICE_CREW_MONTHLY",
+  "PADDLE_PRICE_CREW_YEARLY",
+  "PADDLE_PRICE_BUSINESS_MONTHLY",
+  "PADDLE_PRICE_BUSINESS_YEARLY",
 ];
+
+function envValue(key) {
+  return localEnv[key] ?? testEnv[key] ?? process.env[key];
+}
 
 console.log("# Launch Audit");
 console.log("");
@@ -77,7 +87,7 @@ if (vercelProject) {
 
 console.log("## Environment");
 for (const key of requiredLaunchEnv) {
-  const sourceValue = localEnv[key] ?? testEnv[key] ?? process.env[key];
+  const sourceValue = envValue(key);
   console.log(`- ${key}: ${present(sourceValue)}${sourceValue ? ` (${mask(sourceValue)})` : ""}`);
 }
 
@@ -133,8 +143,11 @@ if (!localEnv.CRON_SECRET && !process.env.CRON_SECRET) {
 if (!localEnv.ONYX_PLATFORM_ADMIN_EMAILS && !process.env.ONYX_PLATFORM_ADMIN_EMAILS) {
   blockers.push("ONYX_PLATFORM_ADMIN_EMAILS is missing; privileged maintenance and account access are disabled");
 }
-if (!localEnv.PADDLE_ENV || !localEnv.PADDLE_API_KEY || !localEnv.PADDLE_WEBHOOK_SECRET) {
+if (!["PADDLE_ENV", "PADDLE_API_KEY", "PADDLE_WEBHOOK_SECRET"].every((key) => envValue(key))) {
   blockers.push("Paddle billing env is incomplete; paid signup, checkout, and webhook reconciliation are disabled");
+}
+if (!["PADDLE_PRICE_SOLO_MONTHLY", "PADDLE_PRICE_SOLO_YEARLY", "PADDLE_PRICE_CREW_MONTHLY", "PADDLE_PRICE_CREW_YEARLY", "PADDLE_PRICE_BUSINESS_MONTHLY", "PADDLE_PRICE_BUSINESS_YEARLY"].every((key) => envValue(key))) {
+  blockers.push("Paddle product prices are incomplete; at least one sellable plan or billing cycle cannot be purchased");
 }
 for (const [label, parts] of [
   ["Automated takeoff job route", ["app", "api", "takeoff", "jobs", "route.ts"]],

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPaddleConfig, verifyWebhookSignature } from "@/lib/billing/paddle";
-import { getTenantBilling, setTenantBilling } from "@/lib/billing/tenantBilling";
+import { getTenantBilling, setTenantBillingFromEvent } from "@/lib/billing/tenantBilling";
 import { PLANS, type PlanTier } from "@/lib/billing/plans";
 import { createServiceClient } from "@/lib/supabase/server";
 
@@ -137,6 +137,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!eventType || !eventId) {
     return NextResponse.json({ error: "Missing event identity" }, { status: 400 });
   }
+  if (!occurredAt || !Number.isFinite(new Date(occurredAt).getTime())) {
+    return NextResponse.json({ error: "Missing or invalid occurred_at" }, { status: 400 });
+  }
   const data = getObj(event, "data") ?? {};
 
   try {
@@ -196,7 +199,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           Date.now() + 30 * 24 * 60 * 60 * 1000,
         ).toISOString();
 
-        await setTenantBilling(tenantId, {
+        await setTenantBillingFromEvent(tenantId, occurredAt, {
           plan_tier: tierInfo.plan_tier,
           subscription_status: status,
           paddle_customer_id: paddleCustomerId,
@@ -230,7 +233,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         const endsAt = endsAtStr ? new Date(endsAtStr).getTime() : null;
         const periodEnded = endsAt !== null && endsAt < Date.now();
 
-        await setTenantBilling(tenantId, {
+        await setTenantBillingFromEvent(tenantId, occurredAt, {
           subscription_status: "canceled",
           ...(periodEnded ? { plan_tier: "trial" as PlanTier } : {}),
         });
@@ -244,7 +247,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         if (!tenantId) break;
         const status =
           eventType === "subscription.paused" ? "paused" : "past_due";
-        await setTenantBilling(tenantId, { subscription_status: status });
+        await setTenantBillingFromEvent(tenantId, occurredAt, { subscription_status: status });
         break;
       }
 

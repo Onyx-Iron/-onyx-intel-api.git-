@@ -16,4 +16,12 @@ describe("project AI chat boundaries", () => {
     assert.ok(projectScopeMatches.length >= 4);
     assert.ok(source.includes("Conversation not found for this project"));
   });
+
+  it("charges assist mode to the canonical tenant UUID", () => {
+    const tenantResolution = source.indexOf("const tenantId = await getOrCreateTenant");
+    const assistBranch = source.indexOf('if (mode === "assist")');
+    assert.ok(tenantResolution > -1 && tenantResolution < assistBranch);
+    assert.ok(source.includes('checkAiRateLimit(tenantId, "ai/chat:assist"'));
+    assert.ok(!source.includes('checkAiRateLimit(authTenantKey(userId, orgId), "ai/chat:assist"'));
+  });
 });

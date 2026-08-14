@@ -867,10 +867,14 @@ export async function POST(req: NextRequest): Promise<Response> {
     };
 
     const mode = body.mode ?? "rag";
+    const tenantId = await getOrCreateTenant(
+      authTenantKey(userId, orgId),
+      authTenantName(userId, orgSlug),
+    );
 
     if (mode === "assist") {
       if (!body.prompt) return NextResponse.json({ error: "prompt is required" }, { status: 400 });
-      const assistRl = await checkAiRateLimit(authTenantKey(userId, orgId), "ai/chat:assist", { windowMs: 60_000, max: 20 }, email);
+      const assistRl = await checkAiRateLimit(tenantId, "ai/chat:assist", { windowMs: 60_000, max: 20 }, email);
       if (!assistRl.ok) {
         return NextResponse.json(
           { error: "Too many AI requests — please slow down." },
@@ -895,7 +899,6 @@ export async function POST(req: NextRequest): Promise<Response> {
       return NextResponse.json({ error: "project_id and message are required" }, { status: 400 });
     }
 
-    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     await assertPermission(tenantId, userId, "financial", "read");
 
     // Agentic mode fires up to MAX_TOOL_ROUNDS extra LLM calls per message —
