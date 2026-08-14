@@ -80,4 +80,12 @@ describe("operational API authorization policy", () => {
     assert.ok(source.includes("assertPermission(") || source.includes("hasPermission("));
     assert.ok(source.includes('"admin", "write"'));
   });
+
+  for (const file of ["app/api/billing/checkout/route.ts", "app/api/billing/portal/route.ts"]) {
+    it(`${file} restricts billing commitments to administrators`, () => {
+      const source = readFileSync(resolve(process.cwd(), file), "utf8");
+      assert.ok(source.includes("assertPermission(") || source.includes("hasPermission("));
+      assert.ok(source.includes('"admin", "write"'));
+    });
+  }
 });

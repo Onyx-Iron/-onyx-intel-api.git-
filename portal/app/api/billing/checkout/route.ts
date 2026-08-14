@@ -7,6 +7,7 @@ import {
 } from "@/lib/project-controls/server";
 import { createTransactionCheckout, getPaddleConfig } from "@/lib/billing/paddle";
 import { PLANS } from "@/lib/billing/plans";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -57,6 +58,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       authTenantKey(userId, orgId),
       authTenantName(userId, orgSlug),
     );
+    await assertPermission(tenantId, userId, "admin", "write");
 
     const client = await clerkClient();
     const user = await client.users.getUser(userId);
@@ -85,7 +87,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
       { error: `[POST /api/billing/checkout] ${msg}` },
-      { status: 500 },
+      { status: err instanceof PermissionError ? 403 : 500 },
     );
   }
 }
