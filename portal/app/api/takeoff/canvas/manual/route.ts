@@ -6,6 +6,7 @@ import { logEvent } from "@/lib/activity";
 import { processOutboxBatch } from "@/lib/estimating/outbox-worker";
 import { calculateLinearLength, calculatePolygonArea, calculateCount, FORMULA_VERSION } from "@/lib/takeoff/canvas/quantity";
 import type { Point } from "@/lib/takeoff/canvas/coordinates";
+import { hasPermission } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -93,6 +94,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  if (!(await hasPermission(tenantId, userId, "field", "write"))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   const distinctProjectIds = [...new Set(items.map((it) => it.project_id))];
   for (const pid of distinctProjectIds) {
@@ -257,6 +259,7 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  if (!(await hasPermission(tenantId, userId, "field", "write"))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
@@ -316,6 +319,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   }
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  if (!(await hasPermission(tenantId, userId, "field", "write"))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;

@@ -39,6 +39,15 @@ const FIELD_WRITE_ROUTES = [
   "app/api/contacts/route.ts",
   "app/api/contacts/[id]/route.ts",
   "app/api/generated-docs/route.ts",
+  "app/api/takeoff/drive-upload-session/route.ts",
+  "app/api/takeoff/drive-upload-session/finalize/route.ts",
+  "app/api/takeoff/upload-url/route.ts",
+  "app/api/takeoff/canvas/area-bounds/route.ts",
+  "app/api/takeoff/canvas/topo/route.ts",
+  "app/api/takeoff/canvas/utility/route.ts",
+  "app/api/takeoff/canvas/calibration/route.ts",
+  "app/api/takeoff/canvas/vectors/route.ts",
+  "app/api/takeoff/canvas/manual/route.ts",
 ];
 
 describe("operational API authorization policy", () => {

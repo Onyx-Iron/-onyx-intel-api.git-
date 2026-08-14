@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { buildDocumentRevisionMeta } from "@/lib/documents/revisions";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import type { TablesInsert } from "@/lib/supabase/types";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -43,6 +44,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
 
     const body = await req.json().catch(() => ({})) as {
       project_id?: string;
@@ -128,7 +130,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[takeoff/upload-url] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[takeoff/upload-url] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -143,6 +145,7 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     if (!document_id) return NextResponse.json({ error: "document_id required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
     const { data: doc } = await db.from("documents")
       .select("id, meta")
@@ -162,6 +165,6 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[takeoff/upload-url cancel] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[takeoff/upload-url cancel] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

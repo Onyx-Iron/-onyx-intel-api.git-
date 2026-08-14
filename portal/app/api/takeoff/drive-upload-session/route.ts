@@ -5,6 +5,7 @@ import { buildDocumentRevisionMeta } from "@/lib/documents/revisions";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { ensureProjectDriveFolder } from "@/lib/google/projectFolder";
 import type { TablesInsert } from "@/lib/supabase/types";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -53,6 +54,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     const { data: project, error: projErr } = await db
@@ -103,6 +105,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         source: "local_upload",
         storage: "google_drive",
         pending_drive_upload: true,
+        upload_session_started_by: userId,
         size: body.size ?? null,
         content_type,
       }),
@@ -118,6 +121,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[takeoff/drive-upload-session] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[takeoff/drive-upload-session] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

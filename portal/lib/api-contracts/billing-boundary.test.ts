@@ -20,3 +20,13 @@ describe("generated document source boundary", () => {
     assert.ok(source.includes("assertProjectBelongsToTenant(body.project_id, tenantId)"));
   });
 });
+
+describe("Drive upload session authority", () => {
+  it("binds finalization to the user who started the pending session", () => {
+    const start = readFileSync(resolve(process.cwd(), "app/api/takeoff/drive-upload-session/route.ts"), "utf8");
+    const finish = readFileSync(resolve(process.cwd(), "app/api/takeoff/drive-upload-session/finalize/route.ts"), "utf8");
+    assert.ok(start.includes("upload_session_started_by: userId"));
+    assert.ok(finish.includes("meta.pending_drive_upload !== true"));
+    assert.ok(finish.includes("meta.upload_session_started_by !== userId"));
+  });
+});

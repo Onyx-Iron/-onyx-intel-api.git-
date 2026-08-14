@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -29,6 +30,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     const { data: doc, error: findErr } = await db
@@ -39,6 +41,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (findErr || !doc) return NextResponse.json({ error: "Document not found" }, { status: 404 });
 
     const meta = (doc.meta as Record<string, unknown> | null) ?? {};
+    if (meta.pending_drive_upload !== true || meta.upload_session_started_by !== userId) {
+      return NextResponse.json({ error: "Upload session is not pending for this user" }, { status: 409 });
+    }
     const { pending_drive_upload: _pending, ...restMeta } = meta;
     void _pending;
 
@@ -54,6 +59,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[drive-upload-session/finalize] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[drive-upload-session/finalize] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant, assertPageBelongsToProject } from "@/lib/project-controls/server";
+import { hasPermission } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -76,6 +77,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   const unit_type = (known_unit ?? "LF").trim().toUpperCase();
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  if (!(await hasPermission(tenantId, userId, "field", "write"))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   try {
     await assertProjectBelongsToTenant(project_id, tenantId);
