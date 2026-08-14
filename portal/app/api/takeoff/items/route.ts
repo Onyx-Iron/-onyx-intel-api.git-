@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { prepareTakeoffRowsForSave } from "@/lib/estimating/takeoff-import";
@@ -9,6 +10,8 @@ import { takeoffItemsSchema, parseBody } from "@/lib/validation";
 import { recordTakeoffHistory, recordTakeoffHistoryBatch } from "@/lib/takeoff/history";
 import type { Json } from "@/lib/supabase/types";
 import { automatedIntakeControlFields } from "@/lib/takeoff/intake-policy";
+import { advanceTakeoffPageJob, createGovernedPageContext, type GovernedPageContext } from "@/lib/takeoff/governance-server";
+import { validateTextQuantityCandidate, type TextQuantityValidationResult } from "@/lib/takeoff/quantity-validation";
 
 function jsonObject(value: Json | null | undefined): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
@@ -104,9 +107,55 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ items: [], skipped: prepared.skipped }, { status: 201 });
     }
 
-    const payload = prepared.rows.map((row) => {
+    type GovernedRow = { context: GovernedPageContext; pageId: string; pageNumber: number; checksum: string; rawText: string; validation: TextQuantityValidationResult };
+    const governedRows = new Map<number, GovernedRow>();
+    const pageContexts = new Map<string, { context: GovernedPageContext; validations: TextQuantityValidationResult[] }>();
+    for (const [index, row] of prepared.rows.entries()) {
+      const documentId = row.document_id;
+      const pageNumber = row.page ?? 0;
+      if (!documentId || pageNumber < 1) continue;
+      const { data: page, error: pageError } = await anyDb.from("document_pages")
+        .select("id,checksum,storage_path").eq("tenant_id", tenantId).eq("document_id", documentId)
+        .eq("page_number", pageNumber).maybeSingle();
+      if (pageError) return NextResponse.json({ error: pageError.message }, { status: 422 });
+      if (!page) return NextResponse.json({ error: `Source page ${pageNumber} is not available for provenance validation` }, { status: 409 });
+      let checksum = typeof page.checksum === "string" ? page.checksum.trim() : "";
+      if (!checksum) {
+        const downloaded = await db.storage.from("plans-bucket").download(page.storage_path);
+        if (downloaded.error || !downloaded.data) return NextResponse.json({ error: `Source page ${pageNumber} checksum could not be verified` }, { status: 409 });
+        checksum = createHash("sha256").update(new Uint8Array(await downloaded.data.arrayBuffer())).digest("hex");
+        await anyDb.from("document_pages").update({ checksum }).eq("id", page.id).eq("tenant_id", tenantId);
+      }
+      let group = pageContexts.get(page.id as string);
+      if (!group) {
+        const context = await createGovernedPageContext({
+          db: anyDb, tenantId, projectId: project_id, documentId, pageId: page.id,
+          pageNumber, sourceChecksum: checksum, actorUserId: userId,
+        });
+        group = { context, validations: [] };
+        pageContexts.set(page.id, group);
+      }
+      const meta = (row.meta ?? {}) as Record<string, unknown>;
+      const rawText = typeof meta.quantity_basis === "string" ? meta.quantity_basis : "";
+      const validation = validateTextQuantityCandidate({
+        sourceChecksum: checksum,
+        authoritativeChecksum: group.context.authoritativeChecksum,
+        manifestVersion: group.context.manifestVersion,
+        authoritativeManifestVersion: group.context.authoritativeManifestVersion,
+        unit: row.unit ?? "",
+        submittedQuantity: row.quantity ?? Number.NaN,
+        rawText,
+        sourceKind: "text",
+        pageNumber,
+      });
+      group.validations.push(validation);
+      governedRows.set(index, { context: group.context, pageId: page.id, pageNumber, checksum, rawText, validation });
+    }
+
+    const payload = prepared.rows.map((row, index) => {
       const isUpdate = row.id != null && existingById.has(row.id);
       const meta = (row.meta ?? {}) as Record<string, unknown>;
+      const governed = governedRows.get(index);
       return {
         id: row.id ?? crypto.randomUUID(),
         tenant_id: tenantId,
@@ -126,6 +175,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         // extraction_method is never sufficient evidence for financial
         // approval; every create or edit returns to the governed review gate.
         ...automatedIntakeControlFields(meta.extraction_method),
+        ...(governed ? {
+          sheet_id: governed.pageId,
+          takeoff_job_id: governed.context.jobId,
+          source_manifest_id: governed.context.manifestId,
+          source_manifest_version: governed.context.manifestVersion,
+          source_checksum: governed.checksum,
+          quantity_validation_status: governed.validation.status,
+          quantity_validation_reason: governed.validation.status === "blocked" ? governed.validation.reason : null,
+          formula_version: governed.validation.status === "validated" ? governed.validation.formulaVersion : null,
+          calculation_checksum: governed.validation.status === "validated" ? governed.validation.calculationChecksum : null,
+          source_provenance: {
+            page_id: governed.pageId, page_number: governed.pageNumber, source_kind: "text",
+            raw_text: governed.rawText, measurement_basis: "source_text", source_checksum: governed.checksum,
+            manifest_version: governed.context.manifestVersion,
+          },
+        } : {}),
         reviewed_by: null,
         reviewed_at: null,
         ...(isUpdate ? {} : { created_by: userId }),
@@ -140,6 +205,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     if (error) {
       return NextResponse.json({ error: `[POST /api/takeoff/items] ${error.message}` }, { status: 422 });
+    }
+
+    for (const group of pageContexts.values()) {
+      await advanceTakeoffPageJob(anyDb, tenantId, group.context.jobId, group.context.unitId, userId, group.validations.every((validation) => validation.status === "validated"));
     }
 
     // Per-row history: "created" for genuinely new rows, "updated" (with

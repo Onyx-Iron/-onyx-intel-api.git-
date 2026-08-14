@@ -3,6 +3,7 @@ import { after, before, describe, it } from "node:test";
 import { createClient } from "@supabase/supabase-js";
 import { loadIntegrationTestEnv } from "@/lib/test-utils/integration-guard";
 import { hashApprovalPayload } from "./approval-preview";
+import { advanceTakeoffPageJob, createGovernedPageContext, releaseRejectedCandidateBlock } from "./governance-server";
 
 const integrationEnv = loadIntegrationTestEnv();
 
@@ -30,6 +31,12 @@ describe("governed vision candidates (live database)", { skip: !integrationEnv.r
     if (document.error) throw document.error;
     const page = await db.from("document_pages").insert({ id: pageId, tenant_id: tenantId, document_id: documentId, page_number: 1, storage_path: `${mark}/1.pdf` });
     if (page.error) throw page.error;
+    const scope = await db.from("takeoff_scope_requests").insert({
+      tenant_id: tenantId, project_id: projectId, requested_by: "estimator-1", mode: "all_scopes",
+      division_codes: [], trade_keys: [], bid_package_ids: [], document_ids: [], sheet_ids: [], alternate_keys: [],
+      estimated_work_units: 1, status: "confirmed", confirmed_at: new Date().toISOString(),
+    });
+    if (scope.error) throw scope.error;
     const job = await db.from("takeoff_jobs").insert({ tenant_id: tenantId, project_id: projectId, scope_snapshot: { mode: "complete" }, scope_hash: mark, created_by: "estimator-1" }).select("id").single();
     if (job.error) throw job.error;
     jobId = job.data.id;
@@ -88,6 +95,28 @@ describe("governed vision candidates (live database)", { skip: !integrationEnv.r
     assert.equal(row.data.formula_version, "source-text-v1");
     assert.equal(row.data.calculation_checksum, calculationChecksum);
     assert.equal(row.data.source_provenance.raw_text, "TYPE A DOORS QTY 12");
+  });
+
+  it("creates a page-scoped job from confirmed preflight and advances it only through legal transitions", async () => {
+    const context = await createGovernedPageContext({
+      db, tenantId, projectId, documentId, pageId, pageNumber: 1,
+      sourceChecksum: "helper-checksum", actorUserId: "estimator-1",
+    });
+    assert.ok(context.jobId);
+    assert.ok(context.manifestId);
+    assert.equal(context.manifestVersion, 1);
+    await advanceTakeoffPageJob(db, tenantId, context.jobId, context.unitId, "estimator-1", false);
+    const [job, unit, events] = await Promise.all([
+      db.from("takeoff_jobs").select("state,row_version").eq("id", context.jobId).single(),
+      db.from("takeoff_job_units").select("state,row_version").eq("id", context.unitId).single(),
+      db.from("takeoff_job_events").select("id", { count: "exact", head: true }).eq("job_id", context.jobId),
+    ]);
+    assert.deepEqual(job.data, { state: "blocked", row_version: 5 });
+    assert.deepEqual(unit.data, { state: "blocked", row_version: 5 });
+    assert.equal(events.count, 10);
+    assert.equal(await releaseRejectedCandidateBlock(db, tenantId, projectId, context.jobId, "estimator-1"), true);
+    const released = await db.from("takeoff_jobs").select("state,row_version").eq("id", context.jobId).single();
+    assert.deepEqual(released.data, { state: "review_ready", row_version: 7 });
   });
 
   it("refuses confirmation when a candidate lacks validated quantity evidence", async () => {

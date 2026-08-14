@@ -6,6 +6,7 @@ import { recordTakeoffHistory } from "@/lib/takeoff/history";
 import { logEvent } from "@/lib/activity";
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 import { classifyLegacyReviewAction } from "@/lib/takeoff/review-policy";
+import { releaseRejectedCandidateBlock } from "@/lib/takeoff/governance-server";
 
 export const runtime = "nodejs";
 
@@ -122,6 +123,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       title: `Takeoff item ${reviewStatus}: ${before.label ?? id}`,
       meta: { review_status: reviewStatus },
     });
+
+    if (reviewStatus === "rejected" && before.project_id && before.takeoff_job_id) {
+      await releaseRejectedCandidateBlock(anyDb, tenantId, before.project_id, before.takeoff_job_id, userId);
+    }
 
     return NextResponse.json({ item: updated, estimate_synced: null });
   } catch (err: unknown) {
