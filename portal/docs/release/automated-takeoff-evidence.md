@@ -2,7 +2,7 @@
 
 **Evidence captured:** 2026-08-14T07:37:31Z  
 **Branch:** `codex/upload-pipeline-reliability`  
-**Last committed evidence base:** `0cba0907305b8babee4cbb350673bf973de3ba13`  
+**Tested implementation commit:** `1641d4d00b35172a1ab11b55e761b88a2871a3fc`  
 **Release decision:** **NOT APPROVED** — software gates pass, but estimator-reviewed fixtures and canary runtime evidence are incomplete.
 
 ## Release gate matrix
