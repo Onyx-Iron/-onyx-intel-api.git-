@@ -9,6 +9,9 @@ Updated: 2026-08-14
 - Estimating separates markup from margin, saves versions atomically, rejects stale writes, requires approved price provenance, and supports governed price review.
 - Reports, project management, procurement, financials, civil intelligence, preconstruction, documents, field operations, and administrative workspaces have real routes and persisted backends.
 - Financial mutations now enforce financial-write roles; project administration enforces admin-write roles; core field and document/takeoff mutations enforce field-write roles. Project-scoped creates verify tenant ownership before persistence or worker dispatch.
+- Project-wide AI chat requires financial-read authorization and binds every supplied conversation to the active tenant and project.
+- Every identified paid-AI route uses an atomic, fail-closed database limiter. Browser roles cannot invoke the limiter RPC directly.
+- Cross-tenant platform maintenance uses a server-only `ONYX_PLATFORM_ADMIN_EMAILS` allowlist; privileged APIs no longer contain a hardcoded owner email.
 - Project synchronization, document processing status/retry, estimate migration, and project knowledge snapshots are wired into the application.
 - AI-assisted output carries a persistent user disclaimer and does not become approved quantity or financial evidence without review.
 - Operational-role bootstrap is least privilege: personal owners become `Owner`, Clerk organization admins become `Admin`, and unassigned organization members become `ClientView`.
@@ -23,6 +26,7 @@ The product must not be represented as production-ready until every item below i
 
 - Supply reviewed golden takeoff fixtures for the six certification boundaries. Current certification is intentionally `0 certified / 6 blocked`; synthetic or unreviewed quantities cannot satisfy this gate.
 - Configure and verify Paddle credentials, live price IDs, checkout, customer portal, webhook signature validation, and webhook replay for subscription creation, updates, past-due state, and cancellation.
+- Configure the server-only platform administrator allowlist and scheduled-recovery secret in each deployment environment.
 - Confirm production Clerk keys, redirect URLs, organization roles, and at least one owner/admin/member authorization acceptance flow.
 - Deploy this branch to a Vercel preview, run authenticated desktop/tablet/mobile workflow QA, and complete an actual document upload through storage, page splitting, extraction, review, approval, estimate import, and estimate approval.
 - Verify Railway document/takeoff service configuration and outage recovery from the preview environment.

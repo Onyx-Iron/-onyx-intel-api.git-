@@ -1,8 +1,8 @@
 # Automated Takeoff Release Evidence
 
-**Evidence captured:** 2026-08-14T10:00:42Z  
+**Evidence captured:** 2026-08-14T10:36:10Z  
 **Branch:** `codex/upload-pipeline-reliability`  
-**Tested implementation commit:** `1927ed6495f54cd81997bae0169087dfd45ae2e6`  
+**Tested implementation commit:** `fc97659493504e3fb98f133213e72d22843ad57d`  
 **Release decision:** **NOT APPROVED** — software gates pass, but estimator-reviewed fixtures and canary runtime evidence are incomplete.
 
 ## Release gate matrix
@@ -33,7 +33,8 @@
 - `npm run lint`: passed.
 - `npm run build`: production build passed and generated 116 application routes/pages.
 - `npm run launch:smoke`: all public signed-out production checks passed.
-- `npm run launch:audit`: correctly failed because capability certification is incomplete. `CRON_SECRET` was subsequently configured as a sensitive Vercel variable for Preview and Production; deployment verification remains pending.
+- Paid AI routes are protected by an atomic database-backed limiter on isolated Supabase. Its allowance sequence verified as `true, true, false`; `anon` and `authenticated` cannot invoke the RPC, while `service_role` can.
+- `npm run launch:audit`: correctly failed on four explicit gates: missing local `CRON_SECRET`, missing platform-administrator allowlist, incomplete Paddle configuration, and incomplete capability certification.
 
 ## Certification status and required evidence
 
