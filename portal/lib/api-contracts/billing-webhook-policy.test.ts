@@ -25,5 +25,7 @@ describe("billing webhook delivery policy", () => {
     assert.ok(migration.includes("FROM anon"));
     assert.ok(migration.includes("FROM authenticated"));
     assert.ok(migration.includes("TO service_role"));
+    assert.ok(migration.includes("USING (false)"));
+    assert.ok(migration.includes("WITH CHECK (false)"));
   });
 });

@@ -18,3 +18,9 @@ ALTER TABLE public.billing_webhook_events FORCE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.billing_webhook_events FROM anon;
 REVOKE ALL ON TABLE public.billing_webhook_events FROM authenticated;
 GRANT ALL ON TABLE public.billing_webhook_events TO service_role;
+
+DROP POLICY IF EXISTS billing_webhook_events_deny_clients ON public.billing_webhook_events;
+CREATE POLICY billing_webhook_events_deny_clients ON public.billing_webhook_events
+  FOR ALL TO anon, authenticated
+  USING (false)
+  WITH CHECK (false);
