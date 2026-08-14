@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { generateText, NoProviderError } from "@/lib/ai/providers";
 import { logEvent } from "@/lib/activity";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -45,6 +46,7 @@ export async function POST(_req: NextRequest, ctx: RouteContext): Promise<NextRe
 
     const { id } = await ctx.params;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     // Fetch the weekly log (tenant-scoped)
@@ -156,6 +158,6 @@ Write the weekly status report now. Max 200 words total.`;
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[POST /api/weekly-logs/generate] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[POST /api/weekly-logs/generate] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

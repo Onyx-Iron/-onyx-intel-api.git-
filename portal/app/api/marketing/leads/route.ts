@@ -1,7 +1,8 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { hasPermission } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -42,9 +43,31 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   };
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  if (!(await hasPermission(tenantId, userId, "field", "write"))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+  if (body.project_id) {
+    try {
+      await assertProjectBelongsToTenant(body.project_id, tenantId);
+    } catch {
+      return NextResponse.json({ error: "project_id does not belong to this tenant" }, { status: 403 });
+    }
+  }
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
+
+  if (body.campaign_id) {
+    const { data: campaign } = await anyDb
+      .from("marketing_campaigns")
+      .select("id")
+      .eq("id", body.campaign_id)
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+    if (!campaign) {
+      return NextResponse.json({ error: "campaign_id does not belong to this tenant" }, { status: 403 });
+    }
+  }
 
   const { data, error } = await anyDb.from("marketing_leads").insert({
     tenant_id: tenantId,

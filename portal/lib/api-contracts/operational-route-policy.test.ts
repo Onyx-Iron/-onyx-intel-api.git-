@@ -48,6 +48,9 @@ const FIELD_WRITE_ROUTES = [
   "app/api/takeoff/canvas/calibration/route.ts",
   "app/api/takeoff/canvas/vectors/route.ts",
   "app/api/takeoff/canvas/manual/route.ts",
+  "app/api/weekly-logs/[id]/generate/route.ts",
+  "app/api/marketing/leads/route.ts",
+  "app/api/agents/daily-log-assistant/route.ts",
 ];
 
 describe("operational API authorization policy", () => {
@@ -66,4 +69,10 @@ describe("operational API authorization policy", () => {
       assert.ok(source.includes('"admin", "write"'));
     });
   }
+
+  it("tenant guard requires administrator permission", () => {
+    const source = readFileSync(resolve(process.cwd(), "app/api/agents/tenant-guard/route.ts"), "utf8");
+    assert.ok(source.includes("assertPermission(") || source.includes("hasPermission("));
+    assert.ok(source.includes('"admin", "write"'));
+  });
 });

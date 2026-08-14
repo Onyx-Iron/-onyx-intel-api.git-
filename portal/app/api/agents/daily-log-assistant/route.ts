@@ -5,8 +5,10 @@ import {
   authTenantName,
   getOrCreateTenant,
   requireProjectId,
+  assertProjectBelongsToTenant,
 } from "@/lib/project-controls/server";
 import { runDailyLogAssistant } from "@/lib/agents/dailyLogAssistant";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -26,12 +28,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       authTenantKey(userId, orgId),
       authTenantName(userId, orgSlug),
     );
+    await assertPermission(tenantId, userId, "field", "write");
+    await assertProjectBelongsToTenant(projectId, tenantId);
 
     const result = await runDailyLogAssistant(tenantId, projectId, date);
     return NextResponse.json(result);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    const status = msg.includes("project_id") ? 400 : 500;
+    const status = err instanceof PermissionError || msg.includes("does not belong") ? 403 : msg.includes("project_id") ? 400 : 500;
     return NextResponse.json({ error: msg }, { status });
   }
 }
