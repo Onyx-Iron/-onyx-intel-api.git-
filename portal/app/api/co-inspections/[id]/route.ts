@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -19,6 +20,7 @@ export async function PATCH(req: NextRequest, ctx: RouteContext): Promise<NextRe
     const { id } = await ctx.params;
     const body = await req.json() as Record<string, unknown>;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     const allowed = [
@@ -52,7 +54,7 @@ export async function PATCH(req: NextRequest, ctx: RouteContext): Promise<NextRe
     if (error) return NextResponse.json({ error: `[PATCH /api/co-inspections/${id}] ${error.message}` }, { status: 422 });
     return NextResponse.json({ item: data });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: String(err) }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -63,6 +65,7 @@ export async function DELETE(_req: NextRequest, ctx: RouteContext): Promise<Next
 
     const { id } = await ctx.params;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     const { error } = await db
@@ -74,6 +77,6 @@ export async function DELETE(_req: NextRequest, ctx: RouteContext): Promise<Next
     if (error) return NextResponse.json({ error: `[DELETE /api/co-inspections/${id}] ${error.message}` }, { status: 422 });
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: String(err) }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

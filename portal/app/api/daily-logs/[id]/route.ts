@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -16,6 +17,7 @@ export async function PUT(req: NextRequest, ctx: RouteContext): Promise<NextResp
     const { id } = await ctx.params;
     const body = await req.json() as Record<string, unknown>;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     const allowed = ["log_date", "weather", "temperature", "crew_count", "work_performed", "notes", "photo_urls"];
@@ -30,7 +32,7 @@ export async function PUT(req: NextRequest, ctx: RouteContext): Promise<NextResp
     if (error) return NextResponse.json({ error: `[PUT /api/daily-logs/${id}] ${error.message}` }, { status: 422 });
     return NextResponse.json({ log: data });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: String(err) }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -40,6 +42,7 @@ export async function DELETE(_req: NextRequest, ctx: RouteContext): Promise<Next
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     const { id } = await ctx.params;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     // Fetch photo paths first so we can remove them from storage too.
@@ -60,6 +63,6 @@ export async function DELETE(_req: NextRequest, ctx: RouteContext): Promise<Next
     if (error) return NextResponse.json({ error: `[DELETE /api/daily-logs/${id}] ${error.message}` }, { status: 422 });
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: String(err) }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

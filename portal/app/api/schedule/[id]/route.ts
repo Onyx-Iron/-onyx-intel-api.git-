@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import type { TablesUpdate } from "@/lib/supabase/types";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -50,6 +51,7 @@ export async function PUT(req: NextRequest, context: RouteContext): Promise<Next
     };
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
 
     const updates: TablesUpdate<"schedule_tasks"> = {};
     if (name !== undefined) updates.name = name;
@@ -85,7 +87,7 @@ export async function PUT(req: NextRequest, context: RouteContext): Promise<Next
     return NextResponse.json({ task: data });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[PUT /api/schedule/[id]] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[PUT /api/schedule/[id]] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -102,6 +104,7 @@ export async function DELETE(_req: NextRequest, context: RouteContext): Promise<
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
 
     const db = await createServiceClient();
     const { error } = await db
@@ -117,6 +120,6 @@ export async function DELETE(_req: NextRequest, context: RouteContext): Promise<
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[DELETE /api/schedule/[id]] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[DELETE /api/schedule/[id]] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

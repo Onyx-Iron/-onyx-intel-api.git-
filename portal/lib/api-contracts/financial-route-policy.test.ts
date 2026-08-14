@@ -15,6 +15,7 @@ const ROUTES: Array<{ file: string; permissions: string[] }> = [
   { file: "app/api/cost-catalog/v2/route.ts", permissions: ['"financial", "read"'] },
   { file: "app/api/cost-catalog/overrides/route.ts", permissions: ['"financial", action'] },
   { file: "app/api/cost-catalog/overrides/[id]/route.ts", permissions: ['"financial", "write"'] },
+  { file: "app/api/estimate/matrix/route.ts", permissions: ['"financial", "read"'] },
 ];
 
 describe("financial API authorization policy", () => {

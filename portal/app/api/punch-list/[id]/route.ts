@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -15,6 +16,7 @@ export async function PUT(req: NextRequest, ctx: RouteContext): Promise<NextResp
     const { id } = await ctx.params;
     const body = await req.json() as Record<string, unknown>;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     const allowed = ["description", "location", "trade", "responsible", "priority", "status", "due_date", "sign_off", "completed_date", "notes"];
@@ -39,7 +41,7 @@ export async function PUT(req: NextRequest, ctx: RouteContext): Promise<NextResp
     if (error) return NextResponse.json({ error: `[PUT /api/punch-list/${id}] ${error.message}` }, { status: 422 });
     return NextResponse.json({ item: data });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: String(err) }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -50,6 +52,7 @@ export async function DELETE(_req: NextRequest, ctx: RouteContext): Promise<Next
 
     const { id } = await ctx.params;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -57,6 +60,6 @@ export async function DELETE(_req: NextRequest, ctx: RouteContext): Promise<Next
     if (error) return NextResponse.json({ error: `[DELETE /api/punch-list/${id}] ${error.message}` }, { status: 422 });
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: String(err) }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

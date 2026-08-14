@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import type { TablesInsert } from "@/lib/supabase/types";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
+import { assertPermission, getUserRole, PermissionError, redactFinancialFields } from "@/lib/project-controls/permissions";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
@@ -33,7 +34,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       );
     }
 
-    return NextResponse.json({ projects: data ?? [], pagination: paginationMeta(count ?? 0, page, limit) });
+    const role = await getUserRole(tenantId, userId);
+    const projects = redactFinancialFields((data ?? []) as unknown as Record<string, unknown>[], role, ["budget"]);
+    return NextResponse.json({ projects, pagination: paginationMeta(count ?? 0, page, limit) });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[GET /api/projects] ${msg}` }, { status: 500 });
@@ -55,6 +58,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "admin", "write");
 
     const payload: TablesInsert<"projects"> = {
       tenant_id: tenantId,
@@ -85,6 +89,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ project: data }, { status: 201 });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[POST /api/projects] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[POST /api/projects] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

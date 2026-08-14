@@ -1,10 +1,11 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { uuidSchema } from "@/lib/validation";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -17,6 +18,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     if (!projectId) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertProjectBelongsToTenant(projectId, tenantId);
     const { page, limit, offset } = parsePagination(req.nextUrl.searchParams);
     const db = await createServiceClient();
 
@@ -59,6 +61,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const projectId = pidParse.data;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
+    await assertProjectBelongsToTenant(projectId, tenantId);
     const db = await createServiceClient();
 
     const { data, error } = await db
@@ -96,6 +100,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ log: data }, { status: 201 });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[POST /api/weekly-logs] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[POST /api/weekly-logs] ${msg}` }, { status: err instanceof PermissionError || msg.includes("does not belong") ? 403 : 500 });
   }
 }
