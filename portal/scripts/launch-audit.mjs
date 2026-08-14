@@ -130,6 +130,12 @@ if (!existsSync(resolve(appRoot, "app", "api", "documents", "[id]", "retry", "ro
 if (!localEnv.CRON_SECRET && !process.env.CRON_SECRET) {
   blockers.push("CRON_SECRET is missing; Vercel cannot authenticate scheduled takeoff recovery");
 }
+if (!localEnv.ONYX_PLATFORM_ADMIN_EMAILS && !process.env.ONYX_PLATFORM_ADMIN_EMAILS) {
+  blockers.push("ONYX_PLATFORM_ADMIN_EMAILS is missing; privileged maintenance and account access are disabled");
+}
+if (!localEnv.PADDLE_ENV || !localEnv.PADDLE_API_KEY || !localEnv.PADDLE_WEBHOOK_SECRET) {
+  blockers.push("Paddle billing env is incomplete; paid signup, checkout, and webhook reconciliation are disabled");
+}
 for (const [label, parts] of [
   ["Automated takeoff job route", ["app", "api", "takeoff", "jobs", "route.ts"]],
   ["Approval preview route", ["app", "api", "takeoff", "approval-preview", "route.ts"]],
@@ -155,8 +161,4 @@ if (blockers.length === 0) {
     console.log(`- ${blocker}`);
   }
   process.exitCode = 1;
-}
-
-if (!localEnv.PADDLE_ENV || !localEnv.PADDLE_API_KEY || !localEnv.PADDLE_WEBHOOK_SECRET) {
-  console.log("- Paddle billing env is not set; billing checkout and webhook flows will stay disabled");
 }
