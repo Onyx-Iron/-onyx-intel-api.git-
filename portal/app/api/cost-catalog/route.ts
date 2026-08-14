@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -10,6 +11,7 @@ export async function GET(): Promise<NextResponse> {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "financial", "read");
     const db = await createServiceClient();
     const { data, error } = await db
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -18,7 +20,7 @@ export async function GET(): Promise<NextResponse> {
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
     return NextResponse.json({ items: data ?? [] });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: String(err) }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -29,6 +31,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const body = await req.json() as Record<string, unknown>;
     if (!body.description) return NextResponse.json({ error: "description required" }, { status: 400 });
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "financial", "write");
     const db = await createServiceClient();
     const { data, error } = await db
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -46,6 +49,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (error) return NextResponse.json({ error: error.message }, { status: 422 });
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: String(err) }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
