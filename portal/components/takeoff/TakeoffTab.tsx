@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { getGoogleToken } from "@/lib/google/clientAuth";
 
 import { useToast } from "@/components/common/Toast";
@@ -435,7 +434,6 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     };
   }, []);
 
-  useProjectSyncRefresh(loadSavedItems);
 
   const deleteSavedItem = useCallback(async (id: string) => {
     setDeletingId(id);
