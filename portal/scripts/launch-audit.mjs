@@ -54,6 +54,7 @@ const requiredLaunchEnv = [
   "NEXT_PUBLIC_SUPABASE_URL",
   "NEXT_PUBLIC_SUPABASE_ANON_KEY",
   "SUPABASE_SERVICE_ROLE_KEY",
+  "CRON_SECRET",
   "PADDLE_ENV",
   "PADDLE_API_KEY",
   "PADDLE_WEBHOOK_SECRET",
@@ -91,6 +92,13 @@ console.log("## Repo Signals");
 console.log(`- ClerkProvider explicitly configured: ${existsSync(resolve(appRoot, "app", "layout.tsx")) ? "yes" : "unknown"}`);
 console.log(`- dedicated sign-in page exists: ${existsSync(resolve(appRoot, "app", "sign-in", "[[...sign-in]]", "page.tsx")) ? "yes" : "no"}`);
 console.log(`- dedicated sign-up page exists: ${existsSync(resolve(appRoot, "app", "sign-up", "[[...sign-up]]", "page.tsx")) ? "yes" : "no"}`);
+console.log(`- document upload route exists: ${existsSync(resolve(appRoot, "app", "api", "documents", "upload", "route.ts")) ? "yes" : "no"}`);
+console.log(`- document ingest route exists: ${existsSync(resolve(appRoot, "app", "api", "documents", "[id]", "ingest", "route.ts")) ? "yes" : "no"}`);
+console.log(`- document status route exists: ${existsSync(resolve(appRoot, "app", "api", "documents", "[id]", "status", "route.ts")) ? "yes" : "no"}`);
+console.log(`- document retry route exists: ${existsSync(resolve(appRoot, "app", "api", "documents", "[id]", "retry", "route.ts")) ? "yes" : "no"}`);
+console.log(`- automated takeoff job route exists: ${existsSync(resolve(appRoot, "app", "api", "takeoff", "jobs", "route.ts")) ? "yes" : "no"}`);
+console.log(`- approval preview route exists: ${existsSync(resolve(appRoot, "app", "api", "takeoff", "approval-preview", "route.ts")) ? "yes" : "no"}`);
+console.log(`- takeoff recovery route exists: ${existsSync(resolve(appRoot, "app", "api", "internal", "takeoff", "recover", "route.ts")) ? "yes" : "no"}`);
 console.log("");
 
 const blockers = [];
@@ -106,10 +114,38 @@ if (!localEnv.NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL || localEnv.NEXT_PUBLIC_CLERK_
 if (!localEnv.NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL || localEnv.NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL !== "/dashboard") {
   blockers.push("Clerk after-sign-up URL should be /dashboard");
 }
-if (!localEnv.PADDLE_ENV || localEnv.PADDLE_ENV !== "live") {
-  blockers.push("Paddle live env is not set");
+if (!existsSync(resolve(appRoot, "app", "api", "documents", "upload", "route.ts"))) {
+  blockers.push("Document upload route is missing");
 }
-
+if (!existsSync(resolve(appRoot, "app", "api", "documents", "[id]", "ingest", "route.ts"))) {
+  blockers.push("Document ingest route is missing");
+}
+if (!existsSync(resolve(appRoot, "app", "api", "documents", "[id]", "status", "route.ts"))) {
+  blockers.push("Document status route is missing");
+}
+if (!existsSync(resolve(appRoot, "app", "api", "documents", "[id]", "retry", "route.ts"))) {
+  blockers.push("Document retry route is missing");
+}
+if (!localEnv.CRON_SECRET && !process.env.CRON_SECRET) {
+  blockers.push("CRON_SECRET is missing; Vercel cannot authenticate scheduled takeoff recovery");
+}
+for (const [label, parts] of [
+  ["Automated takeoff job route", ["app", "api", "takeoff", "jobs", "route.ts"]],
+  ["Approval preview route", ["app", "api", "takeoff", "approval-preview", "route.ts"]],
+  ["Takeoff recovery route", ["app", "api", "internal", "takeoff", "recover", "route.ts"]],
+  ["Takeoff certification report", ["fixtures", "takeoff", "certification-report.json"]],
+]) {
+  if (!existsSync(resolve(appRoot, ...parts))) blockers.push(`${label} is missing`);
+}
+const certificationPath = resolve(appRoot, "fixtures", "takeoff", "certification-report.json");
+if (existsSync(certificationPath)) {
+  const certification = JSON.parse(readFileSync(certificationPath, "utf8"));
+  const summary = certification.summary ?? {};
+  console.log(`- takeoff certification: ${summary.certified ?? 0} certified, ${summary.provisional ?? 0} provisional, ${summary.blocked ?? 0} blocked`);
+  if ((summary.provisional ?? 0) > 0 || (summary.blocked ?? 0) > 0 || (summary.certified ?? 0) === 0) {
+    blockers.push("Automated takeoff certification is incomplete; blocked or provisional capabilities must not be marketed as flawless");
+  }
+}
 console.log("## Status");
 if (blockers.length === 0) {
   console.log("- no repo-detectable launch blockers found");
@@ -117,4 +153,9 @@ if (blockers.length === 0) {
   for (const blocker of blockers) {
     console.log(`- ${blocker}`);
   }
+  process.exitCode = 1;
+}
+
+if (!localEnv.PADDLE_ENV || !localEnv.PADDLE_API_KEY || !localEnv.PADDLE_WEBHOOK_SECRET) {
+  console.log("- Paddle billing env is not set; billing checkout and webhook flows will stay disabled");
 }

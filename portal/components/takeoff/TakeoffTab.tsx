@@ -2,11 +2,15 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { getGoogleToken } from "@/lib/google/clientAuth";
 
 import { useToast } from "@/components/common/Toast";
 import GoogleConnect from "@/components/google/GoogleConnect";
 import GoogleDrivePicker from "@/components/documents/GoogleDrivePicker";
+import ScopePreflight from "@/components/takeoff/ScopePreflight";
+import AutomatedTakeoffStatus from "@/components/takeoff/AutomatedTakeoffStatus";
+import AutomatedTakeoffReview from "@/components/takeoff/AutomatedTakeoffReview";
 import { fetchWithRetry } from "@/lib/network/retry";
 
 // Types matching SecureTakeoffRow output from takeoff_validator.py
@@ -21,6 +25,7 @@ interface TakeoffRow {
   uom: string;
   drawing_ref?: string | null;
   location_tag?: string | null;
+  quantity_evidence?: Record<string, unknown> | null;
   extraction_method?: "deterministic" | "ai_vision";
   page?: number | null;
   document_id?: string | null;
@@ -31,6 +36,7 @@ const DETERMINISTIC_EXTS = [".pdf", ".dwg", ".dxf", ".ifc", ".xlsx", ".xls"];
 const ALL_ACCEPT = ".json," + DETERMINISTIC_EXTS.join(",");
 
 interface Coverage { [k: string]: number | string; }
+interface AiPageRef { page_number: number; page_id: string; }
 
 interface ChunkEvent {
   event: "CHUNK_PROCESSED";
@@ -344,6 +350,11 @@ interface SavedItem {
   quantity: number | null;
   unit: string | null;
   meta: Record<string, unknown> | null;
+  review_status?: string | null;
+  takeoff_job_id?: string | null;
+  quantity_validation_status?: string | null;
+  quantity_validation_reason?: string | null;
+  is_stale?: boolean | null;
 }
 
 // Main component
@@ -360,15 +371,21 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
   const [fileName, setFileName]   = useState("");
   const [saveStatus, setSaveStatus] = useState<"idle"|"saving"|"saved"|"error">("idle");
   const [loadWarning, setLoadWarning] = useState<string | null>(null);
+  const [scopeConfirmed, setScopeConfirmed] = useState(false);
+  const [batchApproving, setBatchApproving] = useState(false);
+  const handleScopeConfirmed = useCallback(() => setScopeConfirmed(true), []);
   const abortRef = useRef<AbortController | null>(null);
 
   // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Multi-format (deterministic + AI) state ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
   const [sourceType, setSourceType]   = useState<string | null>(null);
   const [coverage, setCoverage]       = useState<Coverage | null>(null);
   const [aiPages, setAiPages]         = useState<number[]>([]);
+  const [aiPageRefs, setAiPageRefs]   = useState<AiPageRef[]>([]);
   const [aiRunning, setAiRunning]     = useState(false);
   const [hasLocalPdf, setHasLocalPdf] = useState(false);
   const pdfFileRef = useRef<File | null>(null);
+  const activeDocumentIdRef = useRef<string | null>(null);
+  const autoAiDocumentRef = useRef<string | null>(null);
 
   // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Async page-split polling (large uploads routed off the sync stream) ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
   const [asyncPages, setAsyncPages] = useState<{ total: number; done: number; error: number }>({ total: 0, done: 0, error: 0 });
@@ -377,11 +394,12 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
   // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Saved items from DB ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
   const [savedItems, setSavedItems] = useState<SavedItem[]>([]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [decidingId, setDecidingId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<SavedItem | null>(null);
 
   const loadSavedItems = useCallback(async () => {
     try {
-      const res = await fetch(`/api/takeoff/items?project_id=${encodeURIComponent(projectId)}`);
+      const res = await fetch(`/api/takeoff/items?project_id=${encodeURIComponent(projectId)}&limit=500`);
       if (!res.ok) {
         setSavedItems([]);
         setLoadWarning(`Saved takeoff items could not be refreshed (${res.status}). The takeoff still works; try reloading in a moment.`);
@@ -397,6 +415,27 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
       return false;
     }
   }, [projectId]);
+
+  const describeExtractionResult = useCallback((docName: string, extractedCount: number, candidatePages: number[]) => {
+    if (extractedCount > 0) {
+      return {
+        auditStatus: "VERIFIED_SUCCESS",
+        statusMsg: `Complete - ${extractedCount.toLocaleString()} line items from ${docName}`,
+      };
+    }
+    if (candidatePages.length > 0) {
+      return {
+        auditStatus: "PARTIAL_WITH_ERRORS",
+        statusMsg: `No line items were extracted from ${docName}. ${candidatePages.length} page${candidatePages.length === 1 ? "" : "s"} need AI vision review.`,
+      };
+    }
+    return {
+      auditStatus: "PARTIAL_WITH_ERRORS",
+      statusMsg: `No line items were extracted from ${docName}. Review the document and retry from the project header or Drive button.`,
+    };
+  }, []);
+
+  useProjectSyncRefresh(loadSavedItems);
 
   const deleteSavedItem = useCallback(async (id: string) => {
     setDeletingId(id);
@@ -414,6 +453,99 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
       setDeletingId(null);
     }
   }, [projectId, toast]);
+
+  const decideSavedItem = useCallback(async (item: SavedItem, action: "approve" | "reject") => {
+    setDecidingId(item.id);
+    try {
+      if (action === "reject") {
+        const response = await fetch(`/api/takeoff/items/${encodeURIComponent(item.id)}/review`, {
+          method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.error ?? "Could not reject this candidate");
+      } else {
+        if (item.quantity_validation_status !== "validated" || !item.takeoff_job_id) {
+          throw new Error(item.quantity_validation_reason?.replaceAll("_", " ") ?? "Validated source evidence is required");
+        }
+        const previewResponse = await fetch("/api/takeoff/approval-preview", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projectId, jobId: item.takeoff_job_id, candidateIds: [item.id] }),
+        });
+        const previewBody = await previewResponse.json().catch(() => ({}));
+        if (!previewResponse.ok || !previewBody.preview?.id) throw new Error(previewBody.error ?? "Could not create approval preview");
+        const previewId = previewBody.preview.id as string;
+        const confirmation = await fetch(`/api/takeoff/approval-preview/${encodeURIComponent(previewId)}/confirm`, { method: "POST" });
+        const confirmationBody = await confirmation.json().catch(() => ({}));
+        if (!confirmation.ok) throw new Error(confirmationBody.error ?? "Could not confirm approval");
+        const imported = await fetch("/api/estimate/import-takeoff", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project_id: projectId, preview_id: previewId, idempotency_key: `takeoff-preview:${previewId}` }),
+        });
+        const importedBody = await imported.json().catch(() => ({}));
+        if (!imported.ok) throw new Error(importedBody.error ?? "Could not import the approved quantity");
+      }
+      await loadSavedItems();
+      toast({ title: action === "approve" ? "Quantity approved and imported to the draft estimate." : "Quantity rejected and excluded.", kind: "success" });
+    } catch (error) {
+      toast({ title: error instanceof Error ? error.message : `Could not ${action} this quantity`, kind: "error" });
+    } finally {
+      setDecidingId(null);
+    }
+  }, [loadSavedItems, projectId, toast]);
+
+  const acceptSavedRevision = useCallback(async (item: SavedItem) => {
+    setDecidingId(item.id);
+    try {
+      const response = await fetch("/api/takeoff/source-revisions/approve", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ candidateId: item.id }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error ?? "Could not accept the source revision");
+      toast({ title: "Revision accepted. Run extraction again to validate quantities against it.", kind: "success" });
+      await loadSavedItems();
+    } catch (error) {
+      toast({ title: error instanceof Error ? error.message : "Could not accept the source revision", kind: "error" });
+    } finally {
+      setDecidingId(null);
+    }
+  }, [loadSavedItems, toast]);
+
+  const approveAndImportReady = useCallback(async () => {
+    const ready = savedItems.filter((item) =>
+      (item.review_status === "suggested" || item.review_status === "reviewed")
+      && item.quantity_validation_status === "validated" && item.takeoff_job_id && !item.is_stale,
+    );
+    const pending = savedItems.filter((item) => item.review_status === "suggested" || item.review_status === "reviewed");
+    if (ready.length === 0 || ready.length !== pending.length) return;
+    setBatchApproving(true);
+    try {
+      const byJob = new Map<string, string[]>();
+      for (const item of ready) byJob.set(item.takeoff_job_id!, [...(byJob.get(item.takeoff_job_id!) ?? []), item.id]);
+      for (const [jobId, candidateIds] of byJob) {
+        const previewResponse = await fetch("/api/takeoff/approval-preview", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ projectId, jobId, candidateIds }),
+        });
+        const previewBody = await previewResponse.json().catch(() => ({}));
+        if (!previewResponse.ok || !previewBody.preview?.id) throw new Error(previewBody.error ?? "Could not create approval preview");
+        const previewId = previewBody.preview.id as string;
+        const confirmation = await fetch(`/api/takeoff/approval-preview/${encodeURIComponent(previewId)}/confirm`, { method: "POST" });
+        const confirmationBody = await confirmation.json().catch(() => ({}));
+        if (!confirmation.ok) throw new Error(confirmationBody.error ?? "Could not confirm approval");
+        const imported = await fetch("/api/estimate/import-takeoff", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project_id: projectId, preview_id: previewId, idempotency_key: `takeoff-preview:${previewId}` }),
+        });
+        const importedBody = await imported.json().catch(() => ({}));
+        if (!imported.ok) throw new Error(importedBody.error ?? "Could not import approved quantities");
+      }
+      await loadSavedItems();
+      toast({ title: `${ready.length} ${ready.length === 1 ? "quantity" : "quantities"} approved and imported to the draft estimate.`, kind: "success" });
+    } catch (error) {
+      toast({ title: error instanceof Error ? error.message : "Could not approve and import these quantities", kind: "error" });
+    } finally {
+      setBatchApproving(false);
+    }
+  }, [loadSavedItems, projectId, savedItems, toast]);
 
   // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ "Run takeoff from an uploaded document" ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
   const [docs, setDocs] = useState<{ id: string; file_name: string; drive: boolean }[]>([]);
@@ -466,6 +598,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
         quantity_basis: r.quantity_basis,
         drawing_ref: r.drawing_ref,
         location_tag: r.location_tag,
+        quantity_evidence: r.quantity_evidence ?? null,
         extraction_method: r.extraction_method ?? (r.id?.startsWith("ai-") ? "ai_vision" : "deterministic"),
       },
     }));
@@ -524,8 +657,11 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
         case "COMPLETED":
           setAiPages(ev.ai_candidate_pages ?? []);
           setProgress(100);
-          setAuditStatus(collected.length > 0 ? "VERIFIED_SUCCESS" : "PARTIAL_WITH_ERRORS");
-          setStatusMsg(`Complete - ${collected.length} line items from ${docName}`);
+          {
+            const outcome = describeExtractionResult(docName, collected.length, ev.ai_candidate_pages ?? []);
+            setAuditStatus(outcome.auditStatus);
+            setStatusMsg(outcome.statusMsg);
+          }
           setPhase("done");
           void persistRows(collected);
           break;
@@ -548,25 +684,28 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     } catch {
       setPhase("error"); setStatusMsg("Could not finish reading that file just now. Please try again from the project header or Drive button.");
     }
-  }, [persistRows]);
+  }, [describeExtractionResult, persistRows]);
 
   const reset = () => {
     abortRef.current?.abort();
     if (pollTimerRef.current != null) { window.clearTimeout(pollTimerRef.current); pollTimerRef.current = null; }
     setPhase("idle"); setRows([]); setProgress(0); setStatusMsg("");
     setTotalRows(0); setAuditStatus(null); setFailedRows(0); setFileName("");
-    setSourceType("pdf · page-by-page"); setCoverage(null); setAiPages([]);
+    setSourceType("pdf · page-by-page"); setCoverage(null); setAiPages([]); setAiPageRefs([]);
+    setAiPageRefs([]);
     setHasLocalPdf(false); setAsyncPages({ total: 0, done: 0, error: 0 });
     pdfFileRef.current = null;
+    activeDocumentIdRef.current = null;
+    autoAiDocumentRef.current = null;
   };
 
   // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Poll the async page-split pipeline for large uploads ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
   // (page-split-worker ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ page-processor + page-takeoff-worker fan-out per
   // page). Replaces the synchronous NDJSON reader loop once a from-document
-  // call comes back `{ status: "queued", async: true }`.
+  // call comes back `{ status: "processing", async: true }`.
   const pollSplitStatus = useCallback((documentId: string, docName: string) => {
     setPhase("processing_async");
-    setStatusMsg(`Queued for background processing - ${docName}`);
+    setStatusMsg(`Started background processing - ${docName}`);
     setProgress(0);
     const pollStartedAt = Date.now();
     const POLL_TIMEOUT_MS = 20 * 60 * 1000;
@@ -583,9 +722,13 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
         const data = await res.json().catch(() => ({})) as {
           pages_total?: number; pages_done?: number; pages_error?: number;
           finished?: boolean; document_status?: string; items?: SavedTakeoffItem[]; error?: string | null;
+          ai_candidate_pages?: number[];
+          ai_page_refs?: AiPageRef[];
         };
         if (!res.ok) {
-          setPhase("error"); setStatusMsg("We lost the background page processor. Open the document list, then retry from the project header or Drive button."); return;
+          setPhase("error");
+          setStatusMsg(data.error || `Background processing could not be checked (${res.status}). The uploaded file is still saved; retry extraction from this project.`);
+          return;
         }
         const total = data.pages_total ?? 0;
         const done = data.pages_done ?? 0;
@@ -616,16 +759,30 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
               extraction_method: (meta.extraction_method as "deterministic" | "ai_vision") ?? "deterministic",
             };
           });
+          const aiCandidatePages = Array.isArray(data.ai_candidate_pages)
+            ? data.ai_candidate_pages.filter((page): page is number => typeof page === "number" && Number.isFinite(page))
+            : [];
+          const pageRefs = Array.isArray(data.ai_page_refs)
+            ? data.ai_page_refs
+                .filter((page): page is AiPageRef => !!page && typeof page.page_number === "number" && typeof page.page_id === "string")
+                .map((page) => ({ page_number: page.page_number, page_id: page.page_id }))
+            : [];
           setRows(extracted);
           setTotalRows(extracted.length);
           setProgress(100);
-          setAuditStatus(extracted.length > 0 ? "VERIFIED_SUCCESS" : "PARTIAL_WITH_ERRORS");
+          setAiPages(aiCandidatePages);
+          setAiPageRefs(pageRefs);
+          const outcome = describeExtractionResult(docName, extracted.length, aiCandidatePages);
+          setAuditStatus(outcome.auditStatus);
           setStatusMsg(
-            data.document_status === "failed"
+            data.document_status === "error"
               ? `Background processing failed for ${docName}. Open the document list, then retry from the project header or Drive button.`
-              : `Complete - ${extracted.length} line items from ${docName}`,
+              : outcome.statusMsg,
           );
-          setPhase(data.document_status === "failed" && extracted.length === 0 ? "error" : "done");
+          setPhase(data.document_status === "error" && extracted.length === 0 ? "error" : "done");
+          if (extracted.length === 0 && aiCandidatePages.length > 0 && documentId !== autoAiDocumentRef.current) {
+            autoAiDocumentRef.current = documentId;
+          }
           // Rows are already persisted by page-takeoff-worker directly -
           // just refresh the saved-items list, don't re-POST them.
           setSaveStatus("saved");
@@ -634,12 +791,14 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
             title: `Finished processing ${docName}.`,
             description: extracted.length > 0
               ? `Loaded ${extracted.length} takeoff item${extracted.length === 1 ? "" : "s"} into the list.`
-              : "The document finished, but no line items were found.",
+              : aiCandidatePages.length > 0
+                ? `${aiCandidatePages.length} page${aiCandidatePages.length === 1 ? "" : "s"} need AI vision review before this takeoff is usable.`
+                : "The document finished, but no line items were found.",
             kind: extracted.length > 0 ? "success" : "warning",
           });
           return;
         }
-        if (["failed", "error"].includes(data.document_status ?? "")) {
+        if (data.document_status === "error") {
           setPhase("error");
           setStatusMsg(data.error || `Background processing failed for ${docName}. Retry the upload.`);
           return;
@@ -650,25 +809,25 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
       pollTimerRef.current = window.setTimeout(tick, 2500);
     };
     void tick();
-  }, [loadSavedItems, toast]);
+  }, [describeExtractionResult, loadSavedItems, toast]);
 
   // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Deterministic extraction (PDF tables / DXF / IFC / XLSX) ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
   //
-  // Small files (< 3.5 MB): POST directly to /api/takeoff/extract - simplest path.
-  // Larger files: use the two-step signed-upload flow to bypass Vercel's 4.5 MB
-  // ingress body limit. Vercel returns a plain 413 with no JSON body if we try
-  // to send a big multipart there.
+  // Every source file is stored before extraction. Besides avoiding request
+  // size limits, this is required for reproducible page checksums, revision
+  // lineage, and approval evidence.
   const extractDeterministic = useCallback(async (file: File) => {
     setFileName(file.name); setPhase("uploading"); setRows([]);
     setProgress(0); setStatusMsg("Extracting..."); setAuditStatus(null);
-    setSourceType("pdf · page-by-page"); setCoverage(null); setAiPages([]);
+    setSourceType("pdf · page-by-page"); setCoverage(null); setAiPages([]); setAiPageRefs([]);
     const isPdf = file.name.toLowerCase().endsWith(".pdf");
     pdfFileRef.current = isPdf ? file : null;
     setHasLocalPdf(isPdf);
+    setAiPageRefs([]);
+    activeDocumentIdRef.current = null;
+    autoAiDocumentRef.current = null;
 
-    // Threshold slightly under Vercel's ~4.5 MB ingress ceiling for safety.
-    const DIRECT_UPLOAD_LIMIT = 3.5 * 1024 * 1024;
-    const useStorageUpload = file.size > DIRECT_UPLOAD_LIMIT;
+    const useStorageUpload = true;
 
     let res: Response;
     try {
@@ -783,7 +942,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
         }
 
         // Run takeoff off the uploaded file - large PDFs may come back as an
-        // async 202 (queued for the background page-split pipeline) instead
+        // async 202 (started in the background page-split pipeline) instead
         // of the usual synchronous NDJSON stream.
         setStatusMsg("Extracting...");
         res = await fetchWithRetry(`/api/takeoff/from-document`, {
@@ -798,6 +957,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
         if (res.status === 202) {
           const asyncData = await res.json().catch(() => ({})) as { document_id?: string; async?: boolean };
           if (asyncData.async && asyncData.document_id) {
+            activeDocumentIdRef.current = asyncData.document_id;
             pollSplitStatus(asyncData.document_id, file.name);
             return;
           }
@@ -831,25 +991,31 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
       ...r, id: r.id ?? `det-${i}`,
     }));
 
-    setSourceType("pdf · page-by-page"); setCoverage(null); setAiPages([]);
+    setSourceType("pdf · page-by-page"); setCoverage(null); setAiPages([]); setAiPageRefs([]);
     setCoverage(data.coverage ?? null);
     setAiPages(Array.isArray(data.ai_candidate_pages) ? data.ai_candidate_pages : []);
+    setAiPageRefs([]);
     setRows(extracted);
     setProgress(100);
     setTotalRows(extracted.length);
-    setAuditStatus(extracted.length > 0 ? "VERIFIED_SUCCESS" : "PARTIAL_WITH_ERRORS");
-    setStatusMsg(`Extracted ${extracted.length.toLocaleString()} line items from ${file.name}`);
+    {
+      const outcome = describeExtractionResult(file.name, extracted.length, Array.isArray(data.ai_candidate_pages) ? data.ai_candidate_pages : []);
+      setAuditStatus(outcome.auditStatus);
+      setStatusMsg(outcome.statusMsg);
+    }
     setPhase("done");
     await persistRows(extracted);
-  }, [persistRows, projectId, pollSplitStatus, consumeNdjsonExtractStream]);
+  }, [describeExtractionResult, persistRows, projectId, pollSplitStatus, consumeNdjsonExtractStream]);
 
   // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Page-by-page takeoff from an already-uploaded document (memory-safe) ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
   const runFromDocument = useCallback(async (documentId: string, docName: string, isDrive = false) => {
     pdfFileRef.current = null; // document flow has no local File
     setHasLocalPdf(false);
+    activeDocumentIdRef.current = documentId;
+    autoAiDocumentRef.current = null;
     setFileName(docName); setPhase("streaming"); setRows([]);
     setProgress(0); setAuditStatus(null); setFailedRows(0);
-    setSourceType("pdf · page-by-page"); setCoverage(null); setAiPages([]);
+    setSourceType("pdf · page-by-page"); setCoverage(null); setAiPages([]); setAiPageRefs([]);
     setStatusMsg("Loading document...");
 
     const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -872,6 +1038,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     if (res.status === 202) {
       const asyncData = await res.json().catch(() => ({})) as { document_id?: string; async?: boolean };
       if (asyncData.async && asyncData.document_id) {
+        activeDocumentIdRef.current = asyncData.document_id;
         pollSplitStatus(asyncData.document_id, docName);
         return;
       }
@@ -887,28 +1054,64 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
   // AI vision fallback (Sonnet) for graphical PDF pages
   const runAiFallback = useCallback(async () => {
     const file = pdfFileRef.current;
-    if (!file || aiRunning) return;
+    if ((!file && aiPageRefs.length === 0) || aiRunning) return;
     setAiRunning(true);
     setStatusMsg("Running AI vision on graphical pages...");
 
-    const form = new FormData();
-    form.append("file", file);
-    const qs = aiPages.length ? `?pages=${encodeURIComponent(aiPages.join(","))}` : "";
-
     try {
-      const aiQs = qs ? `${qs}&ai_fallback=true` : `?ai_fallback=true`;
-      const res = await fetchWithRetry(`/api/takeoff/extract${aiQs}`, { method: "POST", body: form }, { retries: 1 });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setStatusMsg(typeof data?.error === "string" ? data.error : `Could not run AI extraction (${res.status}). Try the file again from the project header or Drive import.`);
-        setAiRunning(false);
-        return;
+      let aiRows: TakeoffRow[] = [];
+      if (file) {
+        const form = new FormData();
+        form.append("file", file);
+        const qs = aiPages.length ? `?pages=${encodeURIComponent(aiPages.join(","))}` : "";
+        const aiQs = qs ? `${qs}&ai_fallback=true` : `?ai_fallback=true`;
+        const res = await fetchWithRetry(`/api/takeoff/extract${aiQs}`, { method: "POST", body: form }, { retries: 1 });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setStatusMsg(typeof data?.error === "string" ? data.error : `Could not run AI extraction (${res.status}). Try the file again from the project header or Drive import.`);
+          setAiRunning(false);
+          return;
+        }
+        aiRows = (data.rows ?? []).map((r: TakeoffRow, i: number) => ({
+          ...r, id: `ai-${i}`, extraction_method: "ai_vision",
+        }));
+      } else {
+        const pagesToRun = aiPageRefs.filter((page) => aiPages.includes(page.page_number));
+        if (pagesToRun.length === 0) {
+          setStatusMsg("No stored drawing pages are ready for AI review yet. Reopen the document list and retry.");
+          setAiRunning(false);
+          return;
+        }
+        const aiRowsCollected: TakeoffRow[] = [];
+        for (const page of pagesToRun) {
+            const res = await fetchWithRetry("/api/takeoff/canvas/vision-extract", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ page_id: page.page_id }),
+            }, { retries: 1 });
+            const data = await res.json().catch(() => ({})) as { result?: { items?: Array<Record<string, unknown>> }; error?: string };
+            if (!res.ok) throw new Error(typeof data?.error === "string" ? data.error : `Could not run AI extraction for page ${page.page_number}`);
+            const items = Array.isArray(data.result?.items) ? data.result.items : [];
+            aiRowsCollected.push(...items.map((item, index) => ({
+              id: `ai-${page.page_number}-${index}`,
+              trade: "AI Vision",
+              cost_code: typeof item.cost_code === "string" && item.cost_code.length > 0 ? item.cost_code : "01-00-00",
+              description: typeof item.description === "string" ? item.description : `AI vision item - page ${page.page_number}`,
+              quantity_basis: typeof item.raw_text === "string" && item.raw_text.trim().length > 0 ? item.raw_text : "AI vision extraction",
+              total_qty: typeof item.quantity === "number" ? item.quantity : Number(item.quantity ?? 0),
+              uom: typeof item.unit === "string" && item.unit.length > 0 ? item.unit : "EA",
+              drawing_ref: fileName || null,
+              location_tag: `Page ${page.page_number}`,
+              extraction_method: "ai_vision" as const,
+              page: page.page_number,
+              document_id: activeDocumentIdRef.current,
+            } satisfies TakeoffRow)));
+          }
+        aiRows = aiRowsCollected;
       }
-      const aiRows: TakeoffRow[] = (data.rows ?? []).map((r: TakeoffRow, i: number) => ({
-        ...r, id: `ai-${i}`, extraction_method: "ai_vision",
-      }));
       setRows((prev) => [...prev, ...aiRows]);
       setAiPages([]); // consumed
+      setAiPageRefs([]);
       setStatusMsg(`AI added ${aiRows.length.toLocaleString()} line items from graphical pages`);
       await persistRows([...rows, ...aiRows]);
     } catch {
@@ -916,7 +1119,19 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     } finally {
       setAiRunning(false);
     }
-  }, [aiPages, aiRunning, persistRows, rows]);
+  }, [aiPageRefs, aiPages, aiRunning, fileName, persistRows, rows]);
+
+  useEffect(() => {
+    if (phase !== "done") return;
+    const documentId = activeDocumentIdRef.current;
+    if (!documentId) return;
+    if (aiRunning) return;
+    if (rows.length > 0) return;
+    if (aiPages.length === 0 || aiPageRefs.length === 0) return;
+    if (autoAiDocumentRef.current !== documentId) return;
+    autoAiDocumentRef.current = `${documentId}:started`;
+    void runAiFallback();
+  }, [aiPageRefs, aiPages, aiRunning, phase, rows.length, runAiFallback]);
 
   const handleFile = useCallback(async (file: File) => {
     if (!file.name.toLowerCase().endsWith(".json")) {
@@ -1013,37 +1228,11 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
             Upload a plan, model, or schedule. The app will pull out quantities automatically and keep the CSI coding attached.
           </p>
         </div>
-        <div className="mb-4 rounded-xl border border-[#CCFF00]/20 bg-[#CCFF00]/[0.04] p-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="text-xs font-semibold text-white">Manual takeoff</p>
-              <p className="mt-1 text-[11px] text-white/45">
-                Open the canvas to draw, measure, and save takeoff items by hand.
-              </p>
-            </div>
-            <Link
-              href={`/dashboard/projects/${projectId}/takeoff/canvas`}
-              className="inline-flex h-10 items-center justify-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85"
-            >
-              Open Canvas
-            </Link>
-          </div>
-          <div className="mt-4 grid gap-2 sm:grid-cols-3">
-            <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2">
-              <p className="text-[10px] uppercase tracking-widest text-white/35">Best for</p>
-              <p className="mt-1 text-[11px] text-white/75">Measuring on a drawing</p>
-            </div>
-            <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2">
-              <p className="text-[10px] uppercase tracking-widest text-white/35">Use this if</p>
-              <p className="mt-1 text-[11px] text-white/75">You want to trace items directly on the sheet</p>
-            </div>
-            <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2">
-              <p className="text-[10px] uppercase tracking-widest text-white/35">Then do</p>
-              <p className="mt-1 text-[11px] text-white/75">Set the scale, trace, and save</p>
-            </div>
-          </div>
-        </div>
-        <UploadZone onFile={handleFile} disabled={false} />
+        <ScopePreflight projectId={projectId} onConfirmed={handleScopeConfirmed} />
+        <AutomatedTakeoffStatus projectId={projectId} />
+        <AutomatedTakeoffReview candidates={savedItems} working={batchApproving} onApproveAndImport={() => void approveAndImportReady()} />
+        <UploadZone onFile={handleFile} disabled={!scopeConfirmed} />
+        {!scopeConfirmed && <p className="mt-2 text-center text-[10px] uppercase tracking-widest text-white/30">Confirm the processing scope to enable automated extraction</p>}
 
         {docs.length > 0 && (
           <div className="mt-6 rounded-xl border border-white/10 bg-[#0E0F12] p-5">
@@ -1065,7 +1254,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
               </select>
               <button
                 onClick={() => { const d = docs.find((x) => x.id === selectedDoc); if (d) runFromDocument(d.id, d.file_name, d.drive); }}
-                disabled={!selectedDoc}
+                disabled={!selectedDoc || !scopeConfirmed}
                 className="bg-[#CCFF00]/10 border border-[#CCFF00]/30 text-[#CCFF00] hover:bg-[#CCFF00]/20 rounded-lg px-4 py-2 text-[11px] font-bold tracking-widest uppercase transition-colors disabled:opacity-30"
               >
                 Start extraction
@@ -1091,6 +1280,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
                     <th className="text-left px-4 py-2 text-gray-600 uppercase tracking-widest font-normal">Code</th>
                     <th className="text-right px-4 py-2 text-gray-600 uppercase tracking-widest font-normal">Qty</th>
                     <th className="text-left px-4 py-2 text-gray-600 uppercase tracking-widest font-normal">Unit</th>
+                    <th className="text-left px-4 py-2 text-gray-600 uppercase tracking-widest font-normal">Evidence</th>
                     <th className="px-4 py-2" />
                   </tr>
                 </thead>
@@ -1101,7 +1291,27 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
                       <td className="px-4 py-2 text-gray-500 font-mono">{item.csi_code ?? "-"}</td>
                       <td className="px-4 py-2 text-right text-gray-400 font-mono">{item.quantity != null ? item.quantity.toLocaleString() : "-"}</td>
                       <td className="px-4 py-2 text-gray-500 font-mono uppercase">{item.unit ?? "-"}</td>
+                      <td className="px-4 py-2">
+                        <span className={`rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider ${
+                          item.review_status === "approved" ? "bg-[#CCFF00]/15 text-[#CCFF00]" :
+                          item.review_status === "rejected" ? "bg-red-400/15 text-red-300" :
+                          item.quantity_validation_status === "validated" ? "bg-cyan-400/15 text-cyan-300" : "bg-amber-400/15 text-amber-300"
+                        }`}>
+                          {item.review_status === "approved" || item.review_status === "rejected"
+                            ? item.review_status
+                            : item.quantity_validation_status === "validated" ? "ready for review" : item.quantity_validation_reason?.replaceAll("_", " ") ?? "evidence required"}
+                        </span>
+                      </td>
                       <td className="px-4 py-2 text-right">
+                        {(item.review_status === "suggested" || item.review_status === "reviewed") && (
+                          <span className="mr-3 inline-flex items-center gap-1.5">
+                            {item.quantity_validation_reason === "stale_revision" && (
+                              <button type="button" disabled={decidingId === item.id} onClick={() => void acceptSavedRevision(item)} className="text-[9px] font-bold uppercase tracking-wider text-amber-300 hover:text-amber-100 disabled:opacity-40">Accept revision</button>
+                            )}
+                            <button type="button" disabled={decidingId === item.id} onClick={() => void decideSavedItem(item, "reject")} className="text-[9px] font-bold uppercase tracking-wider text-white/40 hover:text-red-300 disabled:opacity-40">Reject</button>
+                            <button type="button" disabled={decidingId === item.id || item.quantity_validation_status !== "validated" || !item.takeoff_job_id} onClick={() => void decideSavedItem(item, "approve")} className="rounded-full bg-[#CCFF00] px-2.5 py-1 text-[9px] font-bold uppercase tracking-wider text-black disabled:opacity-30">Approve</button>
+                          </span>
+                        )}
                         <button
                           onClick={() => setDeleteTarget(item)}
                           disabled={deletingId === item.id}
@@ -1303,7 +1513,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
       )}
 
       {/* AI vision fallback - only when graphical PDF pages had no readable tables */}
-      {phase === "done" && hasLocalPdf && aiPages.length > 0 && (
+      {phase === "done" && aiPages.length > 0 && (hasLocalPdf || aiPageRefs.length > 0) && (
         <div className="rounded-xl border border-[#CCFF00]/20 bg-[#CCFF00]/[0.04] p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div>
             <p className="text-xs text-white font-bold">

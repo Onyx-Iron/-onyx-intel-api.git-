@@ -1,4 +1,5 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
+import { NextResponse, type NextFetchEvent, type NextRequest } from "next/server";
 
 const isPublicRoute = createRouteMatcher([
   "/",
@@ -14,7 +15,7 @@ const isPublicRoute = createRouteMatcher([
   "/api/procurement/bids",
 ]);
 
-export default clerkMiddleware(async (auth, request) => {
+const protectedProxy = clerkMiddleware(async (auth, request) => {
   if (!isPublicRoute(request)) {
     // Without an explicit redirect target, auth.protect() falls back to
     // Clerk's own default flow, which doesn't know this app has a custom
@@ -23,6 +24,13 @@ export default clerkMiddleware(async (auth, request) => {
     await auth.protect({ unauthenticatedUrl: new URL("/sign-in", request.url).toString() });
   }
 });
+
+export default function proxy(request: NextRequest, event: NextFetchEvent) {
+  if (process.env.PLAYWRIGHT_TEST_MODE === "1" && request.nextUrl.pathname.startsWith("/e2e/")) {
+    return NextResponse.next();
+  }
+  return protectedProxy(request, event);
+}
 
 export const config = {
   matcher: [

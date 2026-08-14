@@ -2,39 +2,13 @@ import { createHash } from "node:crypto";
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 
-import type { ConfirmedTakeoffScope, TakeoffScopeMode } from "@/lib/takeoff/contracts";
 import { assertPermission } from "@/lib/project-controls/permissions";
 import { authTenantKey, authTenantName, getOrCreateTenant } from "@/lib/project-controls/server";
 import { createServiceClient } from "@/lib/supabase/server";
+import { sanitizeConfirmedTakeoffScope } from "@/lib/takeoff/scope-confirmation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const MODES = new Set<TakeoffScopeMode>(["complete", "trades", "bid_packages", "documents", "alternates"]);
-
-function stringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return [...new Set(value.filter((item): item is string => typeof item === "string" && item.trim() !== "").map((item) => item.trim()))].sort();
-}
-
-function buildScope(value: unknown, userId: string): ConfirmedTakeoffScope {
-  const input = value && typeof value === "object" ? value as Record<string, unknown> : {};
-  const mode = input.mode as TakeoffScopeMode;
-  if (!MODES.has(mode)) throw new Error("Choose a complete estimate or a specific trade, package, document, sheet, or alternate scope");
-  const scope: ConfirmedTakeoffScope = {
-    mode,
-    tradeCodes: stringArray(input.tradeCodes),
-    bidPackageIds: stringArray(input.bidPackageIds),
-    documentIds: stringArray(input.documentIds),
-    sheetIds: stringArray(input.sheetIds),
-    alternateIds: stringArray(input.alternateIds),
-    confirmedAt: new Date().toISOString(),
-    confirmedBy: userId,
-  };
-  const selected = scope.tradeCodes.length + scope.bidPackageIds.length + scope.documentIds.length + scope.sheetIds.length + scope.alternateIds.length;
-  if (mode !== "complete" && selected === 0) throw new Error("The selected processing scope is empty");
-  return scope;
-}
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
@@ -48,7 +22,33 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const { data, error } = await db.from("takeoff_jobs" as never).select("*")
       .eq("tenant_id", tenantId).eq("project_id", projectId).order("created_at", { ascending: false });
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    return NextResponse.json({ jobs: data ?? [] });
+    const jobs = (data ?? []) as Array<Record<string, unknown>>;
+    const jobIds = jobs.map((job) => String(job.id));
+    if (jobIds.length === 0) return NextResponse.json({ jobs: [] });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyDb = db as any;
+    const [{ data: units, error: unitsError }, { data: candidates, error: candidatesError }] = await Promise.all([
+      anyDb.from("takeoff_job_units").select("id,job_id,unit_type,source_id,state,attempt_count,last_error")
+        .eq("tenant_id", tenantId).eq("project_id", projectId).in("job_id", jobIds).order("created_at", { ascending: true }),
+      anyDb.from("takeoff_items").select("takeoff_job_id,review_status,quantity_validation_status")
+        .eq("tenant_id", tenantId).eq("project_id", projectId).in("takeoff_job_id", jobIds),
+    ]);
+    if (unitsError || candidatesError) return NextResponse.json({ error: unitsError?.message ?? candidatesError?.message }, { status: 500 });
+    const enriched = jobs.map((job) => {
+      const jobUnits = (units ?? []).filter((unit: Record<string, unknown>) => unit.job_id === job.id);
+      const jobCandidates = (candidates ?? []).filter((candidate: Record<string, unknown>) => candidate.takeoff_job_id === job.id);
+      return {
+        ...job,
+        units: jobUnits,
+        candidate_summary: {
+          total: jobCandidates.length,
+          validated: jobCandidates.filter((candidate: Record<string, unknown>) => candidate.quantity_validation_status === "validated").length,
+          blocked: jobCandidates.filter((candidate: Record<string, unknown>) => candidate.quantity_validation_status === "blocked").length,
+          pending_approval: jobCandidates.filter((candidate: Record<string, unknown>) => candidate.review_status === "suggested" || candidate.review_status === "reviewed").length,
+        },
+      };
+    });
+    return NextResponse.json({ jobs: enriched });
   } catch (error) {
     const status = error instanceof Error && "status" in error ? Number(error.status) : 500;
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status });
@@ -64,7 +64,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!projectId || body.scopeConfirmed !== true) {
       return NextResponse.json({ error: "Confirm the proposed processing scope before starting takeoff" }, { status: 400 });
     }
-    const scope = buildScope(body.scope, userId);
+    const scope = sanitizeConfirmedTakeoffScope(body.scope, userId);
     const scopeHash = createHash("sha256").update(JSON.stringify(scope)).digest("hex");
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     await assertPermission(tenantId, userId, "field", "write");

@@ -8,7 +8,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function authorized(req: NextRequest): boolean {
-  const configured = process.env.TAKEOFF_RECOVERY_SECRET;
+  // Vercel Cron automatically sends CRON_SECRET as a Bearer token. Keep the
+  // older dedicated name as a non-Vercel/manual-scheduler fallback.
+  const configured = process.env.CRON_SECRET ?? process.env.TAKEOFF_RECOVERY_SECRET;
   const supplied = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
   if (!configured || configured.length !== supplied.length) return false;
   return timingSafeEqual(Buffer.from(configured), Buffer.from(supplied));

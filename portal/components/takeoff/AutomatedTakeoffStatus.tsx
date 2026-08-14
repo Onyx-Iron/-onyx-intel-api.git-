@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2, RefreshCw } from "lucide-react";
 
-interface Job { id: string; state: string; created_at: string; scope_snapshot: { mode?: string } }
+interface JobUnit { id: string; unit_type: string; source_id: string; state: string; attempt_count?: number | null; last_error?: string | null }
+interface CandidateSummary { total: number; validated: number; blocked: number; pending_approval: number }
+interface Job { id: string; state: string; created_at: string; scope_snapshot: { mode?: string }; units?: JobUnit[]; candidate_summary?: CandidateSummary }
 
 export default function AutomatedTakeoffStatus({ projectId }: { projectId: string }) {
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -28,12 +30,15 @@ export default function AutomatedTakeoffStatus({ projectId }: { projectId: strin
   const current = jobs[0];
   const completed = current?.state === "estimate_imported" || current?.state === "superseded";
   const attention = current && ["blocked", "conflicted", "failed_terminal"].includes(current.state);
+  const units = current?.units ?? [];
+  const resolvedStates = new Set(["review_ready", "approved", "estimate_imported", "excluded", "superseded"]);
+  const resolvedUnits = units.filter((unit) => resolvedStates.has(unit.state)).length;
 
   return (
     <section className="mb-5 rounded-xl border border-white/10 bg-[#0E0F12] p-4" aria-label="Automated takeoff status">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#00D2FF]">Automated takeoff status</p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#00D2FF]">Processing scope</p>
           <p className="mt-1 text-xs text-white/60">Completion is reported only after every in-scope unit is resolved and approved quantities are reconciled.</p>
         </div>
         <button type="button" onClick={() => void load()} className="rounded-full border border-white/10 p-2 text-white/50 hover:text-white" aria-label="Refresh takeoff status"><RefreshCw size={13} /></button>
@@ -41,7 +46,19 @@ export default function AutomatedTakeoffStatus({ projectId }: { projectId: strin
       {loading ? <p className="mt-3 flex items-center gap-2 text-xs text-white/45"><Loader2 size={13} className="animate-spin" />Checking workflow…</p>
         : error ? <p className="mt-3 flex items-center gap-2 text-xs text-red-300"><AlertTriangle size={13} />{error}</p>
           : !current ? <p className="mt-3 text-xs text-white/40">No governed automated run has started yet. Confirm scope, then select a document.</p>
-            : <div className="mt-3 flex items-center gap-2 text-xs"><span className={`rounded-full px-2.5 py-1 font-semibold uppercase tracking-wider ${completed ? "bg-[#CCFF00]/10 text-[#CCFF00]" : attention ? "bg-amber-400/10 text-amber-300" : "bg-[#00D2FF]/10 text-[#00D2FF]"}`}>{current.state.replaceAll("_", " ")}</span><span className="text-white/35">Scope: {current.scope_snapshot?.mode ?? "confirmed"}</span>{completed && <CheckCircle2 size={14} className="text-[#CCFF00]" />}</div>}
+            : <div className="mt-3 space-y-3">
+                <div className="flex items-center gap-2 text-xs"><span className={`rounded-full px-2.5 py-1 font-semibold uppercase tracking-wider ${completed ? "bg-[#CCFF00]/10 text-[#CCFF00]" : attention ? "bg-amber-400/10 text-amber-300" : "bg-[#00D2FF]/10 text-[#00D2FF]"}`}>{current.state === "conflicted" ? "Conflicted revision" : current.state.replaceAll("_", " ")}</span><span className="text-white/35">Scope: {current.scope_snapshot?.mode ?? "confirmed"}</span>{completed && <CheckCircle2 size={14} className="text-[#CCFF00]" />}</div>
+                {units.length > 0 && <div>
+                  <p className="text-[11px] font-semibold text-white/65">{resolvedUnits} of {units.length} units resolved</p>
+                  <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+                    {units.map((unit) => <div key={unit.id} className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-[10px]">
+                      <div className="flex items-center justify-between gap-2"><span className="truncate text-white/60">{unit.unit_type}: {unit.source_id}</span><span className="uppercase text-white/35">{unit.state.replaceAll("_", " ")}</span></div>
+                      {unit.last_error && <p className="mt-1 text-amber-200/65">{unit.last_error}</p>}
+                    </div>)}
+                  </div>
+                </div>}
+                {current.candidate_summary && <p className="text-[10px] text-white/40">{current.candidate_summary.validated} validated · {current.candidate_summary.blocked} blocked · {current.candidate_summary.pending_approval} pending approval</p>}
+              </div>}
     </section>
   );
 }

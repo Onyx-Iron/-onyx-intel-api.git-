@@ -1,6 +1,9 @@
 export interface CapabilityBoundary { tradeFamily: string; sourceType: string; quantityType: string }
 export interface CapabilityMetrics {
   fixtures: number;
+  reviewedFixtures?: number;
+  verifiedSourceFixtures?: number;
+  qualifiedReviewerFixtures?: number;
   recall?: number;
   precision?: number;
   unitAccuracy?: number;
@@ -16,6 +19,19 @@ export interface CapabilityCertification {
 
 export function evaluateCapability(metrics: CapabilityMetrics): CapabilityCertification {
   if (metrics.fixtures <= 0) return { status: "blocked", boundary: metrics.boundary, reasons: ["no_reviewed_fixtures"] };
+  if (!metrics.boundary) return { status: "blocked", reasons: ["missing_capability_boundary"] };
+  if ((metrics.reviewedFixtures ?? 0) <= 0 || (metrics.qualifiedReviewerFixtures ?? 0) <= 0) {
+    return { status: "blocked", boundary: metrics.boundary, reasons: ["no_qualified_reviewed_fixtures"] };
+  }
+  if ((metrics.verifiedSourceFixtures ?? 0) !== metrics.fixtures) {
+    return { status: "blocked", boundary: metrics.boundary, reasons: ["unverified_fixture_sources"] };
+  }
+  if (metrics.reviewedFixtures !== metrics.fixtures || metrics.qualifiedReviewerFixtures !== metrics.fixtures) {
+    return { status: "blocked", boundary: metrics.boundary, reasons: ["incomplete_qualified_review"] };
+  }
+  if (metrics.fixtures < 3) {
+    return { status: "blocked", boundary: metrics.boundary, reasons: ["insufficient_reviewed_fixtures"] };
+  }
   const missing = [metrics.recall, metrics.precision, metrics.unitAccuracy, metrics.scopeCompleteness, metrics.maxQuantityError].some((value) => value === undefined);
   if (missing) return { status: "blocked", boundary: metrics.boundary, reasons: ["incomplete_metrics"] };
   const reasons: string[] = [];
