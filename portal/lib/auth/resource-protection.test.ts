@@ -24,9 +24,12 @@ describe("Clerk resource-based protection", () => {
       .filter((path) => !PUBLIC_API_ROUTES.has(relative(APP_ROOT, path).replaceAll("\\", "/")))
       .filter((path) => {
         const source = readFileSync(path, "utf8");
-        return !/@clerk\/nextjs\/server|requireGoogleToken|INTERNAL_WORKER_SECRET|CRON_SECRET|verifyWebhookSignature/.test(source);
+        return !/@clerk\/nextjs\/server|requirePlatformAdmin|requireGoogleToken|INTERNAL_WORKER_SECRET|CRON_SECRET|verifyWebhookSignature/.test(source);
       });
     assert.deepEqual(unprotected, []);
+    const platformGuard = readFileSync(join(process.cwd(), "lib/auth/platform-admin.ts"), "utf8");
+    assert.match(platformGuard, /@clerk\/nextjs\/server/);
+    assert.match(platformGuard, /ONYX_PLATFORM_ADMIN_EMAILS/);
   });
 
   it("protects dashboard, admin, and onboarding pages without deprecated path matching", () => {
