@@ -78,6 +78,7 @@ interface TakeoffRow {
   location_tag?: string | null;
   extraction_method?: "deterministic" | "ai_vision";
   confidence?: number | null;
+  quantity_evidence?: Record<string, unknown> | null;
 }
 
 // Mirrors lib/estimating/takeoff-import.ts's buildEstimateImportRows +
@@ -349,6 +350,7 @@ Deno.serve(async (req) => {
           drawing_ref: r.drawing_ref ?? null,
           location_tag: r.location_tag ?? null,
           extraction_method: r.extraction_method ?? "deterministic",
+          quantity_evidence: r.quantity_evidence ?? null,
         },
       })));
       const payloadIds = payload.map((row) => row.id);

@@ -5,7 +5,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { finalSplitStatus, isSplitStartStale } from "@/lib/takeoff/pipeline-status";
 import { advanceTakeoffPageJob, createGovernedPageContext } from "@/lib/takeoff/governance-server";
-import { validateTextQuantityCandidate } from "@/lib/takeoff/quantity-validation";
+import { validateExtractorQuantityCandidate, validateTextQuantityCandidate, type ExtractorQuantityEvidence } from "@/lib/takeoff/quantity-validation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -127,13 +127,19 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       for (const candidate of candidates) {
         const meta = candidate.meta && typeof candidate.meta === "object" ? candidate.meta as Record<string, unknown> : {};
         const rawText = typeof meta.quantity_basis === "string" ? meta.quantity_basis : "";
-        const validation = validateTextQuantityCandidate({
-          sourceChecksum: checksum, authoritativeChecksum: context.authoritativeChecksum,
-          manifestVersion: context.manifestVersion, authoritativeManifestVersion: context.authoritativeManifestVersion,
-          unit: typeof candidate.unit === "string" ? candidate.unit : "",
-          submittedQuantity: typeof candidate.quantity === "number" ? candidate.quantity : Number(candidate.quantity),
-          rawText, sourceKind: "text", pageNumber: page.page_number,
-        });
+        const evidence = meta.quantity_evidence && typeof meta.quantity_evidence === "object" && !Array.isArray(meta.quantity_evidence)
+          ? meta.quantity_evidence as ExtractorQuantityEvidence
+          : null;
+        const submittedQuantity = typeof candidate.quantity === "number" ? candidate.quantity : Number(candidate.quantity);
+        const submittedUnit = typeof candidate.unit === "string" ? candidate.unit : "";
+        const validation = evidence
+          ? validateExtractorQuantityCandidate(evidence, submittedQuantity, submittedUnit)
+          : validateTextQuantityCandidate({
+              sourceChecksum: checksum, authoritativeChecksum: context.authoritativeChecksum,
+              manifestVersion: context.manifestVersion, authoritativeManifestVersion: context.authoritativeManifestVersion,
+              unit: submittedUnit, submittedQuantity,
+              rawText, sourceKind: "text", pageNumber: page.page_number,
+            });
         validations.push(validation);
         const { error: updateError } = await anyDb.from("takeoff_items").update({
           takeoff_job_id: context.jobId, source_manifest_id: context.manifestId,
@@ -143,8 +149,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           formula_version: validation.status === "validated" ? validation.formulaVersion : null,
           calculation_checksum: validation.status === "validated" ? validation.calculationChecksum : null,
           source_provenance: {
-            page_id: page.id, page_number: page.page_number, source_kind: "text", raw_text: rawText,
-            measurement_basis: "source_text", source_checksum: checksum, manifest_version: context.manifestVersion,
+            page_id: page.id, page_number: page.page_number, source_kind: evidence?.source_kind ?? "text",
+            raw_text: evidence?.source_quote ?? rawText, source_locator: evidence?.source_locator ?? null,
+            measurement_basis: evidence?.formula_version ?? "source_text", quantity_evidence: evidence,
+            source_checksum: checksum, manifest_version: context.manifestVersion,
           },
         }).eq("id", candidate.id).eq("tenant_id", tenantId).eq("project_id", docRow.project_id)
           .in("review_status", ["suggested", "reviewed"]);

@@ -126,6 +126,22 @@ class DataIntegrityBreachException(Exception):
 # Pydantic schemas
 # ══════════════════════════════════════════════════════════════════════════════
 
+class QuantityEvidence(BaseModel):
+    """Portable deterministic provenance retained through secure validation."""
+    model_config = {"extra": "forbid"}
+
+    measurement_class:  str            = Field(..., min_length=1, max_length=20)
+    source_kind:         str            = Field(..., min_length=1, max_length=20)
+    original_unit:       str | None     = Field(default=None, max_length=20)
+    normalized_unit:     str            = Field(..., min_length=1, max_length=20)
+    formula_version:     str            = Field(..., min_length=1, max_length=80)
+    calculation_inputs:  dict[str, str]
+    calculation_result:  float          = Field(..., ge=0)
+    source_quote:        str            = Field(..., min_length=1, max_length=2000)
+    source_locator:      str | None     = Field(default=None, max_length=500)
+    calculation_checksum: str           = Field(..., pattern=r"^[a-f0-9]{64}$")
+
+
 class SecureTakeoffRow(BaseModel):
     """
     Strict CSI MasterFormat takeoff row.
@@ -145,6 +161,7 @@ class SecureTakeoffRow(BaseModel):
     uom:            str       = Field(..., min_length=1,  max_length=5)
     drawing_ref:    str       = Field(default="",         max_length=50)
     location_tag:   str       = Field(default="",         max_length=120)
+    quantity_evidence: QuantityEvidence | None = None
 
     @field_validator("total_qty", mode="before")
     @classmethod

@@ -101,6 +101,84 @@ export async function createGovernedPageContext(args: {
   };
 }
 
+export async function createGovernedDocumentContext(args: {
+  db: GovernanceDb;
+  tenantId: string;
+  projectId: string;
+  documentId: string;
+  documentIdentity: string;
+  documentLabel: string;
+  revisionLabel?: string | null;
+  issueDate?: string | null;
+  sourceChecksum: string;
+  actorUserId: string;
+}): Promise<GovernedPageContext> {
+  const {
+    db, tenantId, projectId, documentId, documentIdentity, documentLabel,
+    revisionLabel = null, issueDate = null, sourceChecksum, actorUserId,
+  } = args;
+  const { data: scopeRequest, error: scopeError } = await db.from("takeoff_scope_requests")
+    .select("mode,division_codes,trade_keys,bid_package_ids,document_ids,sheet_ids,alternate_keys,confirmed_at,requested_by")
+    .eq("tenant_id", tenantId).eq("project_id", projectId).eq("status", "confirmed")
+    .order("created_at", { ascending: false }).limit(1).maybeSingle();
+  if (scopeError) throw new Error(scopeError.message);
+  if (!scopeRequest) throw new Error("Confirm the takeoff processing scope before automated extraction");
+
+  const sheetIdentity = `document:${documentIdentity.trim().toLowerCase()}`;
+  const { data: authoritative } = await db.from("takeoff_source_manifests").select("*")
+    .eq("tenant_id", tenantId).eq("project_id", projectId).eq("sheet_identity", sheetIdentity)
+    .eq("authority_status", "authoritative").maybeSingle();
+  let manifest = authoritative?.source_checksum === sourceChecksum ? authoritative : null;
+  if (!manifest) {
+    const { data: existingChecksum } = await db.from("takeoff_source_manifests").select("*")
+      .eq("tenant_id", tenantId).eq("project_id", projectId).eq("sheet_identity", sheetIdentity)
+      .eq("source_checksum", sourceChecksum).maybeSingle();
+    manifest = existingChecksum;
+  }
+  if (!manifest) {
+    const { data: latest } = await db.from("takeoff_source_manifests").select("manifest_version")
+      .eq("tenant_id", tenantId).eq("project_id", projectId).eq("sheet_identity", sheetIdentity)
+      .order("manifest_version", { ascending: false }).limit(1).maybeSingle();
+    const { data: inserted, error } = await db.from("takeoff_source_manifests").insert({
+      tenant_id: tenantId, project_id: projectId, document_id: documentId, sheet_id: null,
+      sheet_identity: sheetIdentity, discipline: "DOCUMENT", sheet_number: documentLabel,
+      revision_label: revisionLabel, issue_date: issueDate, source_checksum: sourceChecksum,
+      manifest_version: (latest?.manifest_version ?? 0) + 1,
+      authority_status: authoritative ? "proposed" : "authoritative", created_by: actorUserId,
+    }).select("*").single();
+    if (error) throw new Error(error.message);
+    manifest = inserted;
+    if (authoritative) {
+      const { error: lineageError } = await db.from("takeoff_source_lineage").insert({
+        tenant_id: tenantId, project_id: projectId, predecessor_id: authoritative.id,
+        successor_id: manifest.id, status: "proposed",
+      });
+      if (lineageError) throw new Error(lineageError.message);
+    }
+  }
+
+  const scope = scopeRequestToJobScope(scopeRequest, documentId, actorUserId);
+  const scopeHash = createHash("sha256").update(JSON.stringify(scope)).digest("hex");
+  const { data: job, error: jobError } = await db.from("takeoff_jobs").insert({
+    tenant_id: tenantId, project_id: projectId, scope_snapshot: scope, scope_hash: scopeHash, created_by: actorUserId,
+  }).select("id").single();
+  if (jobError) throw new Error(jobError.message);
+  const { data: unit, error: unitError } = await db.from("takeoff_job_units").insert({
+    job_id: job.id, tenant_id: tenantId, project_id: projectId, unit_type: "document", source_id: documentId,
+    payload: { document_id: documentId, source_manifest_id: manifest.id },
+  }).select("id").single();
+  if (unitError) throw new Error(unitError.message);
+
+  return {
+    jobId: job.id,
+    unitId: unit.id,
+    manifestId: manifest.id,
+    manifestVersion: manifest.manifest_version,
+    authoritativeManifestVersion: authoritative?.manifest_version ?? manifest.manifest_version,
+    authoritativeChecksum: authoritative?.source_checksum ?? manifest.source_checksum,
+  };
+}
+
 export async function advanceTakeoffPageJob(db: GovernanceDb, tenantId: string, jobId: string, unitId: string, actorUserId: string, validated: boolean): Promise<void> {
   const states = validated
     ? ["validated", "split", "classified", "extracted", "quantity_validated", "review_ready"]
