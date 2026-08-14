@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { resolveEstimateItemId, validateEstimateRowVersion, validateEstimateWriteNumbers } from "./write-policy";
+import { hasPricingBasisChanged, resolveEstimateItemId, validateEstimateRowVersion, validateEstimateWriteNumbers } from "./write-policy";
 
 describe("estimate write ownership policy", () => {
   it("accepts an id only when it already belongs to the target version", () => {
@@ -31,5 +31,19 @@ describe("estimate write ownership policy", () => {
     assert.deepEqual(validateEstimateWriteNumbers({ quantity: -1 }), { valid: false, field: "quantity" });
     assert.deepEqual(validateEstimateWriteNumbers({ material_cost: -0.01 }), { valid: false, field: "material_cost" });
     assert.deepEqual(validateEstimateWriteNumbers({ profit_pct: Number.NaN }), { valid: false, field: "profit_pct" });
+  });
+
+  it("invalidates price evidence when quantity, unit, cost code, or a cost component changes", () => {
+    const existing = {
+      cost_code: "03-30-00", quantity: 100, uom: "SF", labor_cost: 10,
+      material_cost: 20, equipment_cost: 0, trucking_cost: 0,
+      subcontract_cost: 0, disposal_cost: 0, testing_cost: 0,
+      other_direct_cost: 0, indirect_cost: 0,
+    };
+    assert.equal(hasPricingBasisChanged(existing, { ...existing, description: "Renamed only" }), false);
+    assert.equal(hasPricingBasisChanged(existing, { ...existing, quantity: 101 }), true);
+    assert.equal(hasPricingBasisChanged(existing, { ...existing, material_cost: 21 }), true);
+    assert.equal(hasPricingBasisChanged(existing, { ...existing, uom: "CY" }), true);
+    assert.equal(hasPricingBasisChanged(existing, { ...existing, cost_code: "03-31-00" }), true);
   });
 });

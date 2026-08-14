@@ -65,6 +65,8 @@ const testFiles = walk(root)
       normalized === "lib/estimating/outbox-worker.integration.test.ts" ||
       normalized === "lib/estimating/estimate-versioning.integration.test.ts" ||
       normalized === "lib/estimating/estimate-approval.integration.test.ts"
+      || normalized === "lib/estimating/estimate-save.integration.test.ts"
+      || normalized === "lib/construction-intelligence/price-review.integration.test.ts"
     );
   })
   .map((file) => relative(root, file));

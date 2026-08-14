@@ -17,6 +17,25 @@ export function validateEstimateRowVersion(submitted: number | null | undefined,
   return Number.isInteger(submitted) && submitted === current;
 }
 
+const PRICING_BASIS_FIELDS = [
+  "cost_code", "quantity", "uom", "labor_cost", "material_cost", "equipment_cost",
+  "trucking_cost", "subcontract_cost", "disposal_cost", "testing_cost",
+  "other_direct_cost", "indirect_cost",
+] as const;
+
+/** Any manual change to the priced basis makes the attached source snapshot stale. */
+export function hasPricingBasisChanged(
+  existing: Record<string, unknown>,
+  submitted: Record<string, unknown>,
+): boolean {
+  return PRICING_BASIS_FIELDS.some((field) => {
+    const before = existing[field];
+    const after = submitted[field];
+    if (typeof before === "number" || typeof after === "number") return Number(before ?? 0) !== Number(after ?? 0);
+    return String(before ?? "") !== String(after ?? "");
+  });
+}
+
 const NON_NEGATIVE_FIELDS = [
   "quantity",
   "labor_cost",

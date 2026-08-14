@@ -479,6 +479,8 @@ export default function EstimateMatrix({ projectId, projectName, embedded = fals
       }
       setSeedResult("Approved source price applied. Review the item and estimate totals before approval.");
       await load();
+    } catch (error) {
+      setSeedResult(`Pricing blocked: ${error instanceof Error ? error.message : "Could not reach the pricing service."}`);
     } finally {
       setSaving(false);
     }

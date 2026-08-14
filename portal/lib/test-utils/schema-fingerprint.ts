@@ -35,6 +35,10 @@ export const REQUIRED_TAKEOFF_SCHEMA_PATHS = [
   "/rpc/approve_takeoff_source_revision",
   "/rpc/confirm_takeoff_approval_preview",
   "/rpc/confirm_estimate_approval",
+  "/rpc/save_estimate_version",
+  "/price_observation_review_previews",
+  "/price_observation_reviews",
+  "/rpc/confirm_price_observation_review",
 ] as const;
 
 interface OpenApiDocument {

@@ -4,8 +4,8 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 import { assertVersionEditable, getServiceDb, loadVersionForTenant, NotFoundError, VersionLockedError } from "@/lib/estimating/versioning";
 import { applyVersionPercentages, calculateEstimateTotals, calculateItem } from "@/lib/estimating/calculations";
-import { recordEstimateAudit, recordEstimateAuditBatch } from "@/lib/estimating/audit";
-import { resolveEstimateItemId, validateEstimateRowVersion, validateEstimateWriteNumbers } from "@/lib/estimating/write-policy";
+import { recordEstimateAudit } from "@/lib/estimating/audit";
+import { hasPricingBasisChanged, resolveEstimateItemId, validateEstimateRowVersion, validateEstimateWriteNumbers } from "@/lib/estimating/write-policy";
 
 export const runtime = "nodejs";
 
@@ -35,6 +35,7 @@ interface ItemPatch {
   is_allowance?: boolean;
   is_alternate?: boolean;
   alternate_accepted?: boolean;
+  sort_order?: number;
 }
 
 /**
@@ -139,25 +140,19 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   // day-to-day editing path; the separate buyer-adjustment endpoint is for
   // the distinct "show original/proposed/reason, require confirmation"
   // workflow (STEP 7), not every routine slider tweak.
-  let effectiveVersion = version;
-  if (body.settings) {
-    const patch: Record<string, number> = {};
-    if (typeof body.settings.contingency_pct === "number") patch.contingency_pct = body.settings.contingency_pct;
-    if (typeof body.settings.overhead_pct === "number") patch.overhead_pct = body.settings.overhead_pct;
-    if (typeof body.settings.profit_pct === "number") patch.profit_pct = body.settings.profit_pct;
-    if (Object.keys(patch).length > 0) {
-      const { data: updatedVersion, error: vErr } = await db
-        .from("estimate_versions").update({ ...patch, row_version: version.row_version + 1 })
-        .eq("id", id).eq("row_version", version.row_version).select("*").maybeSingle();
-      if (vErr) return NextResponse.json({ error: vErr.message }, { status: 500 });
-      if (!updatedVersion) return NextResponse.json({ error: "Estimate changed while settings were being saved. Reload and try again." }, { status: 409 });
-      effectiveVersion = { ...effectiveVersion, ...updatedVersion };
-    }
-  }
-
   if (!Array.isArray(body.items) || body.items.length === 0) {
+    if (body.settings) {
+      const { data: result, error: saveError } = await db.rpc("save_estimate_version", {
+        p_version_id: id, p_tenant_id: tenantId, p_actor_user_id: userId,
+        p_expected_version_revision: Number(version.row_version ?? 0), p_settings: body.settings, p_items: [],
+      });
+      if (saveError) return NextResponse.json({ error: saveError.message }, { status: /changed|revision|editable/i.test(saveError.message) ? 409 : 422 });
+      const saved = result as { version: Record<string, unknown> };
+      const totals = await getVersionTotals(db, id);
+      return NextResponse.json({ items: [], totals, version: saved.version });
+    }
     const totals = await getVersionTotals(db, id);
-    return NextResponse.json({ items: [], totals, version: effectiveVersion });
+    return NextResponse.json({ items: [], totals, version });
   }
 
   const { data: existingRows } = await db
@@ -181,9 +176,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   }
 
   const pct = {
-    contingencyPct: effectiveVersion.contingency_pct ?? 0,
-    overheadPct: effectiveVersion.overhead_pct ?? 0,
-    profitPct: effectiveVersion.profit_pct ?? 0,
+    contingencyPct: body.settings?.contingency_pct ?? version.contingency_pct ?? 0,
+    overheadPct: body.settings?.overhead_pct ?? version.overhead_pct ?? 0,
+    profitPct: body.settings?.profit_pct ?? version.profit_pct ?? 0,
   };
 
   // Server-side recalculation of every item — the client may send whatever
@@ -218,9 +213,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     });
     const isUpdate = identity.existing;
     const existing = isUpdate ? existingById.get(identity.id) as Record<string, unknown> : null;
+    const pricingBasisChanged = !existing || hasPricingBasisChanged(existing, item as Record<string, unknown>);
     return {
       id: identity.id,
-      row_version: isUpdate ? Number(existing?.row_version ?? 0) + 1 : 0,
+      expected_row_version: isUpdate ? Number(existing?.row_version ?? 0) : null,
       tenant_id: tenantId,
       project_id: version.project_id,
       estimate_version_id: id,
@@ -250,28 +246,27 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       is_allowance: item.is_allowance ?? false,
       is_alternate: item.is_alternate ?? false,
       alternate_accepted: item.alternate_accepted ?? false,
+      sort_order: item.sort_order ?? 0,
       updated_by: userId,
-      pricing_status: isUpdate ? existing?.pricing_status ?? "manual" : "manual",
-      ...(isUpdate ? {} : { created_by: userId }),
+      clear_price_evidence: pricingBasisChanged,
+      created_by: isUpdate ? existing?.created_by ?? userId : userId,
     };
   });
 
-  const { data, error } = await db.from("estimate_items").upsert(payload, { onConflict: "id" }).select("*");
-  if (error) return NextResponse.json({ error: error.message }, { status: 422 });
-
-  await recordEstimateAuditBatch(db, (data ?? []).map((row: { id: string }) => {
-    const before = existingById.get(row.id);
-    return {
-      tenantId, projectId: version.project_id, estimateId: version.estimate_id, estimateVersionId: id,
-      entityType: "item" as const, entityId: row.id,
-      action: (before ? "updated" : "created") as "updated" | "created",
-      actorUserId: userId, before: before ?? null, after: row,
-    };
-  }));
+  const { data: result, error } = await db.rpc("save_estimate_version", {
+    p_version_id: id,
+    p_tenant_id: tenantId,
+    p_actor_user_id: userId,
+    p_expected_version_revision: Number(version.row_version ?? 0),
+    p_settings: body.settings ?? {},
+    p_items: payload,
+  });
+  if (error) return NextResponse.json({ error: error.message }, { status: /changed|revision|belong|editable/i.test(error.message) ? 409 : 422 });
+  const saved = result as { items: Record<string, unknown>[]; version: Record<string, unknown> };
 
   const totals = await getVersionTotals(db, id);
 
-  return NextResponse.json({ items: data ?? [], totals, version: effectiveVersion });
+  return NextResponse.json({ items: saved.items ?? [], totals, version: saved.version });
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
