@@ -3,8 +3,13 @@ import { spawnSync } from "node:child_process";
 import { join, relative, resolve } from "node:path";
 
 const mode = process.argv[2];
+const scope = process.argv[3];
 if (mode !== "unit" && mode !== "integration") {
   console.error("Usage: node scripts/run-tests.mjs <unit|integration>");
+  process.exit(1);
+}
+if (scope !== undefined && scope !== "takeoff") {
+  console.error("Supported test scope: takeoff");
   process.exit(1);
 }
 
@@ -51,6 +56,16 @@ const testFiles = walk(root)
     const integration = file.endsWith(".integration.test.ts") || file.endsWith(".integration.test.tsx");
     return mode === "integration" ? integration : !integration;
   })
+  .filter((file) => {
+    if (scope !== "takeoff") return true;
+    const normalized = relative(root, file).replaceAll("\\", "/");
+    return (
+      normalized.startsWith("lib/takeoff/") ||
+      normalized === "lib/estimating/takeoff-integrity.integration.test.ts" ||
+      normalized === "lib/estimating/outbox-worker.integration.test.ts" ||
+      normalized === "lib/estimating/estimate-versioning.integration.test.ts"
+    );
+  })
   .map((file) => relative(root, file));
 
 if (testFiles.length === 0) {
@@ -62,6 +77,18 @@ const tsxCli = resolve(root, "node_modules", "tsx", "dist", "cli.mjs");
 const command = existsSync(tsxCli) ? process.execPath : "tsx";
 const baseArgs = existsSync(tsxCli) ? [tsxCli, "--test"] : ["--test"];
 let exitCode = 0;
+
+if (mode === "integration") {
+  const schemaCheck = spawnSync(process.execPath, [resolve(root, "scripts", "verify-test-schema.mjs")], {
+    stdio: "inherit",
+    env: process.env,
+  });
+  if (schemaCheck.error) {
+    console.error(schemaCheck.error.message);
+    process.exit(1);
+  }
+  if (schemaCheck.status !== 0) process.exit(schemaCheck.status ?? 1);
+}
 
 for (const testFile of testFiles) {
   const result = spawnSync(command, [...baseArgs, testFile], { stdio: "inherit" });
