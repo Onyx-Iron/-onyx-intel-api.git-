@@ -33,6 +33,12 @@ export interface IntegrationTestEnv {
   projectRef?: string;
 }
 
+export function assertIntegrationTestEnvReady(env: IntegrationTestEnv, required: boolean): boolean {
+  if (env.ready) return true;
+  if (required) throw new Error(`Integration test environment is required: ${env.skipReason ?? "configuration is incomplete"}`);
+  return false;
+}
+
 function loadEnvFile(relativePath: string): Record<string, string> {
   const envPath = resolve(__dirname, relativePath);
   const out: Record<string, string> = {};

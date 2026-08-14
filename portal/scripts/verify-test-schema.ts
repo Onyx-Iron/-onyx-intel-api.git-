@@ -1,9 +1,10 @@
-import { loadIntegrationTestEnv } from "../lib/test-utils/integration-guard";
+import { assertIntegrationTestEnvReady, loadIntegrationTestEnv } from "../lib/test-utils/integration-guard";
 import { verifyRemoteTakeoffSchema } from "../lib/test-utils/schema-fingerprint";
 
 async function main(): Promise<void> {
   const env = loadIntegrationTestEnv();
-  if (!env.ready) {
+  const required = process.env.CI === "true" || process.env.REQUIRE_INTEGRATION_TESTS === "true";
+  if (!assertIntegrationTestEnvReady(env, required)) {
     console.log(`Integration schema check skipped: ${env.skipReason}`);
     return;
   }

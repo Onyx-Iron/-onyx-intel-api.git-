@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "launch": "node scripts/launch.mjs",
+    "launch": "node scripts/release-gate.mjs",
     "launch:audit": "node scripts/launch-audit.mjs",
     "launch:smoke": "node scripts/launch-smoke.mjs",
     "test:unit": "node scripts/run-tests.mjs unit",
@@ -54,6 +54,7 @@
     "postcss": "8.5.25",
     "next": {
       "sharp": "0.35.3"
-    }
+    },
+    "nanoid": "3.3.18"
   }
 }
