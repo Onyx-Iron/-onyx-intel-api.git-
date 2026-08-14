@@ -5,11 +5,13 @@ import { assertPermission, PermissionError } from "@/lib/project-controls/permis
 import { assertVersionEditable, getServiceDb, loadVersionForTenant, NotFoundError, VersionLockedError } from "@/lib/estimating/versioning";
 import { applyVersionPercentages, calculateEstimateTotals, calculateItem } from "@/lib/estimating/calculations";
 import { recordEstimateAudit, recordEstimateAuditBatch } from "@/lib/estimating/audit";
+import { resolveEstimateItemId, validateEstimateRowVersion, validateEstimateWriteNumbers } from "@/lib/estimating/write-policy";
 
 export const runtime = "nodejs";
 
 interface ItemPatch {
   id?: string;
+  row_version?: number;
   cost_code?: string | null;
   description?: string;
   scope_category?: string | null;
@@ -99,6 +101,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   if (!Array.isArray(body.items) && !body.settings) {
     return NextResponse.json({ error: "items array or settings required" }, { status: 400 });
   }
+  if (body.settings) {
+    const validation = validateEstimateWriteNumbers(body.settings);
+    if (!validation.valid) return NextResponse.json({ error: `${validation.field} must be a finite non-negative number` }, { status: 400 });
+  }
+  for (const item of body.items ?? []) {
+    const validation = validateEstimateWriteNumbers(item as Record<string, unknown>);
+    if (!validation.valid) return NextResponse.json({ error: `${validation.field} must be a finite non-negative number` }, { status: 400 });
+  }
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
   try {
@@ -137,8 +147,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (typeof body.settings.profit_pct === "number") patch.profit_pct = body.settings.profit_pct;
     if (Object.keys(patch).length > 0) {
       const { data: updatedVersion, error: vErr } = await db
-        .from("estimate_versions").update(patch).eq("id", id).select("*").single();
+        .from("estimate_versions").update({ ...patch, row_version: version.row_version + 1 })
+        .eq("id", id).eq("row_version", version.row_version).select("*").maybeSingle();
       if (vErr) return NextResponse.json({ error: vErr.message }, { status: 500 });
+      if (!updatedVersion) return NextResponse.json({ error: "Estimate changed while settings were being saved. Reload and try again." }, { status: 409 });
       effectiveVersion = { ...effectiveVersion, ...updatedVersion };
     }
   }
@@ -152,7 +164,21 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     .from("estimate_items")
     .select("*")
     .eq("estimate_version_id", id);
-  const existingById = new Map((existingRows ?? []).map((row: { id: string }) => [row.id, row]));
+  const existingById = new Map<string, Record<string, unknown>>(
+    (existingRows ?? []).map((row: Record<string, unknown>) => [String(row.id), row]),
+  );
+  const existingIds = new Set(existingById.keys());
+
+  for (const item of body.items ?? []) {
+    const identity = resolveEstimateItemId(item.id, existingIds);
+    if (!identity.valid) return NextResponse.json({ error: "Estimate item does not belong to this version" }, { status: 409 });
+    if (identity.existing) {
+      const current = Number(existingById.get(identity.id)?.row_version ?? 0);
+      if (!validateEstimateRowVersion(item.row_version, current)) {
+        return NextResponse.json({ error: "Estimate item changed since it was loaded. Reload and try again." }, { status: 409 });
+      }
+    }
+  }
 
   const pct = {
     contingencyPct: effectiveVersion.contingency_pct ?? 0,
@@ -171,6 +197,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   // dollar amounts and the server applies the same cascade the version's
   // sliders represent.
   const payload = body.items.map((item) => {
+    const identity = resolveEstimateItemId(item.id, existingIds);
+    if (!identity.valid) throw new Error("Estimate item identity changed during validation");
     const totalDirectCostPreview = [
       item.labor_cost, item.material_cost, item.equipment_cost, item.trucking_cost,
       item.subcontract_cost, item.disposal_cost, item.testing_cost, item.other_direct_cost,
@@ -188,9 +216,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       quantity: item.quantity, indirectCost,
       contingency: derived.contingency, overhead: derived.overhead, profit: derived.profit,
     });
-    const isUpdate = item.id != null && existingById.has(item.id);
+    const isUpdate = identity.existing;
+    const existing = isUpdate ? existingById.get(identity.id) as Record<string, unknown> : null;
     return {
-      id: item.id ?? crypto.randomUUID(),
+      id: identity.id,
+      row_version: isUpdate ? Number(existing?.row_version ?? 0) + 1 : 0,
       tenant_id: tenantId,
       project_id: version.project_id,
       estimate_version_id: id,
@@ -221,7 +251,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       is_alternate: item.is_alternate ?? false,
       alternate_accepted: item.alternate_accepted ?? false,
       updated_by: userId,
-      pricing_status: "manual",
+      pricing_status: isUpdate ? existing?.pricing_status ?? "manual" : "manual",
       ...(isUpdate ? {} : { created_by: userId }),
     };
   });
@@ -239,18 +269,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     };
   }));
 
-  const totals = calculateEstimateTotals(
-    (data ?? []).map((it: Record<string, unknown>) => ({
-      totalDirectCost: it.total_direct_cost as number,
-      indirectCost: it.indirect_cost as number,
-      contingency: it.contingency as number,
-      overhead: it.overhead as number,
-      profit: it.profit as number,
-      totalPrice: it.total_price as number,
-      isAlternate: it.is_alternate as boolean,
-      alternateAccepted: it.alternate_accepted as boolean,
-    })),
-  );
+  const totals = await getVersionTotals(db, id);
 
   return NextResponse.json({ items: data ?? [], totals, version: effectiveVersion });
 }

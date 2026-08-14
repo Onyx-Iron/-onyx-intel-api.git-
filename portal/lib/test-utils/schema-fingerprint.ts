@@ -10,6 +10,7 @@ export const REQUIRED_TAKEOFF_SCHEMA_PATHS = [
   "/estimate_versions",
   "/estimate_items",
   "/estimate_sync_outbox",
+  "/estimate_approval_previews",
   "/takeoff_jobs",
   "/takeoff_job_units",
   "/takeoff_job_events",
@@ -33,6 +34,7 @@ export const REQUIRED_TAKEOFF_SCHEMA_PATHS = [
   "/rpc/claim_takeoff_work_units",
   "/rpc/approve_takeoff_source_revision",
   "/rpc/confirm_takeoff_approval_preview",
+  "/rpc/confirm_estimate_approval",
 ] as const;
 
 interface OpenApiDocument {

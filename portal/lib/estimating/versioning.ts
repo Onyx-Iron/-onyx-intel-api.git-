@@ -35,6 +35,7 @@ export interface EstimateVersionRow {
   version_number: number;
   version_name: string | null;
   status: VersionStatus;
+  row_version: number;
   contingency_pct: number | null;
   overhead_pct: number | null;
   profit_pct: number | null;

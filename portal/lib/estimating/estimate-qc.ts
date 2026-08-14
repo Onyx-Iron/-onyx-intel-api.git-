@@ -15,6 +15,8 @@ export interface EstimateQcItem {
   drawing_ref?: string | null;
   location_tag?: string | null;
   pricing_status?: string | null;
+  price_observation_id?: string | null;
+  price_approval_status?: string | null;
 }
 
 export interface EstimateAuditItem {
@@ -41,6 +43,7 @@ export interface EstimateQualityReport {
     missing_evidence: number;
     missing_quantity: number;
     missing_unit_cost: number;
+    missing_price_evidence: number;
   };
   blockers: string[];
   audit_items: EstimateAuditItem[];
@@ -65,6 +68,7 @@ export function buildEstimateQualityReport(items: EstimateQcItem[]): EstimateQua
     missing_evidence: 0,
     missing_quantity: 0,
     missing_unit_cost: 0,
+    missing_price_evidence: 0,
   };
   const auditItems: EstimateAuditItem[] = [];
 
@@ -91,10 +95,12 @@ export function buildEstimateQualityReport(items: EstimateQcItem[]): EstimateQua
     if (status === "review") reasons.push("Estimator review required");
     if (!isFinitePositive(item.quantity)) reasons.push("Missing or zero quantity");
     if (!isFinitePositive(item.unit_cost)) reasons.push("Missing or zero unit cost");
+    if (!hasApprovedPriceEvidence(item)) reasons.push("Missing approved price evidence");
     if (sourceBacked && !hasEvidence(item)) reasons.push("Source-backed row missing drawing, location, or quantity basis");
 
     if (!isFinitePositive(item.quantity)) counts.missing_quantity++;
     if (!isFinitePositive(item.unit_cost)) counts.missing_unit_cost++;
+    if (!hasApprovedPriceEvidence(item)) counts.missing_price_evidence++;
     if (sourceBacked && !hasEvidence(item)) counts.missing_evidence++;
 
     if (reasons.length > 0) {
@@ -127,10 +133,12 @@ export function buildEstimateQualityReport(items: EstimateQcItem[]): EstimateQua
 
 function buildBlockers(counts: EstimateQualityReport["counts"]): string[] {
   const blockers: string[] = [];
+  if (counts.total_items === 0) blockers.push("Estimate has no line items");
   if (counts.unpriced > 0) blockers.push(`${counts.unpriced} estimate item${plural(counts.unpriced)} need unit pricing`);
   if (counts.review > 0) blockers.push(`${counts.review} estimate item${plural(counts.review)} require estimator review`);
   if (counts.missing_quantity > 0) blockers.push(`${counts.missing_quantity} estimate item${plural(counts.missing_quantity)} are missing a usable quantity`);
   if (counts.missing_unit_cost > 0) blockers.push(`${counts.missing_unit_cost} estimate item${plural(counts.missing_unit_cost)} are missing a usable unit cost`);
+  if (counts.missing_price_evidence > 0) blockers.push(`${counts.missing_price_evidence} estimate item${plural(counts.missing_price_evidence)} are missing approved price evidence`);
   if (counts.missing_evidence > 0) blockers.push(`${counts.missing_evidence} source-backed estimate item${plural(counts.missing_evidence)} are missing drawing, location, or quantity basis evidence`);
   return blockers;
 }
@@ -142,6 +150,7 @@ function calculateRiskScore(counts: EstimateQualityReport["counts"]): number {
     counts.review * 25 +
     counts.missing_quantity * 30 +
     counts.missing_unit_cost * 30 +
+    counts.missing_price_evidence * 25 +
     counts.missing_evidence * 15 +
     counts.manual_items * 5;
   return Math.min(100, Math.round(weighted / counts.total_items));
@@ -159,6 +168,10 @@ function normalizePricingStatus(status: string | null | undefined, unitCost: num
 
 function hasEvidence(item: EstimateQcItem): boolean {
   return Boolean(clean(item.quantity_basis) || clean(item.drawing_ref) || clean(item.location_tag));
+}
+
+function hasApprovedPriceEvidence(item: EstimateQcItem): boolean {
+  return Boolean(clean(item.price_observation_id)) && item.price_approval_status === "approved";
 }
 
 function csiDivision(value: string | null | undefined): string {

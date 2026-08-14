@@ -4,6 +4,12 @@ import { describe, it } from "node:test";
 import { buildEstimateQualityReport } from "./estimate-qc.ts";
 
 describe("estimate quality report", () => {
+  it("never approves an empty estimate", () => {
+    const report = buildEstimateQualityReport([]);
+    assert.equal(report.ready_for_proposal, false);
+    assert.match(report.blockers.join("\n"), /no line items/i);
+  });
+
   it("rolls up priced source-backed rows and marks clean estimates proposal-ready", () => {
     const report = buildEstimateQualityReport([
       {
@@ -19,6 +25,8 @@ describe("estimate quality report", () => {
         quantity_basis: "Measured polyline on P2.1",
         drawing_ref: "P2.1",
         pricing_status: "priced",
+        price_observation_id: "price-1",
+        price_approval_status: "approved",
       },
     ]);
 
@@ -72,7 +80,7 @@ describe("estimate quality report", () => {
     assert.equal(report.audit_items.length, 2);
   });
 
-  it("treats manual rows as a lower risk than source or pricing failures", () => {
+  it("blocks manual pricing without approved price evidence", () => {
     const report = buildEstimateQualityReport([
       {
         id: "manual-1",
@@ -88,8 +96,9 @@ describe("estimate quality report", () => {
 
     assert.equal(report.counts.manual_items, 1);
     assert.equal(report.counts.priced, 0);
-    assert.equal(report.ready_for_proposal, true);
-    assert.equal(report.risk_score, 5);
+    assert.equal(report.ready_for_proposal, false);
+    assert.equal(report.counts.missing_price_evidence, 1);
+    assert.match(report.blockers.join("\n"), /approved price evidence/);
   });
 
   it("flags missing quantities even when a unit cost exists", () => {
