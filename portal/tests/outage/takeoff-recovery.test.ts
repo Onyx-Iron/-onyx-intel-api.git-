@@ -2,9 +2,26 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { processOutboxBatch } from "@/lib/estimating/outbox-worker";
-import { recoverTakeoffWork } from "@/lib/takeoff/recovery";
+import { recoverExpiredTakeoffUnits, recoverTakeoffWork } from "@/lib/takeoff/recovery";
 
 describe("takeoff outage and restart behavior", () => {
+  it("supports a lease-only recovery pass for active job polling", async () => {
+    let supplied: Record<string, unknown> | undefined;
+    const db = {
+      rpc: async (name: string, args: Record<string, unknown>) => {
+        assert.equal(name, "recover_expired_takeoff_units");
+        supplied = args;
+        return { data: [{ state: "failed_retryable" }, { state: "failed_terminal" }], error: null };
+      },
+    };
+
+    assert.deepEqual(await recoverExpiredTakeoffUnits(db, 50), {
+      recoveredUnits: 2,
+      terminalUnits: 1,
+    });
+    assert.deepEqual(supplied, { p_limit: 50, p_max_attempts: 8 });
+  });
+
   it("does not duplicate a completed estimate sync after a worker restart", async () => {
     let available = true;
     let syncCalls = 0;

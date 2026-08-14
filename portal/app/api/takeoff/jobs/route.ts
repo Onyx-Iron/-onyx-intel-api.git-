@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { assertPermission } from "@/lib/project-controls/permissions";
 import { authTenantKey, authTenantName, getOrCreateTenant } from "@/lib/project-controls/server";
 import { createServiceClient } from "@/lib/supabase/server";
+import { recoverExpiredTakeoffUnits } from "@/lib/takeoff/recovery";
 import { sanitizeConfirmedTakeoffScope } from "@/lib/takeoff/scope-confirmation";
 
 export const runtime = "nodejs";
@@ -19,14 +20,19 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     await assertPermission(tenantId, userId, "field", "read");
     const db = await createServiceClient();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyDb = db as any;
+    // Active takeoff screens poll this route. Repair expired leases before
+    // returning status so an active job self-heals without waiting for cron.
+    await recoverExpiredTakeoffUnits(anyDb, 50).catch((error) => {
+      console.error("[takeoff-jobs] opportunistic recovery failed", error);
+    });
     const { data, error } = await db.from("takeoff_jobs" as never).select("*")
       .eq("tenant_id", tenantId).eq("project_id", projectId).order("created_at", { ascending: false });
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
     const jobs = (data ?? []) as Array<Record<string, unknown>>;
     const jobIds = jobs.map((job) => String(job.id));
     if (jobIds.length === 0) return NextResponse.json({ jobs: [] });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const anyDb = db as any;
     const [{ data: units, error: unitsError }, { data: candidates, error: candidatesError }] = await Promise.all([
       anyDb.from("takeoff_job_units").select("id,job_id,unit_type,source_id,state,attempt_count,last_error")
         .eq("tenant_id", tenantId).eq("project_id", projectId).in("job_id", jobIds).order("created_at", { ascending: true }),

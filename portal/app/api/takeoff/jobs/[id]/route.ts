@@ -5,6 +5,7 @@ import { assertPermission } from "@/lib/project-controls/permissions";
 import { authTenantKey, authTenantName, getOrCreateTenant } from "@/lib/project-controls/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { TAKEOFF_JOB_STATES, type TakeoffJobState } from "@/lib/takeoff/contracts";
+import { recoverExpiredTakeoffUnits } from "@/lib/takeoff/recovery";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,6 +22,9 @@ export async function GET(_req: NextRequest, { params }: RouteContext): Promise<
     const db = await createServiceClient();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const anyDb = db as any;
+    await recoverExpiredTakeoffUnits(anyDb, 50).catch((error) => {
+      console.error("[takeoff-job] opportunistic recovery failed", error);
+    });
     const { data: job } = await anyDb.from("takeoff_jobs").select("*").eq("id", id).eq("tenant_id", tenantId).maybeSingle();
     if (!job) return NextResponse.json({ error: "Takeoff job not found" }, { status: 404 });
     const [{ data: units, error: unitError }, { data: events, error: eventError }] = await Promise.all([

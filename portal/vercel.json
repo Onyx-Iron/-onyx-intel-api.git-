@@ -1,5 +1,5 @@
 {
   "crons": [
-    { "path": "/api/internal/takeoff/recover", "schedule": "*/5 * * * *" }
+    { "path": "/api/internal/takeoff/recover", "schedule": "0 4 * * *" }
   ]
 }
