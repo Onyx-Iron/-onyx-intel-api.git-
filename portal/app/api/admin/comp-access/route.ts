@@ -1,27 +1,13 @@
-import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { setCompUntil } from "@/lib/billing/tenantBilling";
+import { PlatformAdminError, requirePlatformAdmin } from "@/lib/auth/platform-admin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const ADMIN_EMAIL = "justinatteberry@onyx-iron.com";
 // Sentinel for "comp forever" — far-future timestamp.
 const FOREVER_DATE = new Date("9999-12-31T00:00:00.000Z");
-
-async function requireAdmin(): Promise<NextResponse | null> {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  const user = await currentUser();
-  const email = user?.primaryEmailAddress?.emailAddress ?? "";
-  if (email !== ADMIN_EMAIL) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-  return null;
-}
 
 interface PostBody {
   tenant_id?: string;
@@ -68,8 +54,7 @@ async function resolveTenantId(
 
 export async function GET(): Promise<NextResponse> {
   try {
-    const denied = await requireAdmin();
-    if (denied) return denied;
+    await requirePlatformAdmin();
 
     const db = await createServiceClient();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -89,15 +74,14 @@ export async function GET(): Promise<NextResponse> {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
       { error: `[GET /api/admin/comp-access] ${msg}` },
-      { status: 500 },
+      { status: err instanceof PlatformAdminError ? err.status : 500 },
     );
   }
 }
 
 export async function POST(req: Request): Promise<NextResponse> {
   try {
-    const denied = await requireAdmin();
-    if (denied) return denied;
+    await requirePlatformAdmin();
 
     const body = (await req.json()) as PostBody;
     const resolved = await resolveTenantId(body);
@@ -130,15 +114,14 @@ export async function POST(req: Request): Promise<NextResponse> {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
       { error: `[POST /api/admin/comp-access] ${msg}` },
-      { status: 500 },
+      { status: err instanceof PlatformAdminError ? err.status : 500 },
     );
   }
 }
 
 export async function DELETE(req: Request): Promise<NextResponse> {
   try {
-    const denied = await requireAdmin();
-    if (denied) return denied;
+    await requirePlatformAdmin();
 
     const body = (await req.json()) as { tenant_id?: string };
     if (!body.tenant_id) {
@@ -154,7 +137,7 @@ export async function DELETE(req: Request): Promise<NextResponse> {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
       { error: `[DELETE /api/admin/comp-access] ${msg}` },
-      { status: 500 },
+      { status: err instanceof PlatformAdminError ? err.status : 500 },
     );
   }
 }

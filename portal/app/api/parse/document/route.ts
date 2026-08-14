@@ -12,6 +12,8 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { parseFile, type ParseHint } from "@/lib/parse";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -30,7 +32,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       authTenantKey(userId, orgId),
       authTenantName(userId, orgSlug),
     );
-
+    await assertPermission(tenantId, userId, "field", "read");
     const hintParam = req.nextUrl.searchParams.get("hint");
     const hint = hintParam && (VALID_HINTS as readonly string[]).includes(hintParam)
       ? (hintParam as ParseHint)
@@ -76,6 +78,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
     }
 
+    const rl = await checkAiRateLimit(tenantId, "parse/document", { windowMs: 60_000, max: 10 });
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many document parsing requests — please slow down." },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
+      );
+    }
+
     const result = await parseFile(filename, mime, bytes, { tenantId, userId, hint });
 
     if (result.kind === "error") {
@@ -87,7 +97,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
       { error: `[POST /api/parse/document] ${msg}` },
-      { status: 500 },
+      { status: err instanceof PermissionError ? 403 : 500 },
     );
   }
 }

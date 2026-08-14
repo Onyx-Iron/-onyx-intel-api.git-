@@ -50,18 +50,15 @@ function statusBadge(tier: PlanTier, status: string | null, isComp: boolean) {
       };
   }
 }
-
 function formatLimit(value: number): string {
   return value === -1 ? "Unlimited" : value.toLocaleString();
 }
-
 function daysUntil(iso: string | null): number | null {
   if (!iso) return null;
   const ms = new Date(iso).getTime() - Date.now();
   if (Number.isNaN(ms)) return null;
   return Math.max(0, Math.ceil(ms / (24 * 60 * 60 * 1000)));
 }
-
 export default async function BillingSettingsPage() {
   const { userId, orgId, orgSlug } = await auth();
   if (!userId) redirect("/sign-in");
@@ -107,8 +104,22 @@ export default async function BillingSettingsPage() {
               Info
             </p>
             <p className="mt-2 text-sm text-white">
-              Billing is not yet activated — contact support to get set up.
+              Billing is not yet activated. You can keep using the workspace and finish setup now, then switch billing on once you&apos;re ready.
             </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Link
+                href="/dashboard/projects"
+                className="inline-flex h-9 items-center justify-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85"
+              >
+                Back to projects
+              </Link>
+              <Link
+                href="/dashboard/settings/team"
+                className="inline-flex h-9 items-center justify-center rounded-full border border-white/15 bg-white/[0.03] px-4 text-[11px] font-bold uppercase tracking-widest text-white transition-colors hover:border-white/30"
+              >
+                Team settings
+              </Link>
+            </div>
           </div>
         )}
 
@@ -163,7 +174,7 @@ export default async function BillingSettingsPage() {
           {/* Comp banner */}
           {isComp && (
             <div className="mt-5 rounded-xl border border-[#CCFF00]/30 bg-[#CCFF00]/5 px-4 py-3 text-sm text-white">
-              Comp access — courtesy of Onyx &amp; Iron · expires{" "}
+              Comp access - courtesy of Onyx & Iron · expires{" "}
               {billing?.comp_until
                 ? new Date(billing.comp_until).toLocaleDateString()
                 : "never"}

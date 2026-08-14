@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export async function DELETE(
   req: NextRequest,
@@ -18,6 +19,7 @@ export async function DELETE(
     if (!projectId) return NextResponse.json({ error: "project_id is required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     const { error } = await db
@@ -31,6 +33,6 @@ export async function DELETE(
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[DELETE /api/cut-fill/surfaces/[id]] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[DELETE /api/cut-fill/surfaces/[id]] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

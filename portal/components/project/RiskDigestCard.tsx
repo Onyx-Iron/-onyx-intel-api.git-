@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { AlertCircle, AlertTriangle, CheckCircle, RefreshCw, ShieldAlert } from "lucide-react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 
 interface RiskDigest {
   id: string;
@@ -9,7 +10,6 @@ interface RiskDigest {
   bullets: string[];
   generated_at: string;
 }
-
 const LEVEL_CONFIG = {
   low: {
     label: "Low Risk",
@@ -50,7 +50,6 @@ function timeAgo(iso: string): string {
   const days = Math.floor(hrs / 24);
   return `${days}d ago`;
 }
-
 export default function RiskDigestCard({ projectId }: { projectId: string }) {
   const [digest, setDigest] = useState<RiskDigest | null>(null);
   const [loading, setLoading] = useState(true);
@@ -61,18 +60,24 @@ export default function RiskDigestCard({ projectId }: { projectId: string }) {
     try {
       const res = await fetch(`/api/ai/risk-digest?project_id=${encodeURIComponent(projectId)}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as { digest: RiskDigest | null };
+      const data = (await res.json()) as { digest: RiskDigest | null };
       setDigest(data.digest);
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
+      setError(e instanceof Error ? e.message : "Could not load the risk digest. Refresh the page and try again.");
     } finally {
       setLoading(false);
     }
   }, [projectId]);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { fetchDigest(); }, [fetchDigest]);
+  useProjectSyncRefresh(fetchDigest);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void fetchDigest();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [fetchDigest]);
 
   const refresh = async () => {
     setRefreshing(true);
@@ -84,13 +89,13 @@ export default function RiskDigestCard({ projectId }: { projectId: string }) {
         body: JSON.stringify({ project_id: projectId }),
       });
       if (!res.ok) {
-        const d = await res.json() as { error?: string };
+        const d = (await res.json()) as { error?: string };
         throw new Error(d.error ?? `HTTP ${res.status}`);
       }
-      const data = await res.json() as { digest: RiskDigest };
+      const data = (await res.json()) as { digest: RiskDigest };
       setDigest(data.digest);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Generation failed");
+      setError(e instanceof Error ? e.message : "Could not generate the risk digest. Try again in a moment.");
     } finally {
       setRefreshing(false);
     }
@@ -99,9 +104,11 @@ export default function RiskDigestCard({ projectId }: { projectId: string }) {
   if (loading) {
     return (
       <div className="rounded-xl border border-white/10 bg-[#16161A] px-5 py-4 animate-pulse">
-        <div className="h-4 w-32 bg-white/10 rounded mb-3" />
+        <div className="mb-3 h-4 w-32 rounded bg-white/10" />
         <div className="space-y-2">
-          {[1, 2, 3].map((i) => <div key={i} className="h-3 bg-white/8 rounded" style={{ width: `${85 - i * 10}%` }} />)}
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="h-3 rounded bg-white/8" style={{ width: `${85 - i * 10}%` }} />
+          ))}
         </div>
       </div>
     );
@@ -109,18 +116,18 @@ export default function RiskDigestCard({ projectId }: { projectId: string }) {
 
   if (!digest && !error) {
     return (
-      <div className="rounded-xl border border-white/10 bg-[#16161A] px-5 py-4 flex items-center justify-between">
-        <div>
-          <p className="text-sm font-medium text-white">AI Risk Digest</p>
-          <p className="text-xs text-gray-600 mt-0.5">No digest generated yet</p>
-        </div>
+      <div className="flex items-center justify-between rounded-xl border border-white/10 bg-[#16161A] px-5 py-4">
+      <div>
+        <p className="text-sm font-medium text-white">Risk summary</p>
+        <p className="mt-0.5 text-xs text-gray-600">No risk summary yet. Generate one to get a quick read on schedule, scope, and open risks.</p>
+      </div>
         <button
           onClick={refresh}
           disabled={refreshing}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#CCFF00]/10 border border-[#CCFF00]/20 text-[#CCFF00] text-xs hover:bg-[#CCFF00]/20 transition-colors disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-lg border border-[#CCFF00]/20 bg-[#CCFF00]/10 px-3 py-1.5 text-xs text-[#CCFF00] transition-colors hover:bg-[#CCFF00]/20 disabled:opacity-50"
         >
           <RefreshCw size={11} className={refreshing ? "animate-spin" : ""} />
-          {refreshing ? "Generating…" : "Generate"}
+          {refreshing ? "Generating..." : "Generate"}
         </button>
       </div>
     );
@@ -128,10 +135,18 @@ export default function RiskDigestCard({ projectId }: { projectId: string }) {
 
   if (error && !digest) {
     return (
-      <div className="rounded-xl border border-red-500/20 bg-[#16161A] px-5 py-4 flex items-center justify-between">
-        <p className="text-xs text-red-400">Risk digest error: {error}</p>
-        <button onClick={refresh} disabled={refreshing} className="text-xs text-gray-500 hover:text-white ml-4">
-          Retry
+      <div className="flex items-center justify-between rounded-xl border border-red-500/20 bg-[#16161A] px-5 py-4">
+        <div>
+          <p className="text-sm font-medium text-white">Risk summary could not load.</p>
+          <p className="mt-0.5 text-xs text-red-400">{error}</p>
+          <p className="mt-1 text-[11px] text-white/40">Generate a new summary after the project data is ready, or retry once the backend is responsive again.</p>
+        </div>
+        <button
+          onClick={refresh}
+          disabled={refreshing}
+          className="ml-4 inline-flex h-8 items-center rounded-full border border-red-400/20 bg-red-400/10 px-3 text-[10px] font-bold uppercase tracking-widest text-red-100 hover:border-red-300/30 hover:bg-red-300/15 disabled:opacity-40"
+        >
+          {refreshing ? "Retrying..." : "Retry"}
         </button>
       </div>
     );
@@ -142,41 +157,37 @@ export default function RiskDigestCard({ projectId }: { projectId: string }) {
 
   return (
     <div className={`rounded-xl border bg-[#16161A] px-5 py-4 ${cfg.border}`}>
-      {/* Header row */}
-      <div className="flex items-center justify-between mb-3">
+      <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2.5">
-          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-semibold ${cfg.badge}`}>
+          <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold ${cfg.badge}`}>
             <Icon size={11} />
             {cfg.label}
           </span>
-          <span className="text-[10px] text-gray-600 font-mono">
-            AI Risk Digest · {digest ? timeAgo(digest.generated_at) : ""}
+          <span className="text-[10px] font-mono text-gray-600">
+            Risk summary • {digest ? timeAgo(digest.generated_at) : ""}
           </span>
         </div>
         <button
           onClick={refresh}
           disabled={refreshing}
-          title="Regenerate digest"
-          className="flex items-center gap-1 text-gray-600 hover:text-gray-300 transition-colors disabled:opacity-40 text-[10px]"
+          title="Refresh the latest risk check"
+          className="flex items-center gap-1 text-[10px] text-gray-600 transition-colors hover:text-gray-300 disabled:opacity-40"
         >
           <RefreshCw size={10} className={refreshing ? "animate-spin" : ""} />
-          {refreshing ? "Updating…" : "Refresh"}
+          {refreshing ? "Updating..." : "Refresh"}
         </button>
       </div>
 
-      {/* Bullets */}
       <ul className="space-y-2">
         {(digest?.bullets ?? []).map((bullet, i) => (
           <li key={i} className="flex items-start gap-2.5">
             <span className={`mt-[6px] h-1.5 w-1.5 shrink-0 rounded-full ${cfg.dot}`} />
-            <span className="text-[13px] text-gray-300 leading-snug">{bullet}</span>
+            <span className="text-[13px] leading-snug text-gray-300">{bullet}</span>
           </li>
         ))}
       </ul>
 
-      {error && (
-        <p className="mt-2 text-[11px] text-red-400">{error}</p>
-      )}
+      {error && <p className="mt-2 text-[11px] text-red-400">{error}</p>}
     </div>
   );
 }

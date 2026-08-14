@@ -78,6 +78,7 @@ interface TakeoffRow {
   location_tag?: string | null;
   extraction_method?: "deterministic" | "ai_vision";
   confidence?: number | null;
+  quantity_evidence?: Record<string, unknown> | null;
 }
 
 // Mirrors lib/estimating/takeoff-import.ts's buildEstimateImportRows +
@@ -89,6 +90,19 @@ function fingerprint(label: string | null, csi: string | null, qty: number | nul
   const norm = (v: string | null) => (v ?? "").trim().toLowerCase().replace(/\s+/g, " ");
   const normNum = (v: number | null) => (v == null ? "" : String(v));
   return [norm(label), norm(csi), normNum(qty), norm(unit), norm(drawingRef), norm(locationTag)].join("|");
+}
+
+async function stableTakeoffId(pageId: string, row: TakeoffRow, index: number): Promise<string> {
+  const input = JSON.stringify([
+    pageId, index, row.description ?? "", row.cost_code ?? "",
+    row.total_qty ?? null, row.uom ?? "", row.drawing_ref ?? "", row.location_tag ?? "",
+  ]);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input)));
+  // UUID-compatible deterministic identifier (version/variant bits normalized).
+  digest[6] = (digest[6] & 0x0f) | 0x50;
+  digest[8] = (digest[8] & 0x3f) | 0x80;
+  const hex = [...digest.slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 // deno-lint-ignore no-explicit-any
@@ -214,18 +228,30 @@ Deno.serve(async (req) => {
   const db = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+  const { data: pageState } = await db.from("document_pages")
+    .select("takeoff_status")
+    .eq("id", body.page_id)
+    .eq("tenant_id", body.tenant_id)
+    .maybeSingle();
+  if (pageState?.takeoff_status === "done") {
+    return new Response(JSON.stringify({ ok: true, page_id: body.page_id, deduped: true }), {
+      status: 200, headers: { "Content-Type": "application/json" },
+    });
+  }
   async function recordEvent(status: "started" | "succeeded" | "failed" | "skipped", errorMessage?: string): Promise<void> {
-    await db.from("document_processing_events").insert({
-      tenant_id: body.tenant_id,
-      project_id: body.project_id,
-      document_id: body.document_id,
-      document_page_id: body.page_id,
-      step: "takeoff",
-      status,
-      worker: "page-takeoff-worker",
-      error_message: errorMessage?.slice(0, 2000) ?? null,
-      completed_at: status === "started" ? null : new Date().toISOString(),
-    }).then(() => {}).catch(() => {});
+    try {
+      await db.from("document_processing_events").insert({
+        tenant_id: body.tenant_id,
+        project_id: body.project_id,
+        document_id: body.document_id,
+        document_page_id: body.page_id,
+        step: "takeoff",
+        status,
+        worker: "page-takeoff-worker",
+        error_message: errorMessage?.slice(0, 2000) ?? null,
+        completed_at: status === "started" ? null : new Date().toISOString(),
+      });
+    } catch { /* best-effort telemetry */ }
   }
 
   await db.from("document_pages")
@@ -258,13 +284,46 @@ Deno.serve(async (req) => {
       const detail = (await res.text().catch(() => "")).slice(0, 400);
       throw new Error(`takeoff extract ${res.status}: ${detail}`);
     }
-    const data = await res.json() as { rows?: TakeoffRow[] };
-    const rows = Array.isArray(data.rows) ? data.rows : [];
+    const data = await res.json() as { rows?: TakeoffRow[]; ai_candidate_pages?: number[] };
+    let rows = Array.isArray(data.rows) ? data.rows : [];
+
+    // Deterministic extraction on a single split-page PDF can legitimately
+    // return zero rows for graphical drawing sheets (no machine-readable
+    // schedule table). Previously we still marked that page "done", which let
+    // an entire planset complete with 0 takeoff items even though every page
+    // really needed the AI-vision path. Because this worker processes one page
+    // at a time, the page PDF is always small enough to send straight through
+    // the AI fallback safely. We do that automatically here so large document
+    // takeoffs don't silently "succeed" empty.
+    const shouldRunAiFallback = rows.length === 0
+      && Array.isArray(data.ai_candidate_pages)
+      && data.ai_candidate_pages.includes(1);
+    if (shouldRunAiFallback) {
+      const aiForm = new FormData();
+      aiForm.append("file", dl.data, `page-${body.page_number}.pdf`);
+      const aiRes = await fetchWithRetry(`${PYTHON_API_URL}/api/takeoff/extract?ai_fallback=true&pages=1`, {
+        method: "POST",
+        headers: {
+          "X-Onyx-Secret": ONYX_API_SECRET,
+          "X-Onyx-Tenant": body.tenant_id,
+          "X-Onyx-Project": body.project_id,
+        },
+        body: aiForm,
+      }, 2, 90_000);
+      if (!aiRes.ok) {
+        const detail = (await aiRes.text().catch(() => "")).slice(0, 400);
+        throw new Error(`ai fallback ${aiRes.status}: ${detail}`);
+      }
+      const aiData = await aiRes.json() as { rows?: TakeoffRow[] };
+      rows = Array.isArray(aiData.rows)
+        ? aiData.rows.map((row) => ({ ...row, extraction_method: "ai_vision" }))
+        : [];
+    }
 
     // ── 3. Insert into takeoff_items ─────────────────────────────────────────
     if (rows.length > 0) {
-      const payload = rows.map((r) => ({
-        id: crypto.randomUUID(),
+      const payload = await Promise.all(rows.map(async (r, index) => ({
+        id: await stableTakeoffId(body.page_id, r, index),
         tenant_id: body.tenant_id,
         project_id: body.project_id,
         label: r.description || r.trade || "Untitled item",
@@ -276,14 +335,14 @@ Deno.serve(async (req) => {
         page: body.page_number,
         document_id: body.document_id,
         sheet_id: body.page_id,
-        // Deterministic rows (PDF table/DXF/IFC/XLSX math) are grounded in
-        // real source data and implicitly approved; ai_vision rows are an
-        // unverified suggestion and must wait for a human review action
-        // before they can reach the estimate (see syncTakeoffToEstimate
-        // below, which excludes non-approved rows).
+        // Background extraction never grants financial approval. Deterministic
+        // and AI rows are candidates until source revision and quantity
+        // evidence are validated by the governed application workflow.
         created_by: null,
-        review_status: r.extraction_method === "ai_vision" ? "suggested" : "approved",
+        review_status: "suggested",
         source_method: r.extraction_method ?? "deterministic",
+        quantity_validation_status: "unvalidated",
+        quantity_validation_reason: "worker_governance_pending",
         confidence_score: r.confidence ?? null,
         meta: {
           trade: r.trade ?? null,
@@ -291,16 +350,26 @@ Deno.serve(async (req) => {
           drawing_ref: r.drawing_ref ?? null,
           location_tag: r.location_tag ?? null,
           extraction_method: r.extraction_method ?? "deterministic",
+          quantity_evidence: r.quantity_evidence ?? null,
         },
-      }));
-      const { data: insertedRows, error: insErr } = await db.from("takeoff_items").insert(payload).select("id,review_status");
+      })));
+      const payloadIds = payload.map((row) => row.id);
+      const { data: existingRows } = await db.from("takeoff_items").select("id,review_status").in("id", payloadIds);
+      const existingIds = new Set((existingRows ?? []).map((row: { id: string }) => row.id));
+      const decidedIds = new Set((existingRows ?? [])
+        .filter((row: { review_status?: string }) => row.review_status === "approved" || row.review_status === "rejected")
+        .map((row: { id: string }) => row.id));
+      const rowsToWrite = payload.filter((row) => !decidedIds.has(row.id));
+      const { data: insertedRows, error: insErr } = await db.from("takeoff_items")
+        .upsert(rowsToWrite, { onConflict: "id" }).select("id,review_status");
       if (insErr) throw new Error(`insert takeoff_items: ${insErr.message}`);
 
       // Lifecycle audit trail (mirrors lib/takeoff/history.ts — Deno can't
       // import that module, so this is a small inline equivalent).
       if (insertedRows && insertedRows.length > 0) {
-        await db.from("takeoff_item_history").insert(
-          insertedRows.map((r: { id: string }) => ({
+        const newlyInsertedRows = insertedRows.filter((r: { id: string }) => !existingIds.has(r.id));
+        if (newlyInsertedRows.length > 0) await db.from("takeoff_item_history").insert(
+          newlyInsertedRows.map((r: { id: string }) => ({
             tenant_id: body.tenant_id,
             project_id: body.project_id,
             takeoff_item_id: r.id,
@@ -311,12 +380,9 @@ Deno.serve(async (req) => {
         );
       }
 
-      // ── 3b. Sync into estimate_items ───────────────────────────────────────
-      // Mirrors lib/estimating/auto-sync.ts (Next.js) so large-document
-      // extraction (which never touches the portal's Node API) still keeps
-      // the estimate in sync automatically instead of requiring the
-      // estimator to hit "Import from Takeoff" for pages processed here.
-      await syncTakeoffToEstimate(db, body.tenant_id, body.project_id);
+      // Financial import is intentionally absent here. The portal's immutable
+      // approval preview and idempotent import command are the only supported
+      // path from an automated candidate into an estimate.
     }
 
     // ── 4. Done ───────────────────────────────────────────────────────────────

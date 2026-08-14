@@ -30,13 +30,11 @@ interface NavItem {
   exact?: boolean;
 }
 
-// Live, fully-wired workspaces only. Per the reconciliation's explicit rule:
-// a workspace is only presented as production-ready when its underlying
-// workflow is actually connected and verified — every route below loads
-// real, tenant-scoped data from a real API, not a placeholder.
 const WORKSPACE_NAV: NavItem[] = [
-  { href: "/dashboard", label: "Command Center", icon: <LayoutDashboard size={15} />, exact: true },
+  { href: "/dashboard", label: "Dashboard", icon: <LayoutDashboard size={15} />, exact: true },
+  { href: "/dashboard/command-center", label: "Automation Center", icon: <Bot size={15} /> },
   { href: "/dashboard/projects", label: "Projects", icon: <FolderKanban size={15} /> },
+  { href: "/dashboard/preconstruction", label: "Preconstruction", icon: <BookOpen size={15} /> },
   { href: "/dashboard/project-management", label: "Project Management", icon: <ListChecks size={15} /> },
   { href: "/dashboard/takeoff", label: "Takeoff", icon: <Ruler size={15} /> },
   { href: "/dashboard/estimating", label: "Estimating", icon: <Calculator size={15} /> },
@@ -57,15 +55,7 @@ const SETTINGS_NAV: NavItem[] = [
   { href: "/dashboard/settings/cost-overrides", label: "Cost Overrides", icon: <BookOpen size={13} /> },
 ];
 
-// Target-IA workspaces with no real backend workflow wired up yet. Listed so
-// the full intended IA is visible, but deliberately non-navigable rather
-// than an empty page pretending to be finished — "label incomplete modules
-// as experimental or unavailable" rather than ship a shell. See
-// docs/frontend-backend-reconciliation/PHASE_4_GAP_ANALYSIS.md for the exact
-// missing APIs/tables/workflows behind each of these.
-const COMING_SOON = [
-  "Preconstruction",
-];
+const COMING_SOON: string[] = [];
 
 function NavLink({ item, onNavigate, small }: { item: NavItem; onNavigate?: () => void; small?: boolean }) {
   const pathname = usePathname();
@@ -76,14 +66,10 @@ function NavLink({ item, onNavigate, small }: { item: NavItem; onNavigate?: () =
       href={item.href}
       onClick={onNavigate}
       className={`group relative flex items-center gap-3 rounded-lg px-3 text-sm font-medium transition-colors ${small ? "py-2 text-xs" : "py-2.5"} ${
-        active
-          ? "bg-white/5 text-white"
-          : "text-white/40 hover:bg-white/4 hover:text-white/80"
+        active ? "bg-white/5 text-white" : "text-white/40 hover:bg-white/4 hover:text-white/80"
       }`}
     >
-      {active && (
-        <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-r bg-[#CCFF00]" />
-      )}
+      {active && <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-r bg-[#CCFF00]" />}
       <span className={`transition-colors ${active ? "text-[#CCFF00]" : "text-white/25 group-hover:text-white/55"}`}>
         {item.icon}
       </span>
@@ -96,11 +82,13 @@ function ComingSoonRow({ label }: { label: string }) {
   return (
     <div
       className="flex cursor-default items-center gap-3 rounded-lg px-3 py-2 text-xs text-white/20"
-      title={`${label} — not yet available. Backend workflow isn't connected/verified yet.`}
+      title={`${label} is not ready yet. The workflow isn't connected or verified right now.`}
     >
       <Settings size={13} className="text-white/15" />
       <span className="flex-1">{label}</span>
-      <span className="rounded border border-white/10 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-widest text-white/25">Soon</span>
+      <span className="rounded border border-white/10 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-widest text-white/25">
+        Not ready
+      </span>
     </div>
   );
 }
@@ -108,29 +96,44 @@ function ComingSoonRow({ label }: { label: string }) {
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <>
-      <div className="h-5" />
+      <div className="px-3 pt-4">
+        <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-white/25">Workspace</p>
+        <p className="mt-2 text-xs leading-5 text-white/38">
+          Start with the common jobs. The rest stays easy to reach when you need it.
+        </p>
+        <div className="mt-3 space-y-1">
+          <NavLink item={{ href: "/dashboard/command-center", label: "Command Center", icon: <Bot size={15} /> }} onNavigate={onNavigate} />
+          <NavLink item={{ href: "/dashboard/projects", label: "Projects", icon: <FolderKanban size={15} /> }} onNavigate={onNavigate} />
+          <NavLink item={{ href: "/dashboard/takeoff", label: "Takeoff", icon: <Ruler size={15} /> }} onNavigate={onNavigate} />
+          <NavLink item={{ href: "/dashboard/documents", label: "Documents", icon: <FileText size={15} /> }} onNavigate={onNavigate} />
+        </div>
+      </div>
 
       <nav className="flex-1 overflow-y-auto px-3 py-4">
         <div className="space-y-0.5">
-          <p className="mb-3 px-3 text-[9px] font-bold uppercase tracking-[0.22em] text-white/25">Workspace</p>
+          <p className="mb-3 px-3 text-[9px] font-bold uppercase tracking-[0.22em] text-white/25">Core Work</p>
           {WORKSPACE_NAV.map((item) => (
             <NavLink key={item.label} item={item} onNavigate={onNavigate} />
           ))}
         </div>
 
         <div className="mt-6 space-y-0.5">
-          <p className="mb-3 px-3 text-[9px] font-bold uppercase tracking-[0.22em] text-white/25">Settings & Administration</p>
+          <p className="mb-3 px-3 text-[9px] font-bold uppercase tracking-[0.22em] text-white/25">
+            Settings & Administration
+          </p>
           {SETTINGS_NAV.map((item) => (
             <NavLink key={item.label} item={item} onNavigate={onNavigate} small />
           ))}
         </div>
 
-        <div className="mt-6 space-y-0.5">
-          <p className="mb-3 px-3 text-[9px] font-bold uppercase tracking-[0.22em] text-white/25">Coming Soon</p>
-          {COMING_SOON.map((label) => (
-            <ComingSoonRow key={label} label={label} />
-          ))}
-        </div>
+        {COMING_SOON.length > 0 && (
+          <div className="mt-6 space-y-0.5">
+            <p className="mb-3 px-3 text-[9px] font-bold uppercase tracking-[0.22em] text-white/25">Coming Soon</p>
+            {COMING_SOON.map((label) => (
+              <ComingSoonRow key={label} label={label} />
+            ))}
+          </div>
+        )}
       </nav>
 
       <div className="border-t border-white/5 p-4">
@@ -170,10 +173,7 @@ export function MobileSidebar({ open, onClose }: { open: boolean; onClose: () =>
   }, [open, onClose]);
 
   return (
-    <div
-      className={`fixed inset-0 z-50 lg:hidden ${open ? "" : "pointer-events-none"}`}
-      aria-hidden={!open}
-    >
+    <div className={`fixed inset-0 z-50 lg:hidden ${open ? "" : "pointer-events-none"}`} aria-hidden={!open}>
       <div
         onClick={onClose}
         className={`absolute inset-0 bg-black/70 backdrop-blur-sm transition-opacity ${open ? "opacity-100" : "opacity-0"}`}

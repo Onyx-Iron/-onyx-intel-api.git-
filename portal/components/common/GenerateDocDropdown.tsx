@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, Sparkles, Check, AlertCircle } from "lucide-react";
+import { ChevronDown, Sparkles, Check, AlertCircle, Wand2 } from "lucide-react";
 import { GENERATED_DOC_TYPES } from "@/lib/ai/generatedDocTypes";
 
 interface GenerateDocDropdownProps {
@@ -14,9 +14,11 @@ interface GenerateDocDropdownProps {
 
 type Status = "idle" | "generating" | "done" | "error";
 
+const AUTOPILOT_TYPES = ["project_update", "risk_assessment", "spec_materials"] as const;
+
 /**
  * One dropdown to generate any of the 9 supported doc types.
- * Designed for the post-upload flow: pick a type → generate → result is saved
+ * Designed for the post-upload flow: pick a type -> generate -> result is saved
  * to /api/generated-docs and surfaced under the project's AI Docs tab.
  *
  * sourceDocumentId optionally passes a just-uploaded document's id so the
@@ -25,7 +27,7 @@ type Status = "idle" | "generating" | "done" | "error";
 export default function GenerateDocDropdown({
   projectId,
   sourceDocumentId,
-  label = "Generate Document",
+  label = "Create report",
   variant = "ghost",
   onGenerated,
 }: GenerateDocDropdownProps) {
@@ -54,9 +56,15 @@ export default function GenerateDocDropdown({
   const generate = async (typeKey: string) => {
     // Guard against double-fire from rapid clicks creating duplicate docs
     if (busyKey !== null) return;
+    if (!projectId) {
+      setStatus("error");
+      setStatusMsg("Pick a project first.");
+      setTimeout(() => setStatus("idle"), 3000);
+      return;
+    }
     setBusyKey(typeKey);
     setStatus("generating");
-    setStatusMsg("Generating…");
+    setStatusMsg("Generating...");
     try {
       const res = await fetch("/api/generated-docs", {
         method: "POST",
@@ -74,9 +82,9 @@ export default function GenerateDocDropdown({
       };
       if (!res.ok || !body.doc) {
         if (body.code === "NO_PROVIDER" || res.status === 503) {
-          setStatusMsg("AI is not configured.");
+          setStatusMsg("No AI provider is connected yet. Open billing settings, connect one, and try again.");
         } else {
-          setStatusMsg(body.error ?? `Failed (HTTP ${res.status})`);
+          setStatusMsg(body.error ?? `Failed (HTTP ${res.status}). Check the project context and try again.`);
         }
         setStatus("error");
         setTimeout(() => setStatus("idle"), 4000);
@@ -85,6 +93,53 @@ export default function GenerateDocDropdown({
       onGenerated?.(body.doc);
       setStatus("done");
       setStatusMsg(`Saved: ${body.doc.title}`);
+      setOpen(false);
+      setTimeout(() => setStatus("idle"), 3000);
+    } catch (err) {
+      setStatusMsg(err instanceof Error ? err.message : String(err));
+      setStatus("error");
+      setTimeout(() => setStatus("idle"), 4000);
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const runAutopilot = async () => {
+    if (busyKey !== null) return;
+    setBusyKey("autopilot");
+    setStatus("generating");
+    setStatusMsg("Creating project summary...");
+    try {
+      const titles: string[] = [];
+      for (const typeKey of AUTOPILOT_TYPES) {
+        const res = await fetch("/api/generated-docs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            project_id: projectId,
+            doc_type: typeKey,
+          }),
+        });
+        const body = await res.json().catch(() => ({})) as {
+          doc?: { title?: string };
+          error?: string;
+          code?: string;
+        };
+      if (!res.ok || !body.doc) {
+        if (body.code === "NO_PROVIDER" || res.status === 503) {
+          setStatusMsg("No AI provider is connected yet. Open billing settings, connect one, and try again.");
+        } else {
+          setStatusMsg(body.error ?? `Failed (HTTP ${res.status}). Check the project context and try again.`);
+        }
+          setStatus("error");
+          setTimeout(() => setStatus("idle"), 4000);
+          return;
+        }
+        titles.push(body.doc.title ?? typeKey);
+      }
+      onGenerated?.({ id: "autopilot", doc_type: "bundle", title: "Project Autopilot", content: titles.join("\n") });
+      setStatus("done");
+      setStatusMsg(`Saved: ${titles.length} docs`);
       setOpen(false);
       setTimeout(() => setStatus("idle"), 3000);
     } catch (err) {
@@ -109,19 +164,35 @@ export default function GenerateDocDropdown({
         className={triggerCls}
       >
         <Sparkles size={13} />
-        {status === "generating" ? "Generating…" : label}
+        {status === "generating" ? "Generating..." : label}
         <ChevronDown size={12} className={`transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
       {open && (
         <div className="absolute right-0 z-50 mt-2 w-72 overflow-hidden rounded-xl border border-white/10 bg-[#0E0F12] shadow-2xl">
           <div className="border-b border-white/8 px-4 py-3">
-            <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#CCFF00]/70">Generate from this project</p>
+            <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#CCFF00]/70">Create from this project</p>
             <p className="mt-1 text-[11px] text-white/45">
-              {sourceDocumentId ? "Uses the just-uploaded plan as context." : "Uses live project data as context."}
+              {sourceDocumentId ? "Uses the plan you just uploaded." : "Uses live project data."}
             </p>
           </div>
           <div className="max-h-[60vh] overflow-y-auto py-1">
+            <button
+              key="autopilot"
+              type="button"
+              onClick={() => void runAutopilot()}
+              disabled={busyKey !== null}
+              className="group flex w-full items-start gap-3 px-4 py-2.5 text-left transition-colors hover:bg-white/5 disabled:opacity-40"
+            >
+              <Wand2 size={13} className="mt-0.5 text-[#CCFF00]" />
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-semibold text-white group-hover:text-[#CCFF00]">Project update</p>
+                <p className="mt-0.5 text-[11px] text-white/40">Create a project update, risk summary, and material list.</p>
+              </div>
+              {busyKey === "autopilot" && (
+                <span className="mt-1 h-1.5 w-1.5 animate-pulse rounded-full bg-[#CCFF00]" />
+              )}
+            </button>
             {GENERATED_DOC_TYPES.map((t) => (
               <button
                 key={t.key}
@@ -148,7 +219,17 @@ export default function GenerateDocDropdown({
           {status === "done" && <Check size={12} className="text-[#CCFF00]" />}
           {status === "error" && <AlertCircle size={12} className="text-red-400" />}
           {status === "generating" && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#CCFF00]" />}
-          <span className={status === "error" ? "text-red-400" : "text-white/70"}>{statusMsg}</span>
+          <div className="min-w-0">
+            <span className={status === "error" ? "text-red-400" : "text-white/70"}>{statusMsg}</span>
+            {status === "error" && statusMsg.includes("No AI provider") && (
+              <a
+                href="/dashboard/settings/billing"
+                className="mt-1 block text-[10px] font-semibold uppercase tracking-widest text-[#CCFF00] hover:underline"
+              >
+                Open billing settings
+              </a>
+            )}
+          </div>
         </div>
       )}
     </div>

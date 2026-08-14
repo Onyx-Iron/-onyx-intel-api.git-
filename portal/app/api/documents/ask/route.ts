@@ -6,13 +6,13 @@ import { getAccessToken } from "@/lib/google/oauth";
 import { headerSafe } from "@/lib/http";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { checkAiRateLimit } from "@/lib/ai/rate-limit";
+import { resolveDocumentStorageBucket } from "@/lib/documents/upload";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
 const GEMINI_API_KEY = headerSafe(process.env.GEMINI_API_KEY);
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-pro";
-const BUCKET = "project-documents";
 
 const SYSTEM =
   "You are a construction document assistant. Answer the user's question using ONLY the attached " +
@@ -31,7 +31,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const email = (await currentUser())?.primaryEmailAddress?.emailAddress;
 
     if (!GEMINI_API_KEY) {
-      return NextResponse.json({ error: "AI is not configured (GEMINI_API_KEY missing).", code: "NO_PROVIDER" }, { status: 503 });
+      return NextResponse.json({ error: "No AI provider is connected yet. Open billing settings, connect a provider, and try again.", code: "NO_PROVIDER" }, { status: 503 });
     }
 
     const { document_id, question } = await req.json() as { document_id?: string; question?: string };
@@ -81,7 +81,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       if (!doc.file_name.toLowerCase().endsWith(".pdf")) {
         return NextResponse.json({ error: "Document Q&A currently supports PDF files only." }, { status: 422 });
       }
-      const { data: fileData, error: dlErr } = await db.storage.from(BUCKET).download(storagePath);
+      const { data: fileData, error: dlErr } = await db.storage.from(resolveDocumentStorageBucket(meta)).download(storagePath);
       if (dlErr || !fileData) return NextResponse.json({ error: `Could not load file: ${dlErr?.message}` }, { status: 502 });
       bytes = Buffer.from(await fileData.arrayBuffer());
       contentType = "application/pdf";

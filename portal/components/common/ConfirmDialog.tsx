@@ -33,14 +33,60 @@ export function useConfirm() {
   if (!ctx) {
     return {
       confirm: async (opts: ConfirmOptions) => {
-        if (typeof window === "undefined") return false;
-        return window.confirm(
-          opts.description ? `${opts.title}\n\n${opts.description}` : opts.title,
-        );
+        if (typeof window === "undefined" || typeof document === "undefined") return false;
+        return new Promise<boolean>((resolve) => {
+          const root = document.createElement("div");
+          document.body.appendChild(root);
+          const cleanup = (value: boolean) => {
+            resolve(value);
+            root.remove();
+          };
+
+          root.innerHTML = `
+            <div class="fixed inset-0 z-[10000] flex items-center justify-center p-4" role="dialog" aria-modal="true">
+              <div data-confirm-backdrop class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
+              <div class="relative w-full max-w-md rounded-lg border border-white/10 bg-[#0E0F12] shadow-2xl shadow-black/60">
+                <div class="px-6 pt-5 pb-4">
+                  <h2 class="text-lg font-semibold text-white">${escapeHtml(opts.title)}</h2>
+                  ${opts.description ? `<p class="mt-2 text-sm text-white/60">${escapeHtml(opts.description)}</p>` : ""}
+                </div>
+                <div class="flex items-center justify-end gap-2 border-t border-white/5 px-6 py-3">
+                  <button type="button" data-confirm-cancel class="rounded-md border border-white/10 bg-transparent px-4 py-2 text-sm font-medium text-white/80 transition hover:bg-white/5 hover:text-white">
+                    ${escapeHtml(opts.cancelLabel ?? "Cancel")}
+                  </button>
+                  <button type="button" data-confirm-ok class="${opts.destructive ? "rounded-md bg-[#E50914] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#c4080f]" : "rounded-md bg-lime-400 px-4 py-2 text-sm font-semibold text-black transition hover:bg-lime-300"}">
+                    ${escapeHtml(opts.confirmLabel ?? "Confirm")}
+                  </button>
+                </div>
+              </div>
+            </div>
+          `;
+          const backdrop = root.querySelector("[data-confirm-backdrop]");
+          const cancel = root.querySelector("[data-confirm-cancel]");
+          const ok = root.querySelector("[data-confirm-ok]");
+          backdrop?.addEventListener("click", () => cleanup(false));
+          cancel?.addEventListener("click", () => cleanup(false));
+          ok?.addEventListener("click", () => cleanup(true));
+          window.addEventListener("keydown", function onKey(e) {
+            if (e.key === "Escape") {
+              window.removeEventListener("keydown", onKey);
+              cleanup(false);
+            }
+          });
+        });
       },
     };
   }
   return ctx;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 export function ConfirmProvider({ children }: { children: React.ReactNode }) {
@@ -120,6 +166,11 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
                   {pending.description ? (
                     <p className="mt-2 text-sm text-white/60">
                       {pending.description}
+                    </p>
+                  ) : null}
+                  {pending.destructive ? (
+                    <p className="mt-2 text-[11px] uppercase tracking-widest text-red-300/80">
+                      This action cannot be undone.
                     </p>
                   ) : null}
                 </div>

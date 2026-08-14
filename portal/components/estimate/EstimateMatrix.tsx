@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
+import AIAccuracyNotice from "@/components/common/AIAccuracyNotice";
+import { useConfirm } from "@/components/common/ConfirmDialog";
 import { calculateAssemblyQuantities, type RebarSize, REBAR_UNIT_WEIGHT_LBS_PER_FT } from "@/lib/math/assemblies";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -9,6 +11,7 @@ import { calculateAssemblyQuantities, type RebarSize, REBAR_UNIT_WEIGHT_LBS_PER_
 // ─────────────────────────────────────────────────────────────────────────────
 interface EstimateRow {
   id?: string;
+  row_version?: number;
   cost_code: string;
   description: string;
   quantity: number;
@@ -52,6 +55,7 @@ const RESTRICTED_ROLES: ReadonlySet<string> = new Set<RestrictedRole>(["FieldSup
 interface Props {
   projectId: string;
   projectName: string;
+  embedded?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -73,13 +77,14 @@ const UNIT_COL_LABELS: Record<UnitKey, string> = {
 // into the grid's editable per-unit-rate shape. Division is exact (not
 // rounded) so a round-trip load -> save reproduces the same dollar totals.
 function itemToRow(it: {
-  id: string; cost_code: string | null; description: string | null; quantity: number | null; uom: string | null;
+  id: string; row_version?: number; cost_code: string | null; description: string | null; quantity: number | null; uom: string | null;
   labor_cost: number; material_cost: number; equipment_cost: number; trucking_cost: number;
   subcontract_cost: number; disposal_cost: number; notes: string | null; sort_order?: number;
 }, index: number): EstimateRow {
   const q = it.quantity && it.quantity !== 0 ? it.quantity : 1;
   return {
     id: it.id,
+    row_version: it.row_version ?? 0,
     cost_code: it.cost_code ?? "",
     description: it.description ?? "",
     quantity: it.quantity ?? 0,
@@ -96,11 +101,15 @@ function itemToRow(it: {
   };
 }
 
-export default function EstimateMatrix({ projectId, projectName }: Props) {
+export default function EstimateMatrix({ projectId, projectName, embedded = false }: Props) {
+  const { confirm } = useConfirm();
   const [rows, setRows] = useState<EstimateRow[]>([]);
   const [settings, setSettings] = useState<FinancialSettings>({ overhead_pct: 10, profit_pct: 15, contingency_pct: 5 });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
   const [seedResult, setSeedResult] = useState<string | null>(null);
   const [assemblyModalOpen, setAssemblyModalOpen] = useState(false);
   const [role, setRole] = useState<string | null>(null);
@@ -108,6 +117,15 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   const [versionNumber, setVersionNumber] = useState<number | null>(null);
   const [versionStatus, setVersionStatus] = useState<string | null>(null);
   const saveTimer = useRef<number | null>(null);
+  const rowsRef = useRef<EstimateRow[]>([]);
+  const settingsRef = useRef<FinancialSettings>(settings);
+  const savingRef = useRef(false);
+
+  useEffect(() => { rowsRef.current = rows; }, [rows]);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
+  useEffect(() => () => {
+    if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
+  }, []);
 
   const pricingRestricted = role != null && RESTRICTED_ROLES.has(role);
   const locked = versionStatus === "approved" || versionStatus === "superseded" || versionStatus === "void";
@@ -123,6 +141,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   // estimate + its current version, then loads that version's items. ──────
   const load = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const listRes = await fetch(`/api/estimate/versions?project_id=${encodeURIComponent(projectId)}`, { cache: "no-store" });
       if (!listRes.ok) throw new Error(await listRes.text());
@@ -148,6 +167,22 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         version: { id: string; version_number: number; status: string; contingency_pct: number | null; overhead_pct: number | null; profit_pct: number | null };
         items: Parameters<typeof itemToRow>[0][];
       };
+      if (ver.items.length === 0) {
+        const migrateRes = await fetch("/api/estimate/migrate-legacy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project_id: projectId }),
+        });
+        const migrated = await migrateRes.json().catch(() => ({})) as { migrated?: number; version_id?: string };
+        if (migrateRes.ok && (migrated.migrated ?? 0) > 0) {
+          activeVersionId = migrated.version_id ?? activeVersionId;
+          if (!activeVersionId) throw new Error("Legacy estimate migration did not return a version to load.");
+          const refreshed = await fetch(`/api/estimate/versions/${encodeURIComponent(activeVersionId)}`, { cache: "no-store" });
+          if (!refreshed.ok) throw new Error(await refreshed.text());
+          const refreshedVersion = await refreshed.json() as typeof ver;
+          ver.items = refreshedVersion.items;
+        }
+      }
       setVersionId(ver.version.id);
       setVersionNumber(ver.version.version_number);
       setVersionStatus(ver.version.status);
@@ -158,13 +193,18 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         contingency_pct: numericOr(ver.version.contingency_pct, 5),
       });
     } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "Could not load the estimate matrix. Refresh and try again.");
       console.error("[estimate] load failed", e);
     } finally {
       setLoading(false);
     }
   }, [projectId]);
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   // ── Create a new draft (from the current locked version) and switch to it ──
   async function createNewDraft() {
@@ -183,9 +223,36 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
 
   async function approveCurrentVersion() {
     if (!versionId) return;
-    setSaving(true);
+    if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
+    const saved = await saveAll();
+    if (!saved) return;
     try {
-      const res = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}/approve`, { method: "POST" });
+      setSaving(true);
+      const previewRes = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}/approval-preview`, { method: "POST" });
+      const previewData = await previewRes.json().catch(() => ({})) as {
+        error?: string;
+        quality?: { blockers?: string[] };
+        preview?: { id: string; payload?: { totals?: { totalPrice?: number } } };
+      };
+      if (!previewRes.ok || !previewData.preview) {
+        const blockers = previewData.quality?.blockers?.join("; ");
+        setSeedResult(`Approval blocked: ${blockers || previewData.error || previewRes.status}`);
+        return;
+      }
+      setSaving(false);
+      const total = Number(previewData.preview.payload?.totals?.totalPrice ?? 0);
+      const accepted = await confirm({
+        title: `Approve Estimate Version ${versionNumber ?? ""}?`,
+        description: `You are approving the exact current estimate totaling $${fmt(total)}. This locks the version; future changes require a new draft.`,
+        confirmLabel: "Approve exact version",
+      });
+      if (!accepted) return;
+      setSaving(true);
+      const res = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preview_id: previewData.preview.id }),
+      });
       if (res.ok) await load();
       else setSeedResult(`Approve failed: ${(await res.json().catch(() => ({}))).error ?? res.status}`);
     } finally {
@@ -241,15 +308,18 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
       for (const k of UNIT_COL_KEYS) delete (patch as Record<string, unknown>)[k];
       if (Object.keys(patch).length === 0) return;
     }
-    setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch, _dirty: true } : r)));
+    setRows((prev) => {
+      const next = prev.map((r, i) => (i === idx ? { ...r, ...patch, _dirty: true } : r));
+      rowsRef.current = next;
+      return next;
+    });
     scheduleAutoSave();
   }
 
   function addRow() {
     if (locked) return;
-    setRows((prev) => [
-      ...prev,
-      {
+    setRows((prev) => {
+      const next = [...prev, {
         _local: `new-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         cost_code: "",
         description: "",
@@ -264,8 +334,10 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         notes: "",
         sort_order: prev.length,
         _dirty: true,
-      },
-    ]);
+      }];
+      rowsRef.current = next;
+      return next;
+    });
   }
 
   // ── Insert Assembly Mix — expands one composite spec into its nested
@@ -288,7 +360,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
 
     if (qty.concrete_cy > 0) {
       newRows.push({
-        _local: `asm-concrete-${Date.now()}`,
+        _local: `asm-concrete-${crypto.randomUUID()}`,
         cost_code: "03-30-00",
         description: `Concrete — ${input.mixDesign}, ${input.thicknessInches}" thick`,
         quantity: qty.concrete_cy,
@@ -301,7 +373,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     }
     if (qty.base_material_tons > 0) {
       newRows.push({
-        _local: `asm-base-${Date.now()}`,
+        _local: `asm-base-${crypto.randomUUID()}`,
         cost_code: "31-23-00",
         description: `Aggregate Subbase — ${input.baseDepthInches}" depth`,
         quantity: qty.base_material_tons,
@@ -314,7 +386,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     }
     if (qty.rebar_lbs > 0) {
       newRows.push({
-        _local: `asm-rebar-${Date.now()}`,
+        _local: `asm-rebar-${crypto.randomUUID()}`,
         cost_code: "03-20-00",
         description: `Rebar — ${input.rebarSize} @ ${input.rebarSpacingInches}" o.c.`,
         quantity: qty.rebar_lbs,
@@ -326,7 +398,11 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
       });
     }
 
-    setRows((prev) => [...prev, ...newRows]);
+    setRows((prev) => {
+      const next = [...prev, ...newRows];
+      rowsRef.current = next;
+      return next;
+    });
     scheduleAutoSave();
     setAssemblyModalOpen(false);
   }
@@ -335,33 +411,106 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     if (locked) return; // approved/superseded/void — server would reject anyway; don't even try
     const r = rows[idx];
     if (r.id && versionId) {
-      await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}?item_id=${encodeURIComponent(r.id)}`, { method: "DELETE" });
+      const response = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}?item_id=${encodeURIComponent(r.id)}`, { method: "DELETE" });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({})) as { error?: string };
+        setSaveError(result.error ?? `Delete failed (${response.status}).`);
+        return;
+      }
     }
-    setRows((prev) => prev.filter((_, i) => i !== idx));
+    setRows((prev) => {
+      const next = prev.filter((_, i) => i !== idx);
+      rowsRef.current = next;
+      return next;
+    });
   }
 
-  const scheduleAutoSave = useCallback(() => {
+  function scheduleAutoSave() {
     if (locked) return;
     if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => { void saveAll(); }, 900);
-  }, [locked]);
+  }
+
+  async function applyBestApprovedPrice(row: EstimateRow) {
+    if (!versionId || !row.id || !row.cost_code.trim() || locked || pricingRestricted) return;
+    setSaving(true);
+    setSeedResult(null);
+    try {
+      const query = new URLSearchParams({ project_id: projectId, cost_code: row.cost_code.trim() });
+      const lookupRes = await fetch(`/api/construction-intelligence/prices?${query.toString()}`, { cache: "no-store" });
+      const lookup = await lookupRes.json().catch(() => ({})) as {
+        error?: string;
+        selected?: { authoritative?: boolean; observation?: { id?: string } } | null;
+      };
+      const observationId = lookup.selected?.observation?.id;
+      if (!lookupRes.ok || !lookup.selected?.authoritative || !observationId) {
+        setSeedResult(`Pricing blocked: ${lookup.error ?? "No current approved non-AI price evidence matches this cost code and project."}`);
+        return;
+      }
+      const previewRes = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}/apply-price`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item_id: row.id, price_observation_id: observationId }),
+      });
+      const previewData = await previewRes.json().catch(() => ({})) as {
+        error?: string;
+        preview_hash?: string;
+        preview?: { sourceKind?: string; sourceRef?: string | null; effectiveDate?: string; before?: { totalPrice?: number }; after?: { total_price?: number } };
+      };
+      if (!previewRes.ok || !previewData.preview || !previewData.preview_hash) {
+        setSeedResult(`Pricing blocked: ${previewData.error ?? previewRes.status}`);
+        return;
+      }
+      setSaving(false);
+      const accepted = await confirm({
+        title: "Apply approved price evidence?",
+        description: `${previewData.preview.sourceKind ?? "Approved source"} ${previewData.preview.sourceRef ?? ""} effective ${previewData.preview.effectiveDate ?? "unknown date"}. Item sell price changes from $${fmt(Number(previewData.preview.before?.totalPrice ?? 0))} to $${fmt(Number(previewData.preview.after?.total_price ?? 0))}.`,
+        confirmLabel: "Apply exact price",
+      });
+      if (!accepted) return;
+      setSaving(true);
+      const confirmRes = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}/apply-price`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item_id: row.id, price_observation_id: observationId, confirm: true, preview_hash: previewData.preview_hash }),
+      });
+      const confirmed = await confirmRes.json().catch(() => ({})) as { error?: string };
+      if (!confirmRes.ok) {
+        setSeedResult(`Pricing blocked: ${confirmed.error ?? confirmRes.status}`);
+        return;
+      }
+      setSeedResult("Approved source price applied. Review the item and estimate totals before approval.");
+      await load();
+    } catch (error) {
+      setSeedResult(`Pricing blocked: ${error instanceof Error ? error.message : "Could not reach the pricing service."}`);
+    } finally {
+      setSaving(false);
+    }
+  }
 
   // Converts a row's edited per-unit rates back into cost-category dollar
   // totals for the authoritative estimate_items shape. contingency/overhead/
   // profit are intentionally omitted — the server derives them from the
   // version's percentages (the sliders below), never trusted from here.
   async function saveAll(includeSettings = true) {
-    if (saving || locked || !versionId) return;
-    const dirty = rows.filter((r) => r._dirty);
-    if (dirty.length === 0 && !includeSettings) return;
+    if (savingRef.current || locked || !versionId) return false;
+    const rowsSnapshot = rowsRef.current;
+    const dirty = rowsSnapshot.map((row, index) => ({ row, index })).filter(({ row }) => row._dirty);
+    if (dirty.length === 0 && !includeSettings) return true;
+    const invalid = dirty.find(({ row }) => !row.description.trim() || row.quantity < 0 || UNIT_COL_KEYS.some((key) => row[key] < 0));
+    if (invalid) {
+      setSaveError("Every row needs a description and non-negative quantity and rates before it can be saved.");
+      return false;
+    }
+    savingRef.current = true;
     setSaving(true);
+    setSaveError(null);
     try {
       const res = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          items: dirty.map((r, i) => ({
+          items: dirty.map(({ row: r, index }) => ({
             id: r.id,
+            row_version: r.row_version,
             cost_code: r.cost_code || null,
             description: r.description,
             quantity: r.quantity,
@@ -373,22 +522,36 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
             trucking_cost: r.quantity * r.trucking_unit,
             disposal_cost: r.quantity * r.disposal_unit,
             notes: r.notes,
-            sort_order: i,
+            sort_order: index,
           })),
-          settings: includeSettings ? settings : undefined,
+          settings: includeSettings ? settingsRef.current : undefined,
         }),
       });
       if (res.ok) {
+        setLastSavedAt(new Date());
         await load(); // reload to pick up server-assigned IDs + recalculated totals
+        return true;
+      } else {
+        const result = await res.json().catch(() => ({})) as { error?: string };
+        setSaveError(result.error ?? `Save failed (${res.status}). Your edits remain on screen.`);
+        return false;
       }
+    } catch {
+      setSaveError("Could not reach the server. Your edits remain on screen; use Save now to retry.");
+      return false;
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
 
   function updateSetting(key: keyof FinancialSettings, value: number) {
     if (pricingRestricted || locked) return; // markup sliders are locked for these roles / locked versions
-    setSettings((s) => ({ ...s, [key]: value }));
+    setSettings((current) => {
+      const next = { ...current, [key]: value };
+      settingsRef.current = next;
+      return next;
+    });
     if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => { void saveAll(); }, 400);
   }
@@ -456,12 +619,12 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div className="flex min-h-screen w-full flex-col bg-[#06070A] text-white">
+    <div className={`flex w-full flex-col bg-[#06070A] text-white ${embedded ? "min-h-[720px] overflow-hidden rounded-xl border border-white/10" : "min-h-screen"}`}>
       {/* Sticky top: config bar */}
       <div className="sticky top-0 z-30 border-b border-white/10 bg-[#06070A]/95 backdrop-blur">
         <div className="flex items-center justify-between px-4 py-3">
           <div className="flex items-center gap-4">
-            <Link href={`/dashboard/projects/${projectId}`} className="text-[11px] font-semibold uppercase tracking-widest text-white/50 hover:text-white">← Back</Link>
+            {!embedded && <Link href={`/dashboard/projects/${projectId}`} className="text-[11px] font-semibold uppercase tracking-widest text-white/50 hover:text-white">← Back</Link>}
             <div>
               <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono text-white/40">
                 <span>Estimate · Pricing Matrix</span>
@@ -484,8 +647,9 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
               <button type="button" onClick={createNewDraft} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-amber-400/40 bg-amber-400/10 px-4 text-[11px] font-semibold uppercase tracking-widest text-amber-300 hover:bg-amber-400/20 disabled:opacity-40">New Draft to Edit</button>
             ) : (
               <>
-                <button type="button" onClick={seed} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white disabled:opacity-40">Load from Takeoffs</button>
-                <button type="button" onClick={addRow} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white">+ Row</button>
+                <button type="button" onClick={seed} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white disabled:opacity-40">Use takeoff items</button>
+                <button type="button" onClick={addRow} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white">Add row</button>
+                <button type="button" onClick={() => void saveAll()} disabled={saving || !rows.some((row) => row._dirty)} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white disabled:opacity-30">Save now</button>
                 {!pricingRestricted && (
                   <button type="button" onClick={() => setAssemblyModalOpen(true)} className="inline-flex h-9 items-center rounded-full border border-[#00D2FF]/30 bg-[#00D2FF]/10 px-4 text-[11px] font-semibold uppercase tracking-widest text-[#00D2FF] hover:bg-[#00D2FF]/20">Insert Assembly Mix</button>
                 )}
@@ -516,18 +680,38 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
           </div>
         )}
 
+        <AIAccuracyNotice context="pricing" className="border-x-0 border-b-0" />
+
         {seedResult && <div className="border-t border-white/5 bg-white/[0.03] px-4 py-1.5 text-[11px] text-white/70">{seedResult}</div>}
+        {saveError && (
+          <div role="alert" className="flex items-center justify-between gap-3 border-t border-red-400/20 bg-red-400/10 px-4 py-2 text-[11px] text-red-200">
+            <span>{saveError}</span>
+            <button type="button" onClick={() => void saveAll()} className="shrink-0 rounded-full border border-red-300/30 px-3 py-1 font-semibold uppercase tracking-widest hover:bg-red-300/10">Save now</button>
+          </div>
+        )}
       </div>
 
       {/* Grid */}
       <div className="flex-1 overflow-auto">
+        {loadError && (
+          <div className="border-b border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+            <div className="font-semibold">Estimate matrix could not finish loading.</div>
+            <div className="mt-1 text-amber-100/80">{loadError}</div>
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="mt-3 inline-flex h-9 items-center rounded-full border border-amber-300/30 bg-amber-300/10 px-3 text-[11px] font-semibold uppercase tracking-widest text-amber-100 hover:bg-amber-300/20"
+            >
+              Try again
+            </button>
+          </div>
+        )}
         {loading ? (
-          <div className="p-10 text-center text-sm text-white/40">Loading estimate…</div>
+          <div className="p-10 text-center text-sm text-white/40">Loading estimate...</div>
         ) : rows.length === 0 ? (
           <div className="mx-auto max-w-2xl p-10 text-center">
             <p className="text-sm text-white/60">
-              No estimate rows yet. Click <b>Load from Takeoffs</b> to pull items from your takeoff pipeline
-              and manual sheet measurements, or <b>+ Row</b> to add one by hand.
+            No estimate rows yet. Use <b>Use takeoff items</b> to pull in takeoff measurements, or <b>Add row</b> to enter one by hand.
             </p>
           </div>
         ) : (
@@ -575,7 +759,12 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
                     ))}
                     <td className="border-b border-white/5 px-2 py-1 text-right text-xs font-mono text-white">{pricingRestricted ? "••••" : `$${fmt(direct)}`}</td>
                     <td className="border-b border-white/5 px-1 py-1 text-center">
-                      <button type="button" onClick={() => removeRow(i)} className="text-white/30 hover:text-red-400 text-xs">✕</button>
+                      <div className="flex items-center justify-center gap-1">
+                        {!pricingRestricted && r.id && r.cost_code.trim() ? (
+                          <button type="button" onClick={() => void applyBestApprovedPrice(r)} aria-label={`Apply approved price to ${r.description}`} className="text-[10px] font-bold text-[#CCFF00]/60 hover:text-[#CCFF00]">$</button>
+                        ) : null}
+                        <button type="button" onClick={() => removeRow(i)} aria-label={`Remove ${r.description}`} className="text-white/30 hover:text-red-400 text-xs">✕</button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -598,7 +787,9 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
             <Total label="FINAL BID" value={totals.finalBid} tone="text-[#CCFF00]" big />
           </div>
         )}
-        {saving && <div className="mt-1 text-center text-[10px] uppercase tracking-widest font-mono text-white/40">Saving…</div>}
+        <div className="mt-1 text-center text-[10px] uppercase tracking-widest font-mono text-white/40" aria-live="polite">
+          {saving ? "Saving..." : saveError ? "Not saved" : lastSavedAt ? `Saved ${lastSavedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "Changes save automatically"}
+        </div>
       </div>
 
       {assemblyModalOpen && (

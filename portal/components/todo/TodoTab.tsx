@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { CheckSquare, Plus, Trash2, Pencil } from "lucide-react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
+import { CheckSquare, Plus, Trash2, Pencil, Wand2 } from "lucide-react";
 import UniversalImportButton from "@/components/common/UniversalImportButton";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import { useBulkImport, toStr } from "@/components/common/useBulkImport";
@@ -22,7 +23,6 @@ interface TodoItem {
   completed_at: string | null;
   created_at: string;
 }
-
 interface FormState {
   title: string;
   notes: string;
@@ -31,7 +31,6 @@ interface FormState {
   priority: Priority;
   assignee: string;
 }
-
 function pickField(row: Record<string, string | number | null>, keys: string[]): string | null {
   for (const k of keys) {
     const norm = k.toLowerCase().replace(/[\s_-]/g, "");
@@ -69,7 +68,7 @@ const EMPTY_FORM: FormState = {
 };
 
 function fmtDate(d: string | null): string {
-  if (!d) return "—";
+  if (!d) return "-";
   return new Date(d + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
@@ -81,6 +80,8 @@ export default function TodoTab({ projectId }: { projectId: string }) {
   const [editId, setEditId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [submitting, setSubmitting] = useState(false);
+  const [bundling, setBundling] = useState(false);
+  const [bundleStatus, setBundleStatus] = useState<string | null>(null);
   const [filter, setFilter] = useState<TodoStatus | "all">("all");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -91,11 +92,16 @@ export default function TodoTab({ projectId }: { projectId: string }) {
     fetch(`/api/todo-items?project_id=${encodeURIComponent(projectId)}`)
       .then((r) => r.json())
       .then((d: { items?: TodoItem[] }) => { setItems(d.items ?? []); setLoading(false); })
-      .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
+      .catch((e) => { setError(e?.message ?? "Could not load to-dos. Refresh the page and try again."); setLoading(false); });
   }, [projectId]);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, [load]);
+  useProjectSyncRefresh(load);
+
+  useEffect(() => {
+    const timer = window.setTimeout(load, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
+
 
   const importTodos = useBulkImport<{
     project_id: string; title: string; notes: string | null;
@@ -128,6 +134,7 @@ export default function TodoTab({ projectId }: { projectId: string }) {
   const cycleStatus = async (item: TodoItem) => {
     const idx = STATUS_CYCLE.indexOf(item.status);
     const next = STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length];
+    const prevItems = items;
     setItems((prev) => prev.map((i) => i.id === item.id ? { ...i, status: next } : i));
     try {
       const res = await fetch(`/api/todo-items/${encodeURIComponent(item.id)}`, {
@@ -136,17 +143,20 @@ export default function TodoTab({ projectId }: { projectId: string }) {
         body: JSON.stringify({ status: next }),
       });
       if (!res.ok) {
-        setErrorMsg(`Status update failed (${res.status})`);
+        setItems(prevItems);
+        setErrorMsg(`Could not update that task status (${res.status}). Refresh the list and try again.`);
         load();
       }
     } catch {
-      setErrorMsg("Network error — could not update status.");
+      setItems(prevItems);
+      setErrorMsg("Could not update that task just now. Please try again in a moment.");
       load();
     }
   };
 
   const toggleDone = async (item: TodoItem) => {
     const next: TodoStatus = item.status === "done" ? "open" : "done";
+    const prevItems = items;
     setItems((prev) => prev.map((i) => i.id === item.id ? { ...i, status: next } : i));
     try {
       const res = await fetch(`/api/todo-items/${encodeURIComponent(item.id)}`, {
@@ -154,9 +164,10 @@ export default function TodoTab({ projectId }: { projectId: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: next }),
       });
-      if (!res.ok) { setErrorMsg(`Update failed (${res.status})`); load(); }
+      if (!res.ok) { setItems(prevItems); setErrorMsg(`Could not update that task (${res.status}). Refresh the list and try again.`); load(); }
     } catch {
-      setErrorMsg("Network error — could not update.");
+      setItems(prevItems);
+      setErrorMsg("Could not update that task just now. Please try again in a moment.");
       load();
     }
   };
@@ -206,13 +217,13 @@ export default function TodoTab({ projectId }: { projectId: string }) {
           });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Save failed (${res.status})`);
+        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Could not save this task (${res.status}). Check the form and try again.`);
         return;
       }
       cancelForm();
       load();
     } catch {
-      setErrorMsg("Network error — could not reach the server.");
+      setErrorMsg("Could not reach the server just now. Please try again in a moment.");
     } finally {
       setSubmitting(false);
     }
@@ -220,16 +231,57 @@ export default function TodoTab({ projectId }: { projectId: string }) {
 
   const deleteItem = async (id: string) => {
     if (!(await confirm({ title: String("Delete this to-do?"), destructive: true }))) return;
+    const prevItems = items;
     setItems((prev) => prev.filter((i) => i.id !== id));
     try {
       const res = await fetch(`/api/todo-items/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (!res.ok) {
-        setErrorMsg(`Delete failed (${res.status}) — refreshing list.`);
+        setItems(prevItems);
+        setErrorMsg(`Could not delete that task (${res.status}). Refreshing the list now.`);
         load();
       }
     } catch {
-      setErrorMsg("Network error — could not delete.");
+      setItems(prevItems);
+      setErrorMsg("Could not delete that task just now. Refresh the list and try again in a moment.");
       load();
+    }
+  };
+
+  const bundleOpenItems = async () => {
+    if (bundling) return;
+    setBundling(true);
+    setBundleStatus(null);
+    try {
+      const openItems = items.filter((item) => item.status !== "done").slice(0, 8);
+      if (openItems.length === 0) {
+        setBundleStatus("No open tasks to bundle.");
+        return;
+      }
+
+      const titles = openItems.map((item) => item.title).join("; ");
+      const res = await fetch("/api/todo-items", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project_id: projectId,
+          title: `Review open task bundle (${openItems.length} items)`,
+          notes: `Created from the current open to-do list.\n\nOpen items:\n${titles}`,
+          due_date: null,
+          status: "open",
+          priority: "high",
+          assignee: null,
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error((d as { error?: string }).error ?? `HTTP ${res.status}`);
+      }
+      setBundleStatus(`Created bundle task for ${openItems.length} open item${openItems.length === 1 ? "" : "s"}.`);
+      load();
+    } catch (e) {
+      setBundleStatus(`Bundle failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBundling(false);
     }
   };
 
@@ -278,10 +330,18 @@ export default function TodoTab({ projectId }: { projectId: string }) {
             <CheckSquare size={12} className="text-[#CCFF00]" />
             <span className="text-[11px] uppercase tracking-widest text-gray-400">To-Do List</span>
             {filter !== "all" && (
-              <span className="text-[9px] text-gray-700 uppercase tracking-widest">— {STATUS_LABELS[filter]}</span>
+              <span className="text-[9px] text-gray-700 uppercase tracking-widest">- {STATUS_LABELS[filter]}</span>
             )}
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => void bundleOpenItems()}
+              disabled={bundling}
+              className="flex items-center gap-1.5 bg-white/5 border border-white/10 text-gray-400 hover:bg-white/10 hover:text-white rounded-lg px-4 py-2 text-[11px] font-bold tracking-widest uppercase transition-colors disabled:opacity-50"
+            >
+              <Wand2 size={11} />
+              {bundling ? "Bundling..." : "Bundle Open"}
+            </button>
             <UniversalImportButton
               hint="todo"
               onParsed={importTodos}
@@ -311,9 +371,11 @@ export default function TodoTab({ projectId }: { projectId: string }) {
                 <EmptyState
                   icon={<CheckSquare className="w-6 h-6" />}
                   title="No to-dos yet"
-                  description="Track action items and follow-ups."
+                  description="Track action items and follow-ups so the next step is always easy to find."
                   actionLabel="Add To-Do"
                   onAction={openAdd}
+                  secondaryLabel="View projects"
+                  secondaryHref="/dashboard/projects"
                 />
               </div>
             ) : (
@@ -383,6 +445,12 @@ export default function TodoTab({ projectId }: { projectId: string }) {
         </div>
       </div>
 
+      {bundleStatus && (
+        <div className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-2 text-[11px] text-white/55">
+          {bundleStatus}
+        </div>
+      )}
+
       {showForm && (
         <div className="rounded-xl border border-white/10 bg-[#0E0F12] p-6">
           <p className="text-[11px] uppercase tracking-widest text-gray-500 mb-4">
@@ -437,7 +505,7 @@ export default function TodoTab({ projectId }: { projectId: string }) {
             <div className="flex items-center gap-3 pt-2">
               <button type="submit" disabled={submitting}
                 className="bg-[#CCFF00]/10 border border-[#CCFF00]/30 text-[#CCFF00] hover:bg-[#CCFF00]/20 rounded-lg px-4 py-2 text-[11px] font-bold tracking-widest uppercase transition-colors disabled:opacity-50">
-                {submitting ? "Saving…" : editId ? "Save Changes" : "Add Task"}
+                {submitting ? "Saving..." : editId ? "Save Changes" : "Add Task"}
               </button>
               <button type="button" onClick={cancelForm}
                 className="bg-white/5 border border-white/10 text-gray-400 hover:bg-white/10 rounded-lg px-4 py-2 text-[11px] uppercase tracking-widest transition-colors min-h-[40px] focus-visible:ring-2 focus-visible:ring-[#CCFF00]/40">

@@ -4,12 +4,14 @@ import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { headerSafe } from "@/lib/http";
 import { pythonApiHeaders } from "@/lib/python-api";
 import { checkAiRateLimit } from "@/lib/ai/rate-limit";
+import { assertProjectBelongsToTenant, authTenantKey, authTenantName, getOrCreateTenant } from "@/lib/project-controls/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
 
 // ── AI vision provider config (used only when ?ai_fallback=true) ─────────────
 const GEMINI_API_KEY    = headerSafe(process.env.GEMINI_API_KEY);
-const GEMINI_MODEL      = process.env.GEMINI_MODEL ?? "gemini-2.5-pro";
+const GEMINI_MODEL      = process.env.GEMINI_MODEL ?? "gemini-3.6-flash";
 const ANTHROPIC_API_KEY = headerSafe(process.env.ANTHROPIC_API_KEY);
 const ANTHROPIC_MODEL   = process.env.TAKEOFF_AI_MODEL ?? "claude-sonnet-4-6";
 
@@ -24,16 +26,18 @@ export const maxDuration = 300; // CAD/IFC parsing + AI vision can both take tim
  *   - ?stream=true:       multipart upload → Python /api/stream/upload    (NDJSON streaming response)
  *   - ?ai_fallback=true:  multipart PDF    → Gemini/Anthropic vision      (JSON rows, paid path)
  *
- * Tenant isolation is enforced on every path: X-Onyx-Tenant uses the Clerk
- * org id (or `user_<userId>` for personal workspaces).
+ * Tenant isolation is enforced on every path: X-Onyx-Tenant uses the
+ * canonical project-controls tenant UUID, not a Clerk org/user key.
  */
 export async function POST(req: NextRequest): Promise<Response> {
   try {
-    const { userId, orgId } = await auth();
+    const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    const tenantKey  = orgId ?? `user_${userId}`;
+    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const projectId  = req.nextUrl.searchParams.get("project_id") ?? "";
+    await assertPermission(tenantId, userId, "field", "write");
+    if (projectId) await assertProjectBelongsToTenant(projectId, tenantId);
     const aiFallback = req.nextUrl.searchParams.get("ai_fallback") === "true";
     const streaming  = req.nextUrl.searchParams.get("stream") === "true";
 
@@ -41,17 +45,17 @@ export async function POST(req: NextRequest): Promise<Response> {
     const email = user?.emailAddresses?.[0]?.emailAddress ?? null;
 
     if (aiFallback) {
-      return await runAiFallback(req, tenantKey, email);
+      return await runAiFallback(req, tenantId, email);
     }
 
     if (streaming) {
-      return await runStreamingExtract(req, tenantKey, projectId, email);
+      return await runStreamingExtract(req, tenantId, projectId, email);
     }
 
-    return await runDeterministicExtract(req, tenantKey, projectId, email);
+    return await runDeterministicExtract(req, tenantId, projectId, email);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[takeoff/extract] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[takeoff/extract] ${msg}` }, { status: err instanceof PermissionError || msg.includes("does not belong") ? 403 : 500 });
   }
 }
 

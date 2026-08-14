@@ -50,6 +50,7 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
   const [editingPoints, setEditingPoints] = useState<Array<[number, number]> | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [layerFilter, setLayerFilter] = useState<Set<string>>(new Set());
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // ── Load vectors (initial + on refresh signal from PDF extractor) ─────────
   useEffect(() => {
@@ -57,14 +58,19 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
     const load = async () => {
       try {
         const res = await fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
-        if (!res.ok) return;
-        const data = await res.json() as { vectors: RawVector[] };
+        const data = await res.json().catch(() => ({})) as { vectors?: RawVector[]; error?: string };
+        if (!res.ok) {
+          throw new Error(data.error ?? `Could not load CAD vectors (${res.status}). Refresh and try again.`);
+        }
         if (!cancelled && Array.isArray(data.vectors)) {
           setRaw(data.vectors);
           const descriptions = Array.from(new Set(data.vectors.map((v) => classifyLayer(v.layer).description)));
           onVectorsLoaded?.(descriptions);
+          setLoadError(null);
         }
-      } catch { /* silent */ }
+      } catch (err) {
+        if (!cancelled) setLoadError(err instanceof Error ? err.message : "Could not load CAD vectors. Refresh and try again.");
+      }
     };
     void load();
 
@@ -77,7 +83,7 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
       cancelled = true;
       window.removeEventListener("onyx:cad-vectors-refresh", onRefresh as EventListener);
     };
-  }, [pageId]);
+  }, [pageId, onVectorsLoaded]);
 
   // ── World→screen projection ───────────────────────────────────────────────
   // Fit-to-canvas: compute overall bbox in world units and scale to fit the
@@ -227,10 +233,10 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
       setHoverKey(null);
       setEditingKey(null);
       setEditingPoints(null);
-      setStatus(`Added ${quantity.toFixed(1)} ${item.unit} → project`);
+      setStatus(`Added ${quantity.toFixed(1)} ${item.unit} to project`);
       setTimeout(() => setStatus(null), 2500);
     } catch (e) {
-      setStatus(`Save failed: ${e instanceof Error ? e.message : String(e)}`);
+      setStatus(`Could not save that vector just now: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setApproving(false);
     }
@@ -253,6 +259,11 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
 
   return (
     <>
+      {loadError && (
+        <div className="absolute left-4 top-4 z-40 rounded-lg border border-amber-400/30 bg-amber-400/[0.08] px-3 py-2 text-xs text-amber-200 shadow-lg">
+          {loadError}
+        </div>
+      )}
       {/* Vector SVG overlay */}
       {enabled && (
         <svg

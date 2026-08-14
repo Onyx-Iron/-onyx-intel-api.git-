@@ -1,7 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { Info, Ruler } from "lucide-react";
+import { ArrowRight, Layers, Info, Ruler } from "lucide-react";
 import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 
@@ -31,7 +32,7 @@ const REVIEW_STYLES: Record<string, string> = {
 };
 
 function fmt(d: string | null): string {
-  if (!d) return "—";
+  if (!d) return "-";
   return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
@@ -74,11 +75,15 @@ export default function GlobalTakeoffPage() {
         setProjects(p.projects ?? []);
         setLoading(false);
       })
-      .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
+      .catch((e) => { setError(e?.message ?? "Could not load takeoff items. Refresh the page and try again."); setLoading(false); });
   };
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const projectNameById = useMemo(() => {
     const m = new Map<string, string>();
@@ -100,21 +105,48 @@ export default function GlobalTakeoffPage() {
     return byStatus;
   }, [items]);
 
+  const projectTakeoffCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const item of items) {
+      m.set(item.project_id, (m.get(item.project_id) ?? 0) + 1);
+    }
+    return m;
+  }, [items]);
+
   return (
     <div>
       <PageHero
         eyebrow="Workspace"
         title="Takeoff"
-        description="Every takeoff item across all projects, in one roll-up view"
+        description="Takeoff items across all projects in one place."
         compact
       />
 
       <div className="px-4 py-6 sm:px-6 lg:px-10 lg:py-8">
         {error && <div className="mb-4"><ErrorState message={error} onRetry={load} /></div>}
 
-        <div className="mb-4 flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
-          <Info size={12} className="shrink-0" />
-          <span>Read-only roll-up. Draw and edit takeoffs from a project&apos;s Takeoff tab.</span>
+        <div className="mb-4 grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
+          <div className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-4 text-xs text-white/55">
+            <div className="flex items-start gap-2">
+              <Info size={12} className="mt-0.5 shrink-0" />
+              <div className="space-y-1">
+                <p>Open a project to draw on sheets, edit items, and work sheet by sheet.</p>
+                <p className="text-white/35">Use this page to review totals, then jump into a project when you want to draw or edit measurements.</p>
+              </div>
+            </div>
+          </div>
+          <div className="rounded-lg border border-[#CCFF00]/20 bg-[#CCFF00]/[0.05] px-4 py-4 text-xs text-white/70">
+            <div className="flex items-center gap-2">
+              <Layers size={12} className="text-[#CCFF00]" />
+              <span className="font-semibold text-white">Fast path:</span>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <span className="rounded-full border border-white/10 bg-black/30 px-2 py-1 font-mono uppercase tracking-widest text-[10px]">Open project</span>
+              <span className="rounded-full border border-white/10 bg-black/30 px-2 py-1 font-mono uppercase tracking-widest text-[10px]">Open Takeoff</span>
+              <span className="rounded-full border border-white/10 bg-black/30 px-2 py-1 font-mono uppercase tracking-widest text-[10px]">Pick a sheet</span>
+              <span className="rounded-full border border-white/10 bg-black/30 px-2 py-1 font-mono uppercase tracking-widest text-[10px]">Start measuring</span>
+            </div>
+          </div>
         </div>
 
         {!loading && !error && items.length > 0 && (
@@ -167,7 +199,11 @@ export default function GlobalTakeoffPage() {
                         <EmptyState
                           icon={<Ruler className="w-6 h-6" />}
                           title="No takeoff items yet"
-                          description="Draw takeoffs from a project's Takeoff tab to see them roll up here."
+                          description="Create takeoffs in a project and they will appear here automatically."
+                          actionLabel="Open projects"
+                          actionHref="/dashboard/projects"
+                          secondaryLabel="Open takeoff"
+                          secondaryHref="/dashboard/takeoff"
                         />
                       </div>
                     </td>
@@ -179,9 +215,9 @@ export default function GlobalTakeoffPage() {
                       <tr key={item.id} className="hover:bg-white/[0.02] transition-colors">
                         <td className="px-4 py-3 text-white text-xs truncate max-w-xs">{item.label ?? "Untitled item"}</td>
                         <td className="px-4 py-3 text-gray-400 text-xs">{projectNameById.get(item.project_id) ?? item.project_id}</td>
-                        <td className="px-4 py-3 text-gray-500 font-mono text-xs">{item.csi_code ?? "—"}</td>
+                        <td className="px-4 py-3 text-gray-500 font-mono text-xs">{item.csi_code ?? "-"}</td>
                         <td className="px-4 py-3 text-right text-gray-300 font-mono text-xs">
-                          {item.quantity != null ? `${item.quantity} ${item.unit ?? ""}` : "—"}
+                          {item.quantity != null ? `${item.quantity} ${item.unit ?? ""}` : "-"}
                         </td>
                         <td className="px-4 py-3">
                           <span className={`inline-flex items-center px-2 py-0.5 rounded border text-[9px] font-bold tracking-widest uppercase ${REVIEW_STYLES[reviewKey] ?? "bg-white/5 text-white/40 border-white/10"}`}>
@@ -197,6 +233,46 @@ export default function GlobalTakeoffPage() {
             </table>
           </div>
         </div>
+
+        {projects.length > 0 && (
+          <div className="mt-6">
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-[10px] uppercase tracking-widest text-gray-600">Project shortcuts</p>
+              <p className="text-[10px] uppercase tracking-widest text-gray-600">Open a project and go straight to Takeoff</p>
+            </div>
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {projects.map((p) => (
+                <div key={p.id} className="rounded-xl border border-white/10 bg-[#0E0F12] p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-white">{p.name}</p>
+                      <p className="mt-1 text-[11px] text-white/40">
+                        {projectTakeoffCounts.get(p.id) ?? 0} takeoff item{(projectTakeoffCounts.get(p.id) ?? 0) === 1 ? "" : "s"}
+                      </p>
+                    </div>
+                    <span className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-1 text-[10px] uppercase tracking-widest text-white/40">
+                      Project
+                    </span>
+                  </div>
+                  <div className="mt-4 flex items-center gap-2">
+                      <Link
+                        href={`/dashboard/projects/${p.id}?phase=Takeoff&sub=takeoff`}
+                        className="inline-flex items-center gap-1 rounded-full bg-[#CCFF00] px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85"
+                      >
+                        Open Takeoff <ArrowRight size={12} />
+                      </Link>
+                    <Link
+                      href={`/dashboard/projects/${p.id}`}
+                      className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-white/70 transition-colors hover:border-white/25 hover:text-white"
+                    >
+                      Open Project
+                    </Link>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

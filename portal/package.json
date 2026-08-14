@@ -8,10 +8,15 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
+    "launch": "node scripts/release-gate.mjs",
     "launch:audit": "node scripts/launch-audit.mjs",
     "launch:smoke": "node scripts/launch-smoke.mjs",
     "test:unit": "node scripts/run-tests.mjs unit",
-    "test:integration": "node scripts/run-tests.mjs integration"
+    "test:integration": "node scripts/run-tests.mjs integration",
+    "test:integration:takeoff": "node scripts/run-tests.mjs integration takeoff",
+    "test:browser": "playwright test",
+    "evaluate:takeoff": "tsx scripts/evaluate-takeoff-fixtures.mjs",
+    "verify:test-schema": "node scripts/verify-test-schema.mjs"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.5.9",
@@ -29,6 +34,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^20",
     "@types/react": "^19",
@@ -48,6 +54,7 @@
     "postcss": "8.5.25",
     "next": {
       "sharp": "0.35.3"
-    }
+    },
+    "nanoid": "3.3.18"
   }
 }

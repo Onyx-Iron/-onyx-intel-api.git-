@@ -5,6 +5,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { uuidSchema } from "@/lib/validation";
 import { logEvent } from "@/lib/activity";
 import { auditUpdate, auditDelete } from "@/lib/audit";
+import { assertPermission, getUserRole, PermissionError, redactFinancialFields } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -36,7 +37,9 @@ export async function GET(
       .single();
 
     if (error || !data) return NextResponse.json({ error: "Project not found" }, { status: 404 });
-    return NextResponse.json({ project: data });
+    const role = await getUserRole(ctx.tenantId, ctx.userId);
+    const [project] = redactFinancialFields([data as unknown as Record<string, unknown>], role, ["budget"]);
+    return NextResponse.json({ project });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[GET /api/projects/:id] ${msg}` }, { status: 500 });
@@ -50,6 +53,7 @@ export async function PATCH(
   try {
     const ctx = await resolveTenant();
     if ("error" in ctx) return NextResponse.json({ error: ctx.error }, { status: ctx.status });
+    await assertPermission(ctx.tenantId, ctx.userId, "admin", "write");
 
     const { id } = await params;
     const parsed = uuidSchema.safeParse(id);
@@ -101,7 +105,7 @@ export async function PATCH(
     return NextResponse.json({ project: data });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[PATCH /api/projects/:id] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[PATCH /api/projects/:id] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -112,6 +116,7 @@ export async function DELETE(
   try {
     const ctx = await resolveTenant();
     if ("error" in ctx) return NextResponse.json({ error: ctx.error }, { status: ctx.status });
+    await assertPermission(ctx.tenantId, ctx.userId, "admin", "write");
 
     const { id } = await params;
     const parsed = uuidSchema.safeParse(id);
@@ -154,6 +159,6 @@ export async function DELETE(
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[DELETE /api/projects/:id] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[DELETE /api/projects/:id] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

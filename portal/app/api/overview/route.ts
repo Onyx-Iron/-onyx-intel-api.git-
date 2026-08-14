@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getControlSummary } from "@/lib/project-controls/schema";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { currentItemTotal, listCurrentEstimateItems } from "@/lib/estimating/current-version";
 
 export const runtime = "nodejs";
 
@@ -34,7 +35,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const [
       takeoff_items, documents, schedule_tasks, contacts, daily_logs, generated_docs,
       procurement_total, procurement_pending, punch_total, punch_open, permits_total, permits_approved,
-      estimateRows, scheduleDone, rfiRows, submittalRows, changeOrderRows,
+      scheduleDone, rfiRows, submittalRows, changeOrderRows,
     ] = await Promise.all([
       countTable(db, "takeoff_items", tenantId, projectId),
       countTable(db, "documents", tenantId, projectId),
@@ -51,8 +52,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       countTable(db, "permit_items", tenantId, projectId),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       countTable(db, "permit_items", tenantId, projectId, (q: any) => q.eq("status", "approved")),
-      // estimate value
-      db.from("estimate_items" as never).select("quantity,unit_cost").eq("tenant_id", tenantId).eq("project_id", projectId).limit(5000),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       countTable(db, "schedule_tasks", tenantId, projectId, (q: any) => q.eq("status", "complete")),
       anyDb.from("rfi_items").select("status").eq("tenant_id", tenantId).eq("project_id", projectId).limit(5000),
@@ -60,12 +59,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       anyDb.from("change_order_items").select("status,amount").eq("tenant_id", tenantId).eq("project_id", projectId).limit(5000),
     ]);
 
-    let estimate_value = 0;
-    if (!estimateRows.error) {
-      for (const r of (estimateRows.data ?? []) as Array<{ quantity: number | null; unit_cost: number | null }>) {
-        if (r.quantity != null && r.unit_cost != null) estimate_value += r.quantity * r.unit_cost;
-      }
-    }
+    const estimateRows = await listCurrentEstimateItems(anyDb, tenantId, projectId);
+    const estimate_value = estimateRows.reduce((sum, item) => sum + currentItemTotal(item), 0);
     const completion = schedule_tasks > 0 ? Math.round((scheduleDone / schedule_tasks) * 100) : 0;
     const controls = getControlSummary({
       rfis: rfiRows.error ? [] : (rfiRows.data ?? []),

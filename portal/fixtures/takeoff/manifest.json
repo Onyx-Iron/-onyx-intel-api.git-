@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "takeoff-golden-fixtures-v1",
+  "certificationPolicy": {
+    "minimumQualifiedFixturesPerBoundary": 3,
+    "minimumRecall": 0.95,
+    "minimumPrecision": 0.98,
+    "minimumUnitAccuracy": 1,
+    "minimumScopeCompleteness": 0.95,
+    "maximumQuantityError": 0.02
+  },
+  "capabilities": [
+    { "tradeFamily": "general", "sourceType": "pdf_schedule", "quantityType": "count" },
+    { "tradeFamily": "sitework", "sourceType": "dxf", "quantityType": "length" },
+    { "tradeFamily": "sitework", "sourceType": "dxf", "quantityType": "area" },
+    { "tradeFamily": "building_systems", "sourceType": "ifc", "quantityType": "model_quantity" },
+    { "tradeFamily": "general", "sourceType": "xlsx", "quantityType": "scheduled_quantity" },
+    { "tradeFamily": "all", "sourceType": "scanned_pdf", "quantityType": "all" }
+  ],
+  "fixtures": [
+    {
+      "id": "pdf-schedule-count-001",
+      "boundary": { "tradeFamily": "general", "sourceType": "pdf_schedule", "quantityType": "count" },
+      "projectType": "commercial",
+      "conditions": ["native_pdf", "schedule_table"],
+      "revision": "pending-source",
+      "sourceFile": null,
+      "sourceChecksum": null,
+      "expectedFile": "expected/pdf-schedule-count-001.json",
+      "actualFile": null,
+      "review": { "status": "pending", "reviewer": null, "qualification": null, "effectiveDate": null }
+    },
+    {
+      "id": "dxf-linear-area-001",
+      "boundary": { "tradeFamily": "sitework", "sourceType": "dxf", "quantityType": "length" },
+      "projectType": "civil",
+      "conditions": ["model_units_required", "layer_classification"],
+      "revision": "pending-source",
+      "sourceFile": null,
+      "sourceChecksum": null,
+      "expectedFile": "expected/dxf-linear-area-001.json",
+      "actualFile": null,
+      "review": { "status": "pending", "reviewer": null, "qualification": null, "effectiveDate": null }
+    },
+    {
+      "id": "ifc-model-quantity-001",
+      "boundary": { "tradeFamily": "building_systems", "sourceType": "ifc", "quantityType": "model_quantity" },
+      "projectType": "commercial",
+      "conditions": ["declared_model_units", "property_sets"],
+      "revision": "pending-source",
+      "sourceFile": null,
+      "sourceChecksum": null,
+      "expectedFile": "expected/ifc-model-quantity-001.json",
+      "actualFile": null,
+      "review": { "status": "pending", "reviewer": null, "qualification": null, "effectiveDate": null }
+    },
+    {
+      "id": "xlsx-schedule-001",
+      "boundary": { "tradeFamily": "general", "sourceType": "xlsx", "quantityType": "scheduled_quantity" },
+      "projectType": "mixed_use",
+      "conditions": ["explicit_headers", "source_cell_lineage"],
+      "revision": "pending-source",
+      "sourceFile": null,
+      "sourceChecksum": null,
+      "expectedFile": "expected/xlsx-schedule-001.json",
+      "actualFile": null,
+      "review": { "status": "pending", "reviewer": null, "qualification": null, "effectiveDate": null }
+    }
+  ]
+}

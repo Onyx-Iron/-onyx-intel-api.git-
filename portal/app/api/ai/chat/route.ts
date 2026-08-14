@@ -7,6 +7,8 @@ import { headerSafe } from "@/lib/http";
 import { logEvent } from "@/lib/activity";
 import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { generateText, availableProviders, NoProviderError, type Provider } from "@/lib/ai/providers";
+import { formatProjectKnowledgeForAi, loadProjectKnowledgeSnapshot } from "@/lib/projects/knowledge";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -19,9 +21,9 @@ export const maxDuration = 120;
 // =============================================================================
 
 const GEMINI_API_KEY = headerSafe(process.env.GEMINI_API_KEY);
-const EMBED_MODEL = "text-embedding-004";
-const CHAT_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-pro";
-const SUMMARY_MODEL = process.env.GEMINI_DIGEST_MODEL ?? "gemini-2.0-flash";
+const EMBED_MODEL = "gemini-embedding-2";
+const CHAT_MODEL = process.env.GEMINI_MODEL ?? "gemini-3.6-flash";
+const SUMMARY_MODEL = process.env.GEMINI_DIGEST_MODEL ?? "gemini-3.5-flash-lite";
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 const HISTORY_WINDOW = 12;
@@ -150,7 +152,7 @@ async function embedText(text: string): Promise<number[]> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         content: { parts: [{ text }] },
-        taskType: "RETRIEVAL_QUERY",
+        embedContentConfig: { outputDimensionality: 768 },
       }),
     },
   );
@@ -490,13 +492,17 @@ async function handleRag(
       .select("summary, message_count")
       .eq("id", convId)
       .eq("tenant_id", tenantId)
-      .single();
+      .eq("project_id", project_id)
+      .maybeSingle();
+    if (!convData) return NextResponse.json({ error: "Conversation not found for this project" }, { status: 404 });
     const row = convData as { summary?: string | null; message_count?: number | null } | null;
     convSummary = row?.summary ?? null;
     currentMessageCount = row?.message_count ?? 0;
   }
 
+  const projectKnowledge = await loadProjectKnowledgeSnapshot(tenantId, project_id);
   let SYSTEM = SYSTEM_BASE + "\n\n" + buildProjectBrief(project as ProjectRow, today);
+  if (projectKnowledge) SYSTEM += "\n\n" + formatProjectKnowledgeForAi(projectKnowledge);
   if (convSummary) {
     SYSTEM += `\n\n--- Prior Conversation Summary ---\n${convSummary}\n--- End Summary ---`;
   }
@@ -609,7 +615,9 @@ async function handleRag(
               fullText += text;
               await writer.write(encoder.encode(text));
             }
-          } catch { /* ignore */ }
+          } catch (err) {
+            console.warn("[ai/chat rag stream] skipped malformed chunk", err);
+          }
         }
       }
     } catch (err) {
@@ -680,7 +688,9 @@ async function handleAgentic(
   if (projErr || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
 
   const today = new Date().toISOString().split("T")[0];
-  const systemInstruction = SYSTEM_BASE_AGENTIC + "\n\n" + buildProjectBrief(project as ProjectRow, today);
+  const projectKnowledge = await loadProjectKnowledgeSnapshot(tenantId, project_id);
+  const systemInstruction = SYSTEM_BASE_AGENTIC + "\n\n" + buildProjectBrief(project as ProjectRow, today) +
+    (projectKnowledge ? "\n\n" + formatProjectKnowledgeForAi(projectKnowledge) : "");
 
   let convId = conversation_id;
   if (!convId) {
@@ -691,6 +701,15 @@ async function handleAgentic(
       .single();
     if (convErr || !conv) return NextResponse.json({ error: "Could not create conversation" }, { status: 500 });
     convId = conv.id;
+  } else {
+    const { data: existing } = await db
+      .from("conversations")
+      .select("id")
+      .eq("id", convId)
+      .eq("tenant_id", tenantId)
+      .eq("project_id", project_id)
+      .maybeSingle();
+    if (!existing) return NextResponse.json({ error: "Conversation not found for this project" }, { status: 404 });
   }
 
   await db.from("messages").insert({
@@ -848,10 +867,14 @@ export async function POST(req: NextRequest): Promise<Response> {
     };
 
     const mode = body.mode ?? "rag";
+    const tenantId = await getOrCreateTenant(
+      authTenantKey(userId, orgId),
+      authTenantName(userId, orgSlug),
+    );
 
     if (mode === "assist") {
       if (!body.prompt) return NextResponse.json({ error: "prompt is required" }, { status: 400 });
-      const assistRl = await checkAiRateLimit(authTenantKey(userId, orgId), "ai/chat:assist", { windowMs: 60_000, max: 20 }, email);
+      const assistRl = await checkAiRateLimit(tenantId, "ai/chat:assist", { windowMs: 60_000, max: 20 }, email);
       if (!assistRl.ok) {
         return NextResponse.json(
           { error: "Too many AI requests — please slow down." },
@@ -876,7 +899,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       return NextResponse.json({ error: "project_id and message are required" }, { status: 400 });
     }
 
-    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "financial", "read");
 
     // Agentic mode fires up to MAX_TOOL_ROUNDS extra LLM calls per message —
     // throttle it harder than a single rag turn.
@@ -903,7 +926,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       );
     }
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[ai/chat] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[ai/chat] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -929,9 +952,18 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "financial", "read");
     const db = await createServiceClient();
 
     if (conversation_id) {
+      const { data: conversation } = await db
+        .from("conversations")
+        .select("id")
+        .eq("id", conversation_id)
+        .eq("tenant_id", tenantId)
+        .eq("project_id", project_id)
+        .maybeSingle();
+      if (!conversation) return NextResponse.json({ error: "Conversation not found for this project" }, { status: 404 });
       const { data: messages } = await db
         .from("messages")
         .select("id, role, content, citations, created_at")
@@ -962,7 +994,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ conversation_id: conv.id, messages: messages ?? [] });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[ai/chat GET] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[ai/chat GET] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -975,6 +1007,7 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     if (!conversation_id) return NextResponse.json({ error: "conversation_id required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "financial", "read");
     const db = await createServiceClient();
 
     await db.from("messages").delete().eq("conversation_id", conversation_id).eq("tenant_id", tenantId);
@@ -983,6 +1016,6 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[ai/chat DELETE] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[ai/chat DELETE] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

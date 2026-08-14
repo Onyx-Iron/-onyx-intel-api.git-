@@ -1,0 +1,208 @@
+{
+  "schemaVersion": "takeoff-capability-report-v1",
+  "manifestVersion": "takeoff-golden-fixtures-v1",
+  "policy": {
+    "minimumQualifiedFixturesPerBoundary": 3,
+    "minimumRecall": 0.95,
+    "minimumPrecision": 0.98,
+    "minimumUnitAccuracy": 1,
+    "minimumScopeCompleteness": 0.95,
+    "maximumQuantityError": 0.02
+  },
+  "summary": {
+    "certified": 0,
+    "provisional": 0,
+    "blocked": 6
+  },
+  "capabilities": [
+    {
+      "boundary": {
+        "tradeFamily": "general",
+        "sourceType": "pdf_schedule",
+        "quantityType": "count"
+      },
+      "fixtureIds": [
+        "pdf-schedule-count-001"
+      ],
+      "metrics": {
+        "fixtures": 1,
+        "reviewedFixtures": 0,
+        "verifiedSourceFixtures": 0,
+        "qualifiedReviewerFixtures": 0,
+        "boundary": {
+          "tradeFamily": "general",
+          "sourceType": "pdf_schedule",
+          "quantityType": "count"
+        }
+      },
+      "certification": {
+        "status": "blocked",
+        "boundary": {
+          "tradeFamily": "general",
+          "sourceType": "pdf_schedule",
+          "quantityType": "count"
+        },
+        "reasons": [
+          "no_qualified_reviewed_fixtures"
+        ]
+      }
+    },
+    {
+      "boundary": {
+        "tradeFamily": "sitework",
+        "sourceType": "dxf",
+        "quantityType": "length"
+      },
+      "fixtureIds": [
+        "dxf-linear-area-001"
+      ],
+      "metrics": {
+        "fixtures": 1,
+        "reviewedFixtures": 0,
+        "verifiedSourceFixtures": 0,
+        "qualifiedReviewerFixtures": 0,
+        "boundary": {
+          "tradeFamily": "sitework",
+          "sourceType": "dxf",
+          "quantityType": "length"
+        }
+      },
+      "certification": {
+        "status": "blocked",
+        "boundary": {
+          "tradeFamily": "sitework",
+          "sourceType": "dxf",
+          "quantityType": "length"
+        },
+        "reasons": [
+          "no_qualified_reviewed_fixtures"
+        ]
+      }
+    },
+    {
+      "boundary": {
+        "tradeFamily": "sitework",
+        "sourceType": "dxf",
+        "quantityType": "area"
+      },
+      "fixtureIds": [],
+      "metrics": {
+        "fixtures": 0,
+        "reviewedFixtures": 0,
+        "verifiedSourceFixtures": 0,
+        "qualifiedReviewerFixtures": 0,
+        "boundary": {
+          "tradeFamily": "sitework",
+          "sourceType": "dxf",
+          "quantityType": "area"
+        }
+      },
+      "certification": {
+        "status": "blocked",
+        "boundary": {
+          "tradeFamily": "sitework",
+          "sourceType": "dxf",
+          "quantityType": "area"
+        },
+        "reasons": [
+          "no_reviewed_fixtures"
+        ]
+      }
+    },
+    {
+      "boundary": {
+        "tradeFamily": "building_systems",
+        "sourceType": "ifc",
+        "quantityType": "model_quantity"
+      },
+      "fixtureIds": [
+        "ifc-model-quantity-001"
+      ],
+      "metrics": {
+        "fixtures": 1,
+        "reviewedFixtures": 0,
+        "verifiedSourceFixtures": 0,
+        "qualifiedReviewerFixtures": 0,
+        "boundary": {
+          "tradeFamily": "building_systems",
+          "sourceType": "ifc",
+          "quantityType": "model_quantity"
+        }
+      },
+      "certification": {
+        "status": "blocked",
+        "boundary": {
+          "tradeFamily": "building_systems",
+          "sourceType": "ifc",
+          "quantityType": "model_quantity"
+        },
+        "reasons": [
+          "no_qualified_reviewed_fixtures"
+        ]
+      }
+    },
+    {
+      "boundary": {
+        "tradeFamily": "general",
+        "sourceType": "xlsx",
+        "quantityType": "scheduled_quantity"
+      },
+      "fixtureIds": [
+        "xlsx-schedule-001"
+      ],
+      "metrics": {
+        "fixtures": 1,
+        "reviewedFixtures": 0,
+        "verifiedSourceFixtures": 0,
+        "qualifiedReviewerFixtures": 0,
+        "boundary": {
+          "tradeFamily": "general",
+          "sourceType": "xlsx",
+          "quantityType": "scheduled_quantity"
+        }
+      },
+      "certification": {
+        "status": "blocked",
+        "boundary": {
+          "tradeFamily": "general",
+          "sourceType": "xlsx",
+          "quantityType": "scheduled_quantity"
+        },
+        "reasons": [
+          "no_qualified_reviewed_fixtures"
+        ]
+      }
+    },
+    {
+      "boundary": {
+        "tradeFamily": "all",
+        "sourceType": "scanned_pdf",
+        "quantityType": "all"
+      },
+      "fixtureIds": [],
+      "metrics": {
+        "fixtures": 0,
+        "reviewedFixtures": 0,
+        "verifiedSourceFixtures": 0,
+        "qualifiedReviewerFixtures": 0,
+        "boundary": {
+          "tradeFamily": "all",
+          "sourceType": "scanned_pdf",
+          "quantityType": "all"
+        }
+      },
+      "certification": {
+        "status": "blocked",
+        "boundary": {
+          "tradeFamily": "all",
+          "sourceType": "scanned_pdf",
+          "quantityType": "all"
+        },
+        "reasons": [
+          "no_reviewed_fixtures"
+        ]
+      }
+    }
+  ],
+  "notice": "Blocked and provisional capabilities are not authoritative. AI-assisted quantities require qualified human review and approval."
+}

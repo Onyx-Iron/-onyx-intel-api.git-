@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
@@ -5,13 +6,17 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { headerSafe } from "@/lib/http";
 import { runScopeGapAgent } from "@/lib/agents/scope-gap";
 import { runRfiDrafterAgent } from "@/lib/agents/rfi-drafter";
+import { validateTextQuantityCandidate } from "@/lib/takeoff/quantity-validation";
+import { advanceTakeoffPageJob, createGovernedPageContext } from "@/lib/takeoff/governance-server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
 
 const PLANS_BUCKET     = "plans-bucket";
 const GEMINI_API_KEY   = headerSafe(process.env.GEMINI_API_KEY);
-const GEMINI_MODEL     = process.env.GEMINI_VISION_MODEL ?? process.env.GEMINI_MODEL ?? "gemini-2.5-pro";
+const GEMINI_MODEL     = process.env.GEMINI_VISION_MODEL ?? process.env.GEMINI_MODEL ?? "gemini-3.6-flash";
 const GEMINI_BASE      = "https://generativelanguage.googleapis.com/v1beta";
 
 /**
@@ -75,6 +80,9 @@ interface VisionTakeoffItemRef {
   id: string;
   review_status: string;
   rejected_reason: string | null;
+  takeoff_job_id: string | null;
+  quantity_validation_status: string;
+  quantity_validation_reason: string | null;
 }
 
 // Vision items are matched back to their takeoff_items row via a stable
@@ -85,14 +93,21 @@ interface VisionTakeoffItemRef {
 async function fetchVisionTakeoffItems(anyDb: any, tenantId: string, documentId: string | null, pageId: string): Promise<Record<string, VisionTakeoffItemRef>> {
   const { data } = await anyDb
     .from("takeoff_items")
-    .select("id, review_status, rejected_reason, meta")
+    .select("id, review_status, rejected_reason, takeoff_job_id, quantity_validation_status, quantity_validation_reason, meta")
     .eq("tenant_id", tenantId)
     .eq("document_id", documentId ?? "")
     .contains("meta", { vision_page_id: pageId });
   const byKey: Record<string, VisionTakeoffItemRef> = {};
-  for (const r of (data ?? []) as Array<{ id: string; review_status: string; rejected_reason: string | null; meta?: { item_key?: string } }>) {
+  for (const r of (data ?? []) as Array<VisionTakeoffItemRef & { meta?: { item_key?: string } }>) {
     const key = r.meta?.item_key;
-    if (key) byKey[key] = { id: r.id, review_status: r.review_status, rejected_reason: r.rejected_reason };
+    if (key) byKey[key] = {
+      id: r.id,
+      review_status: r.review_status,
+      rejected_reason: r.rejected_reason,
+      takeoff_job_id: r.takeoff_job_id,
+      quantity_validation_status: r.quantity_validation_status,
+      quantity_validation_reason: r.quantity_validation_reason,
+    };
   }
   return byKey;
 }
@@ -107,13 +122,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!body.page_id) return NextResponse.json({ error: "page_id required" }, { status: 400 });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  try {
+    await assertPermission(tenantId, userId, "field", "write");
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: error instanceof PermissionError ? 403 : 500 },
+    );
+  }
+
   const db = await createServiceClient();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
   const { data: page } = await anyDb
     .from("document_pages")
-    .select("id, storage_path, page_number, vision_extractions, document_id")
+    .select("id, storage_path, page_number, checksum, vision_extractions, document_id")
     .eq("id", body.page_id).eq("tenant_id", tenantId).single();
   if (!page) return NextResponse.json({ error: "Page not found" }, { status: 404 });
 
@@ -122,12 +146,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ result: page.vision_extractions as VisionResult, cached: true, takeoffItems });
   }
 
+  const rl = await checkAiRateLimit(tenantId, "takeoff/canvas/vision-extract", { windowMs: 60_000, max: 5 });
+  if (!rl.ok) {
+    return NextResponse.json(
+      { error: "Too many vision extraction requests — please slow down." },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
+    );
+  }
+
   // Download page PDF bytes
   const dl = await db.storage.from(PLANS_BUCKET).download(page.storage_path);
   if (dl.error || !dl.data) {
     return NextResponse.json({ error: `Storage download failed: ${dl.error?.message ?? "empty"}` }, { status: 502 });
   }
   const bytes = new Uint8Array(await dl.data.arrayBuffer());
+  const sourceChecksum = typeof page.checksum === "string" && page.checksum.trim()
+    ? page.checksum.trim()
+    : createHash("sha256").update(bytes).digest("hex");
 
   // Chunk-safe base64 encode
   const base64 = bufferToBase64(bytes);
@@ -263,13 +298,31 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     projectId = (doc as { project_id?: string } | null)?.project_id ?? null;
   }
   if (projectId && page.document_id) {
-    const { error: rpcErr } = await anyDb.rpc("apply_vision_extraction_takeoff_items", {
-      p_tenant_id: tenantId,
-      p_project_id: projectId,
-      p_document_id: page.document_id,
-      p_page_id: body.page_id,
-      p_page_number: (page as { page_number?: number }).page_number ?? 0,
-      p_items: items.map((it) => ({
+    const governed = await createGovernedPageContext({
+      db: anyDb,
+      tenantId,
+      projectId,
+      documentId: page.document_id,
+      pageId: body.page_id,
+      pageNumber: (page as { page_number?: number }).page_number ?? 1,
+      sourceChecksum,
+      actorUserId: userId,
+    }).catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }));
+    if ("error" in governed) return NextResponse.json({ error: governed.error }, { status: 409 });
+
+    const governedItems = items.map((it) => {
+      const validation = validateTextQuantityCandidate({
+        sourceChecksum,
+        authoritativeChecksum: governed.authoritativeChecksum,
+        manifestVersion: governed.manifestVersion,
+        authoritativeManifestVersion: governed.authoritativeManifestVersion,
+        unit: it.unit,
+        submittedQuantity: it.quantity,
+        rawText: it.raw_text ?? "",
+        sourceKind: it.source as "schedule" | "note" | "callout" | "text",
+        pageNumber: (page as { page_number?: number }).page_number ?? 1,
+      });
+      return {
         description: it.description,
         quantity: it.quantity,
         unit: it.unit,
@@ -278,9 +331,27 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         source: it.source,
         confidence: it.confidence,
         raw_text: it.raw_text ?? null,
-      })),
+        measurement_basis: "source_text",
+        validation_status: validation.status,
+        validation_reason: validation.status === "blocked" ? validation.reason : null,
+        formula_version: validation.status === "validated" ? validation.formulaVersion : null,
+        calculation_checksum: validation.status === "validated" ? validation.calculationChecksum : null,
+      };
     });
-    if (rpcErr) console.error("[vision-extract] apply_vision_extraction_takeoff_items failed", rpcErr);
+    const { error: rpcErr } = await anyDb.rpc("apply_vision_extraction_takeoff_items", {
+      p_tenant_id: tenantId,
+      p_project_id: projectId,
+      p_document_id: page.document_id,
+      p_page_id: body.page_id,
+      p_page_number: (page as { page_number?: number }).page_number ?? 0,
+      p_items: governedItems,
+      p_job_id: governed.jobId,
+      p_source_manifest_id: governed.manifestId,
+      p_source_manifest_version: governed.manifestVersion,
+      p_source_checksum: sourceChecksum,
+    });
+    if (rpcErr) return NextResponse.json({ error: `Could not persist governed takeoff candidates: ${rpcErr.message}` }, { status: 500 });
+    await advanceTakeoffPageJob(anyDb, tenantId, governed.jobId, governed.unitId, userId, governedItems.every((item) => item.validation_status === "validated"));
     // Do NOT sync to estimate here — "suggested" items are excluded by
     // buildEstimateImportRows anyway, so a sync call here would be wasted
     // work (nothing new can be approved without a human action first).

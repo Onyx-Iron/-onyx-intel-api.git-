@@ -6,6 +6,7 @@ import {
   getOrCreateTenant,
 } from "@/lib/project-controls/server";
 import { runTenantGuard } from "@/lib/agents/tenantGuard";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -23,11 +24,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       authTenantKey(userId, orgId),
       authTenantName(userId, orgSlug),
     );
+    await assertPermission(tenantId, userId, "admin", "write");
 
     const result = await runTenantGuard(tenantId, supplied);
     return NextResponse.json(result);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return NextResponse.json({ error: msg }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

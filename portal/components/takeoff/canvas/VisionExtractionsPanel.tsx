@@ -25,9 +25,12 @@ interface TakeoffItemRef {
   id: string;
   review_status: "suggested" | "reviewed" | "approved" | "rejected" | string;
   rejected_reason: string | null;
+  takeoff_job_id: string | null;
+  quantity_validation_status: "unvalidated" | "validated" | "blocked" | string;
+  quantity_validation_reason: string | null;
 }
 
-// "suggested" and "reviewed" both still need an approve/reject decision —
+// "suggested" and "reviewed" both still need an approve/reject decision -
 // neither can affect the estimate yet.
 function needsDecision(status: string): boolean {
   return status === "suggested" || status === "reviewed";
@@ -48,14 +51,14 @@ interface Props {
  *
  * Every finding is committed into takeoff_items as soon as extraction runs
  * (visible in the takeoff grid immediately), but with review_status
- * "suggested" — it is EXCLUDED from the estimate until a human explicitly
+ * "suggested" - it is EXCLUDED from the estimate until a human explicitly
  * approves or rejects it here. Rejected items stay in takeoff_items
  * (permanently auditable) but can never reach the estimate.
  */
-export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onCommitted }: Props) {
+export default function VisionExtractionsPanel({ pageId, projectId, vectorDescriptions, onCommitted }: Props) {
   const [state, setState] = useState<{ result: VisionResult | null; loading: boolean; err: string | null }>({ result: null, loading: true, err: null });
-  // Keyed by computeItemKey(description, quantity, unit) — NOT by array
-  // position. The API returns this same shape (a key -> ref map, see
+  // Keyed by computeItemKey(description, quantity, unit) - not by array
+  // position. The API returns the same shape (a key -> ref map, see
   // fetchVisionTakeoffItems in the route), computed server-side from the
   // stable meta.item_key stored on each row at insert time. Matching by
   // content instead of index is the fix for a real bug found in the
@@ -92,12 +95,12 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
     (async () => {
       try {
         const cached = await fetch(`/api/takeoff/canvas/vision-extract?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
-        if (!cached.ok) throw new Error(String(cached.status));
-        const data = await cached.json() as { result: VisionResult | null; takeoffItems?: Record<string, TakeoffItemRef> };
-        if (data.result) {
+        const body = await cached.json().catch(() => ({})) as { result?: VisionResult | null; takeoffItems?: Record<string, TakeoffItemRef>; error?: string };
+        if (!cached.ok) throw new Error(body.error ?? `Could not load page extraction (${cached.status}). Refresh and try again.`);
+        if (body.result) {
           if (!cancelled) {
-            setState({ result: data.result, loading: false, err: null });
-            setTakeoffItemsByKey(data.takeoffItems ?? {});
+            setState({ result: body.result, loading: false, err: null });
+            setTakeoffItemsByKey(body.takeoffItems ?? {});
           }
           return;
         }
@@ -109,7 +112,7 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
     return () => { cancelled = true; };
   }, [pageId, runExtract]);
 
-  // ── Cross-reference each vision item against vector descriptions, and
+  // Cross-reference each vision item against vector descriptions, and
   // look up its takeoff_items row by stable content key (not array index) ──
   const enriched = useMemo(() => {
     if (!state.result) return [];
@@ -126,12 +129,38 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
     setActing(takeoffId);
     setActionError(null);
     try {
-      const res = await fetch(`/api/takeoff/items/${encodeURIComponent(takeoffId)}/review`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
-      });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? String(res.status));
+      const ref = Object.values(takeoffItemsByKey).find((candidate) => candidate.id === takeoffId);
+      if (!ref) throw new Error("Takeoff candidate could not be found. Refresh the page and try again.");
+      if (action === "approve") {
+        if (ref.quantity_validation_status !== "validated" || !ref.takeoff_job_id) {
+          throw new Error(ref.quantity_validation_reason ?? "This quantity does not yet have validated source evidence.");
+        }
+        const previewResponse = await fetch("/api/takeoff/approval-preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projectId, jobId: ref.takeoff_job_id, candidateIds: [takeoffId] }),
+        });
+        const previewBody = await previewResponse.json().catch(() => ({})) as { preview?: { id?: string }; error?: string };
+        if (!previewResponse.ok || !previewBody.preview?.id) throw new Error(previewBody.error ?? "Could not create the approval preview");
+        const previewId = previewBody.preview.id;
+        const confirmResponse = await fetch(`/api/takeoff/approval-preview/${encodeURIComponent(previewId)}/confirm`, { method: "POST" });
+        const confirmBody = await confirmResponse.json().catch(() => ({})) as { error?: string };
+        if (!confirmResponse.ok) throw new Error(confirmBody.error ?? "Could not confirm the approval preview");
+        const importResponse = await fetch("/api/estimate/import-takeoff", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project_id: projectId, preview_id: previewId, idempotency_key: `takeoff-preview:${previewId}` }),
+        });
+        const importBody = await importResponse.json().catch(() => ({})) as { error?: string };
+        if (!importResponse.ok) throw new Error(importBody.error ?? "Approved quantity could not be imported into the estimate");
+      } else {
+        const res = await fetch(`/api/takeoff/items/${encodeURIComponent(takeoffId)}/review`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? String(res.status));
+      }
       setTakeoffItemsByKey((prev) => {
         const next = { ...prev };
         for (const [key, ref] of Object.entries(next)) {
@@ -142,11 +171,30 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
     } catch (e) {
       // Visible error instead of a silent no-op — the button stays
       // clickable so the user can retry, but they now see why it failed.
-      setActionError(e instanceof Error ? e.message : `Failed to ${action}`);
+      setActionError(e instanceof Error ? e.message : `Could not ${action}. Try again in a moment.`);
     } finally {
       setActing(null);
     }
-  }, []);
+  }, [projectId, takeoffItemsByKey]);
+
+  const acceptRevision = useCallback(async (takeoffId: string) => {
+    setActing(takeoffId);
+    setActionError(null);
+    try {
+      const response = await fetch("/api/takeoff/source-revisions/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidateId: takeoffId }),
+      });
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(body.error ?? "Could not accept the drawing revision");
+      await runExtract(true);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not accept the drawing revision");
+    } finally {
+      setActing(null);
+    }
+  }, [runExtract]);
 
   const pendingCount = Object.values(takeoffItemsByKey).filter((r) => needsDecision(r.review_status)).length;
 
@@ -160,10 +208,10 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
         <div className="text-left">
           <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Schedules · Notes · Images</div>
           <div className="text-sm font-semibold">
-            {state.loading ? "Reading page…" :
+            {state.loading ? "Reading page..." :
              state.err     ? "Extraction failed" :
              enriched.length === 0 ? "No takeoff items detected" :
-             pendingCount > 0 ? `${enriched.length} finding${enriched.length === 1 ? "" : "s"} — ${pendingCount} awaiting review` :
+             pendingCount > 0 ? `${enriched.length} finding${enriched.length === 1 ? "" : "s"} - ${pendingCount} awaiting review` :
              `${enriched.length} finding${enriched.length === 1 ? "" : "s"} reviewed`}
           </div>
         </div>
@@ -173,7 +221,7 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
               type="button"
               onClick={(e) => { e.stopPropagation(); void runExtract(true); }}
               className="text-[9px] font-mono uppercase tracking-widest text-white/40 hover:text-[#CCFF00]"
-              title="Re-run vision extraction (replaces previously added items for this page)"
+              title="Run extraction again"
             >
               refresh
             </button>
@@ -194,7 +242,7 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
           )}
           {actionError && (
             <div className="text-[11px] text-red-400 px-2 py-2 flex items-center gap-2">
-              <span>Approve/Reject failed: {actionError}</span>
+              <span>Approve/reject failed: {actionError}</span>
               <button type="button" onClick={() => setActionError(null)} className="ml-auto text-white/40 hover:text-white">dismiss</button>
             </div>
           )}
@@ -217,6 +265,7 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
                                          "text-white/50";
             const status = it.takeoffRef?.review_status ?? "suggested";
             const isActing = it.takeoffRef && acting === it.takeoffRef.id;
+            const approvalBlocked = it.takeoffRef?.quantity_validation_status !== "validated" || !it.takeoffRef?.takeoff_job_id;
             return (
               <div
                 key={`${it.description}-${i}`}
@@ -244,6 +293,21 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
                 {it.raw_text && (
                   <div className="mt-1 text-[10px] italic text-white/40 line-clamp-1">&ldquo;{it.raw_text}&rdquo;</div>
                 )}
+                {it.takeoffRef?.quantity_validation_status === "blocked" && (
+                  <div className="mt-1 flex items-center gap-2 text-[10px] text-amber-300/75">
+                    <span>Approval locked: {it.takeoffRef.quantity_validation_reason?.replaceAll("_", " ") ?? "source evidence needs correction"}</span>
+                    {it.takeoffRef.quantity_validation_reason === "stale_revision" && (
+                      <button
+                        type="button"
+                        disabled={isActing}
+                        onClick={() => void acceptRevision(it.takeoffRef!.id)}
+                        className="rounded-full border border-amber-300/30 px-2 py-0.5 font-bold uppercase tracking-wider hover:border-amber-200 hover:text-amber-100 disabled:opacity-40"
+                      >
+                        Accept revision and recheck
+                      </button>
+                    )}
+                  </div>
+                )}
                 <div className="mt-1.5 flex items-center gap-2">
                   {it.cost_code && (
                     <span className="text-[10px] font-mono text-white/40">{it.cost_code}</span>
@@ -260,11 +324,12 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
                       </button>
                       <button
                         type="button"
-                        disabled={isActing}
+                        disabled={isActing || approvalBlocked}
                         onClick={() => void review(it.takeoffRef!.id, "approve")}
+                        title={approvalBlocked ? "A current source revision and validated quantity are required" : "Review source evidence, approve, and import to the draft estimate"}
                         className="rounded-full bg-[#CCFF00] px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-widest text-black hover:opacity-85 disabled:opacity-40"
                       >
-                        {isActing ? "…" : "Approve"}
+                        {isActing ? "..." : "Approve"}
                       </button>
                     </div>
                   ) : (
@@ -272,7 +337,7 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
                       className={`ml-auto rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-widest ${
                         status === "rejected" ? "bg-red-400/20 text-red-300" : "bg-[#CCFF00]/20 text-[#CCFF00]"
                       }`}
-                      title={status === "rejected" ? "Excluded from the estimate" : "Approved — included in the estimate"}
+                      title={status === "rejected" ? "Excluded from the estimate" : "Approved - included in the estimate"}
                     >
                       {status === "rejected" ? "Rejected" : "Approved"}
                     </span>

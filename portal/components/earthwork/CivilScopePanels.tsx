@@ -7,19 +7,30 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 // ─────────────────────────────────────────────────────────────────────────────
 const fmt = (n: number, digits = 0) => new Intl.NumberFormat("en-US", { maximumFractionDigits: digits }).format(Number.isFinite(n) ? n : 0);
 
-function useProjectFetch<T>(projectId: string, url: string): { data: T | null; loading: boolean; refresh: () => Promise<void> } {
+function useProjectFetch<T>(projectId: string, url: string): { data: T | null; loading: boolean; error: string | null; refresh: () => Promise<void> } {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const refresh = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const res = await fetch(`${url}?project_id=${encodeURIComponent(projectId)}`, { cache: "no-store" });
-      if (res.ok) setData(await res.json());
+      if (!res.ok) {
+        throw new Error(`Could not load this section (${res.status}). Refresh and try again.`);
+      }
+      setData(await res.json());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load this section. Refresh and try again.");
     } finally { setLoading(false); }
   }, [projectId, url]);
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void refresh(); }, [refresh]);
-  return { data, loading, refresh };
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void refresh();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [refresh]);
+  return { data, loading, error, refresh };
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -40,9 +51,10 @@ interface PipeRun {
 }
 
 export function PipeRunsPanel({ projectId }: { projectId: string }) {
-  const { data, refresh } = useProjectFetch<{ runs: PipeRun[] }>(projectId, "/api/earthwork/pipe-runs");
-  const runs = data?.runs ?? [];
+  const { data, error: loadError, refresh } = useProjectFetch<{ runs: PipeRun[] }>(projectId, "/api/earthwork/pipe-runs");
+  const runs = useMemo(() => data?.runs ?? [], [data]);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState({
     name: "", system: "sanitary", diameter_in: 8, length_lf: 100,
     avg_depth_ft: 6, trench_width_ft: 3, bedding_depth_in: 6, haunch_depth_in: 6, initial_backfill_over_pipe_in: 12,
@@ -66,22 +78,35 @@ export function PipeRunsPanel({ projectId }: { projectId: string }) {
   async function add() {
     if (!draft.name) return;
     setBusy(true);
+    setError(null);
     try {
-      await fetch("/api/earthwork/pipe-runs", {
+      const res = await fetch("/api/earthwork/pipe-runs", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ project_id: projectId, ...draft }),
       });
+      if (!res.ok) throw new Error(`Could not save that pipe run (${res.status}). Refresh and try again.`);
       await refresh();
       setDraft({ ...draft, name: "" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save that pipe run. Refresh and try again.");
     } finally { setBusy(false); }
   }
   async function remove(id: string) {
-    await fetch(`/api/earthwork/pipe-runs?id=${encodeURIComponent(id)}`, { method: "DELETE" });
-    await refresh();
+    setError(null);
+    try {
+      const res = await fetch(`/api/earthwork/pipe-runs?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`Could not delete that pipe run (${res.status}). Refresh and try again.`);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete that pipe run. Refresh and try again.");
+      await refresh();
+    }
   }
 
   return (
     <div className="space-y-4">
+      {loadError && <div className="rounded-xl border border-amber-400/30 bg-amber-400/[0.08] px-4 py-3 text-sm text-amber-200">{loadError}</div>}
+      {error && <div className="rounded-xl border border-[#E50914]/30 bg-[#E50914]/[0.06] px-4 py-3 text-sm text-[#E50914]">{error}</div>}
       {/* Totals band */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-6">
         <Kpi label="Total LF"           value={fmt(totals.lf)}                    tone="text-white" />
@@ -108,7 +133,7 @@ export function PipeRunsPanel({ projectId }: { projectId: string }) {
         <NumInput  label="Initial (in)"  value={draft.initial_backfill_over_pipe_in} step={1} onChange={(v) => setDraft({ ...draft, initial_backfill_over_pipe_in: v })} />
         <div className="md:col-span-6 lg:col-span-9 flex justify-end">
           <button onClick={add} disabled={busy || !draft.name} className="rounded-full bg-[#CCFF00] px-5 py-1.5 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85 disabled:opacity-40">
-            {busy ? "…" : "Add Pipe Run"}
+            {busy ? "..." : "Add Pipe Run"}
           </button>
         </div>
       </div>
@@ -157,10 +182,11 @@ interface Entrance {
 }
 
 export function EntrancesPanel({ projectId }: { projectId: string }) {
-  const { data, refresh } = useProjectFetch<{ entrances: Entrance[] }>(projectId, "/api/earthwork/entrances");
-  const list = data?.entrances ?? [];
+  const { data, error: loadError, refresh } = useProjectFetch<{ entrances: Entrance[] }>(projectId, "/api/earthwork/entrances");
+  const list = useMemo(() => data?.entrances ?? [], [data]);
   const [draft, setDraft] = useState({ name: "", length_ft: 50, width_ft: 20, depth_in: 8, fabric_underlayment: true });
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const totals = useMemo(() => list.reduce((a, e) => ({
     stone_cy: a.stone_cy + e.computed.stone_cy,
     stone_tons: a.stone_tons + e.computed.stone_tons,
@@ -171,6 +197,7 @@ export function EntrancesPanel({ projectId }: { projectId: string }) {
   async function add() {
     if (!draft.name) return;
     setBusy(true);
+    setError(null);
     try {
       await fetch("/api/earthwork/entrances", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -178,15 +205,26 @@ export function EntrancesPanel({ projectId }: { projectId: string }) {
       });
       await refresh();
       setDraft({ ...draft, name: "" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save that entrance. Refresh and try again.");
     } finally { setBusy(false); }
   }
   async function remove(id: string) {
-    await fetch(`/api/earthwork/entrances?id=${encodeURIComponent(id)}`, { method: "DELETE" });
-    await refresh();
+    setError(null);
+    try {
+      const res = await fetch(`/api/earthwork/entrances?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`Could not delete that entrance (${res.status}). Refresh and try again.`);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete that entrance. Refresh and try again.");
+      await refresh();
+    }
   }
 
   return (
     <div className="space-y-4">
+      {loadError && <div className="rounded-xl border border-amber-400/30 bg-amber-400/[0.08] px-4 py-3 text-sm text-amber-200">{loadError}</div>}
+      {error && <div className="rounded-xl border border-[#E50914]/30 bg-[#E50914]/[0.06] px-4 py-3 text-sm text-[#E50914]">{error}</div>}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <Kpi label="Entrances"        value={fmt(list.length)}      tone="text-white" />
         <Kpi label="Stone CY"         value={fmt(totals.stone_cy)}  tone="text-[#CCFF00]" hint={`${fmt(totals.stone_tons)} tons`} />
@@ -247,10 +285,11 @@ interface Stockpile {
 }
 
 export function StockpilesPanel({ projectId }: { projectId: string }) {
-  const { data, refresh } = useProjectFetch<{ stockpiles: Stockpile[] }>(projectId, "/api/earthwork/stockpiles");
-  const list = data?.stockpiles ?? [];
+  const { data, error: loadError, refresh } = useProjectFetch<{ stockpiles: Stockpile[] }>(projectId, "/api/earthwork/stockpiles");
+  const list = useMemo(() => data?.stockpiles ?? [], [data]);
   const [draft, setDraft] = useState({ name: "", material_type: "topsoil", volume_bcy: 0, swell_factor: 1.15, location_notes: "", reuse_planned: true });
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const totals = useMemo(() => list.reduce((a, s) => ({
     bcy: a.bcy + s.computed.bcy, lcy: a.lcy + s.computed.lcy, area: a.area + s.computed.area_est_sf,
   }), { bcy: 0, lcy: 0, area: 0 }), [list]);
@@ -258,22 +297,35 @@ export function StockpilesPanel({ projectId }: { projectId: string }) {
   async function add() {
     if (!draft.name || !draft.material_type) return;
     setBusy(true);
+    setError(null);
     try {
-      await fetch("/api/earthwork/stockpiles", {
+      const res = await fetch("/api/earthwork/stockpiles", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ project_id: projectId, ...draft }),
       });
+      if (!res.ok) throw new Error(`Could not save that stockpile (${res.status}). Refresh and try again.`);
       await refresh();
       setDraft({ ...draft, name: "", volume_bcy: 0 });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save that stockpile. Refresh and try again.");
     } finally { setBusy(false); }
   }
   async function remove(id: string) {
-    await fetch(`/api/earthwork/stockpiles?id=${encodeURIComponent(id)}`, { method: "DELETE" });
-    await refresh();
+    setError(null);
+    try {
+      const res = await fetch(`/api/earthwork/stockpiles?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`Could not delete that stockpile (${res.status}). Refresh and try again.`);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete that stockpile. Refresh and try again.");
+      await refresh();
+    }
   }
 
   return (
     <div className="space-y-4">
+      {loadError && <div className="rounded-xl border border-amber-400/30 bg-amber-400/[0.08] px-4 py-3 text-sm text-amber-200">{loadError}</div>}
+      {error && <div className="rounded-xl border border-[#E50914]/30 bg-[#E50914]/[0.06] px-4 py-3 text-sm text-[#E50914]">{error}</div>}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <Kpi label="Stockpiles"          value={fmt(list.length)}   tone="text-white" />
         <Kpi label="Total Bank CY"       value={fmt(totals.bcy)}    tone="text-[#CCFF00]" />
@@ -334,7 +386,7 @@ interface LedgerTotals {
 }
 
 export function LedgerPanel({ projectId }: { projectId: string }) {
-  const { data, refresh } = useProjectFetch<{ rows: LedgerRow[]; totals: LedgerTotals }>(projectId, "/api/earthwork/ledger");
+  const { data, error: loadError, refresh } = useProjectFetch<{ rows: LedgerRow[]; totals: LedgerTotals }>(projectId, "/api/earthwork/ledger");
   const rows = data?.rows ?? [];
   const totals = data?.totals;
   const [draft, setDraft] = useState<{ direction: LedgerRow["direction"]; material_type: string; quantity_bcy: number; quantity_ton: number; unit_price: number; unit_of_measure: string; source_destination: string; haul_distance_mi: number }>({
@@ -342,26 +394,40 @@ export function LedgerPanel({ projectId }: { projectId: string }) {
     quantity_bcy: 0, quantity_ton: 0, unit_price: 0, unit_of_measure: "CY", source_destination: "", haul_distance_mi: 0,
   });
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function add() {
     if (!draft.material_type) return;
     setBusy(true);
+    setError(null);
     try {
-      await fetch("/api/earthwork/ledger", {
+      const res = await fetch("/api/earthwork/ledger", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ project_id: projectId, ...draft }),
       });
+      if (!res.ok) throw new Error(`Could not save that ledger row (${res.status}). Refresh and try again.`);
       await refresh();
       setDraft({ ...draft, quantity_bcy: 0, quantity_ton: 0 });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save that ledger row. Refresh and try again.");
     } finally { setBusy(false); }
   }
   async function remove(id: string) {
-    await fetch(`/api/earthwork/ledger?id=${encodeURIComponent(id)}`, { method: "DELETE" });
-    await refresh();
+    setError(null);
+    try {
+      const res = await fetch(`/api/earthwork/ledger?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`Could not delete that ledger row (${res.status}). Refresh and try again.`);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete that ledger row. Refresh and try again.");
+      await refresh();
+    }
   }
 
   return (
     <div className="space-y-4">
+      {loadError && <div className="rounded-xl border border-amber-400/30 bg-amber-400/[0.08] px-4 py-3 text-sm text-amber-200">{loadError}</div>}
+      {error && <div className="rounded-xl border border-[#E50914]/30 bg-[#E50914]/[0.06] px-4 py-3 text-sm text-[#E50914]">{error}</div>}
       {totals && (
         <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
           <Kpi label="Total Import BCY"  value={fmt(totals.import_bcy)}     tone="text-amber-400" />
@@ -416,11 +482,11 @@ export function LedgerPanel({ projectId }: { projectId: string }) {
               <tr key={r.id} className="hover:bg-white/[0.02]">
                 <Td className={`font-mono uppercase text-[10px] ${dirTone}`}>{r.direction}</Td>
                 <Td className="font-mono text-[10px] uppercase text-white/60">{r.material_type}</Td>
-                <Td right className="font-mono">{r.quantity_bcy != null ? fmt(Number(r.quantity_bcy)) : "—"}</Td>
-                <Td right className="font-mono">{r.quantity_ton != null ? fmt(Number(r.quantity_ton)) : "—"}</Td>
-                <Td right className="font-mono">{r.unit_price != null ? "$" + fmt(Number(r.unit_price), 2) : "—"}</Td>
+                <Td right className="font-mono">{r.quantity_bcy != null ? fmt(Number(r.quantity_bcy)) : "-"}</Td>
+                <Td right className="font-mono">{r.quantity_ton != null ? fmt(Number(r.quantity_ton)) : "-"}</Td>
+                <Td right className="font-mono">{r.unit_price != null ? "$" + fmt(Number(r.unit_price), 2) : "-"}</Td>
                 <Td className="text-white/70 truncate max-w-[220px]">{r.source_destination}</Td>
-                <Td right className="font-mono">{r.haul_distance_mi != null ? fmt(Number(r.haul_distance_mi)) : "—"}</Td>
+                <Td right className="font-mono">{r.haul_distance_mi != null ? fmt(Number(r.haul_distance_mi)) : "-"}</Td>
                 <Td><button onClick={() => remove(r.id)} className="text-white/30 hover:text-red-400">✕</button></Td>
               </tr>
             );

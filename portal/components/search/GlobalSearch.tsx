@@ -38,9 +38,7 @@ function hrefFor(r: SearchResult): string {
     case "contact":
       return "/dashboard/contacts";
     case "generated_document":
-      return r.project_id
-        ? `/dashboard/projects/${r.project_id}`
-        : "/dashboard/generated-docs";
+      return r.project_id ? `/dashboard/projects/${r.project_id}` : "/dashboard/generated-docs";
   }
 }
 
@@ -50,21 +48,23 @@ export default function GlobalSearch() {
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [activeIndex, setActiveIndex] = useState(-1);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  // Debounced fetch
   useEffect(() => {
     const q = query.trim();
     if (!q) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setResults([]);
-      setLoading(false);
-      setError(null);
-      if (abortRef.current) abortRef.current.abort();
-      return;
+      const timer = window.setTimeout(() => {
+        setResults([]);
+        setLoading(false);
+        setError(null);
+        setActiveIndex(-1);
+        if (abortRef.current) abortRef.current.abort();
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
 
     const handle = window.setTimeout(() => {
@@ -80,13 +80,15 @@ export default function GlobalSearch() {
       })
         .then(async (res) => {
           const body: SearchResponse = await res.json().catch(() => ({}));
-          if (!res.ok) throw new Error(body?.error || `Search failed (${res.status})`);
+          if (!res.ok) throw new Error(body?.error || `Search failed (${res.status}). Try a shorter query or search again in a moment.`);
           setResults(Array.isArray(body.results) ? body.results : []);
+          setActiveIndex(0);
         })
         .catch((err: unknown) => {
           if (err instanceof DOMException && err.name === "AbortError") return;
           setError(err instanceof Error ? err.message : String(err));
           setResults([]);
+          setActiveIndex(-1);
         })
         .finally(() => {
           if (abortRef.current === controller) setLoading(false);
@@ -96,7 +98,6 @@ export default function GlobalSearch() {
     return () => window.clearTimeout(handle);
   }, [query]);
 
-  // Click outside
   useEffect(() => {
     if (!open) return;
     function onClick(e: MouseEvent) {
@@ -109,7 +110,6 @@ export default function GlobalSearch() {
     return () => document.removeEventListener("mousedown", onClick);
   }, [open]);
 
-  // Escape closes
   useEffect(() => {
     if (!open) return;
     function onKey(e: KeyboardEvent) {
@@ -134,8 +134,10 @@ export default function GlobalSearch() {
     );
   }, [results]);
 
-  const showDropdown = open && (query.trim().length > 0 || true);
+  const showDropdown = open;
   const trimmed = query.trim();
+  const flatResults = useMemo(() => grouped.flatMap(([, items]) => items), [grouped]);
+  const activeResult = activeIndex >= 0 ? flatResults[activeIndex] : null;
 
   return (
     <div ref={containerRef} className="relative min-w-0 flex-1 sm:w-72 sm:flex-none">
@@ -151,8 +153,25 @@ export default function GlobalSearch() {
           setOpen(true);
         }}
         onFocus={() => setOpen(true)}
-        placeholder="Search projects, docs, contacts…"
+        onKeyDown={(e) => {
+          if (!flatResults.length) return;
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setOpen(true);
+            setActiveIndex((current) => (current + 1) % flatResults.length);
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setOpen(true);
+            setActiveIndex((current) => (current <= 0 ? flatResults.length - 1 : current - 1));
+          } else if (e.key === "Enter" && activeResult) {
+            setOpen(false);
+            window.location.assign(hrefFor(activeResult));
+          }
+        }}
+        placeholder="Search projects, documents, or contacts..."
         aria-label="Search projects, documents, and contacts"
+        autoComplete="off"
+        spellCheck={false}
         className="h-9 w-full rounded-full border border-white/10 bg-white/[0.03] pl-9 pr-9 text-sm text-white outline-none placeholder:text-white/25 focus:border-[#CCFF00]/40"
       />
       {query ? (
@@ -162,6 +181,7 @@ export default function GlobalSearch() {
           onClick={() => {
             setQuery("");
             setResults([]);
+            setActiveIndex(-1);
             inputRef.current?.focus();
           }}
           className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full p-1 text-white/40 transition-colors hover:text-white focus-visible:ring-2 focus-visible:ring-[#CCFF00]/40"
@@ -174,20 +194,54 @@ export default function GlobalSearch() {
         <div className="absolute left-0 right-0 top-[calc(100%+8px)] z-50 max-h-[420px] overflow-y-auto rounded-2xl border border-white/10 bg-[#0B0D12] shadow-2xl shadow-black/40 sm:left-auto sm:right-0 sm:w-[420px]">
           {!trimmed ? (
             <div className="px-4 py-6 text-center text-xs text-white/45">
-              Type to search projects, documents, contacts…
+              Type to search projects, documents, or contacts...
             </div>
           ) : loading ? (
             <div className="flex items-center justify-center gap-2 px-4 py-6 text-xs text-white/55">
               <Loader2 size={12} className="animate-spin" />
-              Searching…
+              Searching...
             </div>
           ) : error ? (
             <div className="px-4 py-6 text-center text-xs text-red-300/80">
-              {error}
+              <div className="font-semibold">Search is temporarily unavailable.</div>
+              <div className="mt-1">{error}</div>
+              <div className="mt-3 flex items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setError(null);
+                    setResults([]);
+                    setLoading(true);
+                    const nextQuery = query.trim();
+                    if (!nextQuery) {
+                      setLoading(false);
+                      return;
+                    }
+                    void fetch(`/api/search?q=${encodeURIComponent(nextQuery)}`, { cache: "no-store" })
+                      .then(async (res) => {
+                        const body: SearchResponse = await res.json().catch(() => ({}));
+                        if (!res.ok) throw new Error(body?.error || `Search failed (${res.status}). Try again in a moment.`);
+                        setResults(Array.isArray(body.results) ? body.results : []);
+                        setActiveIndex(0);
+                      })
+                      .catch((err: unknown) => {
+                        if (err instanceof DOMException && err.name === "AbortError") return;
+                        setError(err instanceof Error ? err.message : String(err));
+                        setResults([]);
+                        setActiveIndex(-1);
+                      })
+                      .finally(() => setLoading(false));
+                  }}
+                  className="inline-flex h-8 items-center rounded-full border border-red-300/20 bg-red-300/10 px-3 text-[10px] font-bold uppercase tracking-widest text-red-100 transition-colors hover:border-red-300/30 hover:bg-red-300/15"
+                >
+                  Retry
+                </button>
+              </div>
             </div>
           ) : results.length === 0 ? (
             <div className="px-4 py-6 text-center text-xs text-white/45">
-              No matches for &ldquo;{trimmed}&rdquo;.
+              <div>No results for &ldquo;{trimmed}&rdquo;.</div>
+              <div className="mt-1 text-white/30">Try a project name, document title, or contact name.</div>
             </div>
           ) : (
             <ul className="py-2">
@@ -200,29 +254,35 @@ export default function GlobalSearch() {
                       {meta.label}
                     </div>
                     <ul>
-                      {items.map((r) => (
-                        <li key={`${r.kind}-${r.id}`}>
-                          <Link
-                            href={hrefFor(r)}
-                            onClick={() => setOpen(false)}
-                            className="flex items-start gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-white/[0.04]"
-                          >
-                            <span className="mt-[2px] flex h-7 w-7 flex-none items-center justify-center rounded-lg bg-white/[0.04] text-[#CCFF00]">
-                              <Icon size={13} />
-                            </span>
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate text-sm text-white">
-                                {r.title}
+                      {items.map((r) => {
+                        const isActive =
+                          activeResult?.kind === r.kind && activeResult?.id === r.id;
+                        return (
+                          <li key={`${r.kind}-${r.id}`}>
+                            <Link
+                              href={hrefFor(r)}
+                              onClick={() => setOpen(false)}
+                              className={`flex items-start gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-white/[0.04] ${
+                                isActive ? "bg-white/[0.06]" : ""
+                              }`}
+                            >
+                              <span className="mt-[2px] flex h-7 w-7 flex-none items-center justify-center rounded-lg bg-white/[0.04] text-[#CCFF00]">
+                                <Icon size={13} />
                               </span>
-                              {r.snippet ? (
-                                <span className="block truncate text-[11px] text-white/45">
-                                  {r.snippet}
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-sm text-white">
+                                  {r.title}
                                 </span>
-                              ) : null}
-                            </span>
-                          </Link>
-                        </li>
-                      ))}
+                                {r.snippet ? (
+                                  <span className="block truncate text-[11px] text-white/45">
+                                    {r.snippet}
+                                  </span>
+                                ) : null}
+                              </span>
+                            </Link>
+                          </li>
+                        );
+                      })}
                     </ul>
                   </li>
                 );

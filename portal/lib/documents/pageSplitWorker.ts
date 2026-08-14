@@ -43,3 +43,34 @@ export async function invokePageSplitWorker(payload: PageSplitPayload): Promise<
   const detail = await res.text().catch(() => res.statusText);
   throw new Error(`page-split-worker ${res.status}: ${detail.slice(0, 300)}`);
 }
+
+let lastPipelineProbe: { checkedAt: number; healthy: boolean } | null = null;
+
+async function functionBoots(name: "page-split-worker" | "page-takeoff-worker"): Promise<boolean> {
+  const { url, serviceKey } = getWorkerConfig();
+  const res = await fetch(url.replace(/page-split-worker$/, name), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${serviceKey}`,
+      "Content-Type": "application/json",
+    },
+    body: "{}",
+  }).catch(() => null);
+  if (!res) return false;
+  const detail = await res.text().catch(() => "");
+  return !(res.status === 503 && detail.includes("BOOT_ERROR"));
+}
+
+/** Prevents routing a document into an Edge pipeline that cannot boot. */
+export async function pageSplitPipelineHealthy(): Promise<boolean> {
+  if (lastPipelineProbe && Date.now() - lastPipelineProbe.checkedAt < 60_000) {
+    return lastPipelineProbe.healthy;
+  }
+  const checks = await Promise.all([
+    functionBoots("page-split-worker"),
+    functionBoots("page-takeoff-worker"),
+  ]);
+  const healthy = checks.every(Boolean);
+  lastPipelineProbe = { checkedAt: Date.now(), healthy };
+  return healthy;
+}

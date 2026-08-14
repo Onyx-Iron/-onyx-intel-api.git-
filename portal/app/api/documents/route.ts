@@ -5,6 +5,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { uuidSchema } from "@/lib/validation";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
@@ -58,6 +59,7 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     // Fetch the document first so we can log the project_id after deletion.
@@ -93,6 +95,6 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[DELETE /api/documents] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[DELETE /api/documents] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

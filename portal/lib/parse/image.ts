@@ -7,7 +7,7 @@ import type { ParseResult, ParseContext, ParseEntity } from "./index";
 import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
-const VISION_MODEL = process.env.GEMINI_VISION_MODEL ?? "gemini-2.0-flash-001";
+const VISION_MODEL = process.env.GEMINI_VISION_MODEL ?? "gemini-3.6-flash";
 
 const HINT_FOCUS: Record<string, string> = {
   takeoff:   "quantities, materials, dimensions, areas, CSI codes, sheet numbers",

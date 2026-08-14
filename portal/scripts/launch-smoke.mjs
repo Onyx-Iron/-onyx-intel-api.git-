@@ -1,8 +1,11 @@
+const baseUrl = (process.env.LAUNCH_SMOKE_BASE_URL ?? "https://app.onyx-iron.com").replace(/\/$/, "");
 const urls = {
-  home: "https://app.onyx-iron.com/",
-  dashboard: "https://app.onyx-iron.com/dashboard",
-  signIn: "https://app.onyx-iron.com/sign-in",
-  signUp: "https://app.onyx-iron.com/sign-up",
+  home: `${baseUrl}/`,
+  dashboard: `${baseUrl}/dashboard`,
+  signIn: `${baseUrl}/sign-in`,
+  signUp: `${baseUrl}/sign-up`,
+  takeoffJobs: `${baseUrl}/api/takeoff/jobs?project_id=smoke-test`,
+  testHarness: `${baseUrl}/e2e/takeoff`,
 };
 
 async function head(url) {
@@ -24,6 +27,8 @@ const dashboard = await head(urls.dashboard);
 const home = await head(urls.home);
 const signIn = await text(urls.signIn);
 const signUp = await text(urls.signUp);
+const takeoffJobs = await head(urls.takeoffJobs);
+const testHarness = await head(urls.testHarness);
 
 const checks = [
   {
@@ -50,6 +55,16 @@ const checks = [
     name: "sign-up page does not mention accounts.dev",
     ok: !signUp.body.includes("accounts.dev"),
     detail: signUp.body.includes("accounts.dev") ? "accounts.dev present" : "clean",
+  },
+  {
+    name: "takeoff job API rejects anonymous access",
+    ok: takeoffJobs.status === 401 || (takeoffJobs.status >= 300 && takeoffJobs.status < 400 && takeoffJobs.location?.startsWith("/sign-in")),
+    detail: `${takeoffJobs.status} ${takeoffJobs.location ?? ""}`.trim(),
+  },
+  {
+    name: "browser-test harness is unavailable outside test mode",
+    ok: testHarness.status === 404 || (testHarness.status >= 300 && testHarness.status < 400 && testHarness.location?.startsWith("/sign-in")),
+    detail: `${testHarness.status} ${testHarness.location ?? ""}`.trim(),
   },
 ];
 

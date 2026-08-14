@@ -2,7 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
-import { getUserRole, redactFinancialFields } from "@/lib/project-controls/permissions";
+import { assertPermission, getUserRole, PermissionError, redactFinancialFields } from "@/lib/project-controls/permissions";
 import { INVOICE_FINANCIAL_FIELDS } from "@/lib/project-controls/financial-redaction";
 import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
@@ -86,6 +86,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const projectId = projectIdResult.data;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "financial", "write");
     await assertProjectBelongsToTenant(projectId, tenantId);
     const db = await createServiceClient();
 
@@ -117,6 +118,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
     const msg = String(err);
-    return NextResponse.json({ error: msg }, { status: msg.includes("does not belong") ? 403 : 500 });
+    return NextResponse.json({ error: msg }, { status: err instanceof PermissionError || msg.includes("does not belong") ? 403 : 500 });
   }
 }

@@ -6,4 +6,10 @@
 -- or destroy Clerk invitation records directly. It's genuinely used by
 -- team/invite/route.ts via the service-role client, so we keep that access
 -- and only strip anon/authenticated.
-REVOKE ALL ON public."1" FROM anon, authenticated, PUBLIC;
+DO $$
+BEGIN
+  IF to_regclass('public."1"') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON public."1" FROM anon, authenticated, PUBLIC';
+  END IF;
+END
+$$;

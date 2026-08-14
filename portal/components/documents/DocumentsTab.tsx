@@ -1,11 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { FolderOpen, FileText, X, RefreshCw, Sparkles, Send, Upload, ChevronDown, ChevronRight } from "lucide-react";
 import GoogleDrivePicker from "./GoogleDrivePicker";
+import GoogleConnect from "@/components/google/GoogleConnect";
 import GenerateDocDropdown from "@/components/common/GenerateDocDropdown";
 
 import { useToast } from "@/components/common/Toast";
+import { fetchWithRetry } from "@/lib/network/retry";
 
 interface ParsedPage {
   page_number: number;
@@ -62,7 +65,7 @@ function FileIcon({ name }: { name: string }) {
 }
 
 function fmt(d: string | null): string {
-  if (!d) return "—";
+  if (!d) return "-";
   return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
@@ -86,6 +89,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   const { toast } = useToast();
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [driveImporting, setDriveImporting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [askDoc, setAskDoc] = useState<{ id: string; name: string } | null>(null);
@@ -93,8 +97,11 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   const [answer, setAnswer] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
   const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Document | null>(null);
   const [expandedDocId, setExpandedDocId] = useState<string | null>(null);
   const [pagesByDoc, setPagesByDoc] = useState<Record<string, { loading: boolean; pages: ParsedPage[]; questions: SavedQuestion[]; classification?: Record<string, string>; error?: string }>>({});
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  const driveAbortRef = useRef<AbortController | null>(null);
 
   const loadInsights = useCallback(async (docId: string) => {
     setPagesByDoc((prev) => ({ ...prev, [docId]: { loading: true, pages: prev[docId]?.pages ?? [], questions: prev[docId]?.questions ?? [], classification: prev[docId]?.classification } }));
@@ -115,7 +122,68 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   const [pollTimedOut, setPollTimedOut] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Stop polling after this many ms if status still hasn't changed —
+  const uploadViaSupabase = useCallback(async (file: File, signal?: AbortSignal) => {
+    let documentId = "";
+    try {
+      const reserveRes = await fetchWithRetry("/api/documents/upload-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project_id: projectId,
+          file_name: file.name,
+          size: file.size,
+          content_type: file.type || "application/octet-stream",
+        }),
+        signal,
+      }, { retries: 1 });
+      const reservation = await reserveRes.json().catch(() => ({})) as {
+        document_id?: string;
+        upload?: { url?: string };
+        error?: string;
+      };
+      if (!reserveRes.ok || !reservation.document_id || !reservation.upload?.url) {
+        throw new Error(reservation.error ?? `Could not start ${file.name} upload (${reserveRes.status}).`);
+      }
+      documentId = reservation.document_id;
+
+      const uploadRes = await fetch(reservation.upload.url, {
+        method: "PUT",
+        headers: {
+          "Content-Type": file.type || "application/octet-stream",
+          "x-upsert": "false",
+        },
+        body: file,
+        signal,
+      });
+      if (!uploadRes.ok) {
+        const detail = await uploadRes.text().catch(() => uploadRes.statusText);
+        throw new Error(`Storage upload failed (${uploadRes.status}): ${detail.slice(0, 200)}`);
+      }
+
+      const finalizeRes = await fetchWithRetry("/api/documents/upload-url", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_id: documentId }),
+        signal,
+      }, { retries: 1 });
+      const finalized = await finalizeRes.json().catch(() => ({})) as { error?: string };
+      if (!finalizeRes.ok) {
+        throw new Error(finalized.error ?? `Could not finalize ${file.name} (${finalizeRes.status}).`);
+      }
+      return finalized;
+    } catch (error) {
+      if (documentId) {
+        await fetch("/api/documents/upload-url", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ document_id: documentId }),
+        }).catch(() => {});
+      }
+      throw error;
+    }
+  }, [projectId]);
+
+  // Stop polling after this many ms if status still hasn't changed -
   // a stuck "processing" usually means the fire-and-forget ingest crashed
   // before it could update the row to "error".
   const POLL_TIMEOUT_MS = 5 * 60 * 1000;
@@ -131,21 +199,35 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
 
   const loadDocuments = useCallback((showLoading = true) => {
     if (showLoading) setLoading(true);
+    setLoadError(null);
     fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}`)
-      .then((r) => r.json())
+      .then(async (r) => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          throw new Error(typeof (data as { error?: unknown })?.error === "string" ? (data as { error: string }).error : `Could not load documents (${r.status}). Refresh and try again.`);
+        }
+        return data;
+      })
       .then((d: unknown) => {
         const data = d as { documents?: Document[] };
         setDocuments(data.documents ?? []);
+        setPollTimedOut(false);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch((err) => {
+        setDocuments([]);
+        setLoadError(err instanceof Error ? err.message : "Could not load documents. Refresh and try again.");
+        setLoading(false);
+      });
   }, [projectId]);
+
+  useProjectSyncRefresh(() => loadDocuments(false));
 
   useEffect(() => {
     loadDocuments();
   }, [loadDocuments]);
 
-  // Poll while any doc is still processing — but give up after POLL_TIMEOUT_MS
+  // Poll while any doc is still processing - but give up after POLL_TIMEOUT_MS
   // so a silently-crashed background ingest doesn't spin forever.
   useEffect(() => {
     const hasProcessing = documents.some((d) => d.status === "processing" || d.status === "pending");
@@ -189,100 +271,53 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     if (!file) return;
     e.target.value = "";
     setUploading(true);
+    const ctrl = new AbortController();
+    uploadAbortRef.current = ctrl;
     try {
-      // Step 1: ask the unified upload endpoint for a Drive resumable upload URL
-      const sessionRes = await fetch("/api/documents/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ storage_type: "drive", file_name: file.name, content_type: file.type || "application/octet-stream", project_id: projectId }),
-      });
-      const sessionData = await sessionRes.json() as { upload_url?: string; error?: string; code?: string };
-      if (!sessionRes.ok) {
-        if (sessionData.code === "NEED_GOOGLE") {
-          toast({ title: String("Google Drive is not connected.\n\nClick \"From Drive\" to connect Google, then try uploading again."), kind: "error" });
-        } else {
-          toast({ title: String(sessionData.error ?? "Could not start upload"), kind: "error" });
-        }
-        return;
-      }
-
-      // Step 2: upload file bytes directly to Google Drive (bypasses Vercel + Supabase size limits)
-      // Use an AbortController-backed timeout so a hung PUT doesn't leave the UI
-      // stuck on "Uploading…" forever (e.g. Drive token expired between session
-      // create and the PUT — Drive sometimes hangs the connection instead of 401-ing fast).
-      const PUT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — large PDFs are slow on flaky links
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), PUT_TIMEOUT_MS);
-      let uploadRes: Response;
-      try {
-        uploadRes = await fetch(sessionData.upload_url!, {
-          method: "PUT",
-          headers: { "Content-Type": file.type || "application/octet-stream" },
-          body: file,
-          signal: ctrl.signal,
-        });
-      } catch (err) {
-        if ((err as { name?: string }).name === "AbortError") {
-          toast({ title: String(`Upload to Google Drive timed out after ${Math.round(PUT_TIMEOUT_MS / 60000)} minutes. The Google sign-in may have expired — click "From Drive" to reconnect Google, then try again.`), kind: "error" });
-          return;
-        }
-        throw err;
-      } finally {
-        clearTimeout(timer);
-      }
-      if (!uploadRes.ok) {
-        const detail = await uploadRes.text().catch(() => "");
-        if (uploadRes.status === 401 || uploadRes.status === 403) {
-          toast({ title: String(`Google Drive rejected the upload (${uploadRes.status}). Your Google sign-in likely expired between starting and finishing the upload. Click "From Drive" to reconnect Google, then try again.\n\n${detail.slice(0, 200)}`), kind: "error" });
-        } else {
-          toast({ title: String(`Upload to Google Drive failed (${uploadRes.status}): ${detail.slice(0, 200)}`), kind: "error" });
-        }
-        return;
-      }
-      const driveFile = await uploadRes.json() as { id?: string };
-      const driveFileId = driveFile.id;
-      if (!driveFileId) {
-        toast({ title: String("Drive upload completed but did not return a file ID. Please try again."), kind: "success" });
-        return;
-      }
-
-      // Step 3: register the document row via the unified endpoint
-      // (the server auto-fires ingest — no separate call needed)
-      const regRes = await fetch("/api/documents/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ storage_type: "drive", project_id: projectId, file_name: file.name, drive_file_id: driveFileId, mime_type: file.type, size: file.size }),
-      });
-      if (!regRes.ok) {
-        const d = await regRes.json().catch(() => ({})) as { error?: string };
-        toast({ title: String(d.error ?? "Registration failed"), kind: "error" });
-        return;
-      }
-
+      await uploadViaSupabase(file, ctrl.signal);
       loadDocuments();
+      toast({ title: "Upload complete", description: `${file.name} is processing now.`, kind: "success" });
     } catch (err) {
+      if ((err as { name?: string }).name === "AbortError") {
+        toast({ title: "Upload canceled.", kind: "info" });
+        return;
+      }
+      console.error("[documents/upload] failed", {
+        projectId,
+        fileName: file.name,
+        message: err instanceof Error ? err.message : String(err),
+      });
       toast({ title: String(`Upload failed: ${err instanceof Error ? err.message : String(err)}`), kind: "error" });
     } finally {
+      uploadAbortRef.current = null;
       setUploading(false);
     }
-  }, [projectId, loadDocuments]);
+  }, [loadDocuments, projectId, toast, uploadViaSupabase]);
+
+  const cancelUpload = useCallback(() => {
+    uploadAbortRef.current?.abort();
+  }, []);
 
   const handleDriveFiles = useCallback(async (
     driveFiles: { id: string; name: string; mimeType: string; sizeBytes?: number }[],
     accessToken: string,
   ) => {
     setDriveImporting(true);
+    const ctrl = new AbortController();
+    driveAbortRef.current = ctrl;
     const failures: string[] = [];
     try {
-      // accessToken is intentionally unused — server uses the stored OAuth token
+      // accessToken is intentionally unused - server uses the stored OAuth token
       void accessToken;
       await Promise.all(
         driveFiles.map(async (f) => {
+          if (ctrl.signal.aborted) return;
           try {
             // Unified endpoint inserts the row and auto-fires ingest
             const regRes = await fetch("/api/documents/upload", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
+              signal: ctrl.signal,
               body: JSON.stringify({
                 storage_type: "drive",
                 project_id: projectId,
@@ -298,19 +333,31 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
               return;
             }
           } catch (err) {
+            if ((err as { name?: string }).name === "AbortError") return;
             failures.push(`${f.name}: ${err instanceof Error ? err.message : String(err)}`);
           }
         }),
       );
 
       loadDocuments();
+      if (ctrl.signal.aborted) {
+        toast({ title: "Drive import canceled.", kind: "info" });
+        return;
+      }
       if (failures.length) {
         toast({ title: String(`Couldn't import ${failures.length} file(s) from Drive:\n\n${failures.join("\n")}`), kind: "info" });
+      } else if (driveFiles.length > 0) {
+        toast({ title: `Imported ${driveFiles.length} file${driveFiles.length === 1 ? "" : "s"} from Drive.`, kind: "success" });
       }
     } finally {
+      driveAbortRef.current = null;
       setDriveImporting(false);
     }
-  }, [projectId, loadDocuments]);
+  }, [projectId, loadDocuments, toast]);
+
+  const cancelDriveImport = useCallback(() => {
+    driveAbortRef.current?.abort();
+  }, []);
 
   const openAsk = (doc: Document) => {
     setAskDoc({ id: doc.id, name: doc.file_name });
@@ -330,13 +377,13 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
         body: JSON.stringify({ document_id: askDoc.id, question }),
       });
       const d = await res.json() as { answer?: string; error?: string };
-      setAnswer(res.ok ? (d.answer ?? "(no answer)") : `Error: ${d.error ?? res.status}`);
+      setAnswer(res.ok ? (d.answer ?? "(no answer)") : `Could not answer that yet. Try a more specific question or reopen the document: ${d.error ?? res.status}`);
       // Refresh persisted Q&A in the Insights cache so it survives panel close
       if (res.ok && askDoc) {
         void loadInsights(askDoc.id);
       }
     } catch (err) {
-      setAnswer(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
+      setAnswer(`Request failed: ${err instanceof Error ? err.message : String(err)}. Try again in a moment.`);
     } finally {
       setAsking(false);
     }
@@ -344,14 +391,41 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
 
   const deleteDocument = useCallback(async (id: string) => {
     setDeletingDocId(id);
+    const prevDocuments = documents;
     try {
-      await fetch(`/api/documents?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      const res = await fetch(`/api/documents?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({})) as { error?: string };
+      if (!res.ok) {
+        setDocuments(prevDocuments);
+        toast({ title: String(data.error ?? `Could not delete the document (${res.status}). Refresh the list and try again.`), kind: "error" });
+        return;
+      }
       setDocuments((prev) => prev.filter((d) => d.id !== id));
       if (askDoc?.id === id) setAskDoc(null);
+      toast({ title: "Document deleted.", kind: "success" });
+    } catch (err) {
+      setDocuments(prevDocuments);
+      toast({ title: String(err instanceof Error ? err.message : "Could not delete the document just now. Refresh the list and try again in a moment."), kind: "error" });
     } finally {
       setDeletingDocId(null);
     }
-  }, [askDoc]);
+  }, [askDoc, documents, toast]);
+
+  const retryDocument = useCallback(async (doc: Document) => {
+    setDeletingDocId(doc.id);
+    try {
+      const res = await fetch(`/api/documents/${encodeURIComponent(doc.id)}/retry`, { method: "POST" });
+      const data = await res.json().catch(() => ({})) as { error?: string };
+      if (!res.ok) {
+        toast({ title: String(data.error ?? `Retry failed (${res.status}). The document may still be processing, so try again in a moment.`), kind: "error" });
+        return;
+      }
+      toast({ title: `${doc.file_name} is retrying.`, kind: "success" });
+      loadDocuments(false);
+    } finally {
+      setDeletingDocId(null);
+    }
+  }, [loadDocuments, toast]);
 
   const canAsk = (doc: Document) => {
     if (!doc.file_name.toLowerCase().endsWith(".pdf")) return false;
@@ -359,15 +433,34 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     return !!(m.storage_path || m.drive_file_id);
   };
 
+  const canRetry = (doc: Document) => {
+    const m = doc.meta ?? {};
+    return doc.status === "error" && Boolean(m.storage_path || m.drive_file_id);
+  };
+
   return (
-    <div className="space-y-3">
+      <div className="space-y-3">
+      {loadError && (
+        <div className="rounded-xl border border-amber-400/30 bg-amber-400/[0.08] px-4 py-3 text-[11px] text-amber-200">
+          <div className="font-semibold">Documents could not finish loading.</div>
+          <div className="mt-1 text-amber-200/80">{loadError}</div>
+          <button
+            type="button"
+            onClick={() => loadDocuments()}
+            className="mt-3 inline-flex h-9 items-center rounded-full border border-amber-300/30 bg-amber-300/10 px-3 text-[11px] font-semibold uppercase tracking-widest text-amber-100 hover:bg-amber-300/20"
+          >
+            Try again
+          </button>
+        </div>
+      )}
       {pollTimedOut && (
         <div className="rounded-xl border border-[#E50914]/30 bg-[#E50914]/5 px-4 py-3 text-[11px] text-[#E50914]">
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <span>
-              One or more documents have been stuck in &ldquo;Processing&rdquo; for over 5 minutes. The background ingest likely failed silently — try deleting and re-uploading, or click Refresh.
+              One or more documents have been stuck in &ldquo;Processing&rdquo; for over 5 minutes. The background ingest likely stalled. Refresh first, then re-upload if it still does not clear.
             </span>
             <button
+              type="button"
               onClick={() => { setPollTimedOut(false); loadDocuments(); }}
               className="flex items-center gap-1.5 rounded border border-[#E50914]/30 px-2 py-1 uppercase tracking-widest font-bold hover:bg-[#E50914]/10"
             >
@@ -383,7 +476,8 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
             <FolderOpen size={12} className="text-[#00D2FF]" />
             <span className="text-[11px] uppercase tracking-widest text-gray-400">Documents</span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <GoogleConnect compact />
             <input
               ref={fileInputRef}
               type="file"
@@ -401,8 +495,17 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
               }`}
             >
               <Upload size={12} />
-              {uploading ? "Uploading…" : "Upload File"}
+              {uploading ? "Uploading..." : "Upload File"}
             </button>
+            {uploading && (
+              <button
+                onClick={cancelUpload}
+                className="flex items-center gap-2 border rounded-lg px-3 py-1.5 text-[11px] font-bold tracking-widest uppercase transition-colors bg-white/5 border-white/10 text-gray-400 hover:bg-white/10 hover:text-white"
+              >
+                <X size={12} />
+                Cancel
+              </button>
+            )}
             <GoogleDrivePicker onFilesSelected={handleDriveFiles} disabled={driveImporting}>
               <span className={`flex items-center gap-2 border rounded-lg px-3 py-1.5 text-[11px] font-bold tracking-widest uppercase transition-colors ${
                 driveImporting
@@ -417,9 +520,18 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                   <path d="m59.8 53h-32.3l-13.75 23.8c1.35.8 2.9 1.2 4.5 1.2h50.8c1.6 0 3.15-.45 4.5-1.2z" fill="#2684fc"/>
                   <path d="m73.4 26.5-12.7-22c-.8-1.4-1.95-2.5-3.3-3.3l-13.75 23.8 16.15 27h27.45c0-1.55-.4-3.1-1.2-4.5z" fill="#ffba00"/>
                 </svg>
-                {driveImporting ? "Importing…" : "From Drive"}
+                {driveImporting ? "Importing..." : "From Drive"}
               </span>
             </GoogleDrivePicker>
+            {driveImporting && (
+              <button
+                onClick={cancelDriveImport}
+                className="flex items-center gap-2 border rounded-lg px-3 py-1.5 text-[11px] font-bold tracking-widest uppercase transition-colors bg-white/5 border-white/10 text-gray-400 hover:bg-white/10 hover:text-white"
+              >
+                <X size={12} />
+                Cancel
+              </button>
+            )}
           </div>
         </div>
 
@@ -442,7 +554,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
               ) : documents.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="text-center py-16 text-[10px] uppercase tracking-widest text-gray-600">
-                    No documents yet. Click &ldquo;Upload File&rdquo; or &ldquo;From Drive&rdquo; to add a PDF.
+                    No documents yet. Upload a file or use From Drive to add a plan, photo, or PDF.
                   </td>
                 </tr>
               ) : (
@@ -483,7 +595,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                             {doc.doc_type}
                           </span>
                         ) : (
-                          <span className="text-gray-700 text-[10px]">—</span>
+                          <span className="text-gray-700 text-[10px]">-</span>
                         )}
                       </td>
                       <td className="px-4 py-3">
@@ -493,7 +605,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                         </span>
                       </td>
                       <td className="px-4 py-3 text-right text-gray-500 font-mono text-xs">
-                        {doc.page_count != null ? doc.page_count : "—"}
+                        {doc.page_count != null ? doc.page_count : "-"}
                       </td>
                       <td className="px-4 py-3 text-gray-600 text-[11px]">{fmt(doc.uploaded_at)}</td>
                       <td className="px-4 py-3 text-right">
@@ -508,11 +620,9 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                               <span className="text-[10px] uppercase tracking-widest font-mono">Ask</span>
                             </button>
                           )}
-                          {doc.status === "error" && (
+                          {doc.status === "error" && canRetry(doc) && (
                             <button
-                              onClick={() => {
-                                toast({ title: String("To retry, re-import this file from Drive using the From Drive button."), kind: "info" });
-                              }}
+                              onClick={() => void retryDocument(doc)}
                               className="flex items-center gap-1.5 text-gray-600 hover:text-[#00D2FF] transition-colors"
                               title="Retry"
                             >
@@ -520,8 +630,13 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                               <span className="text-[10px] uppercase tracking-widest font-mono">Retry</span>
                             </button>
                           )}
+                          {doc.status === "error" && !canRetry(doc) && (
+                            <span className="text-[10px] uppercase tracking-widest font-mono text-gray-700">
+                              Re-upload or reconnect Drive
+                            </span>
+                          )}
                           <button
-                            onClick={() => deleteDocument(doc.id)}
+                            onClick={() => setDeleteTarget(doc)}
                             disabled={deletingDocId === doc.id}
                             aria-label="Delete document"
                             className="min-h-[40px] text-gray-700 hover:text-[#E50914] transition-colors disabled:opacity-30"
@@ -547,7 +662,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                           <div className="flex items-start justify-between gap-3 mb-3">
                             <div className="flex items-center gap-2">
                               <Sparkles size={11} className="text-[#CCFF00]" />
-                              <span className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">AI Insights — per page</span>
+                              <span className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">Page notes</span>
                               <span className="text-[10px] text-gray-700">
                                 {insights?.pages?.length ?? 0} of {doc.page_count ?? "?"} pages
                               </span>
@@ -555,7 +670,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                             <GenerateDocDropdown
                               projectId={projectId}
                               sourceDocumentId={doc.id}
-                              label="Generate from this plan"
+                              label="Create from this document"
                             />
                           </div>
                           {insights?.classification && Object.keys(insights.classification).length > 0 && (
@@ -596,11 +711,11 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                               ))}
                             </div>
                           ) : insights.error ? (
-                            <p className="text-[11px] text-[#E50914]">Could not load insights: {insights.error}</p>
+                            <p className="text-[11px] text-[#E50914]">Could not load insights. Try reopening the document or retrying the import: {insights.error}</p>
                           ) : insights.pages.length === 0 ? (
                             (insights.classification && Object.keys(insights.classification).length > 0) || (insights.questions?.length ?? 0) > 0 ? null : (
                               <p className="text-[11px] text-gray-600 uppercase tracking-widest">
-                                Document is ready but no per-page summaries were saved. Re-ingest may help.
+                                Document is ready, but no page notes were saved yet. Try retrying the file import.
                               </p>
                             )
                           ) : (
@@ -614,7 +729,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                                         onClick={() => openAsk(doc)}
                                         className="text-[9px] uppercase tracking-widest text-gray-600 hover:text-[#CCFF00] transition-colors"
                                       >
-                                        Ask →
+                                        Ask
                                       </button>
                                     )}
                                   </div>
@@ -674,7 +789,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
           </form>
           {asking && (
             <p className="text-[11px] text-[#00D2FF] mt-3 font-mono uppercase tracking-widest">
-              Reading document…
+              Reading document...
             </p>
           )}
           {answer && (
@@ -684,6 +799,66 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
           )}
         </div>
       )}
+
+      {deleteTarget && (
+        <ConfirmDeleteModal
+          title="Delete document?"
+          body={`This will remove "${deleteTarget.file_name}" from the document list. You can upload it again later, but this copy will be removed now.`}
+          confirming={deletingDocId === deleteTarget.id}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={async () => {
+            await deleteDocument(deleteTarget.id);
+            setDeleteTarget(null);
+          }}
+        />
+      )}
     </div>
   );
 }
+
+function ConfirmDeleteModal({
+  title,
+  body,
+  confirming,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  body: string;
+  confirming: boolean;
+  onCancel: () => void;
+  onConfirm: () => void | Promise<void>;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#0E0F12] p-6">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-bold uppercase tracking-widest text-white">{title}</h3>
+          <button type="button" onClick={onCancel} className="text-white/40 hover:text-white">✕</button>
+        </div>
+        <p className="text-sm leading-relaxed text-white/70">{body}</p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="inline-flex h-9 items-center rounded-full border border-white/15 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/70 hover:text-white"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => void onConfirm()}
+            disabled={confirming}
+            className="inline-flex h-9 items-center rounded-full bg-[#E50914] px-4 text-[11px] font-bold uppercase tracking-widest text-white hover:opacity-90 disabled:opacity-50"
+          >
+            {confirming ? "Deleting..." : "Delete"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+
+

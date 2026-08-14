@@ -6,6 +6,7 @@ import {
   authTenantKey,
   authTenantName,
 } from "@/lib/project-controls/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,6 +36,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       authTenantKey(userId, orgId),
       authTenantName(userId, orgSlug),
     );
+    await assertPermission(tenantId, userId, "financial", "write");
     const body = (await req.json()) as ActualBody;
     if (!body.project_id) {
       return NextResponse.json(
@@ -116,7 +118,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: String(err) }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -131,6 +133,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       authTenantKey(userId, orgId),
       authTenantName(userId, orgSlug),
     );
+    await assertPermission(tenantId, userId, "financial", "read");
     const db = await createServiceClient();
     const csi = req.nextUrl.searchParams.get("csi_code");
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -146,6 +149,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     }
     return NextResponse.json({ items: data ?? [] });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: String(err) }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

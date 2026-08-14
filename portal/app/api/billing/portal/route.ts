@@ -7,6 +7,7 @@ import {
 } from "@/lib/project-controls/server";
 import { createCustomerPortalSession, getPaddleConfig } from "@/lib/billing/paddle";
 import { getTenantBilling } from "@/lib/billing/tenantBilling";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,6 +30,7 @@ export async function POST(): Promise<NextResponse> {
       authTenantKey(userId, orgId),
       authTenantName(userId, orgSlug),
     );
+    await assertPermission(tenantId, userId, "admin", "write");
 
     const billing = await getTenantBilling(tenantId);
     const paddleCustomerId = billing?.paddle_customer_id ?? null;
@@ -49,7 +51,7 @@ export async function POST(): Promise<NextResponse> {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
       { error: `[POST /api/billing/portal] ${msg}` },
-      { status: 500 },
+      { status: err instanceof PermissionError ? 403 : 500 },
     );
   }
 }

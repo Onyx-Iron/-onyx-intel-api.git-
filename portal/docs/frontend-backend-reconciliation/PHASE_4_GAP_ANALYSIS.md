@@ -5,6 +5,19 @@ Reports against actual routes/APIs/tables/components (not the Phase 1
 capability matrix alone), before deciding what to build vs. label
 "Coming Soon."
 
+## 2026-08-03 follow-up
+
+The gaps documented in this file for Reports, Project Management, and
+Preconstruction have now been closed in the current working tree:
+
+- Reports has persisted report history and export.
+- Project Management has a cross-project roll-up over the existing project
+  management tables.
+- Preconstruction has a new `bid_opportunities` table, CRUD API, and pipeline
+  workspace.
+
+The historical gap notes below are kept for audit trail context.
+
 ## Built this phase (real backend confirmed, now exposed globally)
 
 | Workspace | Evidence found | What shipped |

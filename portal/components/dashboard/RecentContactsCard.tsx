@@ -12,7 +12,7 @@ interface ContactRow {
 }
 
 // Ported from the retired /dashboard/command-center page (frontend-backend
-// reconciliation, item 2) — a quick contact directory glance on the
+// reconciliation, item 2) - a quick contact directory glance on the
 // Command Center, using the same workspace-wide /api/contacts endpoint the
 // dedicated Contacts page already uses.
 export default function RecentContactsCard() {
@@ -24,8 +24,8 @@ export default function RecentContactsCard() {
     (async () => {
       try {
         const res = await fetch("/api/contacts?limit=8", { cache: "no-store" });
-        if (!res.ok) throw new Error(String(res.status));
-        const data = await res.json() as { contacts?: ContactRow[] };
+        const data = await res.json().catch(() => ({})) as { contacts?: ContactRow[]; error?: string };
+        if (!res.ok) throw new Error(data.error ?? `Could not load contacts (${res.status}). Refresh and try again.`);
         if (!cancelled) setRows(data.contacts ?? []);
       } catch (e) {
         if (!cancelled) setErr(e instanceof Error ? e.message : String(e));
@@ -38,16 +38,14 @@ export default function RecentContactsCard() {
     <div className="rounded-xl border border-white/10 bg-[#0E0F12] p-4">
       <div className="flex items-center justify-between">
         <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Contact Directory</div>
-        <a href="/dashboard/contacts" className="text-[10px] uppercase tracking-widest font-mono text-white/40 hover:text-white/70">
-          All contacts →
-        </a>
+        <a href="/dashboard/contacts" className="text-[10px] uppercase tracking-widest font-mono text-white/40 hover:text-white/70">View all</a>
       </div>
       {err ? (
-        <div className="mt-2 text-xs text-white/40">Couldn&apos;t load — {err}</div>
+        <div className="mt-2 text-xs text-amber-200">{err}. Open Contacts to keep moving while this reloads.</div>
       ) : rows === null ? (
         <div className="mt-3 h-14 animate-pulse rounded bg-white/5" />
       ) : rows.length === 0 ? (
-        <div className="mt-2 text-xs text-white/40">No contacts yet.</div>
+        <div className="mt-2 text-xs text-white/40">No contacts yet. Add one in Contacts and it will show up here automatically.</div>
       ) : (
         <ul className="mt-2 divide-y divide-white/5">
           {rows.map((c) => (

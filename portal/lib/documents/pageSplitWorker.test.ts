@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
-import { invokePageSplitWorker } from "./pageSplitWorker";
+import { invokePageSplitWorker } from "./pageSplitWorker.ts";
 
 const ORIGINAL_ENV = {
   NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,

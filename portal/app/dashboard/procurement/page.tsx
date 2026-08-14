@@ -55,7 +55,7 @@ const PO_STATUS_STYLES: Record<string, string> = {
 };
 
 function currency(n: number | null | undefined): string {
-  if (n == null) return "—";
+  if (n == null) return "-";
   return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 }
 
@@ -83,11 +83,15 @@ export default function GlobalProcurementPage() {
         setProjects(p.projects ?? []);
         setLoading(false);
       })
-      .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
+      .catch((e) => { setError(e?.message ?? "Could not load procurement. Refresh the page and try again."); setLoading(false); });
   };
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const projectNameById = useMemo(() => {
     const m = new Map<string, string>();
@@ -102,7 +106,7 @@ export default function GlobalProcurementPage() {
       <PageHero
         eyebrow="Workspace"
         title="Procurement"
-        description="Every RFQ, vendor bid, and purchase order across all projects"
+        description="Quote requests, vendor bids, and purchase orders across all projects"
         compact
       />
 
@@ -111,11 +115,11 @@ export default function GlobalProcurementPage() {
 
         <div className="mb-6 flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
           <Info size={12} className="shrink-0" />
-          <span>Read-only roll-up. Package RFQs and award bids from a project&apos;s Procurement tab.</span>
+          <span>Use a project&apos;s Procurement tab to create quote requests and award bids, then review them here across all projects.</span>
         </div>
 
         <section className="mb-8">
-          <h2 className="mb-3 text-[11px] font-bold uppercase tracking-widest text-white/40">RFQ Line Items</h2>
+          <h2 className="mb-3 text-[11px] font-bold uppercase tracking-widest text-white/40">Quote request items</h2>
           <div className="rounded-xl border border-white/8 bg-[#0E0F12] overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full">
@@ -137,7 +141,15 @@ export default function GlobalProcurementPage() {
                     <tr>
                       <td colSpan={5}>
                         <div className="py-4">
-                          <EmptyState icon={<Truck className="w-6 h-6" />} title="No RFQs yet" description="Package a quote request from a project's Procurement tab to see it roll up here." />
+                          <EmptyState
+                            icon={<Truck className="w-6 h-6" />}
+                            title="No quote requests yet"
+                            description="Create a quote request in a project&apos;s Procurement tab and it will show up here automatically."
+                            actionLabel="Open projects"
+                            actionHref="/dashboard/projects"
+                            secondaryLabel="Open procurement"
+                            secondaryHref="/dashboard/projects"
+                          />
                         </div>
                       </td>
                     </tr>
@@ -147,7 +159,7 @@ export default function GlobalProcurementPage() {
                       return (
                         <tr key={item.id} className="hover:bg-white/[0.02] transition-colors">
                           <td className="px-4 py-3 text-white text-xs truncate max-w-xs">{item.item_description}</td>
-                          <td className="px-4 py-3 text-gray-400 text-xs">{item.batch.batch_label ?? "—"}</td>
+                          <td className="px-4 py-3 text-gray-400 text-xs">{item.batch.batch_label ?? "-"}</td>
                           <td className="px-4 py-3 text-right text-gray-300 font-mono text-xs">{item.quantity} {item.unit ?? ""}</td>
                           <td className="px-4 py-3 text-right text-gray-300 font-mono text-xs">{item.bids.length}</td>
                           <td className="px-4 py-3">
@@ -185,7 +197,15 @@ export default function GlobalProcurementPage() {
                     <tr>
                       <td colSpan={4}>
                         <div className="py-4">
-                          <EmptyState icon={<Truck className="w-6 h-6" />} title="No purchase orders yet" description="POs appear here once a vendor bid is awarded on a project." />
+                          <EmptyState
+                            icon={<Truck className="w-6 h-6" />}
+                            title="No purchase orders yet"
+                            description="Award a vendor bid in a project and the purchase order will appear here automatically."
+                            actionLabel="Open projects"
+                            actionHref="/dashboard/projects"
+                            secondaryLabel="Open procurement"
+                            secondaryHref="/dashboard/projects"
+                          />
                         </div>
                       </td>
                     </tr>

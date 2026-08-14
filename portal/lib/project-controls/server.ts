@@ -31,27 +31,24 @@ export interface ControlDb {
 
 export async function getOrCreateTenant(orgId: string, orgName: string): Promise<string> {
   const db = await createServiceClient();
-  const { data } = await db.from("tenants").select("id").eq("clerk_org_id", orgId).single();
-  if (data?.id) return data.id;
-
-  const { data: created, error } = await db
+  const { data, error } = await db
     .from("tenants")
-    .insert({ clerk_org_id: orgId, name: orgName })
+    .upsert({ clerk_org_id: orgId, name: orgName }, { onConflict: "clerk_org_id" })
     .select("id")
     .single();
 
-  if (error || !created) throw new Error(`[tenant] ${error?.message ?? "create failed"}`);
+  if (error || !data) throw new Error(`[tenant] ${error?.message ?? "create failed"}`);
 
   // Auto-seed starter cost rates so a brand-new tenant never silently sits
   // with an empty cost_catalog until someone manually finds and clicks
   // "Seed starter rates" — same failure mode the (now-seeded) global
   // cost_codes catalog had. Best-effort: a seeding failure shouldn't block
   // tenant creation.
-  void seedStarterCostCatalog(db, created.id).catch((e) =>
+  void seedStarterCostCatalog(db, data.id).catch((e) =>
     console.error("[getOrCreateTenant] starter catalog seed failed", e),
   );
 
-  return created.id;
+  return data.id;
 }
 
 export async function getControlDb(): Promise<ControlDb> {

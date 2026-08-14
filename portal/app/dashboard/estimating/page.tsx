@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Calculator, Info } from "lucide-react";
 import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
@@ -17,12 +17,10 @@ interface EstimateItem {
   pricing_status: string | null;
   created_at: string | null;
 }
-
 interface Project {
   id: string;
   name: string;
 }
-
 const PRICING_STYLES: Record<string, string> = {
   manual: "bg-white/5 text-white/60 border-white/10",
   priced: "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
@@ -31,10 +29,9 @@ const PRICING_STYLES: Record<string, string> = {
 };
 
 function currency(n: number | null): string {
-  if (n == null) return "—";
+  if (n == null) return "-";
   return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 }
-
 function SkeletonRows() {
   return (
     <>
@@ -58,7 +55,7 @@ export default function GlobalEstimatingPage() {
   const [error, setError] = useState<string | null>(null);
   const [projectFilter, setProjectFilter] = useState<string>("all");
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true);
     setError(null);
     Promise.all([
@@ -74,11 +71,15 @@ export default function GlobalEstimatingPage() {
         setProjects(p.projects ?? []);
         setLoading(false);
       })
-      .catch((err) => { setError(err?.message ?? "Network error"); setLoading(false); });
-  };
+      .catch((err) => { setError(err?.message ?? "Could not load estimating. Refresh the page and try again."); setLoading(false); });
+  }, []);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   const projectNameById = useMemo(() => {
     const m = new Map<string, string>();
@@ -104,7 +105,7 @@ export default function GlobalEstimatingPage() {
       <PageHero
         eyebrow="Workspace"
         title="Estimating"
-        description="Every estimate line item across all projects, in one roll-up view"
+        description="Estimate line items across all projects in one place"
         compact
       />
 
@@ -113,14 +114,14 @@ export default function GlobalEstimatingPage() {
 
         <div className="mb-4 flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
           <Info size={12} className="shrink-0" />
-          <span>Read-only roll-up. Build and price estimates from a project&apos;s Estimate tab. Cost/price fields are hidden here for roles without financial access.</span>
+          <span>Review estimates here, then open a project&apos;s Estimate tab to build or price line items when you need to make changes.</span>
         </div>
 
         {!loading && !error && items.length > 0 && (
           <div className="mb-5 flex flex-wrap items-center gap-3">
             <div className="rounded-lg border border-white/10 bg-[#0E0F12] px-4 py-2">
               <p className="text-[9px] uppercase tracking-widest text-white/40">Total value</p>
-              <p className="font-mono text-sm text-white">{grandTotal != null ? currency(grandTotal) : "—"}</p>
+              <p className="font-mono text-sm text-white">{grandTotal != null ? currency(grandTotal) : "-"}</p>
             </div>
             <div className="ml-auto">
               <select
@@ -160,7 +161,11 @@ export default function GlobalEstimatingPage() {
                         <EmptyState
                           icon={<Calculator className="w-6 h-6" />}
                           title="No estimate items yet"
-                          description="Build estimates from a project's Estimate tab to see them roll up here."
+                          description="Build estimates in a project&apos;s Estimate tab and they will appear here automatically."
+                          actionLabel="Open projects"
+                          actionHref="/dashboard/projects"
+                          secondaryLabel="Open estimate"
+                          secondaryHref="/dashboard/projects"
                         />
                       </div>
                     </td>
@@ -172,9 +177,9 @@ export default function GlobalEstimatingPage() {
                       <tr key={item.id} className="hover:bg-white/[0.02] transition-colors">
                         <td className="px-4 py-3 text-white text-xs truncate max-w-xs">{item.description}</td>
                         <td className="px-4 py-3 text-gray-400 text-xs">{projectNameById.get(item.project_id) ?? item.project_id}</td>
-                        <td className="px-4 py-3 text-gray-500 text-xs">{item.trade ?? item.csi_code ?? "—"}</td>
+                        <td className="px-4 py-3 text-gray-500 text-xs">{item.trade ?? item.csi_code ?? "-"}</td>
                         <td className="px-4 py-3 text-right text-gray-300 font-mono text-xs">
-                          {item.quantity != null ? `${item.quantity} ${item.uom ?? ""}` : "—"}
+                          {item.quantity != null ? `${item.quantity} ${item.uom ?? ""}` : "-"}
                         </td>
                         <td className="px-4 py-3 text-right text-gray-300 font-mono text-xs">{currency(item.total_price)}</td>
                         <td className="px-4 py-3">

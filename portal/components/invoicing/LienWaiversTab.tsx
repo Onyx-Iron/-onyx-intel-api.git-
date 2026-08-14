@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { Shield, Plus } from "lucide-react";
 import UniversalImportButton from "@/components/common/UniversalImportButton";
+import EmptyState from "@/components/common/EmptyState";
 import { useBulkImport, toStr, toNum, toDate } from "@/components/common/useBulkImport";
 import { LienWaiver, INPUT_CLS, fmtDate, fmtCurrency, pickField } from "./_shared";
 
@@ -40,7 +42,6 @@ interface FormState {
   status: WaiverStatus;
   notes: string;
 }
-
 const EMPTY_FORM: FormState = {
   vendor_name: "", waiver_type: "conditional_progress", draw_number: "",
   amount: "", through_date: "", state: "", signed_at: "", signed_by: "",
@@ -59,7 +60,6 @@ interface LienWaiverPayload {
   status: WaiverStatus;
   notes: string | null;
 }
-
 function SkeletonRows({ cols }: { cols: number }) {
   return (
     <>
@@ -75,7 +75,6 @@ function SkeletonRows({ cols }: { cols: number }) {
     </>
   );
 }
-
 export default function LienWaiversTab({ projectId }: { projectId: string }) {
   const { confirm } = useConfirm();
   const [items, setItems] = useState<LienWaiver[]>([]);
@@ -86,7 +85,7 @@ export default function LienWaiversTab({ projectId }: { projectId: string }) {
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true);
     fetch(`/api/lien-waivers?project_id=${encodeURIComponent(projectId)}`)
       .then((r) => r.json())
@@ -96,10 +95,16 @@ export default function LienWaiversTab({ projectId }: { projectId: string }) {
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  };
+  }, [projectId]);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load();   }, [projectId]);
+  useProjectSyncRefresh(load);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   const importItems = useBulkImport<LienWaiverPayload>(projectId, {
     endpoint: "/api/lien-waivers",
@@ -181,13 +186,13 @@ export default function LienWaiversTab({ projectId }: { projectId: string }) {
           });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Save failed (${res.status})`);
+        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Could not save this lien waiver (${res.status}). Check the form and try again.`);
         return;
       }
       cancelForm();
       load();
     } catch {
-      setErrorMsg("Network error — could not reach the server.");
+      setErrorMsg("Could not reach the server just now. Please try again in a moment.");
     } finally {
       setSubmitting(false);
     }
@@ -199,10 +204,10 @@ export default function LienWaiversTab({ projectId }: { projectId: string }) {
     setItems((curr) => curr.filter((i) => i.id !== id));
     try {
       const res = await fetch(`/api/lien-waivers/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, { method: "DELETE" });
-      if (!res.ok) { setItems(prev); setErrorMsg(`Delete failed (${res.status})`); }
+      if (!res.ok) { setItems(prev); setErrorMsg(`Could not delete that lien waiver (${res.status}). Refresh the list and try again.`); }
     } catch {
       setItems(prev);
-      setErrorMsg("Network error — could not delete.");
+      setErrorMsg("Could not delete that lien waiver just now. Refresh the list and try again in a moment.");
     }
   };
 
@@ -261,18 +266,28 @@ export default function LienWaiversTab({ projectId }: { projectId: string }) {
                 <SkeletonRows cols={9} />
               ) : items.length === 0 ? (
                 <tr><td colSpan={9} className="text-center py-16">
-                  <span className="text-xs uppercase tracking-widest text-gray-600">No lien waivers yet</span>
+                  <div className="py-4">
+                    <EmptyState
+                      icon={<Shield className="w-6 h-6" />}
+                      title="No lien waivers yet"
+                      description="Lien waivers will appear here once you add them on a project or record one from an invoice workflow."
+                      actionLabel="Open projects"
+                      actionHref="/dashboard/projects"
+                      secondaryLabel="View invoices"
+                      secondaryHref="/dashboard/financials"
+                    />
+                  </div>
                 </td></tr>
               ) : (
                 items.map((w) => (
                   <tr key={w.id} className="hover:bg-white/[0.02] transition-colors group">
                     <td className="px-4 py-3 text-white text-xs">{w.vendor_name}</td>
                     <td className="px-4 py-3 text-gray-400 text-xs">{WAIVER_TYPE_LABELS[w.waiver_type] ?? w.waiver_type}</td>
-                    <td className="px-4 py-3 text-gray-500 text-xs font-mono">{w.draw_number ?? "—"}</td>
+                    <td className="px-4 py-3 text-gray-500 text-xs font-mono">{w.draw_number ?? "-"}</td>
                     <td className="px-4 py-3 text-white text-xs font-mono">{fmtCurrency(w.amount)}</td>
                     <td className="px-4 py-3 text-gray-400 text-xs">{fmtDate(w.through_date)}</td>
-                    <td className="px-4 py-3 text-gray-400 text-xs">{w.state ?? "—"}</td>
-                    <td className="px-4 py-3 text-gray-400 text-xs">{w.signed_by ?? "—"}</td>
+                    <td className="px-4 py-3 text-gray-400 text-xs">{w.state ?? "-"}</td>
+                    <td className="px-4 py-3 text-gray-400 text-xs">{w.signed_by ?? "-"}</td>
                     <td className="px-4 py-3">
                       <span className={`inline-block px-2 py-0.5 rounded border text-[9px] font-bold tracking-widest uppercase ${STATUS_STYLES[w.status]}`}>
                         {w.status}

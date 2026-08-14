@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { auditInsert, auditUpdate } from "@/lib/audit";
+import { hasPermission } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -39,15 +40,17 @@ export async function GET(): Promise<NextResponse> {
 export async function PATCH(req: NextRequest): Promise<NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const body = await req.json().catch(() => ({})) as { name?: string; subscription_status?: string };
+  const body = await req.json().catch(() => ({})) as { name?: string };
   const { tenantId, company } = await ensureCompany(userId, orgId ?? null, orgSlug ?? null);
+  if (!(await hasPermission(tenantId, userId, "admin", "write"))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
   const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
   if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim();
-  if (typeof body.subscription_status === "string") patch.subscription_status = body.subscription_status;
 
   const { data: updated, error } = await anyDb
     .from("companies")

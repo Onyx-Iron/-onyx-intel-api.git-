@@ -6,11 +6,12 @@ import {
   authTenantKey,
   authTenantName,
 } from "@/lib/project-controls/server";
+import { assertPermission, type Action } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-async function tenant(): Promise<{ tenantId: string } | NextResponse> {
+async function tenant(action: Action): Promise<{ tenantId: string; userId: string } | NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
   if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -19,12 +20,13 @@ async function tenant(): Promise<{ tenantId: string } | NextResponse> {
     authTenantKey(userId, orgId),
     authTenantName(userId, orgSlug),
   );
-  return { tenantId };
+  await assertPermission(tenantId, userId, "financial", action);
+  return { tenantId, userId };
 }
 
 export async function GET(): Promise<NextResponse> {
   try {
-    const t = await tenant();
+    const t = await tenant("read");
     if (t instanceof NextResponse) return t;
     const db = await createServiceClient();
     const { data, error } = await db
@@ -38,7 +40,8 @@ export async function GET(): Promise<NextResponse> {
     }
     return NextResponse.json({ items: data ?? [] });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const status = err instanceof Error && "status" in err ? Number(err.status) : 500;
+    return NextResponse.json({ error: String(err) }, { status });
   }
 }
 
@@ -55,7 +58,7 @@ interface OverrideBody {
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
-    const t = await tenant();
+    const t = await tenant("write");
     if (t instanceof NextResponse) return t;
     const body = (await req.json()) as OverrideBody;
     if (
@@ -122,13 +125,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const status = err instanceof Error && "status" in err ? Number(err.status) : 500;
+    return NextResponse.json({ error: String(err) }, { status });
   }
 }
 
 export async function DELETE(req: NextRequest): Promise<NextResponse> {
   try {
-    const t = await tenant();
+    const t = await tenant("write");
     if (t instanceof NextResponse) return t;
     const id = req.nextUrl.searchParams.get("id");
     if (!id) {
@@ -146,6 +150,7 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     }
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const status = err instanceof Error && "status" in err ? Number(err.status) : 500;
+    return NextResponse.json({ error: String(err) }, { status });
   }
 }

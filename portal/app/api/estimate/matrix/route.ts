@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -21,13 +22,15 @@ export const runtime = "nodejs";
  */
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const { userId, orgId, orgSlug } = await auth();
-  if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  try {
+    const { userId, orgId, orgSlug } = await auth();
+    if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const projectId = req.nextUrl.searchParams.get("project_id");
   if (!projectId) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
-  const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "financial", "read");
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
@@ -49,7 +52,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     profit_pct: 15,
     contingency_pct: 5,
   };
-  return NextResponse.json({ rows: rowsRes.data ?? [], settings });
+    return NextResponse.json({ rows: rowsRes.data ?? [], settings });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: error instanceof PermissionError ? 403 : 500 },
+    );
+  }
 }
 
 const DEPRECATED_MESSAGE =

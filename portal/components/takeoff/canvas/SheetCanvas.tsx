@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import CADVectorLayer from "./CADVectorLayer";
 import VisionExtractionsPanel from "./VisionExtractionsPanel";
+import { useToast } from "@/components/common/Toast";
 import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
@@ -132,6 +133,7 @@ interface Props {
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
 export default function SheetCanvas({ projectId, projectName, pageId, pageNumber }: Props) {
+  const { toast } = useToast();
   const wrapRef   = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [pdfUrl, setPdfUrl]         = useState<string | null>(null);
@@ -178,6 +180,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [areaDraftPts, setAreaDraftPts] = useState<Pt[]>([]);
   const [areaBoundaryKind, setAreaBoundaryKind] = useState<BoundaryKind>("topsoil_stripping");
   const [areaDepthIn, setAreaDepthIn] = useState(6);
+  const [numericPrompt, setNumericPrompt] = useState<{
+    title: string;
+    label: string;
+    defaultValue: string;
+    inputMode?: "decimal" | "numeric";
+  } | null>(null);
+  const numericPromptResolveRef = useRef<((value: number | null) => void) | null>(null);
+  const [confirmPrompt, setConfirmPrompt] = useState<{ title: string; body: string } | null>(null);
+  const confirmPromptResolveRef = useRef<((value: boolean) => void) | null>(null);
 
   // ── Load signed URL + existing calibration + saved takeoffs ────────────────
   useEffect(() => {
@@ -391,13 +402,13 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
     return calibration?.scale_ratio ?? 1;
   }, [calibration, renderScale]);
-  const pixelDistance = (a: Pt, b: Pt) => Math.hypot(b.x - a.x, b.y - a.y);
-  const totalLen = (pts: Pt[]) => {
+  const pixelDistance = useCallback((a: Pt, b: Pt) => Math.hypot(b.x - a.x, b.y - a.y), []);
+  const totalLen = useCallback((pts: Pt[]) => {
     let s = 0;
     for (let i = 1; i < pts.length; i++) s += pixelDistance(pts[i - 1], pts[i]);
     return s;
-  };
-  const polygonArea = (pts: Pt[]) => {
+  }, [pixelDistance]);
+  const polygonArea = useCallback((pts: Pt[]) => {
     if (pts.length < 3) return 0;
     let s = 0;
     for (let i = 0, n = pts.length; i < n; i++) {
@@ -406,7 +417,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       s += a.x * b.y - b.x * a.y;
     }
     return Math.abs(s) / 2;
-  };
+  }, []);
 
   // Preview quantity for the in-progress draft (before commit).
   const draftQuantity = useMemo(() => {
@@ -414,7 +425,38 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (tool === "length") return totalLen(draftPoints) * scale;
     if (tool === "area")   return polygonArea(draftPoints) * scale * scale;
     return 0;
-  }, [draftPoints, tool, scale]);
+  }, [draftPoints, tool, scale, totalLen, polygonArea]);
+
+  const requestNumericInput = useCallback((title: string, label: string, defaultValue: string, inputMode: "decimal" | "numeric" = "decimal") => {
+    return new Promise<number | null>((resolve) => {
+      numericPromptResolveRef.current = resolve;
+      setNumericPrompt({ title, label, defaultValue, inputMode });
+    });
+  }, []);
+
+  const completeNumericPrompt = useCallback((raw: string | null) => {
+    if (numericPromptResolveRef.current) {
+      const resolved = raw == null ? null : Number(raw);
+      numericPromptResolveRef.current(Number.isFinite(resolved as number) ? (resolved as number) : null);
+      numericPromptResolveRef.current = null;
+    }
+    setNumericPrompt(null);
+  }, []);
+
+  const requestConfirm = useCallback((title: string, body: string) => {
+    return new Promise<boolean>((resolve) => {
+      confirmPromptResolveRef.current = resolve;
+      setConfirmPrompt({ title, body });
+    });
+  }, []);
+
+  const completeConfirmPrompt = useCallback((value: boolean) => {
+    if (confirmPromptResolveRef.current) {
+      confirmPromptResolveRef.current(value);
+      confirmPromptResolveRef.current = null;
+    }
+    setConfirmPrompt(null);
+  }, []);
 
   // ── Click handling ────────────────────────────────────────────────────────
   const onCanvasClick: React.MouseEventHandler<SVGSVGElement> = (e) => {
@@ -424,21 +466,23 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (tool === "calibrate") {
       const next = [...calibPts, p];
       if (next.length === 2) {
-        const raw = window.prompt("Enter the real-world distance between the two clicks (feet):", "10");
-        if (raw != null) {
-          const feet = Number(raw);
-          if (Number.isFinite(feet) && feet > 0) {
+        void requestNumericInput(
+          "Set calibration distance",
+          "Real-world distance between the two clicks (feet)",
+          "10",
+        ).then((feet) => {
+          if (feet != null && feet > 0) {
             const px = pixelDistance(next[0], next[1]);
             // Convert the two CURRENT-render-pixel click points to page
             // space before sending — the server computes and stores
             // page_space_scale_factor from these page-space points itself,
             // never from a render-pixel ratio (STEP 2: never fabricate
             // calibration from current_render_pixels * historical scale).
-            if (px > 0) saveCalibration(toPageSpace(next[0], renderScale), toPageSpace(next[1], renderScale), feet);
+            if (px > 0) void saveCalibration(toPageSpace(next[0], renderScale), toPageSpace(next[1], renderScale), feet);
           }
-        }
-        setCalibPts([]);
-        setTool("pan");
+          setCalibPts([]);
+          setTool("pan");
+        });
       } else {
         setCalibPts(next);
       }
@@ -471,10 +515,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
 
     if (tool === "spot_elevation") {
-      const raw = window.prompt("Enter the true elevation at this point (feet), e.g. 412.55:", "");
-      if (raw != null) {
-        const elevation = Number(raw);
-        if (Number.isFinite(elevation)) {
+      void requestNumericInput(
+        "Add spot elevation",
+        "True elevation at this point (feet)",
+        "",
+      ).then((elevation) => {
+        if (elevation != null) {
           setTopoNodes((prev) => [...prev, {
             key: `spot-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             node_type: "spot_elevation",
@@ -484,7 +530,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             layer_assignment: "manual",
           }]);
         }
-      }
+      });
       return;
     }
 
@@ -531,26 +577,27 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     setUtilityRuns((prev) => [...prev, run]);
     setUtilityModalPts(null);
     setUtilityDraftPts([]);
-  }, [utilityModalPts, scale]);
+  }, [utilityModalPts, scale, totalLen]);
 
-  const finishContourDraft = useCallback(() => {
+  const finishContourDraft = useCallback(async () => {
     if (contourDraftPts.length < 2) { setContourDraftPts([]); return; }
-    const raw = window.prompt("Enter this contour's baseline elevation (feet), e.g. 410.00:", "");
-    if (raw != null) {
-      const elevation = Number(raw);
-      if (Number.isFinite(elevation)) {
-        setTopoNodes((prev) => [...prev, {
-          key: `contour-${Date.now()}`,
-          node_type: "contour_line",
-          points: contourDraftPts,
-          coordinateSpace: "legacy_pixel",
-          elevation,
-          layer_assignment: "manual",
-        }]);
-      }
+    const elevation = await requestNumericInput(
+      "Add contour line",
+      "Contour baseline elevation (feet)",
+      "",
+    );
+    if (elevation != null) {
+      setTopoNodes((prev) => [...prev, {
+        key: `contour-${Date.now()}`,
+        node_type: "contour_line",
+        points: contourDraftPts,
+        coordinateSpace: "legacy_pixel",
+        elevation,
+        layer_assignment: "manual",
+      }]);
     }
     setContourDraftPts([]);
-  }, [contourDraftPts]);
+  }, [contourDraftPts, requestNumericInput]);
 
   // Live SF (shoelace × scale²) and, for stripping/pad kinds, CY preview while drawing.
   const areaDraftPreview = useMemo(() => {
@@ -558,7 +605,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     const sf = polygonArea(areaDraftPts) * scale * scale;
     const cy = DEPTH_APPLICABLE_KINDS.has(areaBoundaryKind) ? (sf * (areaDepthIn / 12)) / 27 : null;
     return { sf, cy };
-  }, [areaDraftPts, scale, areaBoundaryKind, areaDepthIn]);
+  }, [areaDraftPts, scale, areaBoundaryKind, areaDepthIn, polygonArea]);
 
   const finishAreaBoundsDraft = useCallback(() => {
     if (areaDraftPts.length < 3) { setAreaDraftPts([]); return; }
@@ -574,11 +621,11 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       volume_cy: cy,
     }]);
     setAreaDraftPts([]);
-  }, [areaDraftPts, scale, areaBoundaryKind, areaDepthIn]);
+  }, [areaDraftPts, scale, areaBoundaryKind, areaDepthIn, polygonArea]);
 
   const finishDraft = useCallback(() => {
     if (tool === "utility_pipe") { finishUtilityDraft(); return; }
-    if (tool === "contour_line") { finishContourDraft(); return; }
+    if (tool === "contour_line") { void finishContourDraft(); return; }
     if (tool === "civil_area_bounds") { finishAreaBoundsDraft(); return; }
     if (draftPoints.length < 2) { setDraftPoints([]); return; }
     if (tool === "length") {
@@ -603,7 +650,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       }]);
     }
     setDraftPoints([]);
-  }, [draftPoints, tool, scale, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft]);
+  }, [draftPoints, tool, scale, totalLen, polygonArea, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft]);
 
   // Escape/Enter shortcuts for finishing a polygon/line.
   useEffect(() => {
@@ -631,7 +678,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       setCalibration(data.calibration);
     } else {
       const err = await res.json().catch(() => ({}));
-      alert(`Calibration failed: ${err.error ?? res.status}`);
+      toast({ title: String(`Could not save calibration: ${err.error ?? res.status}`), kind: "error" });
     }
   }
 
@@ -640,10 +687,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // them into topo nodes automatically. ──
   const TOPO_LAYER_RE = /C-TOPO|PGCONT/i;
   async function runAutoTopoMatch() {
-    setAutoTopoStatus("Scanning CAD layers…");
+    setAutoTopoStatus("Scanning CAD layers...");
     try {
       const res = await fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
-      if (!res.ok) { setAutoTopoStatus("Could not load vectors."); return; }
+      if (!res.ok) { setAutoTopoStatus("Could not load vectors just now. Refresh the page and try again."); return; }
       const data = await res.json() as { vectors?: Array<{ layer: string; type: string; points: Array<[number, number]>; text_tag?: string }> };
       const vectors = data.vectors ?? [];
       const matches = vectors.filter((v) => TOPO_LAYER_RE.test(v.layer));
@@ -671,7 +718,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       if (nodes.length > 0) setTopoNodes((prev) => [...prev, ...nodes]);
       setAutoTopoStatus(`Matched ${nodes.length} of ${matches.length} candidate lines on C-TOPO/PGCONT layers.`);
     } catch {
-      setAutoTopoStatus("Auto-match failed.");
+      setAutoTopoStatus("Could not auto-match those vectors just now. Try again in a moment.");
     }
   }
 
@@ -709,17 +756,17 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       // Minimal conflict UX (STEP 2's required pair: reload server / discard
       // local) — a fuller side-by-side diff modal with "save as new object"
       // and "retry after review" is deferred, see REMAINING_RISKS.md.
-      const reload = window.confirm(
-        "This measurement was changed by someone else (or another tab) since you loaded it.\n\n" +
-        "OK = reload the server's current version (discarding your drag)\n" +
-        "Cancel = keep your local change (not saved yet — drag it again to retry)",
-      );
-      if (reload && body.server_state) {
-        const serverState = body.server_state as { points?: Pt[]; quantity: number; row_version: number };
-        setShapes((prev) => prev.map((x) => (x.key === drag.key
-          ? { ...x, points: serverState.points ?? drag.originalPoints, quantity: serverState.quantity, row_version: serverState.row_version }
-          : x)));
-      }
+      void requestConfirm(
+        "Measurement changed elsewhere",
+        "This measurement was changed by someone else (or another tab) since you loaded it. Reload the server's version and discard your drag?",
+      ).then((reload) => {
+        if (reload && body.server_state) {
+          const serverState = body.server_state as { points?: Pt[]; quantity: number; row_version: number };
+          setShapes((prev) => prev.map((x) => (x.key === drag.key
+            ? { ...x, points: serverState.points ?? drag.originalPoints, quantity: serverState.quantity, row_version: serverState.row_version }
+            : x)));
+        }
+      });
       // else: keep the local drag position as-is (still tagged saved:true
       // but with an unpersisted position) — the user's next drag or edit on
       // this object will attempt to PATCH again with the same
@@ -730,14 +777,14 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      alert(`Move failed: ${err.error ?? res.status}`);
+      toast({ title: String(`Could not move that measurement: ${err.error ?? res.status}`), kind: "error" });
       setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, points: drag.originalPoints } : x)));
       return;
     }
 
     const body = await res.json() as { manual_takeoff: { row_version: number }; quantity: number };
     setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, row_version: body.manual_takeoff.row_version, quantity: body.quantity } : x)));
-  }, [shapes]);
+  }, [shapes, toast, requestConfirm]);
 
   useEffect(() => {
     if (!dragState) return;
@@ -882,10 +929,17 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         setUtilityRuns((prev) => prev.map((r) => (r.saved ? r : { ...r, points: toPersistedPoints(r.points, r.coordinateSpace), coordinateSpace: "page_space", saved: true })));
         setTopoNodes((prev) => prev.map((n) => (n.saved ? n : { ...n, points: toPersistedPoints(n.points, n.coordinateSpace), coordinateSpace: "page_space", saved: true })));
         setAreaBounds((prev) => prev.map((a) => (a.saved ? a : { ...a, points: toPersistedPoints(a.points, a.coordinateSpace), coordinateSpace: "page_space", saved: true })));
+        const savedCount = [...shapes, ...utilityRuns, ...topoNodes, ...areaBounds].filter((x) => !x.saved).length;
+        toast({
+          title: savedCount > 0
+            ? `Saved ${savedCount} takeoff item${savedCount === 1 ? "" : "s"} to the project.`
+            : "Takeoff changes are already saved.",
+          kind: "success",
+        });
       } else {
         const failed = results.find((r) => !r.ok);
         const err = failed ? await failed.json().catch(() => ({})) : {};
-        alert(`Save failed: ${err.error ?? failed?.status}`);
+        toast({ title: String(`Could not save those takeoff items: ${err.error ?? failed?.status}`), kind: "error" });
       }
     } finally {
       setSaving(false);
@@ -897,6 +951,22 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }
   function removeShape(key: string) {
     setShapes((prev) => prev.filter((s) => s.key !== key));
+  }
+  function duplicateShape(key: string) {
+    setShapes((prev) => {
+      const source = prev.find((s) => s.key === key);
+      if (!source) return prev;
+      const copyKey = `dup-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const copy = {
+        ...source,
+        key: copyKey,
+        id: undefined,
+        row_version: undefined,
+        saved: false,
+        points: source.points.map((p) => ({ x: p.x + 12, y: p.y + 12 })),
+      };
+      return [...prev, copy];
+    });
   }
   function updateUtilityCostCode(key: string, code: string) {
     setUtilityRuns((prev) => prev.map((r) => (r.key === key ? { ...r, cost_code: code, saved: false } : r)));
@@ -913,6 +983,17 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   function updateAreaCostCode(key: string, code: string) {
     setAreaBounds((prev) => prev.map((a) => (a.key === key ? { ...a, target_cost_code: code, saved: false } : a)));
   }
+  const activeSelection = useMemo(() => {
+    const shape = shapes.find((s) => s.key === selectedKey);
+    if (shape) return { kind: "shape" as const, item: shape };
+    const utility = utilityRuns.find((r) => r.key === selectedKey);
+    if (utility) return { kind: "utility" as const, item: utility };
+    const topo = topoNodes.find((n) => n.key === selectedKey);
+    if (topo) return { kind: "topo" as const, item: topo };
+    const area = areaBounds.find((a) => a.key === selectedKey);
+    if (area) return { kind: "area" as const, item: area };
+    return null;
+  }, [selectedKey, shapes, utilityRuns, topoNodes, areaBounds]);
 
   // ── "Compile to civil_surfaces" — push all topo nodes into the site
   // surface mesh model for cut/fill grid calculations. ──
@@ -955,7 +1036,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        alert(`Compile to surface mesh failed: ${err.error ?? res.status}`);
+        toast({ title: String(`Could not compile that surface mesh: ${err.error ?? res.status}`), kind: "error" });
       }
     } finally {
       setCompilingMesh(false);
@@ -986,7 +1067,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        alert(`Commit to earthwork failed: ${err.error ?? res.status}`);
+        toast({ title: String(`Could not commit that area to earthwork: ${err.error ?? res.status}`), kind: "error" });
       }
     } finally {
       setCommittingAreaKey(null);
@@ -1002,6 +1083,43 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
     return { count, len, area };
   }, [shapes]);
+
+  const toolHint = useMemo(() => {
+    switch (tool) {
+      case "pan":
+        return "Pan and review saved items. Drag saved measurements to move them.";
+      case "calibrate":
+        return calibPts.length === 0
+          ? "Click two points on the sheet to start calibration."
+          : "Now click the matching distance once you have the second point.";
+      case "count":
+        return "Click once for each count item.";
+      case "length":
+        return draftPoints.length === 0
+          ? "Click points to trace a line. Enter or double-click to finish."
+          : `Tracing ${draftPoints.length} point${draftPoints.length === 1 ? "" : "s"}. Enter or double-click to finish.`;
+      case "area":
+        return draftPoints.length === 0
+          ? "Click points to trace a polygon. Enter or double-click to finish."
+          : `Tracing ${draftPoints.length} point${draftPoints.length === 1 ? "" : "s"}. Enter or double-click to finish.`;
+      case "utility_pipe":
+        return utilityDraftPts.length === 0
+          ? "Click points along the pipe run. Enter or double-click to configure it."
+          : `Tracing ${utilityDraftPts.length} point${utilityDraftPts.length === 1 ? "" : "s"}. Enter or double-click to configure the run.`;
+      case "spot_elevation":
+        return "Click a point, then enter the elevation.";
+      case "contour_line":
+        return contourDraftPts.length === 0
+          ? "Click points to trace the contour line. Enter or double-click to set elevation."
+          : `Tracing ${contourDraftPts.length} point${contourDraftPts.length === 1 ? "" : "s"}. Enter or double-click to set elevation.`;
+      case "civil_area_bounds":
+        return areaDraftPts.length === 0
+          ? "Click points to draw the area boundary. Enter or double-click to close the polygon."
+          : `Tracing ${areaDraftPts.length} point${areaDraftPts.length === 1 ? "" : "s"}. Enter or double-click to close the polygon.`;
+      default:
+        return "";
+    }
+  }, [tool, calibPts.length, draftPoints.length, utilityDraftPts.length, contourDraftPts.length, areaDraftPts.length]);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -1065,11 +1183,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                     // never silently change, STEP 5). It only changes what
                     // scale NEW draws use going forward, so the confirmation
                     // here is about that distinction, not a batch recompute.
-                    if (!window.confirm(
-                      "Recalibrating sets the scale for NEW measurements drawn from now on.\n\n" +
-                      "Existing saved measurements keep their already-computed quantities unchanged — recalibration never silently alters them.\n\nContinue?",
-                    )) return;
-                    setTool("calibrate"); setDraftPoints([]); setCalibPts([]);
+                    void requestConfirm(
+                      "Recalibrate sheet",
+                      "Recalibrating sets the scale for new measurements drawn from now on. Existing saved measurements keep their quantities unchanged. Continue?",
+                    ).then((ok) => {
+                      if (!ok) return;
+                      setTool("calibrate");
+                      setDraftPoints([]);
+                      setCalibPts([]);
+                    });
                   }}
                   className="rounded-full border border-white/10 px-2 py-0.5 text-white/60 hover:text-white hover:bg-white/[0.06] normal-case tracking-normal"
                 >
@@ -1079,6 +1201,22 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             ) : (
               <span className="text-amber-400">Not calibrated — pick <b>calibrate</b> tool</span>
             )}
+          </div>
+        </div>
+
+        <div className="border-b border-white/5 bg-white/[0.02] px-4 py-2">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] uppercase tracking-widest font-mono text-white/45">
+            <span className="text-[#CCFF00]">Quick start</span>
+            <span>1. Pick a tool</span>
+            <span className="text-white/20">•</span>
+            <span>2. Click the sheet to draw</span>
+            <span className="text-white/20">•</span>
+            <span>3. Press Enter to finish, Esc to cancel</span>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-white/30">
+            <span>{toolHint}</span>
+            <span className="text-white/15">•</span>
+            <span>Calibrate first on new sheets, then switch back to count, length, area, or pipe work.</span>
           </div>
         </div>
 
@@ -1309,7 +1447,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
           {!renderSize && !loadError && (
             <div className="absolute inset-0 flex items-center justify-center text-xs text-white/40">
-              Rendering sheet…
+              Rendering sheet...
             </div>
           )}
           {loadError && (
@@ -1386,64 +1524,102 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           }}
         />
         <div className="border-b border-white/10 px-4 py-3">
-          <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Measurements</div>
-          <div className="mt-1 text-sm font-semibold">
-            {shapes.length} item{shapes.length === 1 ? "" : "s"}
-            <span className="text-white/40 font-normal"> · {totals.count} EA · {totals.len.toFixed(1)} LF · {totals.area.toFixed(1)} SF</span>
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Measurements</div>
+              <div className="mt-1 text-sm font-semibold">
+                {shapes.length} item{shapes.length === 1 ? "" : "s"}
+                <span className="text-white/40 font-normal"> · {totals.count} EA · {totals.len.toFixed(1)} LF · {totals.area.toFixed(1)} SF</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={saveAllUnsaved}
+              disabled={saving}
+              className="rounded-full border border-[#CCFF00]/20 bg-[#CCFF00]/10 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-[#CCFF00] hover:bg-[#CCFF00]/15 disabled:opacity-40"
+            >
+              {saving ? "Saving..." : "Save sheet"}
+            </button>
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1.5">
-          {shapes.length === 0 && (
-            <div className="text-xs text-white/40 px-2 py-4 text-center">
-              No measurements yet. Pick a tool, click the sheet.
+        <div className="flex-1 overflow-y-auto px-3 py-2">
+          {activeSelection && (
+            <div className="mb-3 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2">
+              <div className="text-[10px] uppercase tracking-widest font-mono text-white/35">Selected</div>
+              <div className="mt-1 text-xs text-white/80">
+                {activeSelection.kind === "shape" && "Manual count / line / area"}
+                {activeSelection.kind === "utility" && "Utility pipe run"}
+                {activeSelection.kind === "topo" && "Topo node"}
+                {activeSelection.kind === "area" && "Area boundary"}
+              </div>
             </div>
           )}
-          {shapes.map((s) => {
-            const color = s.tool === "count" ? "text-[#CCFF00]" : s.tool === "length" ? "text-[#00D2FF]" : "text-orange-400";
-            const isSel = s.key === selectedKey;
-            return (
-              <div
-                key={s.key}
-                onClick={() => setSelectedKey(s.key)}
-                className={`rounded-lg border px-3 py-2 cursor-pointer transition-colors ${
-                  isSel ? "border-white/25 bg-white/[0.04]" : "border-white/10 hover:border-white/20 bg-white/[0.02]"
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className={`text-[9px] uppercase tracking-widest font-mono ${color}`}>{s.tool}</span>
-                    <span className="text-sm font-mono">
-                      {s.quantity.toFixed(2)} <span className="text-white/40">{s.unit}</span>
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); removeShape(s.key); }}
-                    className="text-[10px] text-white/30 hover:text-red-400"
-                  >
-                    ✕
-                  </button>
-                </div>
-                <div className="mt-1.5 flex items-center gap-2">
-                  <input
-                    type="text"
-                    placeholder="NN-NN-NN"
-                    value={s.cost_code ?? ""}
-                    onChange={(e) => updateCostCode(s.key, e.target.value)}
-                    className={`flex-1 rounded border px-2 py-1 text-[11px] font-mono bg-black/40 focus:outline-none focus:border-[#CCFF00] ${
-                      s.cost_code && !/^\d{2}-\d{2}-\d{2}$/.test(s.cost_code)
-                        ? "border-red-400/50"
-                        : "border-white/10"
-                    }`}
-                  />
-                  {s.saved && (
-                    <span className="text-[9px] uppercase tracking-widest font-mono text-white/40">Saved</span>
+
+          <div className="overflow-hidden rounded-xl border border-white/10">
+            <div className="max-h-[34vh] overflow-auto">
+              <table className="w-full border-collapse text-left text-[11px]">
+                <thead className="sticky top-0 z-10 bg-[#0B0C0E] text-white/35">
+                  <tr>
+                    <th className="px-3 py-2 font-mono uppercase tracking-widest">Type</th>
+                    <th className="px-3 py-2 font-mono uppercase tracking-widest">Qty</th>
+                    <th className="px-3 py-2 font-mono uppercase tracking-widest">Code</th>
+                    <th className="px-3 py-2 font-mono uppercase tracking-widest">State</th>
+                    <th className="px-3 py-2 font-mono uppercase tracking-widest text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {shapes.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="px-3 py-8 text-center text-white/35">
+                        No measurements yet. Pick a tool, then click the sheet to place the first measurement.
+                      </td>
+                    </tr>
+                  ) : (
+                    shapes.map((s) => {
+                      const isSel = s.key === selectedKey;
+                      const color = s.tool === "count" ? "text-[#CCFF00]" : s.tool === "length" ? "text-[#00D2FF]" : "text-orange-400";
+                      return (
+                        <tr
+                          key={s.key}
+                          onClick={() => setSelectedKey(s.key)}
+                          className={isSel ? "bg-white/[0.05]" : "hover:bg-white/[0.02]"}
+                        >
+                          <td className={`px-3 py-2 ${color} font-mono uppercase tracking-widest`}>{s.tool}</td>
+                          <td className="px-3 py-2 font-mono text-white">
+                            {s.quantity.toFixed(2)} <span className="text-white/35">{s.unit}</span>
+                          </td>
+                          <td className="px-3 py-2">
+                            <input
+                              type="text"
+                              placeholder="NN-NN-NN"
+                              value={s.cost_code ?? ""}
+                              onChange={(e) => updateCostCode(s.key, e.target.value)}
+                              className={`w-full rounded border bg-black/40 px-2 py-1 font-mono text-white outline-none focus:border-[#CCFF00] ${s.cost_code && !/^\d{2}-\d{2}-\d{2}$/.test(s.cost_code) ? "border-red-400/50" : "border-white/10"}`}
+                            />
+                          </td>
+                          <td className="px-3 py-2 text-white/40">{s.saved ? "Saved" : "Draft"}</td>
+                          <td className="px-3 py-2">
+                            <div className="flex justify-end gap-2">
+                              <button type="button" onClick={(e) => { e.stopPropagation(); duplicateShape(s.key); }} className="text-white/45 hover:text-white">Duplicate</button>
+                              <button type="button" onClick={(e) => { e.stopPropagation(); removeShape(s.key); }} className="text-red-400/70 hover:text-red-300">Remove</button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
-                </div>
-              </div>
-            );
-          })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="mt-3 flex items-center gap-2 text-[10px] uppercase tracking-widest text-white/35">
+            <span className="h-px flex-1 bg-white/10" />
+            <span>Manual takeoff register</span>
+            <span className="h-px flex-1 bg-white/10" />
+          </div>
+
         </div>
 
         {utilityRuns.length > 0 && (
@@ -1495,7 +1671,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 disabled={compilingMesh}
                 className="text-[9px] uppercase tracking-widest font-mono text-[#22d3ee] hover:opacity-70 disabled:opacity-40"
               >
-                {compilingMesh ? "Compiling…" : "Compile to Surface Mesh"}
+                {compilingMesh ? "Compiling..." : "Compile to Surface Mesh"}
               </button>
             </div>
             {topoNodes.map((n) => (
@@ -1542,7 +1718,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                       disabled={committingAreaKey === a.key}
                       className="shrink-0 text-[9px] uppercase tracking-widest font-mono text-orange-400 hover:opacity-70 disabled:opacity-40"
                     >
-                      {committingAreaKey === a.key ? "Committing…" : "Commit to Earthwork"}
+                      {committingAreaKey === a.key ? "Committing..." : "Commit to Earthwork"}
                     </button>
                   </div>
                   {a.saved && <span className="text-[9px] uppercase tracking-widest font-mono text-white/40">Saved</span>}
@@ -1561,7 +1737,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               || (shapes.length === 0 && utilityRuns.length === 0 && topoNodes.length === 0 && areaBounds.length === 0)}
             className="w-full inline-flex h-11 items-center justify-center rounded-full bg-[#CCFF00] px-5 text-xs font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85 disabled:opacity-40"
           >
-            {saving ? "Saving…" : "Save to Project Book"}
+            {saving ? "Saving..." : "Save to Project Book"}
           </button>
           <p className="mt-2 text-center text-[10px] text-white/30">
             Cost codes must be <span className="font-mono">NN-NN-NN</span>. Rows without one save as uncoded.
@@ -1576,6 +1752,125 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           onSubmit={commitUtilityRun}
         />
       )}
+
+      {numericPrompt && (
+        <NumericPromptModal
+          title={numericPrompt.title}
+          label={numericPrompt.label}
+          defaultValue={numericPrompt.defaultValue}
+          inputMode={numericPrompt.inputMode}
+          onCancel={() => completeNumericPrompt(null)}
+          onSubmit={completeNumericPrompt}
+        />
+      )}
+
+      {confirmPrompt && (
+        <ConfirmPromptModal
+          title={confirmPrompt.title}
+          body={confirmPrompt.body}
+          onCancel={() => completeConfirmPrompt(false)}
+          onConfirm={() => completeConfirmPrompt(true)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ConfirmPromptModal({
+  title,
+  body,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  body: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#0E0F12] p-6">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-bold uppercase tracking-widest text-white">{title}</h3>
+          <button type="button" onClick={onCancel} className="text-white/40 hover:text-white">✕</button>
+        </div>
+        <p className="text-sm text-white/70 leading-relaxed">{body}</p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="inline-flex h-9 items-center rounded-full border border-white/15 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/70 hover:text-white"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85"
+          >
+            Continue
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NumericPromptModal({
+  title,
+  label,
+  defaultValue,
+  inputMode = "decimal",
+  onCancel,
+  onSubmit,
+}: {
+  title: string;
+  label: string;
+  defaultValue: string;
+  inputMode?: "decimal" | "numeric";
+  onCancel: () => void;
+  onSubmit: (value: string | null) => void;
+}) {
+  const [value, setValue] = useState(defaultValue);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#0E0F12] p-6">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-bold uppercase tracking-widest text-white">{title}</h3>
+          <button type="button" onClick={onCancel} className="text-white/40 hover:text-white">✕</button>
+        </div>
+        <label className="block text-[9px] uppercase tracking-widest text-white/40">
+          {label}
+        </label>
+        <input
+          autoFocus
+          value={value}
+          inputMode={inputMode}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") onCancel();
+            if (e.key === "Enter") onSubmit(value.trim() === "" ? null : value.trim());
+          }}
+          className="mt-2 w-full rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-[#CCFF00] focus:outline-none"
+        />
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="inline-flex h-9 items-center rounded-full border border-white/15 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/70 hover:text-white"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => onSubmit(value.trim() === "" ? null : value.trim())}
+            className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85"
+          >
+            Apply
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

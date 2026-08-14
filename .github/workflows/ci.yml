@@ -86,6 +86,26 @@ jobs:
           NEXT_PUBLIC_GOOGLE_API_KEY: placeholder
           NEXT_PUBLIC_STORAGE_MODE: supabase
 
+  browser-tests:
+    name: Browser acceptance (takeoff, estimating, pricing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: portal/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+        env:
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_dGVzdC5jbGVyay5hY2NvdW50cy5kZXYk
+          CLERK_SECRET_KEY: sk_test_placeholder
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
+          SUPABASE_SERVICE_ROLE_KEY: placeholder
+
   launch-audit:
     name: Launch audit (repo config)
     runs-on: ubuntu-latest
@@ -172,10 +192,8 @@ jobs:
     # lib/test-utils/integration-guard.ts fails closed (throws, does not
     # skip) if TEST_SUPABASE_URL ever resolves to the production project ref,
     # so even a misconfigured secret can't point this job at production.
-    # Every test file in this suite already skips itself gracefully and
-    # reports "SKIPPED — ALLOW_INTEGRATION_TESTS is not set" if these secrets
-    # aren't configured, so this job stays green before they're added — it
-    # just isn't a real gate until they are.
+    # The schema preflight fails closed when either secret is absent. This job
+    # must never turn a skipped database suite into a green release signal.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

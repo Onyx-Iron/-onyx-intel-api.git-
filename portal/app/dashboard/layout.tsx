@@ -4,6 +4,7 @@ import Sidebar from "@/components/layout/Sidebar";
 import MobileTopBar from "@/components/layout/MobileTopBar";
 import OnboardingTour from "@/components/onboarding/OnboardingTour";
 import AppProviders from "@/components/common/AppProviders";
+import Link from "next/link";
 
 export default async function DashboardLayout({
   children,
@@ -22,6 +23,10 @@ export default async function DashboardLayout({
         <OnboardingTour />
         <main id="main-content" className="min-h-screen lg:pl-60">
           {children}
+          <footer className="px-6 pb-6 pt-2 text-center text-[10px] leading-relaxed text-white/25">
+            <p>AI-assisted outputs can contain mistakes. Verify quantities, pricing, code requirements, and contractual decisions before approval or field use.</p>
+            <p className="mt-2"><Link href="/terms" className="hover:text-white/60">Terms</Link><span className="px-2">·</span><Link href="/privacy" className="hover:text-white/60">Privacy</Link></p>
+          </footer>
         </main>
       </div>
     </AppProviders>

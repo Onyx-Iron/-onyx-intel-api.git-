@@ -826,6 +826,146 @@ CREATE TABLE IF NOT EXISTS public.cost_catalog (
   PRIMARY KEY (id)
 );
 
+-- This function is referenced by policies in
+-- 20260706_rls_profiles_and_catalog.sql, which sorts before the migration
+-- that historically defined it. A fresh replay therefore needs the
+-- authoritative definition in the foundational baseline.
+CREATE OR REPLACE FUNCTION public.current_tenant_id()
+RETURNS uuid
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT t.id
+  FROM public.tenants t
+  WHERE t.clerk_org_id = (auth.jwt() ->> 'org_id')
+  LIMIT 1;
+$$;
+
+-- These production functions were historically created out-of-band, but
+-- tracked security migrations alter/revoke them before the later phantom-
+-- object reconciliation migration runs. Define them here so a zero-to-
+-- current replay has the same prerequisites as production.
+CREATE OR REPLACE FUNCTION public._set_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path TO 'public'
+AS $$
+BEGIN NEW.updated_at = now(); RETURN NEW; END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.set_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path TO 'public'
+AS $$
+BEGIN NEW.updated_at = now(); RETURN NEW; END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.match_chunks(
+  query_embedding vector,
+  match_tenant_id uuid,
+  match_project_id uuid,
+  match_count integer DEFAULT 5
+)
+RETURNS TABLE(content text, document_id uuid, page_number integer, similarity double precision)
+LANGUAGE plpgsql
+SET search_path TO 'public'
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT c.content, c.document_id::uuid, c.page_number,
+         1 - (c.embedding <=> query_embedding) AS similarity
+  FROM public.chunks c
+  WHERE c.tenant_id = match_tenant_id AND c.project_id = match_project_id
+  ORDER BY c.embedding <=> query_embedding
+  LIMIT match_count;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.match_chunks(
+  query_embedding vector,
+  match_tenant_id uuid,
+  match_project_id uuid,
+  query_text text DEFAULT ''::text,
+  match_count integer DEFAULT 6,
+  rrf_k integer DEFAULT 60
+)
+RETURNS TABLE(content text, document_id uuid, page_number integer, similarity double precision, rrf_score double precision)
+LANGUAGE plpgsql
+SET search_path TO 'public'
+AS $$
+DECLARE
+  use_hybrid boolean := query_text IS NOT NULL AND length(trim(query_text)) > 0;
+BEGIN
+  IF use_hybrid THEN
+    RETURN QUERY
+    WITH vector_ranked AS (
+      SELECT c.id, c.content, c.document_id, c.page_number,
+             1 - (c.embedding <=> query_embedding) AS sim,
+             ROW_NUMBER() OVER (ORDER BY c.embedding <=> query_embedding) AS vec_rank
+      FROM public.chunks c
+      WHERE c.tenant_id = match_tenant_id AND c.project_id = match_project_id
+      ORDER BY c.embedding <=> query_embedding
+      LIMIT match_count * 4
+    ), keyword_ranked AS (
+      SELECT c.id,
+             ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.fts, websearch_to_tsquery('english', query_text)) DESC) AS kw_rank
+      FROM public.chunks c
+      WHERE c.tenant_id = match_tenant_id
+        AND c.project_id = match_project_id
+        AND c.fts @@ websearch_to_tsquery('english', query_text)
+      LIMIT match_count * 4
+    )
+    SELECT vr.content, vr.document_id::uuid, vr.page_number, vr.sim,
+           COALESCE(1.0 / (rrf_k + vr.vec_rank), 0) + COALESCE(1.0 / (rrf_k + kr.kw_rank), 0)
+    FROM vector_ranked vr
+    LEFT JOIN keyword_ranked kr ON kr.id = vr.id
+    ORDER BY 5 DESC
+    LIMIT match_count;
+  ELSE
+    RETURN QUERY
+    SELECT c.content, c.document_id::uuid, c.page_number,
+           1 - (c.embedding <=> query_embedding),
+           1.0 / (rrf_k + ROW_NUMBER() OVER (ORDER BY c.embedding <=> query_embedding))
+    FROM public.chunks c
+    WHERE c.tenant_id = match_tenant_id AND c.project_id = match_project_id
+    ORDER BY c.embedding <=> query_embedding
+    LIMIT match_count;
+  END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.rls_auto_enable()
+RETURNS event_trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'pg_catalog'
+AS $$
+DECLARE
+  cmd record;
+BEGIN
+  FOR cmd IN
+    SELECT * FROM pg_event_trigger_ddl_commands()
+    WHERE command_tag IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
+      AND object_type IN ('table', 'partitioned table')
+  LOOP
+    IF cmd.schema_name = 'public' THEN
+      BEGIN
+        EXECUTE format('alter table if exists %s enable row level security', cmd.object_identity);
+      EXCEPTION WHEN OTHERS THEN
+        RAISE LOG 'rls_auto_enable: failed to enable RLS on %', cmd.object_identity;
+      END;
+    END IF;
+  END LOOP;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.rls_auto_enable() FROM anon, authenticated, PUBLIC;
+DROP EVENT TRIGGER IF EXISTS ensure_rls;
+CREATE EVENT TRIGGER ensure_rls ON ddl_command_end EXECUTE FUNCTION public.rls_auto_enable();
+
 -- ── Enable RLS on every baseline table (confirmed via pg_class.relrowsecurity
 -- against production: all 40 have RLS enabled, no exceptions). Policies for
 -- these tables are added by later tracked migrations (rls_tenant_isolation,

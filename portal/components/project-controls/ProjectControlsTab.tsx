@@ -1,6 +1,7 @@
-﻿"use client";
+"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { Activity, CircleDollarSign, ClipboardCheck, FileQuestion, Pencil, Plus, Trash2 } from "lucide-react";
 import UniversalImportButton from "@/components/common/UniversalImportButton";
 import { useBulkImport, toStr, toNum } from "@/components/common/useBulkImport";
@@ -333,14 +334,18 @@ export default function ProjectControlsTab({ projectId }: { projectId: string })
     setLoading(false);
   }, [projectId]);
 
+  useProjectSyncRefresh(loadControls);
+
   useEffect(() => {
     let ignore = false;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void loadControls().catch(() => {
-      if (!ignore) setLoading(false);
-    });
+    const timer = window.setTimeout(() => {
+      void loadControls().catch(() => {
+        if (!ignore) setLoading(false);
+      });
+    }, 0);
     return () => {
       ignore = true;
+      window.clearTimeout(timer);
     };
   }, [loadControls]);
 
@@ -474,13 +479,13 @@ export default function ProjectControlsTab({ projectId }: { projectId: string })
       if (!res.ok) {
         // Fix: was swallowing API errors silently
         const d = await res.json().catch(() => ({}));
-        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Save failed (${res.status})`);
+        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Could not save this project control item (${res.status}). Check the form and try again.`);
         return;
       }
       cancelForm();
       await loadControls();
     } catch {
-      setErrorMsg("Network error — could not reach the server.");
+      setErrorMsg("Could not reach the server just now. Please try again in a moment.");
     } finally {
       setSubmitting(false);
     }
@@ -504,6 +509,9 @@ export default function ProjectControlsTab({ projectId }: { projectId: string })
     const cycle = statusCycle(kind);
     const current = cycle.indexOf(item.status);
     const next = cycle[(current + 1) % cycle.length];
+    const prevRfis = rfis;
+    const prevSubmittals = submittals;
+    const prevChangeOrders = changeOrders;
     updateLocalStatus(kind, item.id, next);
     try {
       const res = await fetch(`${endpointFor(kind)}/${encodeURIComponent(item.id)}`, {
@@ -512,18 +520,26 @@ export default function ProjectControlsTab({ projectId }: { projectId: string })
         body: JSON.stringify({ status: next }),
       });
       if (!res.ok) {
-        // Fix: was swallowing — surface and reload to rollback
-        setErrorMsg(`Status update failed (${res.status})`);
+        if (kind === "rfi") setRfis(prevRfis);
+        else if (kind === "submittal") setSubmittals(prevSubmittals);
+        else setChangeOrders(prevChangeOrders);
+        setErrorMsg(`Could not update that project control status (${res.status}). Refresh the list and try again.`);
         await loadControls();
       }
     } catch {
-      setErrorMsg("Network error — could not update status.");
+      if (kind === "rfi") setRfis(prevRfis);
+      else if (kind === "submittal") setSubmittals(prevSubmittals);
+      else setChangeOrders(prevChangeOrders);
+      setErrorMsg("Could not update that project control status just now. Please try again in a moment.");
       await loadControls();
     }
   };
 
   const deleteItem = async (kind: ControlKind, id: string) => {
     if (!(await confirm({ title: String("Delete this project control item?"), destructive: true }))) return;
+    const prevRfis = rfis;
+    const prevSubmittals = submittals;
+    const prevChangeOrders = changeOrders;
     if (kind === "rfi") setRfis((items) => items.filter((item) => item.id !== id));
     else if (kind === "submittal") setSubmittals((items) => items.filter((item) => item.id !== id));
     else setChangeOrders((items) => items.filter((item) => item.id !== id));
@@ -531,12 +547,17 @@ export default function ProjectControlsTab({ projectId }: { projectId: string })
     try {
       const res = await fetch(`${endpointFor(kind)}/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (!res.ok) {
-        // Fix: optimistic delete with no rollback on API failure
-        setErrorMsg(`Delete failed (${res.status}) — refreshing list.`);
+        if (kind === "rfi") setRfis(prevRfis);
+        else if (kind === "submittal") setSubmittals(prevSubmittals);
+        else setChangeOrders(prevChangeOrders);
+        setErrorMsg(`Could not delete that project control item (${res.status}). Refreshing the list now.`);
         await loadControls();
       }
     } catch {
-      setErrorMsg("Network error — could not delete.");
+      if (kind === "rfi") setRfis(prevRfis);
+      else if (kind === "submittal") setSubmittals(prevSubmittals);
+      else setChangeOrders(prevChangeOrders);
+      setErrorMsg("Could not delete that project control item just now. Refresh the list and try again in a moment.");
       await loadControls();
     }
   };
@@ -634,10 +655,12 @@ export default function ProjectControlsTab({ projectId }: { projectId: string })
           <div className="p-4">
             <EmptyState
               icon={<Activity className="w-6 h-6" />}
-              title="No controls data yet"
-              description="Track budget, schedule, and risk health here."
-              actionLabel="Add Entry"
+              title="No controls yet"
+              description="Track RFIs, submittals, and change orders here so the team has one place to manage project decisions."
+              actionLabel="Add item"
               onAction={() => openAdd(activeKind)}
+              secondaryLabel="Open projects"
+              secondaryHref="/dashboard/projects"
             />
           </div>
         )}

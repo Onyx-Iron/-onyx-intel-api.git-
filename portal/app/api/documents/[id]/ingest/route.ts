@@ -4,18 +4,22 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { getAccessToken } from "@/lib/google/oauth";
 import { logEvent } from "@/lib/activity";
-import { requireEnv } from "@/lib/env";
 import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import type { TablesInsert } from "@/lib/supabase/types";
+import { resolveDocumentStorageBucket } from "@/lib/documents/upload";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const GEMINI_API_KEY = requireEnv("GEMINI_API_KEY");
-const EMBED_MODEL = "text-embedding-004";
-const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
-const PLANS_BUCKET = "plans-bucket";
+// Provider configuration is validated when this capability is invoked. Doing
+// so at module load makes the entire app undeployable in environments where
+// document AI is intentionally disabled or configured after the first build.
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? "";
+const EMBED_MODEL = "gemini-embedding-2";
+const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-3.5-flash-lite";
 
 const EXTRACTION_PROMPT = `Analyze this construction document and return ONLY a JSON object with this exact structure — no markdown, no explanation:
 {
@@ -129,7 +133,7 @@ async function embedText(text: string): Promise<number[]> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         content: { parts: [{ text }] },
-        taskType: "RETRIEVAL_DOCUMENT",
+        embedContentConfig: { outputDimensionality: 768 },
       }),
     },
     { label: "Gemini embedding", timeoutMs: 45_000 },
@@ -163,11 +167,18 @@ export async function POST(
   try {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    if (!GEMINI_API_KEY) {
+      return NextResponse.json(
+        { error: "Document AI is not configured", code: "NO_PROVIDER" },
+        { status: 503 },
+      );
+    }
 
     const body = await req.json().catch(() => ({})) as { access_token?: string };
     const accessToken = body.access_token; // optional — server falls back to stored token
 
     tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     // Narrowed const, since `tenantId` is captured by the markError() closure above,
     // which blocks TS's normal control-flow narrowing of the `let` for the rest of this function.
     const resolvedTenantId: string = tenantId;
@@ -198,6 +209,14 @@ export async function POST(
       return NextResponse.json({ error: "Document has no source (no drive_file_id or storage_path)" }, { status: 400 });
     }
 
+    const rl = await checkAiRateLimit(resolvedTenantId, "documents/ingest", { windowMs: 60_000, max: 10 });
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many document indexing requests — please slow down." },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
+      );
+    }
+
     // 1. Download PDF from Drive or Supabase Storage
     let pdfBytes: Buffer;
 
@@ -221,7 +240,7 @@ export async function POST(
     } else {
       // Local file stored in Supabase Storage
       const { data: signed, error: signErr } = await db.storage
-        .from(PLANS_BUCKET)
+        .from(resolveDocumentStorageBucket(meta))
         .createSignedUrl(storagePath!, 300);
       if (signErr || !signed?.signedUrl) {
         await markError(signErr?.message ?? "Could not access stored file", "download");
@@ -380,7 +399,7 @@ export async function POST(
     console.error(`[ingest ${docId}] ${msg}`);
     return NextResponse.json(
       { error: `[POST /api/documents/${docId}/ingest] ${msg}` },
-      { status: 500 },
+      { status: err instanceof PermissionError ? 403 : 500 },
     );
   }
 }

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { ClerkProvider } from "@clerk/nextjs";
+import DeploymentVersionGuard from "@/components/app/DeploymentVersionGuard";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -23,12 +24,27 @@ const clerkSignInUrl = `${appOrigin}/sign-in`;
 const clerkSignUpUrl = `${appOrigin}/sign-up`;
 const clerkAfterSignInUrl = `${appOrigin}/dashboard`;
 const clerkAfterSignUpUrl = `${appOrigin}/dashboard`;
+const deploymentVersion = process.env.VERCEL_DEPLOYMENT_ID
+  ?? process.env.VERCEL_GIT_COMMIT_SHA
+  ?? appOrigin;
 
 export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const content = (
+    <html
+      lang="en"
+      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+    >
+      <body className="min-h-full flex flex-col">
+        <DeploymentVersionGuard version={deploymentVersion} />
+        {children}
+      </body>
+    </html>
+  );
+  if (process.env.PLAYWRIGHT_TEST_MODE === "1") return content;
   return (
     <ClerkProvider
       signInUrl={clerkSignInUrl}
@@ -36,12 +52,7 @@ export default function RootLayout({
       signInFallbackRedirectUrl={clerkAfterSignInUrl}
       signUpFallbackRedirectUrl={clerkAfterSignUpUrl}
     >
-      <html
-        lang="en"
-        className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
-      >
-        <body className="min-h-full flex flex-col">{children}</body>
-      </html>
+      {content}
     </ClerkProvider>
   );
 }

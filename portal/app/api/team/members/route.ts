@@ -44,7 +44,7 @@ export async function GET(): Promise<NextResponse> {
 
     return NextResponse.json({ members });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to list members";
+    const message = err instanceof Error ? err.message : "Could not load team members. Refresh the page and try again.";
     return NextResponse.json(
       { error: message, code: "LIST_FAILED" },
       { status: 500 },
@@ -108,7 +108,7 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json({ ok: true });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to remove";
+    const message = err instanceof Error ? err.message : "Could not remove that member. Refresh the page and try again.";
     return NextResponse.json(
       { error: message, code: "REMOVE_FAILED" },
       { status: 500 },

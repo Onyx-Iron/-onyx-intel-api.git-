@@ -50,9 +50,25 @@ export default async function CanvasPage({ params, searchParams }: PageProps) {
     .single();
   if (!project) notFound();
 
-  // Resolve the target page.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
+  const { data: confirmedScope } = await anyDb.from("takeoff_scope_requests").select("id")
+    .eq("tenant_id", tenantId).eq("project_id", projectId).eq("status", "confirmed")
+    .order("created_at", { ascending: false }).limit(1).maybeSingle();
+  if (!confirmedScope) {
+    return (
+      <div className="min-h-screen bg-[#06070A] text-white">
+        <div className="mx-auto max-w-3xl px-6 py-16 text-center">
+          <p className="text-[11px] font-bold uppercase tracking-[0.32em] text-[#CCFF00]">Scope confirmation required</p>
+          <h1 className="mt-4 text-3xl font-light tracking-tight">Choose what the takeoff should cover first.</h1>
+          <p className="mt-3 text-sm text-white/50">Confirm a complete estimate or selected trades in the Takeoff hub before OnyxIntel reads this sheet.</p>
+          <Link href={`/dashboard/projects/${projectId}?phase=Takeoff&sub=takeoff`} className="mt-8 inline-flex h-10 items-center justify-center rounded-full bg-[#CCFF00] px-5 text-xs font-semibold uppercase tracking-widest text-black hover:opacity-90">Open scope preflight</Link>
+        </div>
+      </div>
+    );
+  }
+
+  // Resolve the target page.
   let page: PageRow | null = null;
   if (sp.page_id) {
     const { data } = await anyDb
@@ -90,17 +106,28 @@ export default async function CanvasPage({ params, searchParams }: PageProps) {
       <div className="min-h-screen bg-[#06070A] text-white">
         <div className="mx-auto max-w-3xl px-6 py-16 text-center">
           <p className="text-[11px] font-bold uppercase tracking-[0.32em] text-[#CCFF00]">Sheet Canvas</p>
-          <h1 className="mt-4 text-3xl font-light tracking-tight">Nothing to draw on yet.</h1>
+          <h1 className="mt-4 text-3xl font-light tracking-tight">No sheet is ready yet.</h1>
           <p className="mt-3 text-sm text-white/50">
-            Import a PDF plan through the Drive picker first — the page-split pipeline creates
-            the individual sheets this workspace renders.
+            Import a PDF plan first, then open it from Documents or the Takeoff hub. Once the file is split into pages, you can open a sheet here and draw directly on it.
           </p>
-          <div className="mt-8 flex justify-center gap-3">
+          <div className="mt-8 flex flex-wrap justify-center gap-3">
             <Link
               href={`/dashboard/projects/${projectId}`}
               className="inline-flex h-10 items-center justify-center rounded-full border border-white/15 bg-white/5 px-5 text-xs font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white"
             >
               Back to project
+            </Link>
+            <Link
+              href={`/dashboard/projects/${projectId}?phase=Documents&sub=documents`}
+              className="inline-flex h-10 items-center justify-center rounded-full border border-white/15 bg-white/5 px-5 text-xs font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white"
+            >
+              Open documents
+            </Link>
+            <Link
+              href={`/dashboard/projects/${projectId}?phase=Takeoff&sub=takeoff`}
+              className="inline-flex h-10 items-center justify-center rounded-full bg-[#CCFF00] px-5 text-xs font-semibold uppercase tracking-widest text-black hover:opacity-90"
+            >
+              Open takeoff hub
             </Link>
           </div>
         </div>

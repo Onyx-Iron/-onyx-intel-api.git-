@@ -47,9 +47,9 @@ export default function GoogleCalendarCard() {
     (async () => {
       try {
         const res = await fetch("/api/google/calendar/upcoming?limit=5", { cache: "no-store" });
-        if (!res.ok) throw new Error(String(res.status));
-        const data = await res.json() as Response;
-        if (!cancelled) setState(data);
+        const data = await res.json().catch(() => ({})) as Partial<Response> & { error?: string };
+        if (!res.ok) throw new Error(data.error ?? `Could not load Calendar (${res.status}). Refresh and try again.`);
+        if (!cancelled) setState({ events: data.events ?? [], connected: Boolean(data.connected) });
       } catch (e) {
         if (!cancelled) setErr(e instanceof Error ? e.message : String(e));
       }
@@ -61,7 +61,7 @@ export default function GoogleCalendarCard() {
     return (
       <div className="rounded-xl border border-white/10 bg-[#0E0F12] p-4">
         <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Calendar</div>
-        <div className="mt-2 text-xs text-white/40">Couldn&apos;t load — {err}</div>
+        <div className="mt-2 text-xs text-amber-200">{err}</div>
       </div>
     );
   }
@@ -80,9 +80,9 @@ export default function GoogleCalendarCard() {
       <div className="rounded-xl border border-white/10 bg-[#0E0F12] p-4">
         <div className="flex items-center justify-between">
           <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Calendar</div>
-          <a href="/api/google/connect" className="text-[10px] uppercase tracking-widest font-mono text-[#CCFF00] hover:opacity-80">Connect →</a>
+          <a href="/api/google/connect" className="text-[10px] uppercase tracking-widest font-mono text-[#CCFF00] hover:opacity-80">Connect</a>
         </div>
-        <div className="mt-2 text-xs text-white/40">Link Google to see today&apos;s schedule.</div>
+        <div className="mt-2 text-xs text-white/40">Connect Google to see today&apos;s schedule. If it should already be linked, reconnect once and refresh.</div>
       </div>
     );
   }
@@ -92,14 +92,7 @@ export default function GoogleCalendarCard() {
       <div className="rounded-xl border border-white/10 bg-[#0E0F12] p-4">
         <div className="flex items-center justify-between">
           <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Upcoming</div>
-          <a
-            href="https://calendar.google.com/calendar/r"
-            target="_blank"
-            rel="noreferrer"
-            className="text-[10px] uppercase tracking-widest font-mono text-white/40 hover:text-white/70"
-          >
-            Google Calendar ↗
-          </a>
+          <a href="https://calendar.google.com/calendar/r" target="_blank" rel="noreferrer" className="text-[10px] uppercase tracking-widest font-mono text-white/40 hover:text-white/70">Google Calendar</a>
         </div>
         <div className="mt-2 text-xs text-white/40">No upcoming events.</div>
       </div>
@@ -110,26 +103,15 @@ export default function GoogleCalendarCard() {
     <div className="rounded-xl border border-white/10 bg-[#0E0F12] p-4">
       <div className="flex items-center justify-between">
         <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Upcoming</div>
-        <a
-          href="https://calendar.google.com/calendar/r"
-          target="_blank"
-          rel="noreferrer"
-          className="text-[10px] uppercase tracking-widest font-mono text-white/40 hover:text-white/70"
-        >
-          Open ↗
-        </a>
+        <a href="https://calendar.google.com/calendar/r" target="_blank" rel="noreferrer" className="text-[10px] uppercase tracking-widest font-mono text-white/40 hover:text-white/70">Open</a>
       </div>
       <ul className="mt-2 divide-y divide-white/5">
         {state.events.map((e) => (
           <li key={e.id} className="py-2">
             <a href={e.html_link} target="_blank" rel="noreferrer" className="group block">
               <div className="flex items-baseline gap-2">
-                <span className="text-xs font-semibold text-white group-hover:text-[#CCFF00] transition-colors line-clamp-1">
-                  {e.summary}
-                </span>
-                {e.attendees > 0 && (
-                  <span className="text-[10px] text-white/40 font-mono">· {e.attendees}p</span>
-                )}
+                <span className="text-xs font-semibold text-white group-hover:text-[#CCFF00] transition-colors line-clamp-1">{e.summary}</span>
+                {e.attendees > 0 && <span className="text-[10px] text-white/40 font-mono">· {e.attendees}p</span>}
               </div>
               <div className="mt-0.5 flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono text-white/40">
                 <span>{formatWhen(e.start, e.all_day)}</span>

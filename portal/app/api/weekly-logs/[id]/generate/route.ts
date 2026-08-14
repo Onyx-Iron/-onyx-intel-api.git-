@@ -4,6 +4,8 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { generateText, NoProviderError } from "@/lib/ai/providers";
 import { logEvent } from "@/lib/activity";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -45,6 +47,7 @@ export async function POST(_req: NextRequest, ctx: RouteContext): Promise<NextRe
 
     const { id } = await ctx.params;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     // Fetch the weekly log (tenant-scoped)
@@ -60,6 +63,14 @@ export async function POST(_req: NextRequest, ctx: RouteContext): Promise<NextRe
       return NextResponse.json({ error: `Weekly log not found: ${wkErr?.message ?? "unknown"}` }, { status: 404 });
     }
     const wk = wkData as unknown as WeeklyLogRow;
+
+    const rl = await checkAiRateLimit(tenantId, "weekly-logs/generate", { windowMs: 60_000, max: 5 });
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many weekly report requests — please slow down." },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
+      );
+    }
 
     // Pull daily logs in the week range (tenant + project scoped)
     const { data: dailyData, error: dailyErr } = await db
@@ -156,6 +167,6 @@ Write the weekly status report now. Max 200 words total.`;
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[POST /api/weekly-logs/generate] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[POST /api/weekly-logs/generate] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

@@ -126,6 +126,7 @@ export function verifyWebhookSignature(
   signatureHeader: string | null,
   rawBody: string,
   secret: string,
+  nowMs = Date.now(),
 ): boolean {
   if (!signatureHeader) return false;
   const parts = signatureHeader.split(";").map((p) => p.trim());
@@ -138,6 +139,12 @@ export function verifyWebhookSignature(
     else if (k === "h1") h1s.push(v);
   }
   if (!ts || h1s.length === 0) return false;
+  if (!/^\d+$/.test(ts)) return false;
+  const timestampMs = Number(ts) * 1000;
+  if (!Number.isSafeInteger(timestampMs)) return false;
+  // Paddle recommends rejecting stale signatures. Allow modest clock skew but
+  // never accept captured requests outside this five-minute window.
+  if (timestampMs < nowMs - 5 * 60_000 || timestampMs > nowMs + 60_000) return false;
 
   const signedPayload = `${ts}:${rawBody}`;
   const expected = crypto

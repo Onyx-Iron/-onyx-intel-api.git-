@@ -29,6 +29,14 @@ portal's SecureTakeoffRow contract:
       "uom":            str,
       "drawing_ref":    str | None,
       "location_tag":   str | None,
+      "quantity_evidence": {
+        "formula_version": str,
+        "calculation_inputs": dict,
+        "calculation_result": float,
+        "source_quote": str,
+        "source_locator": str,
+        "calculation_checksum": str,
+      },
     }
 
 The dispatcher also reports *coverage*: which pages/entities produced rows and,
@@ -38,8 +46,11 @@ the portal can optionally fall back to the AI vision path for those pages only.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
@@ -197,19 +208,127 @@ def _to_float(raw: Any) -> float | None:
         return None
 
 
+def _canonical_decimal(value: int | float | Decimal) -> str:
+    """Render a finite number identically in Python and JavaScript."""
+    decimal_value = Decimal(str(value))
+    rendered = format(decimal_value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return "0" if rendered in {"", "-0"} else rendered
+
+
+def _round_quantity(value: int | float | Decimal) -> float:
+    """Store construction quantities to three decimals using explicit half-up rounding."""
+    return float(Decimal(str(value)).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP))
+
+
+def _canonical_input_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float, Decimal)):
+        return _canonical_decimal(value)
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _build_quantity_evidence(
+    *,
+    measurement_class: str,
+    source_kind: str,
+    original_unit: str | None,
+    normalized_unit: str,
+    formula_version: str,
+    calculation_inputs: dict[str, Any],
+    calculation_result: float,
+    source_quote: str,
+    source_locator: str | None,
+) -> dict[str, Any]:
+    """Build the portable evidence envelope consumed by the web approval gate.
+
+    The checksum preimage is a JSON array of strings. Keeping numeric values in
+    canonical decimal form avoids Python/JavaScript float serialization drift.
+    """
+    normalized_inputs = {
+        str(key): _canonical_input_value(value)
+        for key, value in sorted(calculation_inputs.items(), key=lambda item: str(item[0]))
+    }
+    normalized_original_unit = (original_unit or "").strip()
+    normalized_uom = normalized_unit.strip().upper()
+    normalized_quote = source_quote.strip()
+    normalized_locator = (source_locator or "").strip()
+    preimage = [
+        formula_version,
+        source_kind,
+        measurement_class,
+        normalized_original_unit,
+        normalized_uom,
+        normalized_quote,
+        normalized_locator,
+        json.dumps(normalized_inputs, ensure_ascii=False, separators=(",", ":")),
+        _canonical_decimal(calculation_result),
+    ]
+    encoded = json.dumps(preimage, ensure_ascii=False, separators=(",", ":"))
+    checksum = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return {
+        "measurement_class": measurement_class,
+        "source_kind": source_kind,
+        "original_unit": normalized_original_unit or None,
+        "normalized_unit": normalized_uom,
+        "formula_version": formula_version,
+        "calculation_inputs": normalized_inputs,
+        "calculation_result": float(calculation_result),
+        "source_quote": normalized_quote,
+        "source_locator": normalized_locator or None,
+        "calculation_checksum": checksum,
+    }
+
+
+def _measurement_class_for_uom(uom: str) -> str:
+    normalized = uom.strip().upper()
+    if normalized in {"EA", "EACH", "COUNT"}:
+        return "count"
+    if normalized in {"LF", "FT", "IN", "YD", "M", "MM"}:
+        return "length"
+    if normalized in {"SF", "SQFT", "SY", "M2", "SQM"}:
+        return "area"
+    if normalized in {"CY", "CF", "M3"}:
+        return "volume"
+    if normalized in {"LB", "TON", "KG"}:
+        return "weight"
+    return "other"
+
+
 def _row(description: str, qty: float, basis: str,
          uom: str | None = None, drawing_ref: str | None = None,
-         location_tag: str | None = None) -> dict:
+         location_tag: str | None = None,
+         quantity_evidence: dict[str, Any] | None = None,
+         evidence_spec: dict[str, Any] | None = None) -> dict:
     division, code, trade, default_uom = _classify(description)
+    normalized_uom = _norm_uom(uom, default_uom)
+    rounded_qty = _round_quantity(qty)
+    if evidence_spec is not None:
+        quantity_evidence = _build_quantity_evidence(
+            measurement_class=evidence_spec.get("measurement_class") or _measurement_class_for_uom(normalized_uom),
+            source_kind=evidence_spec["source_kind"],
+            original_unit=evidence_spec.get("original_unit"),
+            normalized_unit=normalized_uom,
+            formula_version=evidence_spec["formula_version"],
+            calculation_inputs=evidence_spec["calculation_inputs"],
+            calculation_result=rounded_qty,
+            source_quote=evidence_spec["source_quote"],
+            source_locator=evidence_spec.get("source_locator"),
+        )
     return {
         "trade":          trade,
         "cost_code":      code,
         "description":    description.strip()[:300],
         "quantity_basis": basis[:200],
-        "total_qty":      round(float(qty), 3),
-        "uom":            _norm_uom(uom, default_uom),
+        "total_qty":      rounded_qty,
+        "uom":            normalized_uom,
         "drawing_ref":    drawing_ref,
         "location_tag":   location_tag,
+        "quantity_evidence": quantity_evidence,
     }
 
 
@@ -266,14 +385,28 @@ def _rows_from_pdf_page(page, idx: int) -> list[dict]:
             desc = str(desc).replace("\n", " ").strip()
             if not desc or len(desc) < 2:
                 continue
-            qty = _to_float(raw[qty_col]) if (qty_col is not None and qty_col < len(raw)) else None
+            raw_qty = raw[qty_col] if (qty_col is not None and qty_col < len(raw)) else None
+            qty = _to_float(raw_qty)
             if qty is None:
                 qty = 1.0
                 basis = f"Schedule row, p.{idx} (count defaulted to 1 — no qty column)"
+                formula_version = "schedule-default-count-v1"
+                calculation_inputs = {"default_count": 1, "raw_quantity": raw_qty or ""}
             else:
                 basis = f"Schedule table, p.{idx}, col '{header[qty_col] or 'qty'}'"
+                formula_version = "source-text-v1"
+                calculation_inputs = {"raw_quantity": raw_qty, "parsed_quantity": qty}
             unit = raw[unit_col] if (unit_col is not None and unit_col < len(raw)) else None
-            rows.append(_row(desc, qty, basis, uom=str(unit) if unit else None, drawing_ref=f"PDF p.{idx}"))
+            source_locator = f"PDF p.{idx}" + (f" col '{header[qty_col] or 'qty'}'" if qty_col is not None else " schedule row")
+            rows.append(_row(
+                desc, qty, basis, uom=str(unit) if unit else None, drawing_ref=f"PDF p.{idx}",
+                evidence_spec={
+                    "source_kind": "schedule", "formula_version": formula_version,
+                    "calculation_inputs": calculation_inputs,
+                    "source_quote": " | ".join(str(cell).replace("\n", " ") for cell in raw if cell is not None),
+                    "source_locator": source_locator, "original_unit": str(unit) if unit else None,
+                },
+            ))
     return rows
 
 
@@ -361,17 +494,30 @@ def extract_from_pdf(path: str) -> dict:
                     if not desc or len(desc) < 2:
                         continue
 
-                    qty = _to_float(raw[qty_col]) if (qty_col is not None and qty_col < len(raw)) else None
+                    raw_qty = raw[qty_col] if (qty_col is not None and qty_col < len(raw)) else None
+                    qty = _to_float(raw_qty)
                     # A schedule line with no count still represents 1 of that item.
                     if qty is None:
                         qty = 1.0
                         basis = f"Schedule row, p.{idx} (count defaulted to 1 — no qty column)"
+                        formula_version = "schedule-default-count-v1"
+                        calculation_inputs = {"default_count": 1, "raw_quantity": raw_qty or ""}
                     else:
                         basis = f"Schedule table, p.{idx}, col '{header[qty_col] or 'qty'}'"
+                        formula_version = "source-text-v1"
+                        calculation_inputs = {"raw_quantity": raw_qty, "parsed_quantity": qty}
 
                     unit = raw[unit_col] if (unit_col is not None and unit_col < len(raw)) else None
-                    rows.append(_row(desc, qty, basis, uom=str(unit) if unit else None,
-                                     drawing_ref=f"PDF p.{idx}"))
+                    source_locator = f"PDF p.{idx}" + (f" col '{header[qty_col] or 'qty'}'" if qty_col is not None else " schedule row")
+                    rows.append(_row(
+                        desc, qty, basis, uom=str(unit) if unit else None, drawing_ref=f"PDF p.{idx}",
+                        evidence_spec={
+                            "source_kind": "schedule", "formula_version": formula_version,
+                            "calculation_inputs": calculation_inputs,
+                            "source_quote": " | ".join(str(cell).replace("\n", " ") for cell in raw if cell is not None),
+                            "source_locator": source_locator, "original_unit": str(unit) if unit else None,
+                        },
+                    ))
                     page_made_rows = True
 
             if page_made_rows:
@@ -460,6 +606,12 @@ def extract_from_dxf(path: str) -> dict:
             qty=length_ft,
             basis=f"Sum of LINE/POLYLINE geometry on layer '{layer}' ({units}, converted to LF)",
             uom="LF", location_tag=layer,
+            evidence_spec={
+                "source_kind": "geometry", "formula_version": "geometry-length-v1",
+                "calculation_inputs": {"raw_length": length, "conversion_factor": to_feet},
+                "source_quote": f"Layer {layer} raw length {length} {units}",
+                "source_locator": f"DXF layer {layer}", "original_unit": units,
+            },
         ))
     for layer, area in sorted(layer_area.items()):
         area_sf = area * (to_feet ** 2)
@@ -470,12 +622,24 @@ def extract_from_dxf(path: str) -> dict:
             qty=area_sf,
             basis=f"Sum of closed-polygon/hatch area on layer '{layer}' ({units}², converted to SF)",
             uom="SF", location_tag=layer,
+            evidence_spec={
+                "source_kind": "geometry", "formula_version": "geometry-area-v1",
+                "calculation_inputs": {"raw_area": area, "conversion_factor_squared": to_feet ** 2},
+                "source_quote": f"Layer {layer} raw area {area} {units} squared",
+                "source_locator": f"DXF layer {layer}", "original_unit": f"{units}2",
+            },
         ))
     for (layer, block_name), count in sorted(block_counts.items()):
         rows.append(_row(
             description=f"{block_name} ({layer})",
             qty=count, basis=f"Count of '{block_name}' block inserts on layer '{layer}'",
             uom="EA", location_tag=layer,
+            evidence_spec={
+                "source_kind": "geometry", "formula_version": "geometry-count-v1",
+                "calculation_inputs": {"block_count": count, "block_name": block_name},
+                "source_quote": f"Layer {layer} block {block_name} count {count}",
+                "source_locator": f"DXF layer {layer} block {block_name}", "original_unit": "EA",
+            },
         ))
 
     return {
@@ -579,6 +743,13 @@ def extract_from_ifc(path: str) -> dict:
                     description=f"{name} — {label}",
                     qty=float(qval), basis=f"IFC {ifc_type} base quantity '{qname}'",
                     uom=uom, drawing_ref=ifc_type, location_tag=_ifc_storey(el),
+                    evidence_spec={
+                        "source_kind": "model", "formula_version": "model-base-quantity-v1",
+                        "calculation_inputs": {"quantity_name": qname, "model_quantity": qval},
+                        "source_quote": f"{ifc_type} {qname} {qval}",
+                        "source_locator": f"IFC {ifc_type} {getattr(el, 'GlobalId', '')}",
+                        "original_unit": uom,
+                    },
                 ))
                 picked = True
         if not picked:
@@ -587,6 +758,13 @@ def extract_from_ifc(path: str) -> dict:
                 description=str(name), qty=1.0,
                 basis=f"IFC {ifc_type} instance (no base quantity in model)",
                 uom="EA", drawing_ref=ifc_type, location_tag=_ifc_storey(el),
+                evidence_spec={
+                    "source_kind": "model", "formula_version": "model-instance-count-v1",
+                    "calculation_inputs": {"instance_count": 1, "global_id": getattr(el, "GlobalId", "")},
+                    "source_quote": f"IFC {ifc_type} instance {getattr(el, 'GlobalId', '')}",
+                    "source_locator": f"IFC {ifc_type} {getattr(el, 'GlobalId', '')}",
+                    "original_unit": "EA",
+                },
             ))
 
     return {
@@ -638,22 +816,35 @@ def extract_from_xlsx(path: str) -> dict:
         unit_col = next((i for i, h in enumerate(header) if UNIT_HEADERS.search(h)), None)
 
         made = False
-        for r in data[header_idx + 1:]:
+        for row_number, r in enumerate(data[header_idx + 1:], start=header_idx + 2):
             if not r or desc_col >= len(r):
                 continue
             desc = r[desc_col]
             if desc is None or str(desc).strip() == "":
                 continue
             desc = str(desc).strip()
-            qty = _to_float(r[qty_col]) if (qty_col is not None and qty_col < len(r)) else None
+            raw_qty = r[qty_col] if (qty_col is not None and qty_col < len(r)) else None
+            qty = _to_float(raw_qty)
             if qty is None:
                 qty = 1.0
                 basis = f"'{ws.title}' row (count defaulted to 1)"
+                formula_version = "schedule-default-count-v1"
+                calculation_inputs = {"default_count": 1, "raw_quantity": raw_qty or ""}
             else:
                 basis = f"'{ws.title}' col '{header[qty_col] or 'qty'}'"
+                formula_version = "spreadsheet-cell-v1"
+                calculation_inputs = {"raw_quantity": raw_qty, "parsed_quantity": qty}
             unit = r[unit_col] if (unit_col is not None and unit_col < len(r)) else None
-            rows.append(_row(desc, qty, basis, uom=str(unit) if unit else None,
-                             drawing_ref=ws.title))
+            source_locator = f"Workbook sheet '{ws.title}' row {row_number}"
+            rows.append(_row(
+                desc, qty, basis, uom=str(unit) if unit else None, drawing_ref=ws.title,
+                evidence_spec={
+                    "source_kind": "spreadsheet", "formula_version": formula_version,
+                    "calculation_inputs": calculation_inputs,
+                    "source_quote": " | ".join(str(cell) for cell in r if cell is not None),
+                    "source_locator": source_locator, "original_unit": str(unit) if unit else None,
+                },
+            ))
             made = True
         if made:
             sheets_used += 1

@@ -3,9 +3,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { recordTakeoffHistory } from "@/lib/takeoff/history";
-import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
 import { logEvent } from "@/lib/activity";
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { classifyLegacyReviewAction } from "@/lib/takeoff/review-policy";
+import { releaseRejectedCandidateBlock } from "@/lib/takeoff/governance-server";
 
 export const runtime = "nodejs";
 
@@ -16,8 +17,8 @@ export const runtime = "nodejs";
  * - "review" flips review_status to "reviewed" — an estimator has looked at
  *   it, but this is NOT approval; the item is still excluded from the
  *   estimate exactly like "suggested".
- * - "approve" flips it to "approved" and immediately re-syncs the project's
- *   estimate (the item was excluded from every prior sync until now).
+ * - "approve" is intentionally rejected here. Approval must use an immutable
+ *   preview followed by explicit confirmation and idempotent estimate import.
  * - "reject" flips it to "rejected" — the row stays in takeoff_items,
  *   permanently auditable, but buildEstimateImportRows excludes it forever;
  *   it can never flow into an estimate unless a human later approves it.
@@ -51,8 +52,15 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
     const { id } = await params;
     const body = await req.json().catch(() => ({})) as { action?: string; reason?: string };
-    if (body.action !== "review" && body.action !== "approve" && body.action !== "reject") {
+    const disposition = classifyLegacyReviewAction(body.action);
+    if (disposition === "invalid") {
       return NextResponse.json({ error: "action must be 'review', 'approve', or 'reject'" }, { status: 400 });
+    }
+    if (disposition === "preview_required") {
+      return NextResponse.json({
+        error: "Approval requires a current takeoff approval preview. Create and confirm the preview before importing to an estimate.",
+        code: "TAKEOFF_APPROVAL_PREVIEW_REQUIRED",
+      }, { status: 409 });
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
@@ -76,7 +84,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (beforeErr) return NextResponse.json({ error: beforeErr.message }, { status: 500 });
     if (!before) return NextResponse.json({ error: "Takeoff item not found" }, { status: 404 });
 
-    const reviewStatus = body.action === "approve" ? "approved" : body.action === "reject" ? "rejected" : "reviewed";
+    const reviewStatus = body.action === "reject" ? "rejected" : "reviewed";
     const patch: Record<string, unknown> = {
       review_status: reviewStatus,
       reviewed_by: userId,
@@ -84,7 +92,6 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       updated_by: userId,
       updated_at: new Date().toISOString(),
     };
-    if (body.action === "approve") { patch.approved_by = userId; patch.approved_at = new Date().toISOString(); }
     if (body.action === "reject") patch.rejected_reason = body.reason?.slice(0, 500) ?? null;
 
     const { data: updated, error } = await anyDb
@@ -99,8 +106,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     // created/updated/deleted/approved/rejected) — recorded as "updated"
     // instead; the before/after snapshot still shows review_status
     // transitioning to "reviewed", so it's fully auditable either way.
-    const historyAction = reviewStatus === "approved" ? "approved" as const
-      : reviewStatus === "rejected" ? "rejected" as const
+    const historyAction = reviewStatus === "rejected" ? "rejected" as const
       : "updated" as const;
     await recordTakeoffHistory(anyDb, {
       tenantId, projectId: before.project_id ?? null, takeoffItemId: id,
@@ -118,13 +124,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       meta: { review_status: reviewStatus },
     });
 
-    // Only approving can add anything new to the estimate — rejected items
-    // are excluded by buildEstimateImportRows, so no sync needed for that path.
-    const sync = reviewStatus === "approved" && before.project_id
-      ? await syncTakeoffToEstimate(tenantId, before.project_id)
-      : null;
+    if (reviewStatus === "rejected" && before.project_id && before.takeoff_job_id) {
+      await releaseRejectedCandidateBlock(anyDb, tenantId, before.project_id, before.takeoff_job_id, userId);
+    }
 
-    return NextResponse.json({ item: updated, estimate_synced: sync });
+    return NextResponse.json({ item: updated, estimate_synced: null });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[PATCH /api/takeoff/items/[id]/review] ${msg}` }, { status: 500 });

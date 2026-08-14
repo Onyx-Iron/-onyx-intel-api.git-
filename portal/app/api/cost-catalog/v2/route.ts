@@ -6,6 +6,7 @@ import {
   authTenantName,
 } from "@/lib/project-controls/server";
 import { resolveCostsBatch, type CostResolveResult } from "@/lib/cost/resolver";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,6 +43,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         authTenantKey(userId, orgId),
         authTenantName(userId, orgSlug),
       );
+      await assertPermission(tenantId, userId, "financial", "read");
     }
 
     const sp = req.nextUrl.searchParams;
@@ -74,6 +76,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json({ items: results });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: String(err) }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

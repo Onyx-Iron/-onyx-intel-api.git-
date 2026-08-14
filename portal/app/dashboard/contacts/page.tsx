@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Users } from "lucide-react";
 import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
@@ -70,7 +70,7 @@ export default function ContactsPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadContacts = () => {
+  const loadContacts = useCallback(() => {
     setLoading(true);
     setError(null);
     fetch("/api/contacts")
@@ -80,11 +80,15 @@ export default function ContactsPage() {
         setContacts(data.contacts ?? []);
         setLoading(false);
       })
-      .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
-  };
+      .catch((e) => { setError(e?.message ?? "Could not load contacts. Refresh the page and try again."); setLoading(false); });
+  }, []);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { loadContacts(); }, []);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadContacts();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadContacts]);
 
   const openAdd = () => {
     setEditId(null);
@@ -124,21 +128,25 @@ export default function ContactsPage() {
       notes: form.notes.trim() || null,
     };
     try {
-      if (editId) {
-        await fetch(`/api/contacts/${encodeURIComponent(editId)}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-      } else {
-        await fetch("/api/contacts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
+      const res = editId
+        ? await fetch(`/api/contacts/${encodeURIComponent(editId)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          })
+        : await fetch("/api/contacts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
       }
       cancelForm();
       loadContacts();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save that contact. Check the form and try again.");
     } finally {
       setSubmitting(false);
     }
@@ -146,9 +154,19 @@ export default function ContactsPage() {
 
   const deleteContact = async (id: string) => {
     if (!(await confirm({ title: String("Delete this contact?"), destructive: true }))) return;
-    setContacts((prev) => prev.filter((c) => c.id !== id));
-    await fetch(`/api/contacts/${encodeURIComponent(id)}`, { method: "DELETE" })
-      .catch(() => loadContacts());
+    const prev = contacts;
+    setContacts((items) => items.filter((c) => c.id !== id));
+    try {
+      const res = await fetch(`/api/contacts/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!res.ok) {
+        setContacts(prev);
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(body.error ?? `Could not delete that contact (${res.status}). Refresh and try again.`);
+      }
+    } catch {
+      setContacts(prev);
+      setError("Could not delete that contact just now. Refresh the list and try again in a moment.");
+    }
   };
 
   return (
@@ -186,16 +204,18 @@ export default function ContactsPage() {
             <tbody className="divide-y divide-white/5">
               {loading ? (
                 <SkeletonRows />
-              ) : contacts.length === 0 && !error ? (
+                ) : contacts.length === 0 && !error ? (
                 <tr>
                   <td colSpan={6}>
                     <div className="py-4">
                       <EmptyState
                         icon={<Users className="w-6 h-6" />}
                         title="No contacts yet"
-                        description="Add subs, vendors, and stakeholders across all your projects."
+                        description="Add subs, vendors, and stakeholders across all your projects, then reuse them everywhere else in the app."
                         actionLabel="Add Contact"
                         onAction={openAdd}
+                        secondaryLabel="View projects"
+                        secondaryHref="/dashboard/projects"
                       />
                     </div>
                   </td>

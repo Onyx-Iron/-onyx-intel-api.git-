@@ -1,6 +1,7 @@
-﻿"use client";
+"use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { Users, Sparkles } from "lucide-react";
 
 import { useToast } from "@/components/common/Toast";
@@ -88,11 +89,11 @@ export default function ContactsTab({ projectId }: { projectId: string }) {
       } else if (d.code === "NO_PROVIDER") {
         toast({ title: String("No AI model connected. Check GEMINI_API_KEY in Vercel."), kind: "info" });
       } else {
-        toast({ title: String(`Parse failed: ${d.error ?? res.status}`), kind: "error" });
+        toast({ title: String(`Could not read those contacts yet. ${d.error ?? `HTTP ${res.status}`}`), kind: "error" });
       }
     } catch {
       // Fix: was swallowing network errors silently
-      toast({ title: String("Parse failed — network error."), kind: "error" });
+      toast({ title: String("Could not read the import file. Try another file or check the export format."), kind: "error" });
     } finally {
       setParsing(false);
     }
@@ -125,7 +126,7 @@ export default function ContactsTab({ projectId }: { projectId: string }) {
         }
       }
       // Fix: surface partial failures instead of silent loss
-      if (failed > 0) toast({ title: String(`${failed} of ${toAdd.length} contact(s) failed to save.`), kind: "error" });
+      if (failed > 0) toast({ title: String(`${failed} of ${toAdd.length} contact(s) could not be saved.`), kind: "error" });
       setShowParse(false); setParseText(""); setParsed(null); setSelected(new Set());
       loadContacts();
     } finally {
@@ -133,7 +134,7 @@ export default function ContactsTab({ projectId }: { projectId: string }) {
     }
   };
 
-  const loadContacts = () => {
+  const loadContacts = useCallback(() => {
     setLoading(true);
     fetch(`/api/contacts?project_id=${encodeURIComponent(projectId)}`)
       .then((r) => r.json())
@@ -143,9 +144,11 @@ export default function ContactsTab({ projectId }: { projectId: string }) {
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  };
+  }, [projectId]);
 
-  useEffect(() => { loadContacts(); }, [projectId]);
+  useProjectSyncRefresh(loadContacts);
+
+  useEffect(() => { loadContacts(); }, [loadContacts]);
 
   const openAdd = () => {
     setEditId(null);
@@ -201,13 +204,13 @@ export default function ContactsTab({ projectId }: { projectId: string }) {
       if (!res.ok) {
         // Fix: was silently closing the form on save failure
         const d = await res.json().catch(() => ({}));
-        toast({ title: String(`Save failed: ${(d as { error?: string })?.error ?? res.status}`), kind: "error" });
+        toast({ title: String(`Could not save this contact: ${(d as { error?: string })?.error ?? `HTTP ${res.status}`}`), kind: "error" });
         return;
       }
       cancelForm();
       loadContacts();
     } catch {
-      toast({ title: String("Save failed — network error."), kind: "error" });
+      toast({ title: String("Could not save this contact just now. Please try again in a moment."), kind: "error" });
     } finally {
       setSubmitting(false);
     }
@@ -222,11 +225,11 @@ export default function ContactsTab({ projectId }: { projectId: string }) {
       const res = await fetch(`/api/contacts/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (!res.ok) {
         setContacts(snapshot);
-        toast({ title: String(`Delete failed (${res.status}).`), kind: "error" });
+        toast({ title: String(`Could not delete that contact (${res.status}). Refresh the list and try again.`), kind: "error" });
       }
     } catch {
       setContacts(snapshot);
-      toast({ title: String("Delete failed — network error."), kind: "error" });
+      toast({ title: String("Could not delete that contact just now. Refresh the list and try again in a moment."), kind: "error" });
     }
   };
 
@@ -279,9 +282,11 @@ export default function ContactsTab({ projectId }: { projectId: string }) {
                       <EmptyState
                         icon={<Users className="w-6 h-6" />}
                         title="No contacts yet"
-                        description="Add subs, vendors, inspectors, and project stakeholders."
+                        description="Add subs, vendors, inspectors, and project stakeholders so they’re ready to reuse across the app."
                         actionLabel="Add Contact"
                         onAction={openAdd}
+                        secondaryLabel="View projects"
+                        secondaryHref="/dashboard/projects"
                       />
                     </div>
                   </td>
@@ -290,15 +295,15 @@ export default function ContactsTab({ projectId }: { projectId: string }) {
                 contacts.map((contact) => (
                   <tr key={contact.id} className="hover:bg-white/[0.02] transition-colors">
                     <td className="px-4 py-3 text-white text-xs font-medium">{contact.name}</td>
-                    <td className="px-4 py-3 text-gray-400 text-xs">{contact.company || "â€”"}</td>
-                    <td className="px-4 py-3 text-gray-400 text-xs">{contact.role || "â€”"}</td>
+                    <td className="px-4 py-3 text-gray-400 text-xs">{contact.company || "-"}</td>
+                    <td className="px-4 py-3 text-gray-400 text-xs">{contact.role || "-"}</td>
                     <td className="px-4 py-3 text-xs">
                       {contact.email
                         ? <a href={`mailto:${contact.email}`} className="text-[#00D2FF] hover:underline">{contact.email}</a>
-                        : <span className="text-gray-600">â€”</span>
+                        : <span className="text-gray-600">-</span>
                       }
                     </td>
-                    <td className="px-4 py-3 text-gray-400 font-mono text-xs">{contact.phone || "â€”"}</td>
+                    <td className="px-4 py-3 text-gray-400 font-mono text-xs">{contact.phone || "-"}</td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-3">
                         <button
@@ -336,17 +341,17 @@ export default function ContactsTab({ projectId }: { projectId: string }) {
         <div className="rounded-xl border border-[#00D2FF]/20 bg-[#0E0F12] p-6">
           <div className="flex items-center gap-2 mb-3">
             <Sparkles size={12} className="text-[#00D2FF]" />
-            <span className="text-[11px] uppercase tracking-widest text-gray-400">Parse Contacts from Text</span>
+            <span className="text-[11px] uppercase tracking-widest text-gray-400">Paste text to find contacts</span>
           </div>
           <p className="text-[11px] text-gray-600 mb-3">
-            Paste a spec cover sheet, email signature block, project directory, or contact list â€” AI extracts the contacts for you to review before saving.
+            Paste a spec cover sheet, email signature block, project directory, or contact list. The app will pull out likely contacts for you to review before saving.
           </p>
           <textarea
             value={parseText}
             onChange={(e) => setParseText(e.target.value)}
             rows={5}
             className="w-full bg-[#0A0A0B] border border-white/10 rounded-lg px-3 py-2 text-white text-xs placeholder-gray-700 focus:outline-none focus:border-[#00D2FF]/40 transition-colors"
-            placeholder="Paste document text containing names, companies, emails, phone numbersâ€¦"
+            placeholder="Paste document text with names, companies, emails, or phone numbers..."
           />
           <div className="flex items-center gap-3 mt-3">
             <button
@@ -354,7 +359,7 @@ export default function ContactsTab({ projectId }: { projectId: string }) {
               disabled={!parseText.trim() || parsing}
               className="flex items-center gap-1.5 bg-[#00D2FF]/10 border border-[#00D2FF]/30 text-[#00D2FF] hover:bg-[#00D2FF]/20 rounded-lg px-4 py-2 text-[11px] font-bold tracking-widest uppercase transition-colors disabled:opacity-50"
             >
-              <Sparkles size={12} /> {parsing ? "Extractingâ€¦" : "Extract Contacts"}
+              <Sparkles size={12} /> {parsing ? "Extracting..." : "Extract Contacts"}
             </button>
             <button
               onClick={() => { setShowParse(false); setParsed(null); setParseText(""); }}
@@ -367,10 +372,10 @@ export default function ContactsTab({ projectId }: { projectId: string }) {
           {parsed && (
             <div className="mt-4">
               {parsed.length === 0 ? (
-                <p className="text-xs text-gray-600 uppercase tracking-widest">No contacts found in that text.</p>
+                <p className="text-xs text-gray-600 uppercase tracking-widest">No contacts found yet. Try a longer snippet, a directory page, or a signature block with names and emails.</p>
               ) : (
                 <>
-                  <p className="text-[10px] uppercase tracking-widest text-gray-600 mb-2">{parsed.length} found â€” select to add</p>
+                  <p className="text-[10px] uppercase tracking-widest text-gray-600 mb-2">{parsed.length} found - select to add</p>
                   <div className="space-y-1.5 max-h-72 overflow-y-auto">
                     {parsed.map((c, i) => (
                       <label key={i} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-[#0A0A0B] border border-white/5 cursor-pointer hover:border-white/15 transition-colors">
@@ -381,10 +386,10 @@ export default function ContactsTab({ projectId }: { projectId: string }) {
                           className="w-4 h-4 rounded accent-[#00D2FF]"
                         />
                         <div className="flex-1 min-w-0 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-                          <span className="text-white font-medium truncate">{c.name || "â€”"}</span>
-                          <span className="text-gray-400 truncate">{c.company || "â€”"}</span>
-                          <span className="text-gray-500 truncate">{c.role || "â€”"}</span>
-                          <span className="text-[#00D2FF] truncate">{c.email || c.phone || "â€”"}</span>
+                          <span className="text-white font-medium truncate">{c.name || "-"}</span>
+                          <span className="text-gray-400 truncate">{c.company || "-"}</span>
+                          <span className="text-gray-500 truncate">{c.role || "-"}</span>
+                          <span className="text-[#00D2FF] truncate">{c.email || c.phone || "-"}</span>
                         </div>
                       </label>
                     ))}
@@ -394,7 +399,7 @@ export default function ContactsTab({ projectId }: { projectId: string }) {
                     disabled={selected.size === 0 || savingParsed}
                     className="mt-3 bg-[#CCFF00]/10 border border-[#CCFF00]/30 text-[#CCFF00] hover:bg-[#CCFF00]/20 rounded-lg px-4 py-2 text-[11px] font-bold tracking-widest uppercase transition-colors disabled:opacity-50"
                   >
-                    {savingParsed ? "Savingâ€¦" : `Add ${selected.size} Contact${selected.size !== 1 ? "s" : ""}`}
+                    {savingParsed ? "Saving..." : `Add ${selected.size} Contact${selected.size !== 1 ? "s" : ""}`}
                   </button>
                 </>
               )}

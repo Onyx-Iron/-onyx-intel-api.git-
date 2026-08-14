@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { BadgeCheck, Plus } from "lucide-react";
 import UniversalImportButton from "@/components/common/UniversalImportButton";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
@@ -42,6 +43,12 @@ interface FormState {
   result_date: string;
   corrective_actions: string;
   notes: string;
+}
+
+interface CertIssueState {
+  certificate_number: string;
+  certificate_type: CertType;
+  certificate_issued_date: string;
 }
 
 const EMPTY_FORM: FormState = {
@@ -89,7 +96,7 @@ function pickField(row: Record<string, string | number | null>, keys: string[]):
 }
 
 function fmtDate(d: string | null): string {
-  if (!d) return "—";
+  if (!d) return "-";
   return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
@@ -119,8 +126,11 @@ export default function CertificateOfOccupancyTab({ projectId }: { projectId: st
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [issueTarget, setIssueTarget] = useState<CoInspection | null>(null);
+  const [issueForm, setIssueForm] = useState<CertIssueState | null>(null);
+  const [issuing, setIssuing] = useState(false);
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true);
     setError(null);
     fetch(`/api/co-inspections?project_id=${encodeURIComponent(projectId)}`)
@@ -130,11 +140,17 @@ export default function CertificateOfOccupancyTab({ projectId }: { projectId: st
         setItems(data.items ?? []);
         setLoading(false);
       })
-      .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
-  };
+      .catch((e) => { setError(e?.message ?? "Could not load certificate of occupancy items. Refresh the page and try again."); setLoading(false); });
+  }, [projectId]);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, [projectId]);
+  useProjectSyncRefresh(load);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   const importItems = useBulkImport<{
     project_id: string;
@@ -216,13 +232,13 @@ export default function CertificateOfOccupancyTab({ projectId }: { projectId: st
           });
       if (!res.ok) {
         const body = await res.json().catch(() => ({})) as { error?: string };
-        setErrorMsg(body.error ?? `Failed to save inspection (${res.status}).`);
+        setErrorMsg(body.error ?? `Could not save that inspection (${res.status}). Check the form and try again.`);
         return;
       }
       cancelForm();
       load();
     } catch (err) {
-      setErrorMsg(`Failed to save inspection: ${err instanceof Error ? err.message : "network error"}`);
+      setErrorMsg(`Could not save that inspection: ${err instanceof Error ? err.message : "network error"}. Try again in a moment.`);
     } finally {
       setSubmitting(false);
     }
@@ -236,45 +252,49 @@ export default function CertificateOfOccupancyTab({ projectId }: { projectId: st
       const res = await fetch(`/api/co-inspections/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (!res.ok) {
         setItems(prev);
-        setErrorMsg(`Failed to delete inspection (${res.status}).`);
+        setErrorMsg(`Could not delete that inspection (${res.status}). Refresh the list and try again.`);
       }
     } catch {
       setItems(prev);
-      setErrorMsg("Failed to delete inspection: network error.");
+      setErrorMsg("Could not delete that inspection just now. Refresh the list and try again in a moment.");
     }
   };
 
   const markCertIssued = async (it: CoInspection) => {
-    const certNumber = window.prompt("Certificate number:", it.certificate_number ?? "");
-    if (certNumber === null) return;
-    const certType = window.prompt("Certificate type — enter TCO or CO:", it.certificate_type ?? "CO");
-    if (certType === null) return;
-    const typeNorm = certType.trim().toUpperCase();
-    if (typeNorm !== "TCO" && typeNorm !== "CO") {
-      setErrorMsg("Certificate type must be 'TCO' or 'CO'.");
-      return;
-    }
-    const today = new Date().toISOString().slice(0, 10);
-    const issuedDate = window.prompt("Issued date (YYYY-MM-DD):", it.certificate_issued_date ?? today);
-    if (issuedDate === null) return;
+    setIssueTarget(it);
+    setIssueForm({
+      certificate_number: it.certificate_number ?? "",
+      certificate_type: it.certificate_type ?? "CO",
+      certificate_issued_date: it.certificate_issued_date ?? new Date().toISOString().slice(0, 10),
+    });
+  };
+
+  const saveCertIssued = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!issueTarget || !issueForm || issuing) return;
+    setIssuing(true);
     try {
-      const res = await fetch(`/api/co-inspections/${encodeURIComponent(it.id)}`, {
+      const res = await fetch(`/api/co-inspections/${encodeURIComponent(issueTarget.id)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          certificate_number: certNumber.trim() || null,
-          certificate_type: typeNorm,
-          certificate_issued_date: issuedDate.trim() || today,
+          certificate_number: issueForm.certificate_number.trim() || null,
+          certificate_type: issueForm.certificate_type,
+          certificate_issued_date: issueForm.certificate_issued_date.trim() || new Date().toISOString().slice(0, 10),
         }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({})) as { error?: string };
-        setErrorMsg(body.error ?? `Failed to mark issued (${res.status}).`);
+        setErrorMsg(body.error ?? `Failed to mark issued (${res.status}). Refresh the page and try again.`);
         return;
       }
+      setIssueTarget(null);
+      setIssueForm(null);
       load();
     } catch (err) {
-      setErrorMsg(`Failed to mark issued: ${err instanceof Error ? err.message : "network error"}`);
+      setErrorMsg(`Could not mark that inspection issued: ${err instanceof Error ? err.message : "network error"}. Try again in a moment.`);
+    } finally {
+      setIssuing(false);
     }
   };
 
@@ -320,18 +340,81 @@ export default function CertificateOfOccupancyTab({ projectId }: { projectId: st
             {latestCertIssued?.certificate_type ? `${latestCertIssued.certificate_type} Issued` : "Certificate"}
           </p>
           <p className="text-2xl font-black leading-none text-white">
-            {latestCertIssued?.certificate_number ?? "—"}
+            {latestCertIssued?.certificate_number ?? "-"}
           </p>
         </div>
         <div className="rounded-xl border border-white/10 bg-[#0E0F12] p-4">
           <p className="text-[9px] uppercase tracking-widest text-gray-600 mb-1">Days Since CO Issued</p>
           <p className="text-2xl font-black leading-none text-[#00D2FF]">
-            {daysSinceCo === null ? "—" : daysSinceCo}
+            {daysSinceCo === null ? "-" : daysSinceCo}
           </p>
         </div>
       </div>
 
       {error && <ErrorState message={error} onRetry={load} />}
+
+      {issueTarget && issueForm && (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#0E0F12] p-5 shadow-2xl shadow-black/50">
+            <div className="mb-4">
+              <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-white/40">Mark certificate issued</p>
+              <h3 className="mt-1 text-lg font-semibold text-white">{issueTarget.inspection_type} inspection</h3>
+              <p className="mt-1 text-sm text-white/45">
+                Fill in the certificate details once the inspection passes so the record stays complete.
+              </p>
+            </div>
+            <form onSubmit={saveCertIssued} className="space-y-3">
+              <div>
+                <label className="mb-1 block text-[10px] font-bold uppercase tracking-widest text-white/45">Certificate number</label>
+                <input
+                  value={issueForm.certificate_number}
+                  onChange={(e) => setIssueForm((prev) => prev ? { ...prev, certificate_number: e.target.value } : prev)}
+                  className={inputCls}
+                  placeholder="Example: CO-2026-014"
+                />
+              </div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-[10px] font-bold uppercase tracking-widest text-white/45">Type</label>
+                  <select
+                    value={issueForm.certificate_type}
+                    onChange={(e) => setIssueForm((prev) => prev ? { ...prev, certificate_type: e.target.value === "TCO" ? "TCO" : "CO" } : prev)}
+                    className={inputCls}
+                  >
+                    <option value="CO">CO</option>
+                    <option value="TCO">TCO</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] font-bold uppercase tracking-widest text-white/45">Issued date</label>
+                  <input
+                    type="date"
+                    value={issueForm.certificate_issued_date}
+                    onChange={(e) => setIssueForm((prev) => prev ? { ...prev, certificate_issued_date: e.target.value } : prev)}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => { setIssueTarget(null); setIssueForm(null); }}
+                  className="rounded-lg border border-white/10 px-4 py-2 text-xs font-semibold uppercase tracking-widest text-white/70 hover:bg-white/5"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={issuing}
+                  className="rounded-lg bg-[#CCFF00] px-4 py-2 text-xs font-bold uppercase tracking-widest text-black disabled:opacity-50"
+                >
+                  {issuing ? "Saving..." : "Mark issued"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Table */}
       <div className="rounded-xl border border-white/10 bg-[#0E0F12] hover:border-white/20 transition-colors overflow-hidden">
@@ -376,6 +459,8 @@ export default function CertificateOfOccupancyTab({ projectId }: { projectId: st
                         description="Track certificate of occupancy milestones and inspections."
                         actionLabel="Add Record"
                         onAction={openAdd}
+                        secondaryLabel="View projects"
+                        secondaryHref="/dashboard/projects"
                       />
                     </div>
                   </td>
@@ -386,7 +471,7 @@ export default function CertificateOfOccupancyTab({ projectId }: { projectId: st
                     <td className="px-4 py-3 text-white text-xs capitalize">{it.inspection_type}</td>
                     <td className="px-4 py-3 text-gray-400 text-xs">{fmtDate(it.scheduled_date)}</td>
                     <td className="px-4 py-3 text-gray-400 text-xs">
-                      <div>{it.inspector_name ?? "—"}</div>
+                      <div>{it.inspector_name ?? "-"}</div>
                       {it.inspector_phone && (
                         <div className="text-[10px] text-gray-600 font-mono">{it.inspector_phone}</div>
                       )}
@@ -406,7 +491,7 @@ export default function CertificateOfOccupancyTab({ projectId }: { projectId: st
                           )}
                         </div>
                       ) : (
-                        <span className="text-gray-600">—</span>
+                        <span className="text-gray-600">-</span>
                       )}
                     </td>
                     <td className="px-4 py-3 text-gray-400 text-xs">{fmtDate(it.certificate_issued_date)}</td>
@@ -516,7 +601,7 @@ export default function CertificateOfOccupancyTab({ projectId }: { projectId: st
             <div className="flex items-center gap-3 pt-2">
               <button type="submit" disabled={submitting}
                 className="bg-[#CCFF00]/10 border border-[#CCFF00]/30 text-[#CCFF00] hover:bg-[#CCFF00]/20 rounded-lg px-4 py-2 text-[11px] font-bold tracking-widest uppercase transition-colors disabled:opacity-50">
-                {submitting ? "Saving…" : editId ? "Save Changes" : "Add Inspection"}
+                {submitting ? "Saving..." : editId ? "Save Changes" : "Add Inspection"}
               </button>
               <button type="button" onClick={cancelForm}
                 className="bg-white/5 border border-white/10 text-gray-400 hover:bg-white/10 rounded-lg px-4 py-2 text-[11px] uppercase tracking-widest transition-colors min-h-[40px] focus-visible:ring-2 focus-visible:ring-[#CCFF00]/40">

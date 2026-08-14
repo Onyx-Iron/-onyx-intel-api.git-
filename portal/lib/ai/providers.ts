@@ -2,7 +2,7 @@
  * Multi-model AI layer for Onyx Intel.
  * ------------------------------------
  * One unified `generateText()` over three providers:
- *   - gemini    (live now — billing key, gemini-2.5-pro)
+ *   - gemini    (live now — billing key, Gemini 3.6 Flash)
  *   - openai    (activates when OPENAI_API_KEY is set)
  *   - anthropic (activates when ANTHROPIC_API_KEY is set)
  *
@@ -23,7 +23,7 @@ interface ProviderConfig {
 const CONFIG: Record<Provider, ProviderConfig> = {
   gemini: {
     key:   headerSafe(process.env.GEMINI_API_KEY),
-    model: process.env.GEMINI_MODEL ?? "gemini-2.5-pro",
+    model: process.env.GEMINI_MODEL ?? "gemini-3.6-flash",
   },
   openai: {
     key:   headerSafe(process.env.OPENAI_API_KEY),

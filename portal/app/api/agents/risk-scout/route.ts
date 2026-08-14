@@ -5,8 +5,11 @@ import {
   authTenantName,
   getOrCreateTenant,
   requireProjectId,
+  assertProjectBelongsToTenant,
 } from "@/lib/project-controls/server";
 import { getLastRiskScoutFindings, runRiskScout } from "@/lib/agents/riskScout";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -21,12 +24,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       authTenantKey(userId, orgId),
       authTenantName(userId, orgSlug),
     );
+    await assertPermission(tenantId, userId, "financial", "read");
+    await assertProjectBelongsToTenant(projectId, tenantId);
+
+    const rl = await checkAiRateLimit(tenantId, "agents/risk-scout", { windowMs: 60_000, max: 5 });
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many risk-scout requests — please slow down." },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
+      );
+    }
 
     const result = await runRiskScout(tenantId, projectId);
     return NextResponse.json(result);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    const status = msg.includes("project_id") ? 400 : 500;
+    const status = err instanceof PermissionError || msg.includes("does not belong") ? 403 : msg.includes("project_id") ? 400 : 500;
     return NextResponse.json({ error: msg }, { status });
   }
 }
@@ -41,12 +54,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       authTenantKey(userId, orgId),
       authTenantName(userId, orgSlug),
     );
+    await assertPermission(tenantId, userId, "financial", "read");
+    await assertProjectBelongsToTenant(projectId, tenantId);
 
     const last = await getLastRiskScoutFindings(tenantId, projectId);
     return NextResponse.json(last ?? { run_id: null, findings: [] });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    const status = msg.includes("project_id") ? 400 : 500;
+    const status = err instanceof PermissionError || msg.includes("does not belong") ? 403 : msg.includes("project_id") ? 400 : 500;
     return NextResponse.json({ error: msg }, { status });
   }
 }

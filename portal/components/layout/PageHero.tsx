@@ -44,6 +44,11 @@ export default function PageHero({
             {description && (
               <p className="mt-2 max-w-2xl text-sm text-white/45 sm:mt-3">{description}</p>
             )}
+            {compact && !actions && (
+              <p className="mt-2 text-[10px] uppercase tracking-widest text-white/25">
+                Use the sidebar to switch sections or start a new item.
+              </p>
+            )}
           </div>
           {actions && (
             <div className="shrink-0">{actions}</div>

@@ -67,13 +67,13 @@ export default function OnboardingPlanPage() {
       });
       if (!res.ok) {
         const text = await res.text();
-        throw new Error(text || `Checkout failed (${res.status})`);
+        throw new Error(text || `Checkout failed (${res.status}). Please try again or choose a different plan.`);
       }
       const json = (await res.json()) as { url?: string };
       if (json.url) {
         window.location.href = json.url;
       } else {
-        throw new Error("No checkout URL returned");
+        throw new Error("No checkout URL was returned. Please try again in a moment.");
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -86,7 +86,7 @@ export default function OnboardingPlanPage() {
       <PageHero
         eyebrow="Onboarding"
         title="Pick your plan"
-        description="Start free, upgrade anytime. Yearly billing saves 17%."
+        description="Start free and upgrade anytime. Yearly billing saves 17%."
       />
       <div className="px-4 py-8 lg:px-10">
         <div className="mb-6 flex items-center justify-center">
@@ -111,7 +111,7 @@ export default function OnboardingPlanPage() {
                   : "text-white/60 hover:text-white"
               }`}
             >
-              Yearly · 2 months free
+              Yearly, 2 months free
             </button>
           </div>
         </div>
@@ -123,7 +123,7 @@ export default function OnboardingPlanPage() {
         )}
 
         {loading ? (
-          <p className="text-center text-sm text-white/45">Loading plans…</p>
+          <p className="text-center text-sm text-white/45">Loading plans...</p>
         ) : (
           <div className="mx-auto grid max-w-7xl grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
             {PLANS.filter((p) => p.tier !== "comp").map((plan) => (
@@ -145,7 +145,7 @@ export default function OnboardingPlanPage() {
         )}
 
         <p className="mt-8 text-center text-xs text-white/45">
-          Need a custom setup?{" "}
+          Need a custom setup or team rollout?{" "}
           <a
             href="mailto:sales@onyx-iron.com"
             className="text-[#CCFF00] hover:underline"

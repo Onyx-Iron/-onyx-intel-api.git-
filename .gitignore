@@ -28,6 +28,7 @@ portal/.env*.local
 # Data / examples (keep out of git)
 data/
 examples/
+/*.docx
 # Anchored so this doesn't also swallow Next.js App Router route segments
 # literally named "public" (e.g. portal/app/public/, portal/app/api/public/).
 /public/

@@ -1,11 +1,14 @@
-﻿"use client";
+"use client";
 
+import Image from "next/image";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { ClipboardList, Plus, Camera, X, Cloud, Users } from "lucide-react";
 
 import { useToast } from "@/components/common/Toast";
 import { useConfirm } from "@/components/common/ConfirmDialog";
 import EmptyState from "@/components/common/EmptyState";
+import { fetchWithRetry } from "@/lib/network/retry";
 
 interface Photo { path: string; url: string | null; }
 
@@ -61,8 +64,14 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
       .then((d: { logs?: DailyLog[] }) => { setLogs(d.logs ?? []); setLoading(false); })
       .catch(() => setLoading(false));
   }, [projectId]);
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, [load]);
+  useProjectSyncRefresh(load);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   const openAdd = () => { setForm(EMPTY_FORM); setPendingPhotos([]); setShowForm(true); };
   const cancel = () => { setShowForm(false); setPendingPhotos([]); setForm(EMPTY_FORM); };
@@ -74,7 +83,7 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
       for (const file of Array.from(files)) {
         const fd = new FormData();
         fd.append("file", file);
-        const res = await fetch(`/api/daily-logs/photo?project_id=${encodeURIComponent(projectId)}`, { method: "POST", body: fd });
+        const res = await fetchWithRetry(`/api/daily-logs/photo?project_id=${encodeURIComponent(projectId)}`, { method: "POST", body: fd }, { retries: 1 });
         const d = await res.json() as { path?: string; url?: string; error?: string };
         if (res.ok && d.path) setPendingPhotos((prev) => [...prev, { path: d.path!, url: d.url ?? null }]);
         else toast({ title: String(`Photo upload failed: ${d.error ?? res.status}`), kind: "error" });
@@ -111,16 +120,16 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
       if (!res.ok) {
         // Fix: was closing form silently on failure
         const d = await res.json().catch(() => ({}));
-        toast({ title: String(`Save failed: ${(d as { error?: string })?.error ?? res.status}`), kind: "error" });
+        toast({ title: String(`Could not save this daily log: ${(d as { error?: string })?.error ?? `HTTP ${res.status}`}`), kind: "error" });
         return;
       }
       cancel();
       load();
-    } catch {
-      toast({ title: String("Save failed — network error."), kind: "error" });
-    } finally {
-      setSubmitting(false);
-    }
+      } catch {
+      toast({ title: String("Could not save this daily log just now. Please try again in a moment."), kind: "error" });
+      } finally {
+        setSubmitting(false);
+      }
   };
 
   const deleteLog = async (id: string) => {
@@ -132,11 +141,11 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
       const res = await fetch(`/api/daily-logs/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (!res.ok) {
         setLogs(snapshot);
-        toast({ title: String(`Delete failed (${res.status}).`), kind: "error" });
+        toast({ title: String(`Could not delete that daily log (${res.status}). Refresh the list and try again.`), kind: "error" });
       }
     } catch {
       setLogs(snapshot);
-      toast({ title: String("Delete failed — network error."), kind: "error" });
+      toast({ title: String("Could not delete that daily log just now. Refresh the list and try again in a moment."), kind: "error" });
     }
   };
 
@@ -147,18 +156,18 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <ClipboardList size={12} className="text-[#CCFF00]" />
-          <span className="text-[11px] uppercase tracking-widest text-gray-400">Daily Logs</span>
+          <span className="text-[11px] uppercase tracking-widest text-gray-400">Daily log</span>
           {logs.length > 0 && <span className="text-[9px] text-gray-700 font-mono">{logs.length}</span>}
         </div>
         <button onClick={openAdd}
           className="flex items-center gap-1.5 bg-[#CCFF00]/10 border border-[#CCFF00]/30 text-[#CCFF00] hover:bg-[#CCFF00]/20 rounded-lg px-4 py-2 text-[11px] font-bold tracking-widest uppercase transition-colors">
-          <Plus size={11} /> New Log
+          <Plus size={11} /> Create log
         </button>
       </div>
 
       {showForm && (
         <div className="rounded-xl border border-white/10 bg-[#0E0F12] p-6">
-          <p className="text-[11px] uppercase tracking-widest text-gray-500 mb-4">New Daily Log</p>
+          <p className="text-[11px] uppercase tracking-widest text-gray-500 mb-4">New log</p>
           <form onSubmit={submit} className="space-y-4">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div>
@@ -171,7 +180,7 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
                 <datalist id="weather-opts">{WEATHER_OPTS.map((w) => <option key={w} value={w} />)}</datalist>
               </div>
               <div>
-                <label className="block text-[10px] uppercase tracking-widest text-gray-600 mb-1.5">Temp (Â°F)</label>
+                <label className="block text-[10px] uppercase tracking-widest text-gray-600 mb-1.5">Temperature (F)</label>
                 <input value={form.temperature} onChange={(e) => setForm((f) => ({ ...f, temperature: e.target.value }))} className={inputCls} placeholder="72" />
               </div>
               <div>
@@ -181,11 +190,11 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
             </div>
             <div>
               <label className="block text-[10px] uppercase tracking-widest text-gray-600 mb-1.5">Work Performed</label>
-              <textarea value={form.work_performed} onChange={(e) => setForm((f) => ({ ...f, work_performed: e.target.value }))} rows={3} className={inputCls} placeholder="Describe work completed todayâ€¦" />
+              <textarea value={form.work_performed} onChange={(e) => setForm((f) => ({ ...f, work_performed: e.target.value }))} rows={3} className={inputCls} placeholder="Describe work completed today..." />
             </div>
             <div>
               <label className="block text-[10px] uppercase tracking-widest text-gray-600 mb-1.5">Notes / Issues</label>
-              <textarea value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} rows={2} className={inputCls} placeholder="Delays, deliveries, safety, visitorsâ€¦" />
+              <textarea value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} rows={2} className={inputCls} placeholder="Delays, deliveries, safety, visitors..." />
             </div>
 
             {/* Photos */}
@@ -195,7 +204,7 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
                 {pendingPhotos.map((p) => (
                   <div key={p.path} className="relative w-20 h-20 rounded-lg overflow-hidden border border-white/10">
                     {p.url
-                      ? <img src={p.url} alt="" className="w-full h-full object-cover" />
+                      ? <Image src={p.url} alt="" fill className="object-cover" />
                       : <div className="w-full h-full bg-white/5" />}
                     <button type="button" aria-label="Remove photo" onClick={() => removePending(p.path)}
                       className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/70 flex items-center justify-center text-white hover:bg-[#E50914] focus-visible:ring-2 focus-visible:ring-[#CCFF00]/40">
@@ -206,7 +215,7 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
                 <button type="button" onClick={() => fileRef.current?.click()} disabled={uploading}
                   className="w-20 h-20 rounded-lg border border-dashed border-white/15 flex flex-col items-center justify-center gap-1 text-gray-500 hover:border-[#CCFF00]/40 hover:text-[#CCFF00] transition-colors disabled:opacity-50">
                   <Camera size={16} />
-                  <span className="text-[8px] uppercase tracking-widest">{uploading ? "â€¦" : "Add"}</span>
+                  <span className="text-[8px] uppercase tracking-widest">{uploading ? "..." : "Add"}</span>
                 </button>
               </div>
               <input ref={fileRef} type="file" accept="image/*" capture="environment" multiple className="hidden" onChange={(e) => handlePhotos(e.target.files)} />
@@ -215,7 +224,7 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
             <div className="flex items-center gap-3 pt-1">
               <button type="submit" disabled={submitting || uploading}
                 className="bg-[#CCFF00]/10 border border-[#CCFF00]/30 text-[#CCFF00] hover:bg-[#CCFF00]/20 rounded-lg px-4 py-2 text-[11px] font-bold tracking-widest uppercase transition-colors disabled:opacity-50">
-                {submitting ? "Savingâ€¦" : "Save Log"}
+                {submitting ? "Saving..." : "Save Log"}
               </button>
               <button type="button" onClick={cancel} className="bg-white/5 border border-white/10 text-gray-400 hover:bg-white/10 rounded-lg px-4 py-2 text-[11px] uppercase tracking-widest transition-colors">Cancel</button>
             </div>
@@ -230,9 +239,11 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
         <EmptyState
           icon={<ClipboardList className="w-6 h-6" />}
           title="No daily logs yet"
-          description="Log today's work, weather, crew, and progress to keep records straight."
-          actionLabel="New Log"
+          description="Add today's work, weather, crew, and progress so the field record is easy to review later."
+          actionLabel="Create log"
           onAction={openAdd}
+          secondaryLabel="View projects"
+          secondaryHref="/dashboard/projects"
         />
       ) : (
         <div className="space-y-3">
@@ -241,7 +252,7 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-3 flex-wrap">
                   <span className="text-white text-sm font-bold">{fmtDate(log.log_date)}</span>
-                  {log.weather && <span className="flex items-center gap-1 text-[10px] text-[#00D2FF]"><Cloud size={10} />{log.weather}{log.temperature ? ` Â· ${log.temperature}Â°` : ""}</span>}
+                  {log.weather && <span className="flex items-center gap-1 text-[10px] text-[#00D2FF]"><Cloud size={10} />{log.weather}{log.temperature ? ` · ${log.temperature}°` : ""}</span>}
                   {log.crew_count != null && <span className="flex items-center gap-1 text-[10px] text-gray-400"><Users size={10} />{log.crew_count} crew</span>}
                 </div>
                 <button aria-label="Delete daily log" onClick={() => deleteLog(log.id)} className="min-h-[40px] text-gray-600 hover:text-[#E50914] opacity-0 group-hover:opacity-100 transition-all">
@@ -254,7 +265,7 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
                 <div className="flex flex-wrap gap-2 mt-3">
                   {log.photos.map((p, i) => p.url && (
                     <a key={i} href={p.url} target="_blank" rel="noopener" className="w-20 h-20 rounded-lg overflow-hidden border border-white/10 hover:border-[#CCFF00]/40 transition-colors">
-                      <img src={p.url} alt="" className="w-full h-full object-cover" />
+                      <Image src={p.url} alt="" fill className="object-cover" />
                     </a>
                   ))}
                 </div>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import HeatmapCanvas from "./HeatmapCanvas";
 import { parseSurfaceCsv } from "@/lib/cutfill/sampling";
 
@@ -19,7 +20,6 @@ interface SurfaceSummary {
   point_count: number;
   uploaded_at: string;
 }
-
 interface GridData {
   origin: { x: number; y: number };
   resolution_ft: number;
@@ -29,7 +29,6 @@ interface GridData {
   max_delta: number;
   delta: number[][];
 }
-
 interface ComputeSummary {
   cut_cy: number;
   fill_cy: number;
@@ -37,7 +36,6 @@ interface ComputeSummary {
   grid_resolution_ft: number;
   cells: number;
 }
-
 interface CutFillTabProps {
   projectId: string;
 }
@@ -63,7 +61,7 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
     try {
       const r = await fetch(`/api/cut-fill/surfaces?project_id=${encodeURIComponent(projectId)}`);
       const j = await r.json();
-      if (!r.ok) throw new Error(j.error || "Failed to load surfaces");
+      if (!r.ok) throw new Error(j.error || "Could not load cut/fill surfaces. Refresh the page and try again.");
       const list: SurfaceSummary[] = j.surfaces ?? [];
       setSurfaces(list);
       // auto-pick most recent of each type
@@ -76,15 +74,19 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
     }
   }, [projectId]);
 
+  useProjectSyncRefresh(loadSurfaces);
+
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void loadSurfaces();
+    const timer = window.setTimeout(() => {
+      void loadSurfaces();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [loadSurfaces]);
 
   const uploadCsv = useCallback(
     async (file: File, type: "existing" | "proposed") => {
       setError(null);
-      setBusy(`Uploading ${type} surface…`);
+      setBusy(`Uploading ${type} surface...`);
       try {
         const text = await file.text();
         const points = parseSurfaceCsv(text);
@@ -116,7 +118,7 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
           { method: "DELETE" }
         );
         const j = await r.json();
-        if (!r.ok) throw new Error(j.error || "Delete failed");
+        if (!r.ok) throw new Error(j.error || "Could not delete that surface. Try again in a moment.");
         if (existingId === id) setExistingId(null);
         if (proposedId === id) setProposedId(null);
         await loadSurfaces();
@@ -133,7 +135,7 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
       return;
     }
     setError(null);
-    setBusy("Computing volumes…");
+    setBusy("Computing volumes...");
     try {
       const r = await fetch("/api/cut-fill/compute", {
         method: "POST",
@@ -165,7 +167,7 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
         <h2 className="text-xl font-semibold tracking-tight">Cut / Fill Earthwork</h2>
         <p className="mt-1 text-sm text-neutral-400">
           Upload existing and proposed grade points as CSV (columns: x,y,z or northing,easting,elevation).
-          We interpolate Δz on a uniform grid and tally cut/fill volumes.
+          We interpolate delta-z on a uniform grid and tally cut/fill volumes.
         </p>
       </div>
 
@@ -226,7 +228,7 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
               onChange={(e) => setExistingId(e.target.value || null)}
               className="w-full rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-sm"
             >
-              <option value="">— select —</option>
+              <option value="">- select -</option>
               {existingSurfaces.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.name} ({s.point_count} pts)
@@ -241,7 +243,7 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
               onChange={(e) => setProposedId(e.target.value || null)}
               className="w-full rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-sm"
             >
-              <option value="">— select —</option>
+              <option value="">- select -</option>
               {proposedSurfaces.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.name} ({s.point_count} pts)
@@ -287,7 +289,7 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
             <div className="mt-1 text-2xl font-semibold text-sky-200">{fmt(summary.fill_cy)} CY</div>
           </div>
           <div className="rounded-md border border-neutral-800 bg-neutral-950/60 p-4">
-            <div className="text-xs uppercase tracking-wider text-neutral-400">Net (Fill − Cut)</div>
+            <div className="text-xs uppercase tracking-wider text-neutral-400">Net (Fill âˆ’ Cut)</div>
             <div
               className={`mt-1 text-2xl font-semibold ${
                 summary.net_cy >= 0 ? "text-sky-200" : "text-red-200"
@@ -307,7 +309,7 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
           Surfaces
         </h3>
         {surfaces.length === 0 ? (
-          <p className="text-sm text-neutral-500">No surfaces uploaded yet.</p>
+          <p className="text-sm text-neutral-500">No surfaces uploaded yet. Add an Existing and Proposed surface above to compute cut and fill.</p>
         ) : (
           <ul className="divide-y divide-neutral-800">
             {surfaces.map((s) => (
@@ -315,7 +317,7 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
                 <div>
                   <div className="font-medium text-neutral-100">{s.name}</div>
                   <div className="text-xs text-neutral-500">
-                    {s.type} · {s.point_count} points ·{" "}
+                    {s.type} • {s.point_count} points •{" "}
                     {new Date(s.uploaded_at).toLocaleString()}
                   </div>
                 </div>

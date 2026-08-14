@@ -1,24 +1,9 @@
-import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
+import { PlatformAdminError, requirePlatformAdmin } from "@/lib/auth/platform-admin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const ADMIN_EMAIL = "justinatteberry@onyx-iron.com";
-
-async function requireAdmin(): Promise<NextResponse | null> {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  const user = await currentUser();
-  const email = user?.primaryEmailAddress?.emailAddress ?? "";
-  if (email !== ADMIN_EMAIL) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-  return null;
-}
 
 interface DotRow {
   csi_code: string;
@@ -42,8 +27,7 @@ interface DotBody {
 // source = "dot_<state>", region_type = "state", region_code = <state>.
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
-    const guard = await requireAdmin();
-    if (guard) return guard;
+    await requirePlatformAdmin();
     const body = (await req.json()) as DotBody;
     const state = (body.state ?? "").trim().toUpperCase();
     const rows = Array.isArray(body.rows) ? body.rows : [];
@@ -134,6 +118,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 201 },
     );
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: String(err) }, { status: err instanceof PlatformAdminError ? err.status : 500 });
   }
 }

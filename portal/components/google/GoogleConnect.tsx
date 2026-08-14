@@ -1,6 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useToast } from "@/components/common/Toast";
+
+const PENDING_RECONNECT_KEY = "onyx_pending_google_reconnect_v1";
 
 function GoogleG() {
   return (
@@ -12,37 +15,79 @@ function GoogleG() {
     </svg>
   );
 }
-
 interface ConnectionStatus {
   connected: boolean;
   email?: string | null;
   drive_folder_url?: string | null;
 }
-
 export default function GoogleConnect({ compact = false }: { compact?: boolean }) {
+  const { toast } = useToast();
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
+  const [disconnectConfirmOpen, setDisconnectConfirmOpen] = useState(false);
+  const [pendingReconnect] = useState(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return window.localStorage.getItem(PENDING_RECONNECT_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
   const menuRef = useRef<HTMLDivElement>(null);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
+    setStatusError(null);
     try {
       const res = await fetch("/api/google/status");
-      const data = await res.json() as ConnectionStatus;
-      setStatus(data);
-    } catch {
+      const data = await res.json().catch(() => ({})) as Partial<ConnectionStatus> & { error?: string };
+      if (!res.ok) throw new Error(data.error ?? `Could not load Google connection status (${res.status}). Refresh and try again.`);
+      setStatus({ connected: Boolean(data.connected), email: data.email ?? null, drive_folder_url: data.drive_folder_url ?? null });
+    } catch (err) {
+      if (typeof window !== "undefined" && window.location.search.includes("google=")) {
+        setStatus({ connected: false });
+        return;
+      }
+      setStatusError(err instanceof Error ? err.message : "Could not load Google connection status.");
+      toast({
+        title: err instanceof Error ? err.message : "Could not load Google connection status.",
+        description: "Reconnect Google if the card keeps showing disconnected.",
+        kind: "warning",
+      });
       setStatus({ connected: false });
     }
-  };
+  }, [toast]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    refresh();
+    const timer = window.setTimeout(() => {
+      void refresh();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!status?.connected || typeof window === "undefined") return;
+    try {
+      if (window.localStorage.getItem(PENDING_RECONNECT_KEY) === "1") {
+        window.localStorage.removeItem(PENDING_RECONNECT_KEY);
+        toast({
+          title: "Google is connected",
+          description: "Resume the interrupted upload from the project header or Documents tab.",
+          kind: "success",
+        });
+      }
+    } catch {
+      // ignore storage failures
+    }
+  }, [status?.connected, toast]);
+
+  useEffect(() => {
     if (typeof window !== "undefined" && window.location.search.includes("google=")) {
       const t = setTimeout(refresh, 600);
       return () => clearTimeout(t);
     }
-  }, []);
+  }, [refresh]);
 
   // Close menu on outside click / Escape
   useEffect(() => {
@@ -60,23 +105,47 @@ export default function GoogleConnect({ compact = false }: { compact?: boolean }
   }, [open]);
 
   const connect = () => {
+    try {
+      window.localStorage.setItem(PENDING_RECONNECT_KEY, "1");
+    } catch {
+      // ignore storage failures
+    }
     setBusy(true);
     window.location.href = "/api/google/connect";
   };
 
   const reconnect = () => {
+    try {
+      window.localStorage.setItem(PENDING_RECONNECT_KEY, "1");
+    } catch {
+      // ignore storage failures
+    }
     setBusy(true);
-    // Same URL — Google will re-prompt for missing scopes if needed
+    // Same URL - Google will re-prompt for missing scopes if needed
     window.location.href = "/api/google/connect";
   };
 
   const disconnect = async () => {
-    if (!confirm("Disconnect Google? Auto-save of reports to Drive and Drive imports will stop until you reconnect.")) return;
     setBusy(true);
     try {
-      await fetch("/api/google/status", { method: "DELETE" });
+      const res = await fetch("/api/google/status", { method: "DELETE" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error ?? `Disconnect failed (${res.status}). Refresh and try again.`);
+      }
       setStatus({ connected: false });
       setOpen(false);
+      setDisconnectConfirmOpen(false);
+      toast({
+        title: "Google disconnected",
+        description: "Drive imports and auto-save will resume when you reconnect.",
+        kind: "info",
+      });
+    } catch (err) {
+      toast({
+        title: err instanceof Error ? err.message : "Disconnect failed. Refresh and try again.",
+        kind: "error",
+      });
     } finally {
       setBusy(false);
     }
@@ -86,6 +155,19 @@ export default function GoogleConnect({ compact = false }: { compact?: boolean }
     return <div className={`${compact ? "h-9 w-9" : "h-10 w-10"} animate-pulse rounded-full bg-white/5`} />;
   }
 
+  if (statusError && !status.connected) {
+    return (
+      <button
+        type="button"
+        onClick={() => void refresh()}
+        title={statusError}
+        className={`${compact ? "h-9" : "h-10"} flex items-center gap-2 rounded-full border border-amber-400/20 bg-amber-400/10 px-4 text-xs font-semibold text-amber-100 transition-colors hover:border-amber-300/30 hover:bg-amber-300/15`}
+      >
+        <GoogleG /> Retry Google
+      </button>
+    );
+  }
+
   // ── Not connected: prominent CTA ─────────────────────────────────────────
   if (!status.connected) {
     return (
@@ -93,10 +175,15 @@ export default function GoogleConnect({ compact = false }: { compact?: boolean }
         type="button"
         onClick={connect}
         disabled={busy}
-        title="Connect your Google account for Drive imports + auto-save reports to Drive"
+        title={pendingReconnect ? "Reconnect Google so you can retry the interrupted upload" : "Connect your Google account for Drive imports + auto-save reports to Drive"}
         className={`${compact ? "h-9" : "h-10"} flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-4 text-xs font-semibold text-white/80 transition-colors hover:border-white/30 hover:text-white disabled:opacity-50`}
       >
-        <GoogleG /> {busy ? "Connecting…" : "Connect Google"}
+        <GoogleG /> {busy ? "Connecting..." : pendingReconnect ? "Reconnect Google" : "Connect Google"}
+        {pendingReconnect && !busy && (
+          <span className="rounded-full border border-[#CCFF00]/25 bg-[#CCFF00]/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest text-[#CCFF00]">
+            Resume
+          </span>
+        )}
       </button>
     );
   }
@@ -165,14 +252,59 @@ export default function GoogleConnect({ compact = false }: { compact?: boolean }
 
           <button
             type="button"
-            onClick={disconnect}
+            onClick={() => setDisconnectConfirmOpen(true)}
             disabled={busy}
             className="w-full px-4 py-2.5 text-left text-xs text-red-400 transition-colors hover:bg-red-400/[0.06] disabled:opacity-50"
           >
-            {busy ? "Disconnecting…" : "Disconnect Google"}
+            Disconnect Google
           </button>
         </div>
       )}
+
+      {disconnectConfirmOpen && (
+        <ConfirmDisconnectModal
+          busy={busy}
+          onCancel={() => setDisconnectConfirmOpen(false)}
+          onConfirm={() => void disconnect()}
+        />
+      )}
+    </div>
+  );
+}
+function ConfirmDisconnectModal({
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#0E0F12] p-5 shadow-2xl">
+        <h3 className="text-sm font-bold uppercase tracking-widest text-white">Disconnect Google?</h3>
+        <p className="mt-2 text-sm leading-relaxed text-white/70">
+          Auto-save to Drive and Drive imports will stop until you reconnect.
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="inline-flex h-9 items-center rounded-full border border-white/15 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/70 hover:text-white"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={busy}
+            className="inline-flex h-9 items-center rounded-full bg-red-500 px-4 text-[11px] font-bold uppercase tracking-widest text-white hover:opacity-90 disabled:opacity-50"
+          >
+            {busy ? "Disconnecting..." : "Disconnect"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

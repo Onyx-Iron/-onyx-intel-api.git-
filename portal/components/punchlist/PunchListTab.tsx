@@ -1,6 +1,7 @@
-﻿"use client";
+"use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { ClipboardList, Plus, ListChecks } from "lucide-react";
 import UniversalImportButton from "@/components/common/UniversalImportButton";
 import { useBulkImport, toStr } from "@/components/common/useBulkImport";
@@ -75,7 +76,7 @@ const EMPTY_FORM: FormState = {
 };
 
 function fmtDate(d: string | null): string {
-  if (!d) return "â€”";
+  if (!d) return "-";
   return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
@@ -106,7 +107,7 @@ export default function PunchListTab({ projectId }: { projectId: string }) {
   const [filter, setFilter] = useState<PunchStatus | "all">("all");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true);
     fetch(`/api/punch-list?project_id=${encodeURIComponent(projectId)}`)
       .then((r) => r.json())
@@ -116,10 +117,16 @@ export default function PunchListTab({ projectId }: { projectId: string }) {
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  };
+  }, [projectId]);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, [projectId]);
+  useProjectSyncRefresh(load);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   const importItems = useBulkImport<{ project_id: string; description: string; location: string | null; priority: Priority; status: PunchStatus; assigned_to: string | null }>(projectId, {
     endpoint: "/api/punch-list",
@@ -156,11 +163,11 @@ export default function PunchListTab({ projectId }: { projectId: string }) {
       });
       if (!res.ok) {
         // Fix: was swallowing failure silently — surface error and roll back via reload
-        setErrorMsg(`Status update failed (${res.status})`);
+        setErrorMsg(`Could not update that punch item status (${res.status}). Refresh the list and try again.`);
         load();
       }
     } catch {
-      setErrorMsg("Network error — could not update status.");
+      setErrorMsg("Could not update that punch item status just now. Please try again in a moment.");
       load();
     }
   };
@@ -217,13 +224,13 @@ export default function PunchListTab({ projectId }: { projectId: string }) {
           });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Save failed (${res.status})`);
+        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Could not save this punch item (${res.status}). Check the form and try again.`);
         return;
       }
       cancelForm();
       load();
     } catch {
-      setErrorMsg("Network error — could not reach the server.");
+      setErrorMsg("Could not reach the server just now. Please try again in a moment.");
     } finally {
       setSubmitting(false);
     }
@@ -231,16 +238,18 @@ export default function PunchListTab({ projectId }: { projectId: string }) {
 
   const deleteItem = async (id: string) => {
     if (!(await confirm({ title: String("Delete this punch list item?"), destructive: true }))) return;
+    const prevItems = items;
     setItems((prev) => prev.filter((i) => i.id !== id));
     try {
       const res = await fetch(`/api/punch-list/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (!res.ok) {
-        // Fix: optimistic delete with no rollback on API failure
-        setErrorMsg(`Delete failed (${res.status}) — refreshing list.`);
+        setItems(prevItems);
+        setErrorMsg(`Could not delete that punch item (${res.status}). Refreshing the list now.`);
         load();
       }
     } catch {
-      setErrorMsg("Network error — could not delete.");
+      setItems(prevItems);
+      setErrorMsg("Could not delete that punch item just now. Refresh the list and try again in a moment.");
       load();
     }
   };
@@ -291,7 +300,7 @@ export default function PunchListTab({ projectId }: { projectId: string }) {
             <span className="text-[11px] uppercase tracking-widest text-gray-400">Punch List</span>
             {filter !== "all" && (
               <span className="text-[9px] text-gray-700 uppercase tracking-widest">
-                â€” {STATUS_LABELS[filter]}
+                - {STATUS_LABELS[filter]}
               </span>
             )}
           </div>
@@ -336,6 +345,8 @@ export default function PunchListTab({ projectId }: { projectId: string }) {
                           description="Track outstanding items before closeout."
                           actionLabel="Add Item"
                           onAction={openAdd}
+                          secondaryLabel="Open projects"
+                          secondaryHref="/dashboard/projects"
                         />
                       ) : (
                         <EmptyState
@@ -344,6 +355,8 @@ export default function PunchListTab({ projectId }: { projectId: string }) {
                           description="Clear this filter to see all punch list items, or add a new one."
                           actionLabel="Add Item"
                           onAction={openAdd}
+                          secondaryLabel="Open projects"
+                          secondaryHref="/dashboard/projects"
                         />
                       )}
                     </div>
@@ -358,8 +371,8 @@ export default function PunchListTab({ projectId }: { projectId: string }) {
                     <td className="px-4 py-3 text-white text-xs max-w-[200px] truncate" title={item.description}>
                       {item.description}
                     </td>
-                    <td className="px-4 py-3 text-gray-400 text-xs">{item.location ?? "â€”"}</td>
-                    <td className="px-4 py-3 text-gray-400 text-xs">{item.trade ?? "â€”"}</td>
+                    <td className="px-4 py-3 text-gray-400 text-xs">{item.location ?? "-"}</td>
+                    <td className="px-4 py-3 text-gray-400 text-xs">{item.trade ?? "-"}</td>
                     <td className="px-4 py-3">
                       <span className={`inline-flex items-center px-2 py-0.5 rounded border text-[9px] font-bold tracking-widest uppercase ${PRIORITY_STYLES[item.priority]}`}>
                         {item.priority}
@@ -374,7 +387,7 @@ export default function PunchListTab({ projectId }: { projectId: string }) {
                       </button>
                     </td>
                     <td className="px-4 py-3 text-gray-400 text-xs">{fmtDate(item.due_date)}</td>
-                    <td className="px-4 py-3 text-gray-400 text-xs">{item.sign_off ?? "â€”"}</td>
+                    <td className="px-4 py-3 text-gray-400 text-xs">{item.sign_off ?? "-"}</td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button aria-label="Edit punch list item" onClick={() => openEdit(item)} className="min-h-[40px] text-gray-600 hover:text-white transition-colors">
@@ -470,7 +483,7 @@ export default function PunchListTab({ projectId }: { projectId: string }) {
             <div className="flex items-center gap-3 pt-2">
               <button type="submit" disabled={submitting}
                 className="bg-[#CCFF00]/10 border border-[#CCFF00]/30 text-[#CCFF00] hover:bg-[#CCFF00]/20 rounded-lg px-4 py-2 text-[11px] font-bold tracking-widest uppercase transition-colors disabled:opacity-50">
-                {submitting ? "Savingâ€¦" : editId ? "Save Changes" : "Add Item"}
+                {submitting ? "Saving..." : editId ? "Save Changes" : "Add Item"}
               </button>
               <button type="button" onClick={cancelForm}
                 className="bg-white/5 border border-white/10 text-gray-400 hover:bg-white/10 rounded-lg px-4 py-2 text-[11px] uppercase tracking-widest transition-colors min-h-[40px] focus-visible:ring-2 focus-visible:ring-[#CCFF00]/40">

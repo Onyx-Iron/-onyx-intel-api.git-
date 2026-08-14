@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Info, Mountain } from "lucide-react";
 import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
@@ -30,7 +30,7 @@ export default function GlobalCivilIntelligencePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true);
     setError(null);
     Promise.all([
@@ -47,11 +47,15 @@ export default function GlobalCivilIntelligencePage() {
         setProjects(p.projects ?? []);
         setLoading(false);
       })
-      .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
-  };
+      .catch((e) => { setError(e?.message ?? "Could not load civil intelligence. Refresh the page and try again."); setLoading(false); });
+  }, []);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   const projectNameById = useMemo(() => {
     const m = new Map<string, string>();
@@ -64,7 +68,7 @@ export default function GlobalCivilIntelligencePage() {
       <PageHero
         eyebrow="Workspace"
         title="Civil Intelligence"
-        description="Earthwork cut/fill volumes across all projects"
+        description="Earthwork cut and fill volumes across all projects"
         compact
       />
 
@@ -74,9 +78,8 @@ export default function GlobalCivilIntelligencePage() {
         <div className="mb-6 flex items-start gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
           <Info size={12} className="mt-0.5 shrink-0" />
           <span>
-            Read-only roll-up of earthwork cut/fill/mass-haul volumes, sourced from each project&apos;s Civil scope panel.
-            Utility pipe runs, construction entrances, stockpiles, and material ledger entries are project-level only for
-            now — see the Cut/Fill tab inside a project&apos;s Takeoff section for that detail.
+            Read-only view of earthwork cut, fill, and mass-haul volumes. Utility pipe runs, construction entrances, stockpiles, and material ledger entries stay on the project page for now.
+            Open the Cut/Fill tab inside a project&apos;s Takeoff section for that detail.
           </span>
         </div>
 
@@ -118,7 +121,15 @@ export default function GlobalCivilIntelligencePage() {
                   <tr>
                     <td colSpan={5}>
                       <div className="py-4">
-                        <EmptyState icon={<Mountain className="w-6 h-6" />} title="No earthwork volumes yet" description="Compute cut/fill volumes from a project's Cut/Fill tab to see them roll up here." />
+                        <EmptyState
+                          icon={<Mountain className="w-6 h-6" />}
+                          title="No earthwork volumes yet"
+                          description="Compute cut and fill volumes in a project&apos;s Cut/Fill tab and they will appear here automatically."
+                          actionLabel="Open projects"
+                          actionHref="/dashboard/projects"
+                          secondaryLabel="Go to takeoff"
+                          secondaryHref="/dashboard/takeoff"
+                        />
                       </div>
                     </td>
                   </tr>

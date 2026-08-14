@@ -1,16 +1,23 @@
 import { auth } from "@clerk/nextjs/server";
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 import { buildDocumentRevisionMeta } from "@/lib/documents/revisions";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { getAccessTokenWithReason } from "@/lib/google/oauth";
 import { logEvent } from "@/lib/activity";
 import type { TablesInsert } from "@/lib/supabase/types";
+import {
+  buildLocalDocumentInsert,
+  detectDocumentUploadStorageType,
+  LOCAL_DOCUMENT_BUCKET,
+  LOCAL_DOCUMENT_MAX_BYTES,
+} from "@/lib/documents/upload";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const BUCKET = "project-documents";
+const BUCKET = LOCAL_DOCUMENT_BUCKET;
 
 /**
  * Unified document upload entry point.
@@ -36,13 +43,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     const contentType = req.headers.get("content-type") ?? "";
-    const isMultipart = contentType.includes("multipart/form-data");
+    const uploadStorageType = detectDocumentUploadStorageType({ contentType });
 
     // ---------- Supabase Storage branch ----------
-    if (isMultipart) {
+    if (uploadStorageType === "supabase") {
+      const requestLength = Number(req.headers.get("content-length") ?? 0);
+      if (Number.isFinite(requestLength) && requestLength > LOCAL_DOCUMENT_MAX_BYTES + 1024 * 1024) {
+        return NextResponse.json({ error: "File is larger than the 1GB upload limit.", code: "FILE_TOO_LARGE" }, { status: 413 });
+      }
       const form = await req.formData();
       const file = form.get("file");
       const project_id = String(form.get("project_id") ?? "");
@@ -55,6 +67,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
       if (!(file instanceof File)) return NextResponse.json({ error: "No file provided" }, { status: 400 });
       if (!project_id) return NextResponse.json({ error: "project_id required" }, { status: 400 });
+      if (file.size === 0) return NextResponse.json({ error: "The selected file is empty.", code: "EMPTY_FILE" }, { status: 400 });
+      if (file.size > LOCAL_DOCUMENT_MAX_BYTES) {
+        return NextResponse.json({ error: "File is larger than the 1GB upload limit.", code: "FILE_TOO_LARGE" }, { status: 413 });
+      }
 
       const { data: project, error: projErr } = await db
         .from("projects").select("id").eq("id", project_id).eq("tenant_id", tenantId).single();
@@ -68,27 +84,32 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         .from(BUCKET)
         .upload(storagePath, bytes, { contentType: file.type || "application/octet-stream", upsert: false });
       if (uploadErr) {
-        return NextResponse.json({ error: `Storage upload failed: ${uploadErr.message}` }, { status: 500 });
+        const tooLarge = /too large|maximum|size limit|payload/i.test(uploadErr.message);
+        return NextResponse.json(
+          { error: `Storage upload failed: ${uploadErr.message}`, code: tooLarge ? "FILE_TOO_LARGE" : "STORAGE_UPLOAD_FAILED" },
+          { status: tooLarge ? 413 : 502 },
+        );
       }
 
-      const insertRow: TablesInsert<"documents"> = {
-        id: crypto.randomUUID(),
-        tenant_id: tenantId,
-        project_id,
-        file_name: file.name,
-        status: "pending",
-        uploaded_at: new Date().toISOString(),
-        meta: buildDocumentRevisionMeta(file.name, {
-          source: "local_upload",
-          storage: "supabase",
-          storage_path: storagePath,
-          size: bytes.length,
-          content_type: file.type || "application/octet-stream",
-        }),
-      };
+      const insertRow: TablesInsert<"documents"> = buildLocalDocumentInsert({
+        documentId: crypto.randomUUID(),
+        tenantId,
+        projectId: project_id,
+        fileName: file.name,
+        storagePath,
+        fileSize: bytes.length,
+        contentType: file.type || "application/octet-stream",
+      });
       const { data: doc, error } = await db
         .from("documents").insert(insertRow).select("id, file_name, status").single();
-      if (error || !doc) return NextResponse.json({ error: `[insert] ${error?.message}` }, { status: 500 });
+      if (error || !doc) {
+        const { error: cleanupError } = await db.storage.from(BUCKET).remove([storagePath]);
+        return NextResponse.json({
+          error: `[insert] ${error?.message ?? "Document registration failed"}`,
+          code: "DOCUMENT_REGISTRATION_FAILED",
+          cleanup_failed: Boolean(cleanupError),
+        }, { status: 500 });
+      }
 
       fireIngest(req, doc.id);
       void logEvent({
@@ -196,7 +217,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ upload_url });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[POST /api/documents/upload] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[POST /api/documents/upload] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -248,13 +269,20 @@ async function insertDriveRow(args: {
 }
 
 function fireIngest(req: NextRequest, docId: string): void {
-  // Fire-and-forget: do NOT await, so the upload response stays fast.
-  void fetch(new URL(`/api/documents/${docId}/ingest`, req.url).toString(), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Cookie": req.headers.get("cookie") ?? "",
-    },
-    body: JSON.stringify({}),
-  }).catch(() => {});
+  const url = new URL(`/api/documents/${docId}/ingest`, req.url).toString();
+  const cookie = req.headers.get("cookie") ?? "";
+  // Next keeps `after` work alive for the configured route duration. A bare
+  // floating promise can be terminated as soon as the upload response returns.
+  after(async () => {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({}),
+      });
+      if (!response.ok) console.error(`[upload ingest ${docId}] HTTP ${response.status}`);
+    } catch (error) {
+      console.error(`[upload ingest ${docId}]`, error);
+    }
+  });
 }
