@@ -6,7 +6,8 @@ import { headerSafe } from "@/lib/http";
 import { getAccessToken } from "@/lib/google/oauth";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { pythonApiHeaders } from "@/lib/python-api";
-import { invokePageSplitWorker, pageSplitPipelineHealthy } from "@/lib/documents/pageSplitWorker";
+import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
+import { pageSplitPipelineHealthy } from "@/lib/documents/pageSplitHealth";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 
 const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";

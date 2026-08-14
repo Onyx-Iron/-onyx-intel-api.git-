@@ -50,7 +50,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
   const parsed = previewSchema.safeParse(body);
   if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Invalid review" }, { status: 400 });
-  const { data: observation, error: readError } = await db.from("price_observations").select("*")
+  const { data: observation, error: readError } = await reviewDb.from("price_observations").select("*")
     .eq("id", id).eq("tenant_id", tenantId).maybeSingle();
   if (readError) return NextResponse.json({ error: readError.message }, { status: 500 });
   if (!observation) return NextResponse.json({ error: "Price observation not found" }, { status: 404 });

@@ -68,7 +68,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   if (parsed.data.project_id) await assertProjectBelongsToTenant(parsed.data.project_id, actor.tenantId);
 
   const db = await createServiceClient();
-  let query = db.from("price_observations").select("*").eq("tenant_id", actor.tenantId);
+  // Generated production types are refreshed only after branch migrations promote.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const priceDb = db as any;
+  let query = priceDb.from("price_observations").select("*").eq("tenant_id", actor.tenantId);
   query = parsed.data.project_id
     ? query.or(`project_id.eq.${parsed.data.project_id},project_id.is.null`)
     : query.is("project_id", null);
@@ -107,7 +110,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (observation.project_id) await assertProjectBelongsToTenant(observation.project_id, actor.tenantId);
 
   const db = await createServiceClient();
-  const { data, error } = await db.from("price_observations").insert({
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const priceDb = db as any;
+  const { data, error } = await priceDb.from("price_observations").insert({
     ...observation,
     tenant_id: actor.tenantId,
     created_by: actor.userId,

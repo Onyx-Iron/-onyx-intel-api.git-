@@ -34,7 +34,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   if (!projectId) return NextResponse.json({ divisions: MASTERFORMAT_DIVISIONS, latest: null });
   await assertProjectBelongsToTenant(projectId, actor.tenantId);
   const db = await createServiceClient();
-  const { data, error } = await db.from("takeoff_scope_requests").select("*").eq("tenant_id", actor.tenantId).eq("project_id", projectId).in("status", ["confirmed", "running", "completed"]).order("created_at", { ascending: false }).limit(1).maybeSingle();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const scopeDb = db as any;
+  const { data, error } = await scopeDb.from("takeoff_scope_requests").select("*").eq("tenant_id", actor.tenantId).eq("project_id", projectId).in("status", ["confirmed", "running", "completed"]).order("created_at", { ascending: false }).limit(1).maybeSingle();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ divisions: MASTERFORMAT_DIVISIONS, latest: data ?? null });
 }
@@ -49,7 +51,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const errors = validateScopeSelection(selection);
   if (errors.length) return NextResponse.json({ error: errors[0] }, { status: 400 });
   const db = await createServiceClient();
-  const { data, error } = await db.from("takeoff_scope_requests").insert({ tenant_id: actor.tenantId, project_id: parsed.data.project_id, requested_by: actor.userId, mode: selection.mode, division_codes: selection.divisionCodes, trade_keys: selection.tradeKeys, bid_package_ids: selection.bidPackageIds, document_ids: selection.documentIds, sheet_ids: selection.sheetIds, alternate_keys: selection.alternateKeys, estimated_work_units: estimateScopeWorkUnits(selection), status: "confirmed", confirmed_at: new Date().toISOString() }).select("*").single();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const scopeDb = db as any;
+  const { data, error } = await scopeDb.from("takeoff_scope_requests").insert({ tenant_id: actor.tenantId, project_id: parsed.data.project_id, requested_by: actor.userId, mode: selection.mode, division_codes: selection.divisionCodes, trade_keys: selection.tradeKeys, bid_package_ids: selection.bidPackageIds, document_ids: selection.documentIds, sheet_ids: selection.sheetIds, alternate_keys: selection.alternateKeys, estimated_work_units: estimateScopeWorkUnits(selection), status: "confirmed", confirmed_at: new Date().toISOString() }).select("*").single();
   if (error) return NextResponse.json({ error: error.message }, { status: 422 });
   return NextResponse.json({ scope: data }, { status: 201 });
 }

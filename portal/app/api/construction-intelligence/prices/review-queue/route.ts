@@ -18,7 +18,9 @@ export async function GET(): Promise<NextResponse> {
     throw error;
   }
   const db = await createServiceClient();
-  const { data, error } = await db.from("price_observations").select("*")
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const priceDb = db as any;
+  const { data, error } = await priceDb.from("price_observations").select("*")
     .eq("tenant_id", tenantId).eq("approval_status", "unreviewed")
     .order("created_at", { ascending: true }).limit(250);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
