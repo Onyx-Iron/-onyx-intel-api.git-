@@ -13,6 +13,13 @@ export const REQUIRED_TAKEOFF_SCHEMA_PATHS = [
   "/takeoff_jobs",
   "/takeoff_job_units",
   "/takeoff_job_events",
+  "/takeoff_source_manifests",
+  "/takeoff_source_lineage",
+  "/project_memberships",
+  "/takeoff_approval_previews",
+  "/takeoff_approval_confirmations",
+  "/takeoff_import_commands",
+  "/takeoff_reconciliation_exceptions",
   "/rpc/apply_vision_extraction_takeoff_items",
   "/rpc/claim_outbox_events",
   "/rpc/complete_outbox_event",
@@ -24,6 +31,8 @@ export const REQUIRED_TAKEOFF_SCHEMA_PATHS = [
   "/rpc/transition_takeoff_state",
   "/rpc/recover_expired_takeoff_units",
   "/rpc/claim_takeoff_work_units",
+  "/rpc/approve_takeoff_source_revision",
+  "/rpc/confirm_takeoff_approval_preview",
 ] as const;
 
 interface OpenApiDocument {
