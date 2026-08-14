@@ -1,8 +1,9 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { uuidSchema } from "@/lib/validation";
+import { assertPermission, getUserRole, PermissionError, redactFinancialFields } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 
@@ -29,7 +30,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       .order("created_at", { ascending: false });
 
     if (error) return NextResponse.json({ error: `[GET /api/equipment-suppliers] ${error.message}` }, { status: 500 });
-    return NextResponse.json({ items: data ?? [] });
+    const role = await getUserRole(tenantId, userId);
+    const items = redactFinancialFields((data ?? []) as unknown as Record<string, unknown>[], role, ["daily_rate", "weekly_rate", "monthly_rate"]);
+    return NextResponse.json({ items });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
@@ -49,6 +52,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const projectId = projectIdResult.data;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "financial", "write");
+    await assertProjectBelongsToTenant(projectId, tenantId);
     const db = await createServiceClient();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -67,6 +72,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (error) return NextResponse.json({ error: `[POST /api/equipment-suppliers] ${error.message}` }, { status: 422 });
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const msg = String(err);
+    return NextResponse.json({ error: msg }, { status: err instanceof PermissionError || msg.includes("does not belong") ? 403 : 500 });
   }
 }

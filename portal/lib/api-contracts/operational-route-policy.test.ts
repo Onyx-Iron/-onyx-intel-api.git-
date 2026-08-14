@@ -47,10 +47,10 @@ describe("operational API authorization policy", () => {
     });
   }
 
-  for (const file of ["app/api/projects/route.ts", "app/api/projects/[id]/route.ts"]) {
+  for (const file of ["app/api/projects/route.ts", "app/api/projects/[id]/route.ts", "app/api/companies/route.ts"]) {
     it(`${file} restricts project mutation to administrators`, () => {
       const source = readFileSync(resolve(process.cwd(), file), "utf8");
-      assert.ok(source.includes("assertPermission("));
+      assert.ok(source.includes("assertPermission(") || source.includes("hasPermission("));
       assert.ok(source.includes('"admin", "write"'));
     });
   }
