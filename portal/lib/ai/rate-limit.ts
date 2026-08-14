@@ -1,5 +1,4 @@
 import { createServiceClient } from "@/lib/supabase/server";
-import { isAdminEmail } from "@/lib/python-api";
 
 /**
  * Per-tenant rate limit for routes that trigger a paid LLM API call. Backed
@@ -7,14 +6,10 @@ import { isAdminEmail } from "@/lib/python-api";
  * are stateless across invocations/instances — an in-memory counter would
  * reset per cold start and wouldn't be shared across concurrent instances.
  *
- * This is a coarse abuse guard, not a precision limiter: it counts rows
- * inserted in the trailing window rather than using a fixed bucket, so it's
- * a true sliding window at the cost of one extra round-trip per call.
- *
- * The admin account (justinatteberry@onyx-iron.com) bypasses this entirely,
- * consistent with the same bypass already applied to the Railway takeoff
- * service (see lib/python-api.ts's isAdminEmail/pythonApiSecret) and to
- * billing/plan limits (tenants.comp_until — see lib/billing/gate.ts).
+ * The database function takes a transaction-scoped advisory lock before it
+ * counts and inserts, so concurrent serverless requests cannot all slip past
+ * the ceiling. Provider-spend protection applies to every account, including
+ * administrators.
  */
 export async function checkAiRateLimit(
   tenantId: string,
@@ -22,32 +17,23 @@ export async function checkAiRateLimit(
   { windowMs, max }: { windowMs: number; max: number },
   email?: string | null,
 ): Promise<{ ok: true } | { ok: false; retryAfterSeconds: number }> {
-  if (isAdminEmail(email)) return { ok: true };
+  void email;
 
   const db = await createServiceClient();
-  const windowStart = new Date(Date.now() - windowMs).toISOString();
-
-  // `ai_rate_limit_hits` is not yet in the generated Supabase types (same
-  // situation as other brand-new tables like `daily_logs`/`cut_fill_surfaces`
-  // elsewhere in this repo) — cast the table name until types are regenerated.
-  const { count, error } = await db
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    .from("ai_rate_limit_hits" as any)
-    .select("id", { count: "exact", head: true })
-    .eq("tenant_id", tenantId)
-    .eq("route", route)
-    .gte("created_at", windowStart);
-
-  // Fail open on a DB error — a rate-limit outage should not take down the
-  // feature itself, and Supabase is already a hard dependency for everything
-  // else these routes do.
-  if (error) return { ok: true };
-
-  if ((count ?? 0) >= max) {
-    return { ok: false, retryAfterSeconds: Math.ceil(windowMs / 1000) };
-  }
-
+  // The RPC is introduced by 20260814_atomic_ai_rate_limits.sql. Cast until
+  // generated database types are refreshed after production migration.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await db.from("ai_rate_limit_hits" as any).insert({ tenant_id: tenantId, route });
+  const { data, error } = await (db as any).rpc("consume_ai_rate_limit", {
+    p_tenant_id: tenantId,
+    p_route: route,
+    p_window_ms: windowMs,
+    p_max_hits: max,
+  });
+
+  // Fail closed when the spend guard is unavailable. A temporary 429 is safer
+  // than allowing an unbounded number of paid provider calls during a DB fault.
+  if (error || data !== true) {
+    return { ok: false, retryAfterSeconds: Math.max(1, Math.ceil(windowMs / 1000)) };
+  }
   return { ok: true };
 }

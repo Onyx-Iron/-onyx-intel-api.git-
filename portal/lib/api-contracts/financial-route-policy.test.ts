@@ -26,6 +26,8 @@ const ROUTES: Array<{ file: string; permissions: string[] }> = [
   { file: "app/api/agents/audit-trails/[id]/decide/route.ts", permissions: ['"financial", "write"'] },
   { file: "app/api/reports/route.ts", permissions: ['"financial", "read"'] },
   { file: "app/api/agents/risk-scout/route.ts", permissions: ['"financial", "read"'] },
+  { file: "app/api/ai/risk-digest/route.ts", permissions: ['"financial", "read"'] },
+  { file: "app/api/status-report/route.ts", permissions: ['"financial", "read"'] },
 ];
 
 describe("financial API authorization policy", () => {

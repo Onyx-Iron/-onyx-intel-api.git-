@@ -6,6 +6,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { getDocTypeByKey } from "@/lib/ai/generatedDocTypes";
 import { createGoogleDocInProjectFolder } from "@/lib/google/projectFolder";
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -48,7 +49,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     await assertPermission(tenantId, userId, "field", "write");
     await assertProjectBelongsToTenant(body.project_id, tenantId);
-
     const docType = body.doc_type ?? "other";
     const typeDef = getDocTypeByKey(docType);
     const system = typeDef?.systemPrompt ?? FALLBACK_SYSTEM;
@@ -58,40 +58,50 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // If source_document_id is provided, pull its parsed summary/pages as context
     let extraContext = "";
     if (body.source_document_id) {
-      try {
-        const ctxDb = await createServiceClient();
-        const { data: src } = await ctxDb
-          .from("documents")
-          .select("file_name, doc_type, meta, page_count")
-          .eq("id", body.source_document_id)
-          .eq("tenant_id", tenantId)
-          .eq("project_id", body.project_id)
-          .single();
-        const { data: pages } = await ctxDb
-          .from("pages")
-          .select("page_number, extracted_text")
-          .eq("document_id", body.source_document_id)
-          .eq("tenant_id", tenantId)
-          .order("page_number")
-          .limit(50);
-        if (src) {
-          const meta = (src.meta ?? {}) as Record<string, unknown>;
-          extraContext += `\n=== Source Document ===\n`;
-          extraContext += `Filename: ${src.file_name}\n`;
-          if (src.doc_type) extraContext += `Type: ${src.doc_type}\n`;
-          if (meta.inferred_title) extraContext += `Title: ${meta.inferred_title}\n`;
-          if (src.page_count) extraContext += `Pages: ${src.page_count}\n`;
-          if (pages && pages.length > 0) {
-            extraContext += "\n--- Page Summaries ---\n";
-            // Cap per-page text to avoid runaway prompt size on big PDFs
-            for (const p of pages) {
-              const txt = (p.extracted_text ?? "").slice(0, 800);
-              extraContext += `\nPage ${p.page_number}: ${txt}\n`;
-              if (extraContext.length > 40_000) break;
-            }
-          }
+      const ctxDb = await createServiceClient();
+      const { data: src, error: srcError } = await ctxDb
+        .from("documents")
+        .select("file_name, doc_type, meta, page_count")
+        .eq("id", body.source_document_id)
+        .eq("tenant_id", tenantId)
+        .eq("project_id", body.project_id)
+        .maybeSingle();
+      if (srcError || !src) {
+        return NextResponse.json({ error: "Source document not found" }, { status: 404 });
+      }
+      const { data: pages, error: pagesError } = await ctxDb
+        .from("pages")
+        .select("page_number, extracted_text")
+        .eq("document_id", body.source_document_id)
+        .eq("tenant_id", tenantId)
+        .order("page_number")
+        .limit(50);
+      if (pagesError) {
+        return NextResponse.json({ error: "Could not load source document pages" }, { status: 500 });
+      }
+      const meta = (src.meta ?? {}) as Record<string, unknown>;
+      extraContext += `\n=== Source Document ===\n`;
+      extraContext += `Filename: ${src.file_name}\n`;
+      if (src.doc_type) extraContext += `Type: ${src.doc_type}\n`;
+      if (meta.inferred_title) extraContext += `Title: ${meta.inferred_title}\n`;
+      if (src.page_count) extraContext += `Pages: ${src.page_count}\n`;
+      if (pages && pages.length > 0) {
+        extraContext += "\n--- Page Summaries ---\n";
+        // Cap per-page text to avoid runaway prompt size on big PDFs
+        for (const p of pages) {
+          const txt = (p.extracted_text ?? "").slice(0, 800);
+          extraContext += `\nPage ${p.page_number}: ${txt}\n`;
+          if (extraContext.length > 40_000) break;
         }
-      } catch { /* best effort — fall back to no source context */ }
+      }
+    }
+
+    const rl = await checkAiRateLimit(tenantId, "generated-docs", { windowMs: 60_000, max: 10 });
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many document generation requests — please slow down." },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
+      );
     }
 
     const fullContext = [body.context, extraContext].filter(Boolean).join("\n\n");

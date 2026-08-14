@@ -9,6 +9,7 @@ import {
 } from "@/lib/project-controls/server";
 import { runDailyLogAssistant } from "@/lib/agents/dailyLogAssistant";
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -30,6 +31,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
     await assertPermission(tenantId, userId, "field", "write");
     await assertProjectBelongsToTenant(projectId, tenantId);
+
+    const rl = await checkAiRateLimit(tenantId, "agents/daily-log-assistant", { windowMs: 60_000, max: 10 });
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many daily-log assistant requests — please slow down." },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
+      );
+    }
 
     const result = await runDailyLogAssistant(tenantId, projectId, date);
     return NextResponse.json(result);

@@ -9,6 +9,7 @@ import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import type { TablesInsert } from "@/lib/supabase/types";
 import { resolveDocumentStorageBucket } from "@/lib/documents/upload";
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -206,6 +207,14 @@ export async function POST(
 
     if (!driveFileId && !storagePath) {
       return NextResponse.json({ error: "Document has no source (no drive_file_id or storage_path)" }, { status: 400 });
+    }
+
+    const rl = await checkAiRateLimit(resolvedTenantId, "documents/ingest", { windowMs: 60_000, max: 10 });
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many document indexing requests — please slow down." },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
+      );
     }
 
     // 1. Download PDF from Drive or Supabase Storage

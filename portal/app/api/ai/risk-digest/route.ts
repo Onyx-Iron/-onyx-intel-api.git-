@@ -5,6 +5,8 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { headerSafe } from "@/lib/http";
 import { logEvent } from "@/lib/activity";
 import { loadProjectKnowledgeSnapshot } from "@/lib/projects/knowledge";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -93,6 +95,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     if (!project_id) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "financial", "read");
     const db = await createServiceClient();
 
     const { data } = await db
@@ -106,7 +109,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json({ digest: data ?? null });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: String(err) }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -120,12 +123,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!project_id) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "financial", "read");
     const db = await createServiceClient();
 
     // Verify project ownership
     const { data: project } = await db
       .from("projects").select("id").eq("id", project_id).eq("tenant_id", tenantId).single();
     if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
+
+    const rl = await checkAiRateLimit(tenantId, "ai/risk-digest", { windowMs: 60_000, max: 5 });
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many risk analysis requests — please slow down." },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
+      );
+    }
 
     const snapshot = await loadProjectKnowledgeSnapshot(tenantId, project_id);
     if (!snapshot) return NextResponse.json({ error: "Could not build the project snapshot. Try again in a moment." }, { status: 500 });
@@ -170,6 +182,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json({ digest: saved });
   } catch (err: unknown) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: String(err) }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

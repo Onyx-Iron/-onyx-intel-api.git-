@@ -9,6 +9,7 @@ import {
 } from "@/lib/project-controls/server";
 import { getLastRiskScoutFindings, runRiskScout } from "@/lib/agents/riskScout";
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -25,6 +26,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
     await assertPermission(tenantId, userId, "financial", "read");
     await assertProjectBelongsToTenant(projectId, tenantId);
+
+    const rl = await checkAiRateLimit(tenantId, "agents/risk-scout", { windowMs: 60_000, max: 5 });
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many risk-scout requests — please slow down." },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
+      );
+    }
 
     const result = await runRiskScout(tenantId, projectId);
     return NextResponse.json(result);

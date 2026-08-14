@@ -51,6 +51,7 @@ const FIELD_WRITE_ROUTES = [
   "app/api/weekly-logs/[id]/generate/route.ts",
   "app/api/marketing/leads/route.ts",
   "app/api/agents/daily-log-assistant/route.ts",
+  "app/api/construction-intelligence/scope/route.ts",
 ];
 
 describe("operational API authorization policy", () => {

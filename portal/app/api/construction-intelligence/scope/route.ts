@@ -5,6 +5,7 @@ import { assertProjectBelongsToTenant, authTenantKey, authTenantName, getOrCreat
 import { createServiceClient } from "@/lib/supabase/server";
 import { estimateScopeWorkUnits, normalizeScopeSelection, validateScopeSelection } from "@/lib/construction-intelligence/scope";
 import { MASTERFORMAT_DIVISIONS } from "@/lib/construction-intelligence/taxonomy";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,18 +43,26 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  const actor = await identity();
-  if (!actor) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const parsed = scopeSchema.safeParse(await req.json().catch(() => null));
-  if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Invalid scope" }, { status: 400 });
-  await assertProjectBelongsToTenant(parsed.data.project_id, actor.tenantId);
-  const selection = normalizeScopeSelection({ mode: parsed.data.mode, divisionCodes: parsed.data.division_codes, tradeKeys: parsed.data.trade_keys, bidPackageIds: parsed.data.bid_package_ids, documentIds: parsed.data.document_ids, sheetIds: parsed.data.sheet_ids, alternateKeys: parsed.data.alternate_keys });
-  const errors = validateScopeSelection(selection);
-  if (errors.length) return NextResponse.json({ error: errors[0] }, { status: 400 });
-  const db = await createServiceClient();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const scopeDb = db as any;
-  const { data, error } = await scopeDb.from("takeoff_scope_requests").insert({ tenant_id: actor.tenantId, project_id: parsed.data.project_id, requested_by: actor.userId, mode: selection.mode, division_codes: selection.divisionCodes, trade_keys: selection.tradeKeys, bid_package_ids: selection.bidPackageIds, document_ids: selection.documentIds, sheet_ids: selection.sheetIds, alternate_keys: selection.alternateKeys, estimated_work_units: estimateScopeWorkUnits(selection), status: "confirmed", confirmed_at: new Date().toISOString() }).select("*").single();
-  if (error) return NextResponse.json({ error: error.message }, { status: 422 });
-  return NextResponse.json({ scope: data }, { status: 201 });
+  try {
+    const actor = await identity();
+    if (!actor) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    await assertPermission(actor.tenantId, actor.userId, "field", "write");
+    const parsed = scopeSchema.safeParse(await req.json().catch(() => null));
+    if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Invalid scope" }, { status: 400 });
+    await assertProjectBelongsToTenant(parsed.data.project_id, actor.tenantId);
+    const selection = normalizeScopeSelection({ mode: parsed.data.mode, divisionCodes: parsed.data.division_codes, tradeKeys: parsed.data.trade_keys, bidPackageIds: parsed.data.bid_package_ids, documentIds: parsed.data.document_ids, sheetIds: parsed.data.sheet_ids, alternateKeys: parsed.data.alternate_keys });
+    const errors = validateScopeSelection(selection);
+    if (errors.length) return NextResponse.json({ error: errors[0] }, { status: 400 });
+    const db = await createServiceClient();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const scopeDb = db as any;
+    const { data, error } = await scopeDb.from("takeoff_scope_requests").insert({ tenant_id: actor.tenantId, project_id: parsed.data.project_id, requested_by: actor.userId, mode: selection.mode, division_codes: selection.divisionCodes, trade_keys: selection.tradeKeys, bid_package_ids: selection.bidPackageIds, document_ids: selection.documentIds, sheet_ids: selection.sheetIds, alternate_keys: selection.alternateKeys, estimated_work_units: estimateScopeWorkUnits(selection), status: "confirmed", confirmed_at: new Date().toISOString() }).select("*").single();
+    if (error) return NextResponse.json({ error: error.message }, { status: 422 });
+    return NextResponse.json({ scope: data }, { status: 201 });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: error instanceof PermissionError ? 403 : 500 },
+    );
+  }
 }

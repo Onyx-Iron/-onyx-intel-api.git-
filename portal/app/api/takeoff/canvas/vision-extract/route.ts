@@ -9,6 +9,7 @@ import { runRfiDrafterAgent } from "@/lib/agents/rfi-drafter";
 import { validateTextQuantityCandidate } from "@/lib/takeoff/quantity-validation";
 import { advanceTakeoffPageJob, createGovernedPageContext } from "@/lib/takeoff/governance-server";
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
@@ -129,6 +130,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: error instanceof PermissionError ? 403 : 500 },
     );
   }
+
   const db = await createServiceClient();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -142,6 +144,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (page.vision_extractions && !body.force) {
     const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, page.document_id ?? null, body.page_id);
     return NextResponse.json({ result: page.vision_extractions as VisionResult, cached: true, takeoffItems });
+  }
+
+  const rl = await checkAiRateLimit(tenantId, "takeoff/canvas/vision-extract", { windowMs: 60_000, max: 5 });
+  if (!rl.ok) {
+    return NextResponse.json(
+      { error: "Too many vision extraction requests — please slow down." },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
+    );
   }
 
   // Download page PDF bytes

@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { NoProviderError, availableProviders } from "@/lib/ai/providers";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { generateProjectStatusReport } from "@/lib/reports/project-status";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -20,6 +22,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!project_id) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "financial", "read");
+    const rl = await checkAiRateLimit(tenantId, "status-report", { windowMs: 60_000, max: 5 });
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many status report requests — please slow down." },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
+      );
+    }
     let result;
     try {
       result = await generateProjectStatusReport(tenantId, project_id);
@@ -42,6 +52,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[POST /api/status-report] ${msg}` }, { status: 502 });
+    return NextResponse.json({ error: `[POST /api/status-report] ${msg}` }, { status: err instanceof PermissionError ? 403 : 502 });
   }
 }

@@ -6,6 +6,7 @@ import { authTenantKey, authTenantName, getOrCreateTenant } from "@/lib/project-
 import { generateProjectStatusReport } from "@/lib/reports/project-status";
 import { createServiceClient } from "@/lib/supabase/server";
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -65,6 +66,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     await assertPermission(tenantId, userId, "financial", "read");
     const db = await createServiceClient();
+
+    const rl = await checkAiRateLimit(tenantId, "reports/generate", { windowMs: 60_000, max: 5 });
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many report generation requests — please slow down." },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
+      );
+    }
 
     let generated;
     try {

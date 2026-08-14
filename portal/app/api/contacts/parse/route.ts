@@ -1,6 +1,9 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { generateText, NoProviderError, availableProviders } from "@/lib/ai/providers";
+import { authTenantKey, authTenantName, getOrCreateTenant } from "@/lib/project-controls/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -22,12 +25,22 @@ interface ParsedContact {
  */
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
-    const { userId } = await auth();
+    const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const { text } = await req.json() as { text?: string };
     if (!text?.trim()) return NextResponse.json({ error: "text is required" }, { status: 400 });
     if (text.length > 40000) return NextResponse.json({ error: "Text too long (40k char max)" }, { status: 413 });
+
+    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "read");
+    const rl = await checkAiRateLimit(tenantId, "contacts/parse", { windowMs: 60_000, max: 10 });
+    if (!rl.ok) {
+      return NextResponse.json(
+        { error: "Too many contact parsing requests — please slow down." },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
+      );
+    }
 
     let result;
     try {
@@ -64,6 +77,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ contacts, provider: result.provider });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[POST /api/contacts/parse] ${msg}` }, { status: 502 });
+    return NextResponse.json({ error: `[POST /api/contacts/parse] ${msg}` }, { status: err instanceof PermissionError ? 403 : 502 });
   }
 }
