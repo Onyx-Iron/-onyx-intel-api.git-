@@ -8,6 +8,7 @@ import { runScopeGapAgent } from "@/lib/agents/scope-gap";
 import { runRfiDrafterAgent } from "@/lib/agents/rfi-drafter";
 import { validateTextQuantityCandidate } from "@/lib/takeoff/quantity-validation";
 import { advanceTakeoffPageJob, createGovernedPageContext } from "@/lib/takeoff/governance-server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
@@ -120,6 +121,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!body.page_id) return NextResponse.json({ error: "page_id required" }, { status: 400 });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  try {
+    await assertPermission(tenantId, userId, "field", "write");
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: error instanceof PermissionError ? 403 : 500 },
+    );
+  }
   const db = await createServiceClient();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

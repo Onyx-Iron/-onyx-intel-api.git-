@@ -8,6 +8,7 @@ import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import type { TablesInsert } from "@/lib/supabase/types";
 import { resolveDocumentStorageBucket } from "@/lib/documents/upload";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -176,6 +177,7 @@ export async function POST(
     const accessToken = body.access_token; // optional — server falls back to stored token
 
     tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     // Narrowed const, since `tenantId` is captured by the markError() closure above,
     // which blocks TS's normal control-flow narrowing of the `let` for the rest of this function.
     const resolvedTenantId: string = tenantId;
@@ -388,7 +390,7 @@ export async function POST(
     console.error(`[ingest ${docId}] ${msg}`);
     return NextResponse.json(
       { error: `[POST /api/documents/${docId}/ingest] ${msg}` },
-      { status: 500 },
+      { status: err instanceof PermissionError ? 403 : 500 },
     );
   }
 }

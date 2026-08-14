@@ -4,7 +4,8 @@ import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { headerSafe } from "@/lib/http";
 import { pythonApiHeaders } from "@/lib/python-api";
 import { checkAiRateLimit } from "@/lib/ai/rate-limit";
-import { authTenantKey, authTenantName, getOrCreateTenant } from "@/lib/project-controls/server";
+import { assertProjectBelongsToTenant, authTenantKey, authTenantName, getOrCreateTenant } from "@/lib/project-controls/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
 
@@ -35,6 +36,8 @@ export async function POST(req: NextRequest): Promise<Response> {
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const projectId  = req.nextUrl.searchParams.get("project_id") ?? "";
+    await assertPermission(tenantId, userId, "field", "write");
+    if (projectId) await assertProjectBelongsToTenant(projectId, tenantId);
     const aiFallback = req.nextUrl.searchParams.get("ai_fallback") === "true";
     const streaming  = req.nextUrl.searchParams.get("stream") === "true";
 
@@ -52,7 +55,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     return await runDeterministicExtract(req, tenantId, projectId, email);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[takeoff/extract] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[takeoff/extract] ${msg}` }, { status: err instanceof PermissionError || msg.includes("does not belong") ? 403 : 500 });
   }
 }
 

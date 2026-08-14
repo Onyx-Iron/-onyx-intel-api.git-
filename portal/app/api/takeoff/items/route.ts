@@ -10,6 +10,7 @@ import { takeoffItemsSchema, parseBody } from "@/lib/validation";
 import { recordTakeoffHistory, recordTakeoffHistoryBatch } from "@/lib/takeoff/history";
 import type { Json } from "@/lib/supabase/types";
 import { automatedIntakeControlFields } from "@/lib/takeoff/intake-policy";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 import { advanceTakeoffPageJob, createGovernedDocumentContext, createGovernedPageContext, type GovernedPageContext } from "@/lib/takeoff/governance-server";
 import {
   validateExtractorQuantityCandidate,
@@ -72,6 +73,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const { project_id, rows } = validation.data;
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
 
     // project_id is client-supplied — never trust it without verifying it
     // actually belongs to the caller's own tenant before using it to scope
@@ -292,7 +294,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ items: data ?? [], skipped: prepared.skipped, estimate_synced: null, approval_required: true }, { status: 201 });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[POST /api/takeoff/items] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[POST /api/takeoff/items] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
 
@@ -307,6 +309,8 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     if (!project_id) return NextResponse.json({ error: "project_id is required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
+    await assertProjectBelongsToTenant(project_id, tenantId);
     const db = await createServiceClient();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const anyDb = db as any;
@@ -330,6 +334,6 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[DELETE /api/takeoff/items] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[DELETE /api/takeoff/items] ${msg}` }, { status: err instanceof PermissionError || msg.includes("does not belong") ? 403 : 500 });
   }
 }

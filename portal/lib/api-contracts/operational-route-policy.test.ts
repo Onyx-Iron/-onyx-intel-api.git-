@@ -16,6 +16,12 @@ const FIELD_WRITE_ROUTES = [
   "app/api/weekly-logs/[id]/route.ts",
   "app/api/co-inspections/route.ts",
   "app/api/co-inspections/[id]/route.ts",
+  "app/api/documents/upload/route.ts",
+  "app/api/documents/[id]/ingest/route.ts",
+  "app/api/takeoff/from-document/route.ts",
+  "app/api/takeoff/extract/route.ts",
+  "app/api/takeoff/items/route.ts",
+  "app/api/takeoff/canvas/vision-extract/route.ts",
 ];
 
 describe("operational API authorization policy", () => {

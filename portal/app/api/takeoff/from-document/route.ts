@@ -9,6 +9,7 @@ import { pythonApiHeaders } from "@/lib/python-api";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import { pageSplitPipelineHealthy } from "@/lib/documents/pageSplitHealth";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
 // Aligned with the Supabase Edge Functions — see `page-split-worker/index.ts`.
@@ -45,6 +46,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     const { data: doc, error } = await db
@@ -359,6 +361,6 @@ export async function POST(req: NextRequest): Promise<Response> {
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[from-document] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[from-document] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }

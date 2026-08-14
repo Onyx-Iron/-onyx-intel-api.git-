@@ -12,6 +12,7 @@ import {
   LOCAL_DOCUMENT_BUCKET,
   LOCAL_DOCUMENT_MAX_BYTES,
 } from "@/lib/documents/upload";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -42,6 +43,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await createServiceClient();
 
     const contentType = req.headers.get("content-type") ?? "";
@@ -215,7 +217,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ upload_url });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `[POST /api/documents/upload] ${msg}` }, { status: 500 });
+    return NextResponse.json({ error: `[POST /api/documents/upload] ${msg}` }, { status: err instanceof PermissionError ? 403 : 500 });
   }
 }
 
