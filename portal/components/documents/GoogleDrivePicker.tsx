@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-
 import { useToast } from "@/components/common/Toast";
+import type { GooglePickerResponse } from "@/lib/google/window";
 
 interface DriveFile {
   id: string;
@@ -17,14 +17,12 @@ interface Props {
   children: React.ReactNode;
 }
 
-import type { GooglePickerResponse } from "@/lib/google/window";
-
 const CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? "";
-const API_KEY   = process.env.NEXT_PUBLIC_GOOGLE_API_KEY ?? "";
-// drive.file (not drive.readonly): recommended for the Picker, NOT a restricted
-// scope — so Workspace orgs that block restricted scopes don't auto-close consent.
+const API_KEY = process.env.NEXT_PUBLIC_GOOGLE_API_KEY ?? "";
+// drive.file (not drive.readonly): recommended for the Picker, not a restricted
+// scope, so Workspace orgs that block restricted scopes don't auto-close consent.
 // Grants the app access only to the files the user actually picks.
-const SCOPES    = "https://www.googleapis.com/auth/drive.file";
+const SCOPES = "https://www.googleapis.com/auth/drive.file";
 
 const ALLOWED_MIMES = [
   "application/pdf",
@@ -68,9 +66,7 @@ export default function GoogleDrivePicker({ onFilesSelected, disabled, children 
       return;
     }
 
-    const view = new pickerApi.DocsView()
-      .setMimeTypes(ALLOWED_MIMES);
-
+    const view = new pickerApi.DocsView().setMimeTypes(ALLOWED_MIMES);
     const picker = new pickerApi.PickerBuilder()
       .addView(view)
       .enableFeature(pickerApi.Feature.MULTISELECT_ENABLED)
@@ -89,7 +85,7 @@ export default function GoogleDrivePicker({ onFilesSelected, disabled, children 
 
     picker.setVisible(true);
     setLoading(false);
-  }, []);
+  }, [toast]);
 
   const requestToken = useCallback(() => {
     if (!tokenClientRef.current) {
@@ -106,29 +102,32 @@ export default function GoogleDrivePicker({ onFilesSelected, disabled, children 
         callback: (resp) => {
           if (resp.access_token) {
             accessTokenRef.current = resp.access_token;
-            // Load picker API then open
             window.gapi?.load("picker", () => openPicker(resp.access_token!));
           } else if (resp.error) {
             setLoading(false);
-            toast({ title: String(`Google sign-in failed: ${resp.error}. If it closes immediately, your Google Workspace may be blocking app access — tell me and I'll walk you through trusting the app.`), kind: "error" });
+            toast({
+              title: String(`Google sign-in failed: ${resp.error}.`),
+              description: "Click Connect Google in the project header or Documents tab, then open Import from Drive again.",
+              kind: "error",
+            });
           }
           setLoading(false);
         },
         error_callback: (err: { type?: string; message?: string }) => {
           setLoading(false);
           if (err?.type !== "popup_closed") {
-            toast({ title: String(`Google Drive connection error: ${err?.message ?? err?.type ?? "unknown"}.`), kind: "error" });
+            toast({
+              title: String(`Google Drive connection error: ${err?.message ?? err?.type ?? "unknown"}.`),
+              description: "Click Connect Google in the project header or Documents tab, then open Import from Drive again.",
+              kind: "error",
+            });
           }
         },
       });
     }
     tokenClientRef.current?.requestAccessToken();
-  }, [openPicker]);
+  }, [openPicker, toast]);
 
-  // Preload Google's scripts on mount. The OAuth popup must open synchronously
-  // inside the click event — if we instead load scripts on click and open the
-  // popup from their async onload, the browser blocks it (silently). Preloading
-  // means the scripts are ready by click time, so the popup opens in the gesture.
   useEffect(() => {
     loadScript("https://apis.google.com/js/api.js", () => { window.__gapiLoaded = true; });
     loadScript("https://accounts.google.com/gsi/client", () => { window.__gisLoaded = true; });
@@ -137,27 +136,24 @@ export default function GoogleDrivePicker({ onFilesSelected, disabled, children 
   const handleClick = useCallback(() => {
     if (disabled || loading) return;
 
-    // Already have a token → just (re)open the picker.
     if (accessTokenRef.current && window.gapi) {
       setLoading(true);
       window.gapi.load("picker", () => openPicker(accessTokenRef.current!));
       return;
     }
 
-    // Scripts not ready yet (clicked within a split-second of page load).
     if (!window.google?.accounts?.oauth2) {
-      toast({ title: String("Still connecting to Google Drive — give it a second and click again."), kind: "info" });
+      toast({
+        title: String("Still connecting to Google Drive."),
+        description: "Give it a second, then click Connect Google or Import from Drive again.",
+        kind: "info",
+      });
       return;
     }
 
-    // Request the token NOW, synchronously, so the sign-in popup isn't blocked.
     setLoading(true);
     requestToken();
-  }, [disabled, loading, openPicker, requestToken]);
+  }, [disabled, loading, openPicker, requestToken, toast]);
 
-  return (
-    <div onClick={handleClick} className="contents cursor-pointer">
-      {children}
-    </div>
-  );
+  return <div onClick={handleClick} className="contents cursor-pointer">{children}</div>;
 }

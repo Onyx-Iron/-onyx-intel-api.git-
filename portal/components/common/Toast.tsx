@@ -10,11 +10,18 @@ export interface ToastOptions {
   description?: string;
   kind?: ToastKind;
   duration?: number;
+  actionLabel?: string;
+  onAction?: () => void;
 }
 
-interface ToastItem extends Required<Omit<ToastOptions, "description">> {
+interface ToastItem {
   id: string;
+  title: string;
+  kind: ToastKind;
+  duration: number;
   description?: string;
+  actionLabel?: string;
+  onAction?: () => void;
 }
 
 interface ToastContextValue {
@@ -28,11 +35,9 @@ const ToastContext = createContext<ToastContextValue | null>(null);
 export function useToast() {
   const ctx = useContext(ToastContext);
   if (!ctx) {
-    // Graceful fallback so calls outside provider don't crash the app.
     return {
       toast: (opts: ToastOptions) => {
         if (typeof window !== "undefined") {
-           
           console.warn("[toast]", opts.title, opts.description ?? "");
         }
       },
@@ -52,8 +57,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 
   const toast = useCallback((opts: ToastOptions) => {
     const kind: ToastKind = opts.kind ?? "info";
-    const duration =
-      opts.duration ?? (kind === "error" ? 6000 : 4000);
+    const duration = opts.duration ?? (kind === "error" ? 6000 : 4000);
     const id =
       typeof crypto !== "undefined" && "randomUUID" in crypto
         ? crypto.randomUUID()
@@ -64,6 +68,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       description: opts.description,
       kind,
       duration,
+      actionLabel: opts.actionLabel,
+      onAction: opts.onAction,
     };
     setItems((prev) => [...prev, item].slice(-10));
     if (duration > 0) {
@@ -98,8 +104,10 @@ export function Toaster() {
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setMounted(true);
+    const timer = window.setTimeout(() => {
+      setMounted(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   if (!ctx || !mounted || typeof document === "undefined") return null;
@@ -128,13 +136,21 @@ export function Toaster() {
                 {icon}
               </div>
               <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium text-white">
-                  {t.title}
-                </div>
+                <div className="truncate text-sm font-medium text-white">{t.title}</div>
                 {t.description ? (
-                  <div className="mt-0.5 text-xs text-white/60 break-words">
-                    {t.description}
-                  </div>
+                  <div className="mt-0.5 break-words text-xs text-white/60">{t.description}</div>
+                ) : null}
+                {t.actionLabel && t.onAction ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      t.onAction?.();
+                      ctx.dismiss(t.id);
+                    }}
+                    className="mt-2 inline-flex h-7 items-center rounded-full border border-white/10 bg-white/[0.03] px-3 text-[10px] font-bold uppercase tracking-widest text-white/75 hover:border-white/25 hover:text-white"
+                  >
+                    {t.actionLabel}
+                  </button>
                 ) : null}
               </div>
               <button

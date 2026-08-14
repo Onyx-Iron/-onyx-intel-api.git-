@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { CalendarDays, Plus, Sparkles, ChevronDown, ChevronRight, Trash2, Pencil } from "lucide-react";
 import UniversalImportButton from "@/components/common/UniversalImportButton";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
@@ -74,12 +75,12 @@ function thisWeekRange(): { start: string; end: string } {
 }
 
 function fmtDate(d: string | null): string {
-  if (!d) return "—";
+  if (!d) return "-";
   return new Date(d + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
 function fmtRange(start: string, end: string): string {
-  return `${fmtDate(start)} → ${fmtDate(end)}`;
+  return `${fmtDate(start)} -> ${fmtDate(end)}`;
 }
 
 const EMPTY_FORM: FormState = {
@@ -111,11 +112,17 @@ export default function WeeklyLogTab({ projectId }: { projectId: string }) {
         setLogs(d.logs ?? []);
         setLoading(false);
       })
-      .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
+      .catch((e) => { setError(e?.message ?? "Could not load weekly logs. Refresh the page and try again."); setLoading(false); });
   }, [projectId]);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, [load]);
+  useProjectSyncRefresh(load);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   const importLogs = useBulkImport<{
     project_id: string; week_start: string; week_end: string;
@@ -200,13 +207,13 @@ export default function WeeklyLogTab({ projectId }: { projectId: string }) {
           });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Save failed (${res.status})`);
+        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Could not save this weekly log (${res.status}). Check the form and try again.`);
         return;
       }
       cancelForm();
       load();
     } catch {
-      setErrorMsg("Network error — could not reach the server.");
+      setErrorMsg("Could not reach the server just now. Please try again in a moment.");
     } finally {
       setSubmitting(false);
     }
@@ -226,7 +233,7 @@ export default function WeeklyLogTab({ projectId }: { projectId: string }) {
       });
       if (!createRes.ok) {
         const d = await createRes.json().catch(() => ({}));
-        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Create failed (${createRes.status})`);
+        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Could not create this weekly log (${createRes.status}). Try again in a moment.`);
         return;
       }
       const j = await createRes.json() as { log?: { id?: string } };
@@ -243,13 +250,13 @@ export default function WeeklyLogTab({ projectId }: { projectId: string }) {
       const res = await fetch(`/api/weekly-logs/${encodeURIComponent(id)}/generate`, { method: "POST" });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `AI generation failed (${res.status})`);
+        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Could not generate the AI summary (${res.status}). Try again in a moment.`);
         return;
       }
       setExpanded((e) => ({ ...e, [id]: true }));
       load();
     } catch {
-      setErrorMsg("Network error during AI generation.");
+      setErrorMsg("Could not generate that weekly summary just now. Please try again in a moment.");
     } finally {
       setGeneratingId(null);
     }
@@ -257,15 +264,18 @@ export default function WeeklyLogTab({ projectId }: { projectId: string }) {
 
   const deleteLog = async (id: string) => {
     if (!(await confirm({ title: String("Delete this weekly log?"), destructive: true }))) return;
+    const prevLogs = logs;
     setLogs((prev) => prev.filter((l) => l.id !== id));
     try {
       const res = await fetch(`/api/weekly-logs/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (!res.ok) {
-        setErrorMsg(`Delete failed (${res.status}) — refreshing list.`);
+        setLogs(prevLogs);
+        setErrorMsg(`Could not delete this weekly log (${res.status}). Refreshing the list now.`);
         load();
       }
     } catch {
-      setErrorMsg("Network error — could not delete.");
+      setLogs(prevLogs);
+      setErrorMsg("Could not delete that weekly log just now. Refresh the list and try again in a moment.");
       load();
     }
   };
@@ -289,7 +299,7 @@ export default function WeeklyLogTab({ projectId }: { projectId: string }) {
           <div className="flex items-center gap-2">
             <CalendarDays size={12} className="text-[#CCFF00]" />
             <span className="text-[11px] uppercase tracking-widest text-gray-400">Weekly Logs</span>
-            <span className="text-[9px] text-gray-700 uppercase tracking-widest">— {logs.length} report{logs.length === 1 ? "" : "s"}</span>
+            <span className="text-[9px] text-gray-700 uppercase tracking-widest">- {logs.length} report{logs.length === 1 ? "" : "s"}</span>
           </div>
           <div className="flex items-center gap-2">
             <UniversalImportButton
@@ -303,7 +313,7 @@ export default function WeeklyLogTab({ projectId }: { projectId: string }) {
               className="flex items-center gap-1.5 bg-[#00D2FF]/10 border border-[#00D2FF]/30 text-[#00D2FF] hover:bg-[#00D2FF]/20 rounded-lg px-4 py-2 text-[11px] font-bold tracking-widest uppercase transition-colors disabled:opacity-50"
             >
               <Sparkles size={11} />
-              {generatingId ? "Generating…" : "Generate This Week"}
+              {generatingId ? "Generating..." : "Generate This Week"}
             </button>
             <button
               onClick={() => openAdd(thisWeekRange())}
@@ -325,13 +335,15 @@ export default function WeeklyLogTab({ projectId }: { projectId: string }) {
             ))
           ) : logs.length === 0 && !error ? (
             <div className="py-4">
-              <EmptyState
-                icon={<CalendarDays className="w-6 h-6" />}
-                title="No weekly logs yet"
-                description="Roll up daily logs into a weekly summary for owners and stakeholders."
-                actionLabel="New Weekly Log"
-                onAction={() => openAdd(thisWeekRange())}
-              />
+          <EmptyState
+            icon={<CalendarDays className="w-6 h-6" />}
+            title="No weekly logs yet"
+            description="Turn daily logs into a weekly summary for owners and stakeholders, or create a new week and fill it in by hand."
+            actionLabel="New Weekly Log"
+            onAction={() => openAdd(thisWeekRange())}
+            secondaryLabel="View projects"
+            secondaryHref="/dashboard/projects"
+          />
             </div>
           ) : (
             logs.map((log) => {
@@ -358,7 +370,7 @@ export default function WeeklyLogTab({ projectId }: { projectId: string }) {
                         className="text-[10px] uppercase tracking-widest text-[#00D2FF] hover:text-white transition-colors disabled:opacity-50"
                         title="Regenerate AI summary"
                       >
-                        {generatingId === log.id ? "…" : "Generate"}
+                        {generatingId === log.id ? "..." : "Generate"}
                       </button>
                       <button type="button" aria-label="Edit weekly log" onClick={() => openEdit(log)} className="min-h-[40px] text-gray-600 hover:text-white transition-colors" title="Edit">
                         <Pencil size={12} />
@@ -374,12 +386,12 @@ export default function WeeklyLogTab({ projectId }: { projectId: string }) {
                       {log.summary ? (
                         <div className="rounded-lg border border-[#CCFF00]/20 bg-[#CCFF00]/[0.03] p-4">
                           <p className="text-[9px] uppercase tracking-widest text-[#CCFF00] mb-2">
-                            AI Summary {log.generated_at ? `· ${new Date(log.generated_at).toLocaleString()}` : ""}
+                            AI Summary {log.generated_at ? `- ${new Date(log.generated_at).toLocaleString()}` : ""}
                           </p>
                           <pre className="whitespace-pre-wrap text-xs text-gray-300 font-sans leading-relaxed">{log.summary}</pre>
                         </div>
                       ) : (
-                        <p className="text-[10px] uppercase tracking-widest text-gray-600">No AI summary yet — click Generate.</p>
+                        <p className="text-[10px] uppercase tracking-widest text-gray-600">No summary yet. Click Generate to create one, or add details now and generate later.</p>
                       )}
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
@@ -434,7 +446,7 @@ export default function WeeklyLogTab({ projectId }: { projectId: string }) {
                 <label className="block text-[10px] uppercase tracking-widest text-gray-600 mb-1.5">Schedule Status</label>
                 <textarea value={form.schedule_status}
                   onChange={(e) => setForm((f) => ({ ...f, schedule_status: e.target.value }))}
-                  className={textareaCls} placeholder="On track / behind / ahead — brief note" />
+                  className={textareaCls} placeholder="On track / behind / ahead - short note" />
               </div>
               <div>
                 <label className="block text-[10px] uppercase tracking-widest text-gray-600 mb-1.5">Budget Status</label>
@@ -470,7 +482,7 @@ export default function WeeklyLogTab({ projectId }: { projectId: string }) {
             <div className="flex items-center gap-3 pt-2">
               <button type="submit" disabled={submitting}
                 className="bg-[#CCFF00]/10 border border-[#CCFF00]/30 text-[#CCFF00] hover:bg-[#CCFF00]/20 rounded-lg px-4 py-2 text-[11px] font-bold tracking-widest uppercase transition-colors disabled:opacity-50">
-                {submitting ? "Saving…" : editId ? "Save Changes" : "Create Week"}
+                {submitting ? "Saving..." : editId ? "Save Changes" : "Create Week"}
               </button>
               <button type="button" onClick={cancelForm}
                 className="bg-white/5 border border-white/10 text-gray-400 hover:bg-white/10 rounded-lg px-4 py-2 text-[11px] uppercase tracking-widest transition-colors min-h-[40px] focus-visible:ring-2 focus-visible:ring-[#CCFF00]/40">

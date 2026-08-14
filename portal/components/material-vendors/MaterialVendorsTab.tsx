@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { Package, Plus } from "lucide-react";
 import UniversalImportButton from "@/components/common/UniversalImportButton";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
@@ -19,7 +20,6 @@ function pickField(row: Record<string, string | number | null>, keys: string[]):
   }
   return null;
 }
-
 interface Vendor {
   id: string;
   name: string;
@@ -32,7 +32,6 @@ interface Vendor {
   lead_time_days: number | null;
   notes: string | null;
 }
-
 interface FormState {
   name: string;
   category: string;
@@ -44,7 +43,6 @@ interface FormState {
   lead_time_days: string;
   notes: string;
 }
-
 const EMPTY_FORM: FormState = {
   name: "", category: "", contact_name: "", contact_email: "", contact_phone: "",
   unit_price: "", unit: "", lead_time_days: "", notes: "",
@@ -77,7 +75,7 @@ export default function MaterialVendorsTab({ projectId }: { projectId: string })
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true);
     setError(null);
     fetch(`/api/material-vendors?project_id=${encodeURIComponent(projectId)}`)
@@ -87,11 +85,17 @@ export default function MaterialVendorsTab({ projectId }: { projectId: string })
         setItems(data.items ?? []);
         setLoading(false);
       })
-      .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
-  };
+      .catch((e) => { setError(e?.message ?? "Could not load material vendors. Refresh the page and try again."); setLoading(false); });
+  }, [projectId]);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, [projectId]);
+  useProjectSyncRefresh(load);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   const importItems = useBulkImport<{ project_id: string; name: string; category: string | null; contact_name: string | null; contact_email: string | null; contact_phone: string | null; unit_price: number | null; unit: string | null; lead_time_days: number | null; notes: string | null }>(projectId, {
     endpoint: "/api/material-vendors",
@@ -165,13 +169,13 @@ export default function MaterialVendorsTab({ projectId }: { projectId: string })
           });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Save failed (${res.status})`);
+        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Could not save this vendor (${res.status}). Check the form and try again.`);
         return;
       }
       cancelForm();
       load();
     } catch {
-      setErrorMsg("Network error — could not reach the server.");
+      setErrorMsg("Could not reach the server just now. Please try again in a moment.");
     } finally {
       setSubmitting(false);
     }
@@ -179,12 +183,14 @@ export default function MaterialVendorsTab({ projectId }: { projectId: string })
 
   const deleteItem = async (id: string) => {
     if (!(await confirm({ title: String("Delete this vendor?"), destructive: true }))) return;
+    const prevItems = items;
     setItems((prev) => prev.filter((i) => i.id !== id));
     try {
       const res = await fetch(`/api/material-vendors/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, { method: "DELETE" });
-      if (!res.ok) { setErrorMsg(`Delete failed (${res.status})`); load(); }
+      if (!res.ok) { setItems(prevItems); setErrorMsg(`Could not delete that vendor (${res.status}). Refresh the list and try again.`); load(); }
     } catch {
-      setErrorMsg("Network error — could not delete.");
+      setItems(prevItems);
+      setErrorMsg("Could not delete that vendor just now. Refresh the list and try again in a moment.");
       load();
     }
   };
@@ -235,9 +241,11 @@ export default function MaterialVendorsTab({ projectId }: { projectId: string })
                     <EmptyState
                       icon={<Package className="w-6 h-6" />}
                       title="No material vendors yet"
-                      description="Track material suppliers, lead times, and pricing."
+                      description="Track material suppliers, lead times, and pricing so the same vendors are easy to reuse on future projects."
                       actionLabel="Add Vendor"
                       onAction={openAdd}
+                      secondaryLabel="View projects"
+                      secondaryHref="/dashboard/projects"
                     />
                   </div>
                 </td></tr>
@@ -245,13 +253,13 @@ export default function MaterialVendorsTab({ projectId }: { projectId: string })
                 items.map((v) => (
                   <tr key={v.id} className="hover:bg-white/[0.02] transition-colors group">
                     <td className="px-4 py-3 text-white text-xs">{v.name}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs">{v.category ?? "—"}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs">{v.contact_name ?? "—"}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs">{v.contact_email ?? "—"}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs">{v.contact_phone ?? "—"}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs font-mono">{v.unit_price == null ? "—" : `$${v.unit_price}`}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs">{v.unit ?? "—"}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs">{v.lead_time_days == null ? "—" : `${v.lead_time_days}d`}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs">{v.category ?? "-"}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs">{v.contact_name ?? "-"}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs">{v.contact_email ?? "-"}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs">{v.contact_phone ?? "-"}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs font-mono">{v.unit_price == null ? "-" : `$${v.unit_price}`}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs">{v.unit ?? "-"}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs">{v.lead_time_days == null ? "-" : `${v.lead_time_days}d`}</td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button type="button" aria-label="Edit vendor" onClick={() => openEdit(v)} className="min-h-[40px] text-white/55 hover:text-white">

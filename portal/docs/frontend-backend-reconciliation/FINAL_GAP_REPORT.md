@@ -1,46 +1,33 @@
 # Final gap report — frontend/backend reconciliation (Phases 1–6)
 
+> Current-state notice (2026-08-14): this is a historical phase report. Its
+> old branch, test-count, browser-availability, and launch-readiness claims are
+> superseded by `docs/LAUNCH_READINESS.md` and the fail-closed `npm run launch`
+> evidence. In particular, takeoff certification, Paddle, preview/canary QA,
+> and production migrations remain required release blockers.
+
 Branch `feature/frontend-backend-reconciliation`, PR #4 (draft, undeployed).
 This report separates what's real and working from what's genuinely missing,
 across the whole engagement — not just Phase 4.
 
-## Working (real backend, wired, verified)
+## 2026-08-04 launch-readiness update
 
-| Area | Evidence |
-|---|---|
-| Command Center | Deduplicated single implementation, tenant-wide |
-| Takeoff (project + global) | Canvas, vector extraction, calibration, quantity math — 33 unit tests passing |
-| Estimating (project + global) | Full matrix, roll-up math, QC report — 17 unit tests passing |
-| Documents | Upload, Drive picker, split/OCR/vector/takeoff pipeline, per-stage status UI, now with real `last_error`/`last_error_step` wiring |
-| Contacts & Companies, Price Book | Real tables/APIs, project-scoped |
-| Procurement (project + global) | RFQ → vendor bid → award → PO, tenant-isolation bug fixed (`purchase_orders` was missing `tenant_id` filter), 6/6 integration tests |
-| Civil Intelligence (project + global cut/fill only) | Real mass-haul math; pipe runs/entrances/stockpiles/material ledger remain project-only (see gap below) |
-| Financials (project + global) | Invoices (AR/AP) + lien waivers, financial-read redaction closed on both endpoints |
-| Project Controls (RFIs/Submittals/Change Orders) | Confirmed live in Phase 1, 10/10 integration tests |
-| AI Workforce | Tenant-wide agent approval feed, real audit trail, already fully wired before this engagement touched it |
-| Marketing | Tenant-wide campaigns/leads, already fully wired |
-| Schema/migrations | Empty-DB replay reproduces production exactly (88=88 tables, identical security-advisor findings); 9 legacy pre-CLI SQL files reconciled |
-| Integration test safety | Guard fails closed against production, isolated branch confirmed working, 21/21 passing, zero residual data |
-| TypeScript/lint | Zero errors, zero warnings-that-are-errors, across the whole portal (excluding Deno Edge Functions, which are a different runtime) |
-| Env var handling | Fails closed with a clear message instead of silently forwarding blank values (the recurring class of bug behind a prior production incident) |
+The three workspaces below are now implemented in the current working tree and
+no longer belong in the "Unavailable" bucket:
 
-## Partially working (real backend, incomplete scope)
+- Reports: persisted `report_runs`, `/api/reports`, `/api/reports/[id]`, and
+  `/dashboard/reports` with generation history and Markdown export.
+- Project Management: `/api/project-management/overview` and
+  `/dashboard/project-management` aggregate RFIs, submittals, change orders,
+  schedule tasks, daily/weekly logs, punch list, and staff across projects.
+- Preconstruction: `bid_opportunities`, `/api/preconstruction/opportunities`,
+  `/api/preconstruction/opportunities/[id]`, and
+  `/dashboard/preconstruction` provide a real bid-pursuit pipeline.
 
-| Area | What's real | What's missing |
-|---|---|---|
-| Civil Intelligence | Cut/fill volumes globally | Pipe runs, construction entrances, stockpiles, material ledger are project-only — each has a real table/API but wasn't rolled into the global workspace (documented in `PHASE_4_GAP_ANALYSIS.md`) |
-| Document processing observability | `last_error`/`last_error_step` now populated by the ingest route and the split-worker Edge Function | `page-processor` (OCR stage) and `page-takeoff-worker` Edge Functions were not audited/fixed this pass for the same class of bug — only the two paths actually exercised by this engagement's changes were verified. The dedicated `document_processing_events` per-step log table exists in the schema but nothing writes to it anywhere |
-| Billing | Checkout and Paddle webhook price-tier resolution were both silently broken (iterating an array as if it were a keyed object) and are now fixed | Never load-tested against a real Paddle sandbox event in this engagement — fixed by code inspection + the type system, not an end-to-end webhook replay |
-
-## Unavailable (no real backend — correctly left "Coming Soon")
-
-| Workspace | Why | What it needs |
-|---|---|---|
-| Preconstruction | No `bid_opportunities`/pipeline concept exists in the schema at all | New table + API + workspace (net-new scope) |
-| Project Management (global roll-up) | Data exists (RFIs, submittals, change orders, schedule, daily/weekly logs, punch list, staff all real per-project) but nothing aggregates it tenant-wide | One new aggregation route + page across 7 tables |
-| Reports | Only `/api/status-report` exists — a one-shot, non-persisted AI text summary | `report_runs` table, template selection, history/export |
-
-Full detail for these three: `docs/frontend-backend-reconciliation/PHASE_4_GAP_ANALYSIS.md`.
+Remaining launch blockers are operational/configuration items, not workspace
+coverage gaps: replace Clerk test keys with production credentials, configure
+Paddle live billing keys and price IDs, replay a Paddle sandbox/live webhook,
+and do a real browser QA pass before opening sales access.
 
 ## Verification performed this phase (Phase 5/6)
 

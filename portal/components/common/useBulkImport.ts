@@ -39,12 +39,12 @@ export function useBulkImport<TPayload>(projectId: string, opts: BulkImportOptio
     } else if ((parsed.kind === "image" || parsed.kind === "cad") && parsed.entities && opts.mapEntities) {
       payloads = opts.mapEntities(parsed.entities, projectId);
     } else if (parsed.kind === "text") {
-      toast({ title: String(`Imported "${parsed.filename}" as text. Plain-text bulk import isn't supported on this tab — paste content into a manual entry instead.`), kind: "error" });
+      toast({ title: String(`Imported "${parsed.filename}" as text. Plain-text bulk import isn't supported on this tab - paste content into a manual entry instead.`), kind: "error" });
       return;
     }
 
     if (payloads.length === 0) {
-      toast({ title: String("Nothing to import — the file didn't contain rows that map to this section."), kind: "info" });
+      toast({ title: String("Nothing to import - the file didn't contain rows that map to this section."), kind: "info" });
       return;
     }
 
@@ -72,7 +72,7 @@ export function useBulkImport<TPayload>(projectId: string, opts: BulkImportOptio
           const body = await res.json().catch(() => ({})) as { error?: string };
           if (body.error && errors.length < 5) errors.push(`[${res.status}] ${body.error}`);
           else if (errors.length < 5) errors.push(`HTTP ${res.status}`);
-          // Abort early if the first 3 calls fail with auth — no point spamming the server.
+          // Abort early if the first 3 calls fail with auth - no point spamming the server.
           if (consecutiveAuthFails >= 3 && i < 3) {
             aborted = true;
             errors.unshift("Aborted: not authorized to create these records. Please re-authenticate.");
@@ -93,8 +93,8 @@ export function useBulkImport<TPayload>(projectId: string, opts: BulkImportOptio
 
     const total = payloads.length;
     const summaryHead = aborted
-      ? `Import aborted after ${created + failed} of ${total} items.`
-      : `Imported ${created} of ${total} item${total === 1 ? "" : "s"}${failed > 0 ? `. ${failed} failed.` : "."}`;
+      ? `Import stopped after ${created + failed} of ${total} items.`
+      : `Imported ${created} of ${total} item${total === 1 ? "" : "s"}${failed > 0 ? `. ${failed} need a retry.` : "."}`;
     if (errors.length > 0) {
       toast({ title: String(`${summaryHead}\n\nFirst few errors:\n${errors.join("\n")}`), kind: "error" });
     } else {
@@ -134,7 +134,7 @@ export function toDate(v: unknown): string | null {
   if (v === null || v === undefined || v === "") return null;
   if (v instanceof Date) return Number.isFinite(v.getTime()) ? v.toISOString().slice(0, 10) : null;
   if (typeof v === "number") {
-    // Excel serial date — days since 1899-12-30 (Lotus bug compat).
+    // Excel serial date - days since 1899-12-30 (Lotus bug compat).
     if (v > 59 && v < 100000) {
       const ms = (v - 25569) * 86400 * 1000;
       const d = new Date(ms);

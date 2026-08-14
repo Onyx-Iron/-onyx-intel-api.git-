@@ -29,7 +29,7 @@ function relTime(iso: string): string {
 }
 
 // Ported from the retired /dashboard/command-center page (frontend-backend
-// reconciliation, item 2) — the raw table-level audit trail is distinct
+// reconciliation, item 2) - the raw table-level audit trail is distinct
 // from OnyxIntelDashboard's own "Recent Activity" panel (which shows
 // higher-level project events, not row-level insert/update/delete records),
 // so this is preserved as its own card rather than dropped.
@@ -42,8 +42,8 @@ export default function AuditActivityCard() {
     (async () => {
       try {
         const res = await fetch("/api/audit-logs?limit=12", { cache: "no-store" });
-        if (!res.ok) throw new Error(String(res.status));
-        const data = await res.json() as { items?: AuditLogRow[] };
+        const data = await res.json().catch(() => ({})) as { items?: AuditLogRow[]; error?: string };
+        if (!res.ok) throw new Error(data.error ?? `Could not load audit activity (${res.status}). Refresh and try again.`);
         if (!cancelled) setRows(data.items ?? []);
       } catch (e) {
         if (!cancelled) setErr(e instanceof Error ? e.message : String(e));
@@ -59,11 +59,11 @@ export default function AuditActivityCard() {
         {rows && <span className="text-[10px] font-mono text-white/40">{rows.length}</span>}
       </div>
       {err ? (
-        <div className="mt-2 text-xs text-white/40">Couldn&apos;t load — {err}</div>
+        <div className="mt-2 text-xs text-amber-200">{err}. Recent audit rows will reappear after the next refresh.</div>
       ) : rows === null ? (
         <div className="mt-3 h-14 animate-pulse rounded bg-white/5" />
       ) : rows.length === 0 ? (
-        <div className="mt-2 text-xs text-white/40">No audit entries yet.</div>
+        <div className="mt-2 text-xs text-white/40">No audit activity yet. Changes will appear here automatically as you work in the app.</div>
       ) : (
         <ul className="mt-2 divide-y divide-white/5 max-h-[320px] overflow-y-auto">
           {rows.map((a) => (

@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { Truck, Wrench, Plus } from "lucide-react";
 import UniversalImportButton from "@/components/common/UniversalImportButton";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
@@ -62,7 +63,7 @@ const STATUS_STYLES: Record<Status, string> = {
 };
 
 function fmtDate(d: string | null): string {
-  if (!d) return "—";
+  if (!d) return "-";
   return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
@@ -89,7 +90,7 @@ export default function EquipmentSuppliersTab({ projectId }: { projectId: string
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true);
     setError(null);
     fetch(`/api/equipment-suppliers?project_id=${encodeURIComponent(projectId)}`)
@@ -99,11 +100,17 @@ export default function EquipmentSuppliersTab({ projectId }: { projectId: string
         setItems(data.items ?? []);
         setLoading(false);
       })
-      .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
-  };
+      .catch((e) => { setError(e?.message ?? "Could not load equipment suppliers. Refresh the page and try again."); setLoading(false); });
+  }, [projectId]);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, [projectId]);
+  useProjectSyncRefresh(load);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   const importItems = useBulkImport<{ project_id: string; name: string; equipment_type: string | null; daily_rate: number | null; weekly_rate: number | null; monthly_rate: number | null; on_site_date: string | null; return_date: string | null; operator: string | null; status: Status; notes: string | null }>(projectId, {
     endpoint: "/api/equipment-suppliers",
@@ -178,13 +185,13 @@ export default function EquipmentSuppliersTab({ projectId }: { projectId: string
           });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Save failed (${res.status})`);
+        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Could not save this equipment supplier (${res.status}). Check the form and try again.`);
         return;
       }
       cancelForm();
       load();
     } catch {
-      setErrorMsg("Network error.");
+      setErrorMsg("Could not reach the server just now. Please try again in a moment.");
     } finally {
       setSubmitting(false);
     }
@@ -192,12 +199,14 @@ export default function EquipmentSuppliersTab({ projectId }: { projectId: string
 
   const deleteItem = async (id: string) => {
     if (!(await confirm({ title: String("Delete this equipment record?"), destructive: true }))) return;
+    const prevItems = items;
     setItems((prev) => prev.filter((i) => i.id !== id));
     try {
       const res = await fetch(`/api/equipment-suppliers/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, { method: "DELETE" });
-      if (!res.ok) { setErrorMsg(`Delete failed (${res.status})`); load(); }
+      if (!res.ok) { setItems(prevItems); setErrorMsg(`Could not delete that equipment supplier (${res.status}). Refresh the list and try again.`); load(); }
     } catch {
-      setErrorMsg("Network error.");
+      setItems(prevItems);
+      setErrorMsg("Could not delete that equipment supplier just now. Refresh the list and try again in a moment.");
       load();
     }
   };
@@ -246,9 +255,11 @@ export default function EquipmentSuppliersTab({ projectId }: { projectId: string
                     <EmptyState
                       icon={<Wrench className="w-6 h-6" />}
                       title="No equipment suppliers yet"
-                      description="Track equipment rental and supplier contacts."
+                      description="Track equipment rental and supplier contacts so the right crew and equipment are easy to reuse next time."
                       actionLabel="Add Supplier"
                       onAction={openAdd}
+                      secondaryLabel="View projects"
+                      secondaryHref="/dashboard/projects"
                     />
                   </div>
                 </td></tr>
@@ -256,13 +267,13 @@ export default function EquipmentSuppliersTab({ projectId }: { projectId: string
                 items.map((v) => (
                   <tr key={v.id} className="hover:bg-white/[0.02] transition-colors group">
                     <td className="px-4 py-3 text-white text-xs">{v.name}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs">{v.equipment_type ?? "—"}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs font-mono">{v.daily_rate == null ? "—" : `$${v.daily_rate}`}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs font-mono">{v.weekly_rate == null ? "—" : `$${v.weekly_rate}`}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs font-mono">{v.monthly_rate == null ? "—" : `$${v.monthly_rate}`}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs">{v.equipment_type ?? "-"}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs font-mono">{v.daily_rate == null ? "-" : `$${v.daily_rate}`}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs font-mono">{v.weekly_rate == null ? "-" : `$${v.weekly_rate}`}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs font-mono">{v.monthly_rate == null ? "-" : `$${v.monthly_rate}`}</td>
                     <td className="px-4 py-3 text-white/55 text-xs">{fmtDate(v.on_site_date)}</td>
                     <td className="px-4 py-3 text-white/55 text-xs">{fmtDate(v.return_date)}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs">{v.operator ?? "—"}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs">{v.operator ?? "-"}</td>
                     <td className="px-4 py-3">
                       <span className={`inline-flex items-center px-2 py-0.5 rounded border text-[9px] font-bold tracking-widest uppercase ${STATUS_STYLES[v.status]}`}>{v.status.replace("_", " ")}</span>
                     </td>

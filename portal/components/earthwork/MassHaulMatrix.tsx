@@ -121,8 +121,12 @@ export default function MassHaulMatrix({ projectId, projectName }: Props) {
     } finally { setLoading(false); }
   }, [projectId, existingId, proposedId]);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   async function compute() {
     if (!existingId || !proposedId) { setError("Pick both an Existing and Proposed surface first"); return; }
@@ -233,7 +237,7 @@ export default function MassHaulMatrix({ projectId, projectName }: Props) {
           <label className="flex flex-col gap-1">
             <span className="text-[9px] uppercase tracking-widest font-mono text-white/40">Existing surface</span>
             <select value={existingId} onChange={(e) => setExistingId(e.target.value)} className="h-9 rounded-md border border-white/10 bg-black/40 px-2 text-xs">
-              <option value="">— pick —</option>
+              <option value="">- pick -</option>
               {surfaces.filter((s) => s.surface_type === "existing").map((s) => (
                 <option key={s.id} value={s.id}>{s.name ?? s.id.slice(0, 8)}</option>
               ))}
@@ -242,7 +246,7 @@ export default function MassHaulMatrix({ projectId, projectName }: Props) {
           <label className="flex flex-col gap-1">
             <span className="text-[9px] uppercase tracking-widest font-mono text-white/40">Proposed surface</span>
             <select value={proposedId} onChange={(e) => setProposedId(e.target.value)} className="h-9 rounded-md border border-white/10 bg-black/40 px-2 text-xs">
-              <option value="">— pick —</option>
+              <option value="">- pick -</option>
               {surfaces.filter((s) => s.surface_type === "proposed").map((s) => (
                 <option key={s.id} value={s.id}>{s.name ?? s.id.slice(0, 8)}</option>
               ))}
@@ -265,7 +269,7 @@ export default function MassHaulMatrix({ projectId, projectName }: Props) {
               disabled={!canCompute}
               className="w-full inline-flex h-9 items-center justify-center rounded-full bg-[#CCFF00] px-4 text-xs font-bold uppercase tracking-widest text-black hover:opacity-85 disabled:opacity-40"
             >
-              {computing ? "Computing…" : "Run Cut/Fill"}
+              {computing ? "Computing..." : "Run Cut/Fill"}
             </button>
           </div>
         </div>
@@ -275,14 +279,14 @@ export default function MassHaulMatrix({ projectId, projectName }: Props) {
       {/* Per-layer matrix */}
       <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-10">
         {loading ? (
-          <div className="p-10 text-center text-sm text-white/40">Loading…</div>
+          <div className="p-10 text-center text-sm text-white/40">Loading...</div>
         ) : rowsSorted.length === 0 ? (
           <div className="rounded-xl border border-white/10 bg-white/[0.02] p-8 text-center">
             <p className="text-sm text-white/60">
               No earthwork volumes yet. Pick an Existing and Proposed surface above, then Run Cut/Fill.
             </p>
             <p className="mt-2 text-xs text-white/40">
-              Surfaces are stored in <span className="font-mono">civil_surfaces</span> with a JSON <span className="font-mono">coordinate_mesh</span> —
+              Surfaces are stored in <span className="font-mono">civil_surfaces</span> with a JSON <span className="font-mono">coordinate_mesh</span> -
               typically imported from Civil 3D / LandXML.
             </p>
           </div>

@@ -65,6 +65,8 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [nationalPrices, setNationalPrices] = useState<Record<string, number>>({});
+  const [warning, setWarning] = useState<string | null>(null);
+  const [codeLookupWarning, setCodeLookupWarning] = useState<string | null>(null);
 
   // Typeahead state
   const [codeQuery, setCodeQuery] = useState("");
@@ -74,6 +76,7 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
 
   const load = useCallback(async () => {
     setLoading(true);
+    setWarning(null);
     try {
       const res = await fetch("/api/cost-catalog/overrides", { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -108,15 +111,17 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
               }
             }
             setNationalPrices(map);
+          } else {
+            setWarning("National pricing could not be loaded right now. Overrides still work, but the comparison column may be incomplete.");
           }
         } catch {
-          // National pricing is best-effort; ignore failures.
+          setWarning("National pricing could not be loaded right now. Overrides still work, but the comparison column may be incomplete.");
         }
       } else {
         setNationalPrices({});
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to load overrides";
+      const msg = err instanceof Error ? err.message : "Could not load cost overrides. Refresh the page and try again.";
       toast({ title: msg, kind: "error" });
     } finally {
       setLoading(false);
@@ -124,8 +129,10 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
   }, [toast]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load();
+    const timer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [load]);
 
   // CSI code typeahead — debounced
@@ -133,9 +140,11 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
     if (!showCodeDropdown) return;
     const q = codeQuery.trim();
     if (q.length < 1) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setCodeOptions([]);
-      return;
+      const timer = window.setTimeout(() => {
+        setCodeOptions([]);
+        setCodeLookupWarning(null);
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
     if (codeFetchAbort.current) codeFetchAbort.current.abort();
     const ctrl = new AbortController();
@@ -163,8 +172,9 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
           opts.push({ csi_code: r.csi_code, description: r.description ?? null });
         }
         setCodeOptions(opts);
+        setCodeLookupWarning(null);
       } catch {
-        // ignore aborted/failed lookups
+        setCodeLookupWarning("CSI code lookup is unavailable right now. You can still enter a code manually and save the override.");
       }
     }, 200);
     return () => {
@@ -265,7 +275,9 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
       closeForm();
       void load();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Save failed";
+      const msg = err instanceof Error
+        ? err.message
+        : "Could not save that override. Refresh and try again, or reopen it if another edit changed it.";
       toast({ title: msg, kind: "error" });
     } finally {
       setSaving(false);
@@ -291,7 +303,9 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
       toast({ title: "Override deleted", kind: "success" });
       void load();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Delete failed";
+      const msg = err instanceof Error
+        ? err.message
+        : "Could not delete that override. Refresh and try again, or check whether it was already removed.";
       toast({ title: msg, kind: "error" });
     }
   }
@@ -312,10 +326,15 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
 
   return (
     <div className="space-y-6">
+      {warning && (
+        <div className="rounded-xl border border-amber-400/30 bg-amber-400/[0.08] px-4 py-3 text-sm text-amber-200">
+          {warning}
+        </div>
+      )}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-xs uppercase tracking-widest text-white/40">
           <span>Tenant ID</span>
-          <span className="font-mono text-white/65">{tenantId.slice(0, 8)}…</span>
+          <span className="font-mono text-white/65">{tenantId.slice(0, 8)}...</span>
           <span className="ml-3 inline-flex h-5 items-center rounded-full border border-white/15 bg-white/5 px-2 text-[10px] font-bold uppercase">
             {planLabel}
           </span>
@@ -344,6 +363,12 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
           </button>
         </div>
       </div>
+
+      {codeLookupWarning && (
+        <div className="rounded-xl border border-amber-400/30 bg-amber-400/[0.08] px-4 py-3 text-sm text-amber-200">
+          {codeLookupWarning}
+        </div>
+      )}
 
       {showForm && (
         <form
@@ -536,7 +561,7 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
               disabled={saving}
               className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-xs font-bold uppercase tracking-widest text-black hover:opacity-85 disabled:opacity-50"
             >
-              {saving ? "Saving…" : form.id ? "Save Changes" : "Save Override"}
+              {saving ? "Saving..." : form.id ? "Save Changes" : "Save Override"}
             </button>
           </div>
         </form>
@@ -545,12 +570,12 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
       <div className="rounded-2xl border border-white/8 bg-[#0E0F12] overflow-hidden">
         {loading ? (
           <div className="px-5 py-10 text-center text-sm text-white/40">
-            Loading overrides…
+            Loading overrides...
           </div>
         ) : filtered.length === 0 ? (
           <div className="px-5 py-10 text-center text-sm text-white/40">
             {items.length === 0
-              ? "No overrides yet. Add your first to start customizing pricing."
+              ? "No overrides yet. Add your first override to start customizing pricing."
               : "No matches for your search."}
           </div>
         ) : (
@@ -579,7 +604,7 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
                       <td className="px-4 py-3 font-mono text-[#CCFF00]">
                         {row.csi_code}
                       </td>
-                      <td className="px-4 py-3">{row.description ?? "—"}</td>
+                      <td className="px-4 py-3">{row.description ?? "-"}</td>
                       <td className="px-4 py-3">
                         {row.region_code ? (
                           <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] uppercase">
@@ -594,14 +619,14 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
                         {row.unit && <span className="ml-1 text-white/40">/{row.unit}</span>}
                       </td>
                       <td className={`px-4 py-3 text-right font-mono ${vs?.tone ?? "text-white/40"}`}>
-                        {vs ? vs.label : "—"}
+                        {vs ? vs.label : "-"}
                       </td>
                       <td className="px-4 py-3 font-mono text-white/55">
-                        {row.labor_cost ?? "—"} / {row.material_cost ?? "—"} /{" "}
-                        {row.equipment_cost ?? "—"}
+                        {row.labor_cost ?? "-"} / {row.material_cost ?? "-"} /{" "}
+                        {row.equipment_cost ?? "-"}
                       </td>
                       <td className="px-4 py-3 text-white/55 max-w-[200px] truncate">
-                        {row.notes ?? "—"}
+                        {row.notes ?? "-"}
                       </td>
                       <td className="px-4 py-3 text-right">
                         <div className="inline-flex items-center gap-1">

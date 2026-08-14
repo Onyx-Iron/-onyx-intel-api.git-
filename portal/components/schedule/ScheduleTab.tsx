@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { CalendarDays, Calendar } from "lucide-react";
 import GanttView from "./GanttView";
 import UniversalImportButton from "@/components/common/UniversalImportButton";
@@ -54,13 +55,13 @@ function statusLabel(s: TaskStatus): string {
 }
 
 function daysBetween(start: string | null, end: string | null): string {
-  if (!start || !end) return "—";
+  if (!start || !end) return "-";
   const diff = (new Date(end).getTime() - new Date(start).getTime()) / 86400000;
-  return diff < 0 ? "—" : `${Math.round(diff)}d`;
+  return diff < 0 ? "-" : `${Math.round(diff)}d`;
 }
 
 function fmt(d: string | null): string {
-  if (!d) return "—";
+  if (!d) return "-";
   return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
@@ -99,7 +100,7 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
   const [view, setView] = useState<"list" | "timeline">("list");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const loadTasks = () => {
+  const loadTasks = useCallback(() => {
     setLoading(true);
     fetch(`/api/schedule?project_id=${encodeURIComponent(projectId)}`)
       .then((r) => r.json())
@@ -109,10 +110,16 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  };
+  }, [projectId]);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { loadTasks();   }, [projectId]);
+  useProjectSyncRefresh(loadTasks);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadTasks();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadTasks]);
 
   const importTasks = useBulkImport<{ project_id: string; name: string; status: TaskStatus; start_date: string | null; end_date: string | null; critical: boolean }>(projectId, {
     endpoint: "/api/schedule",
@@ -141,6 +148,7 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
   const cycleStatus = async (task: ScheduleTask) => {
     const idx = STATUS_CYCLE.indexOf(task.status);
     const next = STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length];
+    const prevTasks = tasks;
     setTasks((prev) => prev.map((t) => t.id === task.id ? { ...t, status: next } : t));
     try {
       const res = await fetch(`/api/schedule/${encodeURIComponent(task.id)}`, {
@@ -150,27 +158,32 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        setErrorMsg(typeof d?.error === "string" ? d.error : `Status update failed (${res.status})`);
+        setTasks(prevTasks);
+        setErrorMsg(typeof d?.error === "string" ? d.error : `Could not update that schedule item (${res.status}). Refresh the list and try again.`);
         loadTasks();
       }
     } catch {
-      setErrorMsg("Network error — could not update status.");
+      setTasks(prevTasks);
+      setErrorMsg("Could not update that schedule item just now. Please try again in a moment.");
       loadTasks();
     }
   };
 
   const deleteTask = async (id: string) => {
     if (!(await confirm({ title: String("Delete this task?"), destructive: true }))) return;
+    const prevTasks = tasks;
     setTasks((prev) => prev.filter((t) => t.id !== id));
     try {
       const res = await fetch(`/api/schedule/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        setErrorMsg(typeof d?.error === "string" ? d.error : `Delete failed (${res.status})`);
+        setTasks(prevTasks);
+        setErrorMsg(typeof d?.error === "string" ? d.error : `Could not delete that schedule item (${res.status}). Refresh the list and try again.`);
         loadTasks();
       }
     } catch {
-      setErrorMsg("Network error — could not delete task.");
+      setTasks(prevTasks);
+      setErrorMsg("Could not delete that schedule item just now. Refresh the list and try again in a moment.");
       loadTasks();
     }
   };
@@ -226,13 +239,13 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
           });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        setErrorMsg(typeof d?.error === "string" ? d.error : `Save failed (${res.status})`);
+        setErrorMsg(typeof d?.error === "string" ? d.error : `Could not save this schedule item (${res.status}). Check the form and try again.`);
         return;
       }
       cancelForm();
       loadTasks();
     } catch {
-      setErrorMsg("Network error — could not reach the server.");
+      setErrorMsg("Could not reach the server just now. Please try again in a moment.");
     } finally {
       setSubmitting(false);
     }
@@ -282,7 +295,7 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
           </div>
         </div>
 
-        {/* Body — list or timeline */}
+        {/* Body - list or timeline */}
         {view === "timeline" ? (
           <div className="p-4">
             <GanttView tasks={tasks} />
@@ -314,6 +327,8 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
                         description="Add tasks to start building your project schedule."
                         actionLabel="Add Task"
                         onAction={openAdd}
+                        secondaryLabel="View projects"
+                        secondaryHref="/dashboard/projects"
                       />
                     </div>
                   </td>
@@ -336,7 +351,7 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
                     <td className="px-4 py-3">
                       {task.critical
                         ? <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#E50914]" title="Critical path" />
-                        : <span className="text-gray-700 text-xs">—</span>
+                        : <span className="text-gray-700 text-xs">-</span>
                       }
                     </td>
                     <td className="px-4 py-3 text-right">

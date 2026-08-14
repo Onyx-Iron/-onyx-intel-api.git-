@@ -9,12 +9,28 @@ import PageHero from "@/components/layout/PageHero";
 import ProjectUploadButton from "@/components/project/ProjectUploadButton";
 import GenerateDocDropdown from "@/components/common/GenerateDocDropdown";
 import ProjectLocationCard from "@/components/project/ProjectLocationCard";
+import ProjectAutopilotButton from "@/components/project/ProjectAutopilotButton";
+import ProjectCommandBrief from "@/components/project/ProjectCommandBrief";
+import GoogleConnect from "@/components/google/GoogleConnect";
+import ProjectSyncProvider from "@/components/project/ProjectSyncProvider";
 
 interface PageProps {
   params: Promise<{ id: string }>;
+  searchParams?: Promise<{ phase?: string; sub?: string }>;
 }
 
-async function getProject(projectId: string, tenantId: string) {
+type ProjectRow = {
+  name: string;
+  status: string;
+  city: string | null;
+  state: string | null;
+  zip_code: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  budget: number | null;
+};
+
+async function getProject(projectId: string, tenantId: string): Promise<ProjectRow | null> {
   const db = await createServiceClient();
   const { data } = await db
     .from("projects")
@@ -36,8 +52,9 @@ async function getTenantId(userId: string, orgId: string | null): Promise<string
   return data?.id ?? null;
 }
 
-export default async function ProjectDetailPage({ params }: PageProps) {
+export default async function ProjectDetailPage({ params, searchParams }: PageProps) {
   const { id } = await params;
+  const sp = searchParams ? await searchParams : undefined;
   const { userId, orgId } = await auth();
   if (!userId) return null;
 
@@ -48,6 +65,7 @@ export default async function ProjectDetailPage({ params }: PageProps) {
   if (!project) notFound();
 
   return (
+    <ProjectSyncProvider projectId={id}>
     <div className="min-h-screen">
       <PageHero
         eyebrow="Project"
@@ -57,6 +75,8 @@ export default async function ProjectDetailPage({ params }: PageProps) {
           <div className="flex flex-wrap items-center gap-2 sm:gap-3">
             <StatusBadge status={project.status} />
             <GenerateDocDropdown projectId={id} />
+            <ProjectAutopilotButton projectId={id} />
+            <GoogleConnect compact />
             <ProjectUploadButton projectId={id} />
           </div>
         }
@@ -87,7 +107,12 @@ export default async function ProjectDetailPage({ params }: PageProps) {
         </div>
       </div>
 
-      <ProjectTabs projectId={id} projectName={project.name} />
+      <div className="px-4 pt-5 sm:px-6 lg:px-10">
+        <ProjectCommandBrief projectId={id} />
+      </div>
+
+      <ProjectTabs projectId={id} projectName={project.name} initialPhase={(sp?.phase as "Takeoff" | undefined) ?? undefined} initialSubId={sp?.sub} />
     </div>
+    </ProjectSyncProvider>
   );
 }

@@ -85,13 +85,13 @@ const INITIAL_AI_MESSAGES: AIMessage[] = [
     id: "msg-001",
     role: "system",
     content:
-      "OnyxIntel AI is ready. Ask for a spec summary, RFI draft, quantity check, or schedule risk scan.",
+      "OnyxIntel AI is ready. Ask for a spec summary, draft RFI, quantity check, or schedule risk scan.",
     timestamp: "--",
   },
 ];
 
 const QUICK_PROMPTS = [
-  "Summarize project risks across the active jobs.",
+  "Summarize project risks across active jobs.",
   "Draft an RFI from a missing spec detail.",
   "What takeoff items need estimate review?",
 ];
@@ -166,7 +166,7 @@ function ProgressBar({ value, tone = "lime" }: { value: number; tone?: "lime" | 
 function ProjectPipeline({ projects, loading }: { projects: DashProject[]; loading: boolean }) {
   return (
     <Panel
-      title="Project Pipeline"
+      title="Active Projects"
       className="xl:col-span-2"
       action={
         <Link href="/dashboard/projects" className="inline-flex items-center gap-1 text-xs text-white/40 transition-colors hover:text-[#CCFF00]">
@@ -198,7 +198,18 @@ function ProjectPipeline({ projects, loading }: { projects: DashProject[]; loadi
             ) : projects.length === 0 ? (
               <tr>
                 <td className="px-4 py-10 text-center text-sm text-white/30" colSpan={6}>
-                  No matching projects yet.
+                  <div className="mx-auto flex max-w-sm flex-col items-center gap-3">
+                    <p>No projects match the current filters.</p>
+                    <p className="text-xs text-white/25">Clear the filters, or create a project to start filling this view.</p>
+                    <div className="flex flex-wrap items-center justify-center gap-2">
+                      <Link href="/dashboard/projects" className="inline-flex h-9 items-center justify-center rounded-lg bg-[#CCFF00] px-4 text-[10px] font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85">
+                        View projects
+                      </Link>
+                      <Link href="/dashboard/projects" className="inline-flex h-9 items-center justify-center rounded-lg border border-white/10 bg-white/[0.03] px-4 text-[10px] font-bold uppercase tracking-widest text-white/70 transition-colors hover:border-white/30 hover:text-white">
+                        Create project
+                      </Link>
+                    </div>
+                  </div>
                 </td>
               </tr>
             ) : (
@@ -210,7 +221,7 @@ function ProjectPipeline({ projects, loading }: { projects: DashProject[]; loadi
                       <Link href={`/dashboard/projects/${project.id}`} className="font-semibold text-white transition-colors hover:text-[#CCFF00]">
                         {project.name}
                       </Link>
-                      <p className="mt-0.5 text-xs text-white/40">{project.location}</p>
+                  <p className="mt-0.5 text-xs text-white/40">{project.location || "Location not set yet"}</p>
                     </td>
                     <td className="px-4 py-3">
                       <span className={`inline-flex rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${statusClasses(project.status)}`}>
@@ -256,7 +267,7 @@ function ScheduleRiskPanel({ projects, loading }: { projects: DashProject[]; loa
   const ranked = projects.slice().sort((a, b) => a.completion - b.completion).slice(0, 4);
 
   return (
-    <Panel title="Schedule & Risk">
+    <Panel title="Schedule and Risk">
       <div className="divide-y divide-white/5">
         {loading ? (
           [...Array(4)].map((_, index) => (
@@ -265,7 +276,7 @@ function ScheduleRiskPanel({ projects, loading }: { projects: DashProject[]; loa
             </div>
           ))
         ) : ranked.length === 0 ? (
-          <div className="px-4 py-8 text-sm text-white/30">Add project dates and tasks to unlock the schedule view.</div>
+          <div className="px-4 py-8 text-sm text-white/30">Add project dates and tasks to unlock this view.</div>
         ) : (
           ranked.map((project) => (
             <Link key={project.id} href={`/dashboard/projects/${project.id}`} className="block px-4 py-3 transition-colors hover:bg-white/3">
@@ -295,14 +306,14 @@ function DocumentIntelligence({ data, loading }: { data: DashData | null; loadin
   const latest = data?.activity.filter((item) => item.kind === "document").slice(0, 4) ?? [];
 
   return (
-    <Panel title="Document Intelligence">
+    <Panel title="Documents">
       <div className="grid grid-cols-2 border-b border-white/5">
         <div className="border-r border-white/5 p-4">
-          <p className="text-[10px] uppercase tracking-widest text-white/40">Indexed docs</p>
+          <p className="text-[10px] uppercase tracking-widest text-white/40">Documents indexed</p>
           <p className="mt-2 text-2xl font-black text-white">{loading ? "--" : data?.kpis.documents ?? 0}</p>
         </div>
         <div className="p-4">
-          <p className="text-[10px] uppercase tracking-widest text-white/40">Takeoff lines</p>
+          <p className="text-[10px] uppercase tracking-widest text-white/40">Takeoff items</p>
           <p className="mt-2 text-2xl font-black text-white">{loading ? "--" : data?.kpis.takeoffItems ?? 0}</p>
         </div>
       </div>
@@ -346,7 +357,7 @@ function ActivityFeed({ items, loading }: { items: DashActivity[]; loading: bool
             </div>
           ))
         ) : items.length === 0 ? (
-          <div className="px-4 py-8 text-sm text-white/30">No activity yet.</div>
+          <div className="px-4 py-8 text-sm text-white/30">Recent activity will appear here as you work.</div>
         ) : (
           items.slice(0, 6).map((item) => (
             <div key={item.id} className="flex gap-3 px-4 py-3">
@@ -384,7 +395,7 @@ function AICommandPanel({
   const inputRef = useRef<HTMLInputElement>(null);
   return (
     <Panel
-      title="AI Command"
+      title="Ask AI"
       action={<AIProviderPicker />}
       className="min-h-[520px]"
     >
@@ -461,17 +472,15 @@ function AICommandPanel({
 interface OnyxIntelDashboardProps {
   userName?: string;
   previewData?: DashData;
-  previewProviders?: string[];
 }
 
-export default function OnyxIntelDashboard({ previewData, previewProviders }: OnyxIntelDashboardProps) {
+export default function OnyxIntelDashboard({ previewData }: OnyxIntelDashboardProps) {
   const [data, setData] = useState<DashData | null>(previewData ?? null);
   const [dataLoading, setDataLoading] = useState(!previewData);
   const [dataError, setDataError] = useState<string | null>(null);
   const [aiInput, setAiInput] = useState("");
   const [aiMessages, setAiMessages] = useState<AIMessage[]>(INITIAL_AI_MESSAGES);
   const [aiLoading, setAiLoading] = useState(false);
-  const [providers, setProviders] = useState<string[]>(previewProviders ?? []);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -488,11 +497,6 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
       .catch((error: unknown) => { if (!cancelled) setDataError(error instanceof Error ? error.message : String(error)); })
       .finally(() => { if (!cancelled) setDataLoading(false); });
 
-    fetch("/api/ai/chat?status=1")
-      .then((response) => response.json())
-      .then((body: { providers?: string[] }) => { if (!cancelled) setProviders(body.providers ?? []); })
-      .catch(() => { if (!cancelled) setProviders([]); });
-
     return () => { cancelled = true; };
   }, [previewData]);
 
@@ -507,7 +511,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
 
   const metrics: Metric[] = data ? [
     { label: "Active Projects",  value: String(data.kpis.activeProjects), detail: `${data.kpis.projects} total projects in workspace`, icon: <TrendingUp size={16} />, tone: "lime" },
-    { label: "Pending Takeoffs", value: String(pendingTakeoffs), detail: `${data.kpis.takeoffItems} takeoff line items indexed`, icon: <Layers size={16} />, tone: "blue" },
+    { label: "Takeoffs needing work", value: String(pendingTakeoffs), detail: `${data.kpis.takeoffItems} takeoff line items indexed`, icon: <Layers size={16} />, tone: "blue" },
     { label: "Documents",        value: String(data.kpis.documents), detail: "Specs, drawings, photos, and contracts", icon: <FileText size={16} />, tone: "slate" },
     { label: "Estimate Value",   value: formatCurrency(data.kpis.estimatedValue), detail: overBudget > 0 ? `${overBudget} project${overBudget === 1 ? "" : "s"} above budget` : "No budget alerts", icon: <DollarSign size={16} />, tone: overBudget > 0 ? "amber" : "lime" },
   ] : [];
@@ -557,11 +561,11 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
       const content = response.ok
         ? (body.text?.trim() || "(no response)")
         : body.code === "NO_PROVIDER"
-          ? "No AI model is connected yet. Add an AI provider key before using command mode."
-          : `Error: ${body.error ?? response.status}`;
+          ? "No AI model is connected yet. Open Billing settings, connect a provider, and try again."
+          : `Error: ${body.error ?? response.status}. Try again in a moment or add a different AI provider if this keeps happening.`;
       setAiMessages((previous) => [...previous, { id: `msg-${Date.now() + 1}`, role: "system", content, timestamp: timestamp() }]);
     } catch (error) {
-      setAiMessages((previous) => [...previous, { id: `msg-${Date.now() + 1}`, role: "system", content: `Request failed: ${error instanceof Error ? error.message : String(error)}`, timestamp: timestamp() }]);
+      setAiMessages((previous) => [...previous, { id: `msg-${Date.now() + 1}`, role: "system", content: `Request failed: ${error instanceof Error ? error.message : String(error)}. Try again in a moment.`, timestamp: timestamp() }]);
     } finally {
       setAiLoading(false);
     }
@@ -658,13 +662,13 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
             <ProjectPipeline projects={filteredProjects} loading={dataLoading} />
             <div className="grid grid-cols-1 gap-4 2xl:grid-cols-2">
               <ScheduleRiskPanel projects={filteredProjects} loading={dataLoading} />
-              <Panel title="Operations Snapshot">
+              <Panel title="Operations at a Glance">
                 <div className="divide-y divide-white/5">
                   {([
-                    { label: "Schedule tasks",           value: data?.kpis.scheduleTasks ?? 0, tone: "text-[#00D2FF] bg-[#00D2FF]/10", icon: <Clock size={13} /> },
-                    { label: "Projects needing takeoff", value: pendingTakeoffs,                tone: "text-[#CCFF00] bg-[#CCFF00]/10", icon: <Layers size={13} /> },
-                    { label: "Budget alerts",            value: overBudget,                     tone: "text-amber-400 bg-amber-400/10", icon: <AlertTriangle size={13} /> },
-                    { label: "Clean records",            value: Math.max((data?.kpis.projects ?? 0) - pendingTakeoffs - overBudget, 0), tone: "text-white/50 bg-white/5", icon: <CheckCircle2 size={13} /> },
+                    { label: "Schedule tasks", value: data?.kpis.scheduleTasks ?? 0, tone: "text-[#00D2FF] bg-[#00D2FF]/10", icon: <Clock size={13} /> },
+                    { label: "Needs takeoff", value: pendingTakeoffs, tone: "text-[#CCFF00] bg-[#CCFF00]/10", icon: <Layers size={13} /> },
+                    { label: "Over budget", value: overBudget, tone: "text-amber-400 bg-amber-400/10", icon: <AlertTriangle size={13} /> },
+                    { label: "No alerts", value: Math.max((data?.kpis.projects ?? 0) - pendingTakeoffs - overBudget, 0), tone: "text-white/50 bg-white/5", icon: <CheckCircle2 size={13} /> },
                   ] as { label: string; value: number; tone: string; icon: React.ReactNode }[]).map((item) => (
                     <div key={item.label} className="flex items-center justify-between px-4 py-3.5">
                       <div className="flex items-center gap-2.5">
@@ -698,7 +702,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
         </div>
 
         <footer className="mt-8 flex items-center justify-between border-t border-white/5 pt-4 text-xs text-white/20">
-          <span>All in one construction platform · A Onyx &amp; Iron Company</span>
+          <span>Construction platform · A Onyx &amp; Iron Company</span>
           <span className="inline-flex items-center gap-1.5">
             <FolderOpen size={12} /> {data?.kpis.projects ?? 0} projects
           </span>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Plus } from "lucide-react";
+import { Plus, Sparkles } from "lucide-react";
 import { useToast } from "@/components/common/Toast";
 import { UniversalImportButton } from "@/components/common/UniversalImportButton";
 import { useBulkImport, toNum, toStr } from "@/components/common/useBulkImport";
@@ -41,6 +41,8 @@ export default function CostActualsCapture({ projectId }: Props) {
   const [items, setItems] = useState<ActualRow[]>([]);
   const [codes, setCodes] = useState<CodeOption[]>([]);
   const [loadingCodes, setLoadingCodes] = useState(false);
+  const [seeding, setSeeding] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [csiCode, setCsiCode] = useState("");
   const [quantity, setQuantity] = useState("");
@@ -54,25 +56,30 @@ export default function CostActualsCapture({ projectId }: Props) {
         `/api/cost-catalog/actuals?project_id=${encodeURIComponent(projectId)}`,
         { cache: "no-store" },
       );
-      if (!res.ok) return;
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error((data as { error?: string }).error ?? `Could not load cost actuals (${res.status}). Refresh and try again.`);
+      }
       const rows: ActualRow[] = Array.isArray(data?.actuals)
         ? data.actuals
         : Array.isArray(data)
           ? data
           : [];
       setItems(rows);
-    } catch {
-      // best-effort; don't block UI
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Could not load cost actuals. Refresh and try again.");
     }
   }, [projectId]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void loadActuals();
+    const timer = window.setTimeout(() => {
+      void loadActuals();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [loadActuals]);
 
-  // Lightweight code list for dropdown — uses cost-catalog v2 listing endpoint.
+  // Lightweight code list for dropdown - uses cost-catalog v2 listing endpoint.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -155,6 +162,45 @@ export default function CostActualsCapture({ projectId }: Props) {
     },
   });
 
+  const seedStarterCatalog = useCallback(async () => {
+    if (seeding) return;
+    setSeeding(true);
+    try {
+      const res = await fetch("/api/cost-catalog/seed", { method: "POST" });
+      const body = (await res.json().catch(() => ({}))) as { seeded?: number; message?: string; error?: string };
+      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+      toast({
+        title: body.seeded && body.seeded > 0
+          ? `Seeded ${body.seeded} starter cost codes`
+          : body.message ?? "Cost catalog already seeded",
+        kind: "success",
+      });
+      setLoadingCodes(true);
+      const refresh = await fetch(`/api/cost-catalog/v2?limit=500`, { cache: "no-store" });
+      if (refresh.ok) {
+        const data = await refresh.json();
+        const arr: Array<{ csi_code: string; description?: string | null }> = Array.isArray(data?.items)
+          ? data.items
+          : Array.isArray(data)
+            ? data
+            : [];
+        const seen = new Set<string>();
+        const opts: CodeOption[] = [];
+        for (const r of arr) {
+          if (!r?.csi_code || seen.has(r.csi_code)) continue;
+          seen.add(r.csi_code);
+          opts.push({ csi_code: r.csi_code, description: r.description ?? null });
+        }
+        setCodes(opts);
+      }
+    } catch (err) {
+      toast({ title: err instanceof Error ? err.message : "Seeding failed", kind: "error" });
+    } finally {
+      setSeeding(false);
+      setLoadingCodes(false);
+    }
+  }, [seeding, toast]);
+
   async function quickAdd(e: React.FormEvent) {
     e.preventDefault();
     if (!csiCode.trim()) {
@@ -194,7 +240,7 @@ export default function CostActualsCapture({ projectId }: Props) {
       setEstimatedCost("");
       void loadActuals();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Save failed";
+      const msg = err instanceof Error ? err.message : "Could not save that cost actual. Check the fields and try again in a moment.";
       toast({ title: msg, kind: "error" });
     } finally {
       setSaving(false);
@@ -203,6 +249,11 @@ export default function CostActualsCapture({ projectId }: Props) {
 
   return (
     <div className="space-y-5">
+      {loadError && (
+        <div className="rounded-xl border border-amber-400/30 bg-amber-400/[0.08] px-4 py-3 text-xs text-amber-200">
+          {loadError}
+        </div>
+      )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <SummaryStat label="Observations" value={variance.count.toString()} />
         <SummaryStat
@@ -211,7 +262,7 @@ export default function CostActualsCapture({ projectId }: Props) {
         />
         <SummaryStat
           label="Avg Variance"
-          value={variance.avg === null ? "—" : `${variance.avg >= 0 ? "+" : ""}${variance.avg.toFixed(1)}%`}
+          value={variance.avg === null ? "-" : `${variance.avg >= 0 ? "+" : ""}${variance.avg.toFixed(1)}%`}
           tone={
             variance.avg === null
               ? "neutral"
@@ -250,6 +301,15 @@ export default function CostActualsCapture({ projectId }: Props) {
               Bulk Import
             </button>
           </div>
+          <button
+            type="button"
+            onClick={() => void seedStarterCatalog()}
+            disabled={seeding}
+            className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-bold uppercase tracking-widest text-white/55 transition-colors hover:border-[#CCFF00]/25 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Sparkles size={12} />
+            {seeding ? "Seeding..." : "Seed Catalog"}
+          </button>
         </div>
 
         {mode === "quick" ? (
@@ -264,12 +324,12 @@ export default function CostActualsCapture({ projectId }: Props) {
                 className="h-9 w-full rounded border border-white/10 bg-[#08090C] px-2 text-sm text-white focus:border-[#CCFF00]/40 focus:outline-none"
               >
                 <option value="">
-                  {loadingCodes ? "Loading…" : "Select a code"}
+                  {loadingCodes ? "Loading..." : "Select a code to start"}
                 </option>
                 {codes.map((c) => (
                   <option key={c.csi_code} value={c.csi_code}>
                     {c.csi_code}
-                    {c.description ? ` — ${c.description}` : ""}
+                    {c.description ? ` - ${c.description}` : ""}
                   </option>
                 ))}
               </select>
@@ -320,7 +380,7 @@ export default function CostActualsCapture({ projectId }: Props) {
                 className="inline-flex h-9 items-center gap-2 rounded-full bg-[#CCFF00] px-4 text-xs font-bold uppercase tracking-widest text-black hover:opacity-85 disabled:opacity-50"
               >
                 <Plus className="h-3.5 w-3.5" />
-                {saving ? "Recording…" : "Record Actual"}
+                {saving ? "Recording..." : "Record Actual"}
               </button>
             </div>
           </form>
@@ -350,7 +410,7 @@ export default function CostActualsCapture({ projectId }: Props) {
         </div>
         {items.length === 0 ? (
           <div className="px-5 py-10 text-center text-sm text-white/40">
-            No actuals recorded yet.
+            No actuals recorded yet. Add one above or import a CSV/XLSX file to start comparing actuals against estimate.
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -391,7 +451,7 @@ export default function CostActualsCapture({ projectId }: Props) {
                         {row.csi_code}
                       </td>
                       <td className="px-4 py-3 text-right font-mono">
-                        {row.quantity ?? "—"}
+                        {row.quantity ?? "-"}
                       </td>
                       <td className="px-4 py-3 text-right font-mono">
                         ${row.actual_unit_cost.toFixed(2)}
@@ -399,11 +459,11 @@ export default function CostActualsCapture({ projectId }: Props) {
                       <td className="px-4 py-3 text-right font-mono text-white/55">
                         {row.estimated_unit_cost != null
                           ? `$${row.estimated_unit_cost.toFixed(2)}`
-                          : "—"}
+                          : "-"}
                       </td>
                       <td className={`px-4 py-3 text-right font-mono ${tone}`}>
                         {v === null
-                          ? "—"
+                          ? "-"
                           : `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`}
                       </td>
                     </tr>

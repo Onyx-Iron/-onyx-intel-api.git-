@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useUser } from "@clerk/nextjs";
 import PageHero from "@/components/layout/PageHero";
 
@@ -17,6 +17,13 @@ interface ListResponse {
   tenants: CompTenant[];
 }
 
+function formatCompUntil(value: string | null): string {
+  if (!value) return "Forever";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "Invalid date";
+  return parsed.toLocaleDateString();
+}
+
 export default function CompAccessAdminPage() {
   const { isLoaded, user } = useUser();
   const email = user?.primaryEmailAddress?.emailAddress ?? "";
@@ -30,10 +37,22 @@ export default function CompAccessAdminPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [listFilter, setListFilter] = useState("");
+
+  const filteredComped = useMemo(() => {
+    const needle = listFilter.trim().toLowerCase();
+    if (!needle) return comped;
+    return comped.filter((tenant) =>
+      [tenant.name, tenant.clerk_org_id]
+        .filter((value): value is string => Boolean(value))
+        .some((value) => value.toLowerCase().includes(needle)),
+    );
+  }, [comped, listFilter]);
 
   const refresh = useCallback(async () => {
     if (!isAuthorized) return;
     setLoading(true);
+    setError(null);
     try {
       const res = await fetch("/api/admin/comp-access", { cache: "no-store" });
       if (!res.ok) throw new Error(`Status ${res.status}`);
@@ -48,36 +67,12 @@ export default function CompAccessAdminPage() {
 
   useEffect(() => {
     if (isLoaded && isAuthorized) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      void refresh();
+      const timer = window.setTimeout(() => {
+        void refresh();
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
   }, [isLoaded, isAuthorized, refresh]);
-
-  if (!isLoaded) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-[#06070A] text-white/45">
-        Loading…
-      </div>
-    );
-  }
-
-  if (!isAuthorized) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-[#06070A]">
-        <div className="text-center">
-          <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-white/45">
-            403
-          </p>
-          <h1 className="mt-2 text-4xl font-black tracking-tight text-white">
-            Forbidden
-          </h1>
-          <p className="mt-2 text-sm text-white/45">
-            You are not authorized to access this page.
-          </p>
-        </div>
-      </div>
-    );
-  }
 
   const handleGrant = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -93,7 +88,7 @@ export default function CompAccessAdminPage() {
     const compUntil = forever
       ? null
       : (() => {
-          const n = parseInt(days, 10);
+          const n = Number.parseInt(days, 10);
           if (!Number.isFinite(n) || n <= 0) return null;
           const d = new Date();
           d.setDate(d.getDate() + n);
@@ -119,7 +114,7 @@ export default function CompAccessAdminPage() {
         const text = await res.text();
         throw new Error(text || `Failed (${res.status})`);
       }
-      setMessage(forever ? "Comp access granted (forever)" : `Comp access granted for ${days} days`);
+      setMessage(forever ? "Comp access granted forever" : `Comp access granted for ${days} days`);
       setSearch("");
       await refresh();
     } catch (err) {
@@ -149,6 +144,32 @@ export default function CompAccessAdminPage() {
     }
   };
 
+  if (!isLoaded) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#06070A] text-white/45">
+        Loading...
+      </div>
+    );
+  }
+
+  if (!isAuthorized) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#06070A]">
+        <div className="text-center">
+          <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-white/45">
+            403
+          </p>
+          <h1 className="mt-2 text-4xl font-black tracking-tight text-white">
+            Forbidden
+          </h1>
+          <p className="mt-2 text-sm text-white/45">
+            You are not authorized to access this page.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#06070A]">
       <PageHero
@@ -169,13 +190,15 @@ export default function CompAccessAdminPage() {
           </div>
         )}
 
-        {/* Grant form */}
         <form
           onSubmit={handleGrant}
           className="rounded-2xl border border-white/8 bg-[#0E0F12] p-6"
         >
           <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-white/45">
             Grant Comp Access
+          </p>
+          <p className="mt-2 text-xs text-white/45">
+            Search by tenant name or Clerk org slug, then choose a duration.
           </p>
           <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
             <label className="block">
@@ -224,25 +247,45 @@ export default function CompAccessAdminPage() {
               disabled={submitting}
               className="inline-flex h-9 items-center gap-2 rounded-full bg-[#CCFF00] px-4 text-xs font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85 disabled:opacity-50"
             >
-              {submitting ? "Granting…" : "Grant Comp Access"}
+              {submitting ? "Granting..." : "Grant Comp Access"}
             </button>
           </div>
         </form>
 
-        {/* List */}
         <div className="rounded-2xl border border-white/8 bg-[#0E0F12]">
-          <div className="border-b border-white/8 px-6 py-4">
-            <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-white/45">
-              Currently Comped Tenants
-            </p>
+          <div className="flex flex-col gap-3 border-b border-white/8 px-6 py-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-white/45">
+                Currently Comped Tenants
+              </p>
+              <p className="mt-1 text-xs text-white/45">
+                {loading ? "Refreshing..." : `${filteredComped.length} of ${comped.length} visible`}
+              </p>
+            </div>
+            <label className="block w-full md:w-72">
+              <span className="mb-1 block text-[10px] font-bold uppercase tracking-widest text-white/35">
+                Filter list
+              </span>
+              <input
+                type="text"
+                value={listFilter}
+                onChange={(e) => setListFilter(e.target.value)}
+                placeholder="Search tenant or org slug"
+                className="h-9 w-full rounded-lg border border-white/10 bg-[#06070A] px-3 text-sm text-white placeholder-white/25 focus:border-[#CCFF00]/50 focus:outline-none"
+              />
+            </label>
           </div>
           {loading ? (
             <p className="px-6 py-8 text-center text-sm text-white/45">
-              Loading…
+              Loading...
             </p>
           ) : comped.length === 0 ? (
             <p className="px-6 py-8 text-center text-sm text-white/45">
               No tenants currently have comp access.
+            </p>
+          ) : filteredComped.length === 0 ? (
+            <p className="px-6 py-8 text-center text-sm text-white/45">
+              No tenants match this filter.
             </p>
           ) : (
             <table className="w-full text-sm">
@@ -255,16 +298,14 @@ export default function CompAccessAdminPage() {
                 </tr>
               </thead>
               <tbody>
-                {comped.map((t) => (
+                {filteredComped.map((t) => (
                   <tr key={t.id} className="border-b border-white/5 text-white">
-                    <td className="px-6 py-3">{t.name ?? "—"}</td>
+                    <td className="px-6 py-3">{t.name ?? "-"}</td>
                     <td className="px-6 py-3 text-white/60">
-                      {t.clerk_org_id ?? "—"}
+                      {t.clerk_org_id ?? "-"}
                     </td>
                     <td className="px-6 py-3 text-white/60">
-                      {t.comp_until
-                        ? new Date(t.comp_until).toLocaleDateString()
-                        : "Forever"}
+                      {formatCompUntil(t.comp_until)}
                     </td>
                     <td className="px-6 py-3 text-right">
                       <button

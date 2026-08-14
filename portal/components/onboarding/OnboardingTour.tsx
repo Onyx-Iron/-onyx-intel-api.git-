@@ -9,30 +9,29 @@ interface Step {
   body: string;
   targetId?: string;
 }
-
 const STEPS: Step[] = [
   {
     title: "Welcome to OnyxIntel",
-    body: "Your AI command center for construction and real estate. Plans, daily logs, estimates, and reports — unified in one place built for builders.",
+    body: "Your workspace for construction and real estate. Plans, daily logs, estimates, and reports all live together in one place.",
   },
   {
     title: "Create your first project",
-    body: "Spin up a project to anchor every plan, budget, and report. Click the New Project button to get started.",
+    body: "Start by creating a project. That gives every plan, budget, report, and task a home.",
     targetId: "new-project-button",
   },
   {
     title: "Upload plans",
-    body: "Drop PDFs or images into Upload Plans. We extract scope, takeoffs, and key details automatically.",
+    body: "Upload PDFs or images from the project page. The app extracts scope, takeoffs, and key details automatically.",
     targetId: "upload-plans-pill",
   },
   {
-    title: "Generate AI reports",
-    body: "Use the Generate Document dropdown to produce daily logs, RFIs, change orders, and field reports in seconds.",
+    title: "Make reports",
+    body: "Use the document menu to create daily logs, RFIs, change orders, and field reports.",
     targetId: "generate-document-dropdown",
   },
   {
     title: "All in one workspace",
-    body: "Switch between the five phases — Preconstruction, Construction, Closeout, Operations, and Intelligence — without ever leaving your project.",
+    body: "Move between Preconstruction, Construction, Closeout, Operations, and Intelligence without leaving your project.",
     targetId: "phase-tabs",
   },
 ];
@@ -46,32 +45,47 @@ export default function OnboardingTour() {
     if (typeof window === "undefined") return;
     try {
       const done = window.localStorage.getItem(STORAGE_KEY);
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (!done) setOpen(true);
+      if (!done) {
+        const timer = window.setTimeout(() => {
+          setOpen(true);
+        }, 0);
+        return () => window.clearTimeout(timer);
+      }
     } catch {
-      // localStorage blocked — skip tour silently.
+      const timer = window.setTimeout(() => {
+        setOpen(true);
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
   }, []);
 
   useEffect(() => {
     if (!open) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setHighlight(null);
-      return;
+      const timer = window.setTimeout(() => {
+        setHighlight(null);
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
     const current = STEPS[step];
     if (!current?.targetId) {
-      setHighlight(null);
-      return;
+      const timer = window.setTimeout(() => {
+        setHighlight(null);
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
     const el = document.getElementById(current.targetId);
     if (!el) {
-      setHighlight(null);
-      return;
+      const timer = window.setTimeout(() => {
+        setHighlight(null);
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
     const rect = el.getBoundingClientRect();
-    setHighlight(rect);
     el.scrollIntoView({ behavior: "smooth", block: "center" });
+    const timer = window.setTimeout(() => {
+      setHighlight(rect);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [step, open]);
 
   useEffect(() => {
@@ -149,7 +163,7 @@ export default function OnboardingTour() {
         onClick={complete}
         className="absolute right-5 top-5 z-10 text-xs font-bold uppercase tracking-widest text-white/60 transition-colors hover:text-white"
       >
-        Skip tour
+        Skip
       </button>
 
       {/* Card */}
@@ -160,7 +174,7 @@ export default function OnboardingTour() {
               aria-hidden
               className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-[#CCFF00] text-lg font-black text-black"
             >
-              ⚡
+              ?
             </span>
             <span className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#CCFF00]">
               OnyxIntel
@@ -202,7 +216,7 @@ export default function OnboardingTour() {
             onClick={next}
             className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-5 text-xs font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85"
           >
-            {isLast ? "Get started" : "Next"}
+            {isLast ? "Done" : "Next"}
           </button>
         </div>
       </div>

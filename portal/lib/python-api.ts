@@ -25,7 +25,11 @@ export function isAdminEmail(email: string | null | undefined): boolean {
  */
 export function pythonApiSecret(email: string | null | undefined): string {
   void email;
-  return process.env.ONYX_API_SECRET || "";
+  const secret = process.env.ONYX_API_SECRET;
+  if (!secret || secret.trim() === "") {
+    throw new Error("Missing required environment variable: ONYX_API_SECRET");
+  }
+  return secret;
 }
 
 /**

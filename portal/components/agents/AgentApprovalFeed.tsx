@@ -3,9 +3,9 @@
 import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Types
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 interface Recommendation {
   gaps?: Array<{
     item: {
@@ -47,14 +47,15 @@ interface Props {
   projectNames: Record<string, string>;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Component
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export default function AgentApprovalFeed({ initialItems, projectNames }: Props) {
   const [items, setItems] = useState<AuditItem[]>(initialItems);
   const [busy, setBusy]   = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [filterAgent, setFilterAgent] = useState<"all" | "scope_gap_verifier" | "rfi_drafter">("all");
+  const [error, setError] = useState<string | null>(null);
 
   const filtered = useMemo(() => {
     if (filterAgent === "all") return items;
@@ -63,6 +64,8 @@ export default function AgentApprovalFeed({ initialItems, projectNames }: Props)
 
   const decide = useCallback(async (id: string, decision: "approve" | "reject" | "modify") => {
     setBusy(id);
+    setError(null);
+    const prevItems = items;
     try {
       const res = await fetch(`/api/agents/audit-trails/${encodeURIComponent(id)}/decide`, {
         method: "POST",
@@ -73,12 +76,16 @@ export default function AgentApprovalFeed({ initialItems, projectNames }: Props)
         setItems((prev) => prev.filter((it) => it.id !== id));
       } else {
         const err = await res.json().catch(() => ({}));
-        alert(`Decision failed: ${err.error ?? res.status}`);
+        setItems(prevItems);
+        setError(`Decision failed: ${err.error ?? res.status}`);
       }
+    } catch {
+      setItems(prevItems);
+      setError("Decision failed just now. Refresh and try again in a moment.");
     } finally {
       setBusy(null);
     }
-  }, []);
+  }, [items]);
 
   return (
     <div className="min-h-screen bg-[#06070A] text-white">
@@ -94,7 +101,7 @@ export default function AgentApprovalFeed({ initialItems, projectNames }: Props)
               </span>
             </h1>
             <p className="mt-1 text-xs text-white/40">
-              Nothing an agent proposes writes to your estimates or drafts an RFI until you click <b>Approve</b> here.
+              Nothing an agent proposes writes to your estimates or drafts an RFI until you approve it here.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -119,11 +126,16 @@ export default function AgentApprovalFeed({ initialItems, projectNames }: Props)
 
       {/* Feed */}
       <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 lg:px-10 space-y-3">
+        {error && (
+          <div className="rounded-xl border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-200">
+            {error}
+          </div>
+        )}
         {filtered.length === 0 && (
           <div className="rounded-xl border border-white/10 bg-white/[0.02] p-8 text-center">
-            <p className="text-sm text-white/60">No agent findings waiting for review.</p>
+            <p className="text-sm text-white/60">No findings waiting for review.</p>
             <p className="mt-2 text-xs text-white/40">
-              As pages get parsed, background agents post findings here.
+              As documents get processed, findings will appear here.
             </p>
           </div>
         )}
@@ -164,13 +176,13 @@ export default function AgentApprovalFeed({ initialItems, projectNames }: Props)
                   {it.agent_name === "scope_gap_verifier" && it.recommendations.gaps && (
                     <div>
                       <div className="text-[10px] uppercase tracking-widest font-mono text-white/40 mb-1">
-                        Proposed estimate insertions
+                        Suggested estimate items
                       </div>
                       <div className="rounded-lg border border-white/10 divide-y divide-white/5">
                         {it.recommendations.gaps.map((g, i) => (
                           <div key={i} className="grid grid-cols-[80px_1fr_auto] gap-3 px-3 py-2 text-xs">
                             <span className="font-mono text-white/50">
-                              {g.item.cost_code ?? "—"}
+                              {g.item.cost_code ? g.item.cost_code : "-"}
                             </span>
                             <span className="min-w-0">
                               <span className="text-white line-clamp-1">{g.item.description}</span>
@@ -178,7 +190,7 @@ export default function AgentApprovalFeed({ initialItems, projectNames }: Props)
                             </span>
                             <span className="flex items-center gap-2 whitespace-nowrap text-white/70">
                               <span className="font-mono">{g.item.quantity.toLocaleString()} {g.item.unit}</span>
-                              {g.cross_verified && <span className="text-[9px] uppercase tracking-widest font-mono text-[#CCFF00]">✓ verified</span>}
+                              {g.cross_verified && <span className="text-[9px] uppercase tracking-widest font-mono text-[#CCFF00]">verified</span>}
                               {typeof g.confidence === "number" && (
                                 <span className={`text-[9px] uppercase tracking-widest font-mono ${confTone(g.confidence)}`}>
                                   {(g.confidence * 100).toFixed(0)}%
@@ -200,7 +212,7 @@ export default function AgentApprovalFeed({ initialItems, projectNames }: Props)
                           <div className="space-y-1.5">
                             {it.recommendations.contradictions.map((c, i) => (
                               <div key={i} className="rounded-lg border border-amber-400/20 bg-amber-400/[0.03] px-3 py-2 text-xs">
-                                <div className="text-amber-300 font-semibold text-[11px]">{c.discipline} — {c.reason}</div>
+                                <div className="text-amber-300 font-semibold text-[11px]">{c.discipline} - {c.reason}</div>
                                 <div className="mt-1 text-[10px] text-white/60">
                                   <div>A ({c.a.source}): &ldquo;{c.a.text.slice(0, 180)}&rdquo;</div>
                                   <div>B ({c.b.source}): &ldquo;{c.b.text.slice(0, 180)}&rdquo;</div>
@@ -212,7 +224,7 @@ export default function AgentApprovalFeed({ initialItems, projectNames }: Props)
                       )}
                       {it.recommendations.draft && (
                         <div>
-                          <div className="text-[10px] uppercase tracking-widest font-mono text-white/40 mb-1">Draft (will save as a document; nothing is sent externally)</div>
+                          <div className="text-[10px] uppercase tracking-widest font-mono text-white/40 mb-1">Draft preview</div>
                           <div className="rounded-lg border border-white/10 bg-black/40 px-3 py-2">
                             <div className="text-[11px] font-semibold text-white">{it.recommendations.draft.subject}</div>
                             <pre className="mt-1 whitespace-pre-wrap font-mono text-[10px] text-white/70 leading-snug">{it.recommendations.draft.body}</pre>
@@ -246,7 +258,7 @@ export default function AgentApprovalFeed({ initialItems, projectNames }: Props)
                       onClick={() => decide(it.id, "approve")}
                       className="rounded-full bg-[#CCFF00] px-5 py-1.5 text-[10px] font-bold uppercase tracking-widest text-black hover:opacity-85 disabled:opacity-40"
                     >
-                      {busy === it.id ? "…" : "Approve Agent Finding"}
+                      {busy === it.id ? "..." : "Approve"}
                     </button>
                   </div>
                 </div>

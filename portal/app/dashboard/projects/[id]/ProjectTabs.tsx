@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Award,
@@ -26,7 +26,7 @@ import type { JSX } from "react";
 import { printDocument } from "@/lib/print";
 import TakeoffTab               from "@/components/takeoff/TakeoffTab";
 import ScheduleTab              from "@/components/schedule/ScheduleTab";
-import EstimateTab              from "@/components/estimate/EstimateTab";
+import EstimateMatrix           from "@/components/estimate/EstimateMatrix";
 import ProjectControlsTab       from "@/components/project-controls/ProjectControlsTab";
 import PunchListTab             from "@/components/punchlist/PunchListTab";
 import DocumentsTab             from "@/components/documents/DocumentsTab";
@@ -46,6 +46,7 @@ import ClosedInvoicesTab        from "@/components/invoicing/ClosedInvoicesTab";
 import LienWaiversTab           from "@/components/invoicing/LienWaiversTab";
 import CutFillTab               from "@/components/cut-fill/CutFillTab";
 import ProcurementBoard         from "@/components/procurement/ProcurementBoard";
+import { useProjectSync, useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 
 // Target 10-section IA (docs/frontend-backend-reconciliation/INFORMATION_ARCHITECTURE.md)
 // replacing the prior 5-phase/~21-subtab structure. This recomposes the same
@@ -55,7 +56,7 @@ type Phase =
   | "Overview"
   | "Documents"
   | "Takeoff"
-  | "Estimate & Budget"
+  | "Estimate"
   | "Schedule"
   | "Project Controls"
   | "Procurement"
@@ -69,7 +70,6 @@ interface SubTabDef {
   icon: JSX.Element;
   render: (projectId: string, projectName: string) => JSX.Element;
 }
-
 const PHASES: { id: Phase; subtabs: SubTabDef[] }[] = [
   {
     id: "Overview",
@@ -92,9 +92,9 @@ const PHASES: { id: Phase; subtabs: SubTabDef[] }[] = [
     ],
   },
   {
-    id: "Estimate & Budget",
+    id: "Estimate",
     subtabs: [
-      { id: "estimates", label: "Estimate & Budget", icon: <Calculator size={13} />, render: (p) => <EstimateTab projectId={p} /> },
+      { id: "estimates", label: "Estimate", icon: <Calculator size={13} />, render: (p, n) => <EstimateMatrix projectId={p} projectName={n} embedded /> },
     ],
   },
   {
@@ -119,20 +119,20 @@ const PHASES: { id: Phase; subtabs: SubTabDef[] }[] = [
       // Wired in per frontend-backend-reconciliation Phase-1 audit finding:
       // ProcurementBoard + its full RFQ -> vendor bid -> award -> PO backend
       // already existed at this route with zero navigation path to it.
-      { id: "procurement", label: "Vendor Bids & POs",     icon: <Truck size={13} />,       render: (p, n) => <ProcurementBoard projectId={p} projectName={n} /> },
-      { id: "materials",   label: "Material Vendors",      icon: <PackageOpen size={13} />, render: (p) => <MaterialVendorsTab projectId={p} /> },
-      { id: "equipment",   label: "Equipment Suppliers",   icon: <Truck size={13} />,       render: (p) => <EquipmentSuppliersTab projectId={p} /> },
-      { id: "subs",        label: "Subcontractors",        icon: <Hammer size={13} />,      render: (p) => <ContactsTab projectId={p} /> },
+      { id: "procurement", label: "Procurement",          icon: <Truck size={13} />,       render: (p, n) => <ProcurementBoard projectId={p} projectName={n} /> },
+      { id: "materials",   label: "Vendors",              icon: <PackageOpen size={13} />, render: (p) => <MaterialVendorsTab projectId={p} /> },
+      { id: "equipment",   label: "Equipment",            icon: <Truck size={13} />,       render: (p) => <EquipmentSuppliersTab projectId={p} /> },
+      { id: "subs",        label: "Subs",                 icon: <Hammer size={13} />,      render: (p) => <ContactsTab projectId={p} /> },
     ],
   },
   {
     id: "Financials",
     subtabs: [
-      { id: "ar",           label: "Accounts Receivable", icon: <Banknote size={13} />,    render: (p) => <AccountsReceivableTab projectId={p} /> },
-      { id: "ap",           label: "Accounts Payable",    icon: <Receipt size={13} />,     render: (p) => <AccountsPayableTab projectId={p} /> },
-      { id: "open",         label: "Open Invoices",       icon: <Coins size={13} />,       render: (p) => <OpenInvoicesTab projectId={p} /> },
-      { id: "closed",       label: "Closed Invoices",     icon: <FileCheck size={13} />,   render: (p) => <ClosedInvoicesTab projectId={p} /> },
-      { id: "lien-waivers", label: "Lien Waivers",        icon: <ShieldCheck size={13} />, render: (p) => <LienWaiversTab projectId={p} /> },
+      { id: "ar",           label: "Receivables",        icon: <Banknote size={13} />,    render: (p) => <AccountsReceivableTab projectId={p} /> },
+      { id: "ap",           label: "Payables",          icon: <Receipt size={13} />,     render: (p) => <AccountsPayableTab projectId={p} /> },
+      { id: "open",         label: "Open Invoices",     icon: <Coins size={13} />,       render: (p) => <OpenInvoicesTab projectId={p} /> },
+      { id: "closed",       label: "Closed Invoices",   icon: <FileCheck size={13} />,   render: (p) => <ClosedInvoicesTab projectId={p} /> },
+      { id: "lien-waivers", label: "Lien Waivers",      icon: <ShieldCheck size={13} />, render: (p) => <LienWaiversTab projectId={p} /> },
     ],
   },
   {
@@ -157,11 +157,13 @@ const PHASES: { id: Phase; subtabs: SubTabDef[] }[] = [
 interface ProjectTabsProps {
   projectId: string;
   projectName?: string;
+  initialPhase?: Phase;
+  initialSubId?: string;
 }
-
-export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps) {
-  const [activePhase, setActivePhase] = useState<Phase>("Overview");
-  const [activeSubId, setActiveSubId] = useState<string>("summary");
+export default function ProjectTabs({ projectId, projectName, initialPhase, initialSubId }: ProjectTabsProps) {
+  const projectSync = useProjectSync();
+  const [activePhase, setActivePhase] = useState<Phase>(initialPhase ?? "Overview");
+  const [activeSubId, setActiveSubId] = useState<string>(initialSubId ?? (initialPhase === "Takeoff" ? "takeoff" : "summary"));
 
   const selectPhase = (phase: Phase) => {
     setActivePhase(phase);
@@ -211,6 +213,13 @@ export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps
               {phase.id}
             </button>
           ))}
+          <span
+            className="ml-auto inline-flex shrink-0 items-center gap-1.5 px-2 text-[9px] font-semibold uppercase tracking-widest text-white/30"
+            title={projectSync?.updatedAt ? `Last project change: ${new Date(projectSync.updatedAt).toLocaleString()}` : "Connecting project data"}
+          >
+            <span className={`h-1.5 w-1.5 rounded-full ${projectSync?.connected ? "bg-emerald-400" : "bg-amber-400"}`} />
+            {projectSync?.connected ? "Project synced" : "Syncing"}
+          </span>
         </div>
       </div>
 
@@ -245,7 +254,6 @@ export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps
     </div>
   );
 }
-
 function RiskAssessmentTab({ projectId }: { projectId: string }) {
   return (
     <div className="space-y-4">
@@ -253,13 +261,12 @@ function RiskAssessmentTab({ projectId }: { projectId: string }) {
       <div className="rounded-xl border border-white/8 bg-[#0E0F12] p-5 text-sm text-white/55">
         <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-white/40 mb-2">What this is</p>
         <p>
-          The AI Risk Digest reads your live project state — open RFIs, schedule slack, budget variance, weather forecast, missing submittals — and surfaces the issues most likely to bite you next. Regenerate any time you want a fresh read.
+          The AI Risk Digest reads your live project state - open RFIs, schedule slack, budget variance, weather forecast, missing submittals - and surfaces the issues most likely to bite you next. Regenerate any time you want a fresh read.
         </p>
       </div>
     </div>
   );
 }
-
 interface OverviewCounts {
   takeoff_items: number; documents: number; schedule_tasks: number;
   contacts: number; daily_logs: number; generated_docs: number;
@@ -281,18 +288,27 @@ function OverviewTab({ projectId }: { projectId: string }) {
   const [counts, setCounts] = useState<OverviewCounts | null>(null);
   const [report, setReport] = useState<string | null>(null);
   const [reporting, setReporting] = useState(false);
+  const [packing, setPacking] = useState(false);
+  const [packStatus, setPackStatus] = useState<string | null>(null);
 
-  useEffect(() => {
+  const loadCounts = useCallback(() => {
     fetch(`/api/overview?project_id=${projectId}`)
       .then((r) => r.json())
       .then((d) => setCounts(d))
       .catch(() => {});
   }, [projectId]);
 
+  useProjectSyncRefresh(loadCounts);
+
+  useEffect(() => {
+    loadCounts();
+  }, [loadCounts]);
+
   const generateReport = async () => {
     if (reporting) return;
     setReporting(true);
     setReport(null);
+    setPackStatus(null);
     try {
       const res = await fetch("/api/status-report", {
         method: "POST",
@@ -302,24 +318,79 @@ function OverviewTab({ projectId }: { projectId: string }) {
       const d = await res.json() as { report?: string; error?: string; code?: string };
       if (res.ok && d.report) setReport(d.report);
       else if (d.code === "NO_PROVIDER") setReport("No AI model connected. Check GEMINI_API_KEY in Vercel.");
-      else setReport(`Error: ${d.error ?? res.status}`);
+      else setReport(`Could not build the project summary. Try again in a moment and check the latest error details below.\n\n${d.error ?? `HTTP ${res.status}`}`);
     } finally {
       setReporting(false);
     }
   };
 
+  const runOpsPack = async () => {
+    if (packing) return;
+    setPacking(true);
+    setPackStatus(null);
+    try {
+      const [statusRes, updateRes, riskRes, materialsRes] = await Promise.all([
+        fetch("/api/status-report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project_id: projectId }),
+        }),
+        fetch("/api/generated-docs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project_id: projectId, doc_type: "project_update" }),
+        }),
+        fetch("/api/generated-docs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project_id: projectId, doc_type: "risk_assessment" }),
+        }),
+        fetch("/api/generated-docs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project_id: projectId, doc_type: "spec_materials" }),
+        }),
+      ]);
+
+      const statusBody = (await statusRes.json().catch(() => ({}))) as { report?: string; error?: string; code?: string };
+      const updateBody = (await updateRes.json().catch(() => ({}))) as { doc?: { title?: string }; error?: string; code?: string };
+      const riskBody = (await riskRes.json().catch(() => ({}))) as { doc?: { title?: string }; error?: string; code?: string };
+      const materialsBody = (await materialsRes.json().catch(() => ({}))) as { doc?: { title?: string }; error?: string; code?: string };
+
+      if (!statusRes.ok) {
+        if (statusBody.code === "NO_PROVIDER") throw new Error("No AI model is connected for status reports.");
+        throw new Error(statusBody.error ?? `HTTP ${statusRes.status}`);
+      }
+      if (!updateRes.ok) throw new Error(updateBody.error ?? `HTTP ${updateRes.status}`);
+      if (!riskRes.ok) throw new Error(riskBody.error ?? `HTTP ${riskRes.status}`);
+      if (!materialsRes.ok) throw new Error(materialsBody.error ?? `HTTP ${materialsRes.status}`);
+
+      setReport(statusBody.report ?? null);
+      setPackStatus([
+        "Status report refreshed",
+        updateBody.doc?.title ? `Created ${updateBody.doc.title}` : null,
+        riskBody.doc?.title ? `Created ${riskBody.doc.title}` : null,
+        materialsBody.doc?.title ? `Created ${materialsBody.doc.title}` : null,
+      ].filter(Boolean).join(" · "));
+    } catch (e) {
+      setPackStatus(`Summary failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setPacking(false);
+    }
+  };
+
   const c = counts;
   const stats: { label: string; value: string; alert?: boolean }[] = [
-    { label: "Completion",     value: c ? `${c.completion}%` : "—" },
-    { label: "Estimate Value", value: c ? money(c.estimate_value) : "—" },
-    { label: "Takeoff Items",  value: c ? String(c.takeoff_items) : "—" },
-    { label: "Documents",      value: c ? String(c.documents) : "—" },
-    { label: "Open Punch",     value: c ? `${c.punch_open}/${c.punch_total}` : "—",    alert: !!(c && c.punch_open > 0) },
-    { label: "Permits OK",     value: c ? `${c.permits_approved}/${c.permits_total}` : "—" },
-    { label: "Procurement",    value: c ? `${c.procurement_pending} pending` : "—" },
-    { label: "Open Controls",  value: c ? String(c.rfis_open + c.submittals_open) : "—", alert: !!(c && c.rfis_open + c.submittals_open > 0) },
-    { label: "Pending COs",    value: c ? money(c.pending_change_order_value) : "—" },
-    { label: "Daily Logs",     value: c ? String(c.daily_logs) : "—" },
+    { label: "Completion",     value: c ? `${c.completion}%` : "-" },
+    { label: "Estimate Value", value: c ? money(c.estimate_value) : "-" },
+    { label: "Takeoff Items",  value: c ? String(c.takeoff_items) : "-" },
+    { label: "Documents",      value: c ? String(c.documents) : "-" },
+    { label: "Open Punch",     value: c ? `${c.punch_open}/${c.punch_total}` : "-",    alert: !!(c && c.punch_open > 0) },
+    { label: "Permits OK",     value: c ? `${c.permits_approved}/${c.permits_total}` : "-" },
+    { label: "Procurement",    value: c ? `${c.procurement_pending} pending` : "-" },
+    { label: "Open Items",  value: c ? String(c.rfis_open + c.submittals_open) : "-", alert: !!(c && c.rfis_open + c.submittals_open > 0) },
+    { label: "Pending COs",    value: c ? money(c.pending_change_order_value) : "-" },
+    { label: "Daily Logs",     value: c ? String(c.daily_logs) : "-" },
   ];
 
   return (
@@ -336,14 +407,20 @@ function OverviewTab({ projectId }: { projectId: string }) {
         ))}
       </div>
 
-      {/* AI Status Report */}
       <div className="rounded-xl border border-white/8 bg-[#111113] p-6">
         <div className="mb-4 flex items-center justify-between">
           <div>
-            <p className="text-[10px] font-semibold uppercase tracking-widest text-white/40">AI Project Status Report</p>
-            <p className="mt-1 text-xs text-white/25">Executive summary from live project data</p>
+            <p className="text-[10px] font-semibold uppercase tracking-widest text-white/40">Project status</p>
+            <p className="mt-1 text-xs text-white/25">Live summary from the project</p>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={runOpsPack}
+              disabled={packing}
+              className="h-8 rounded-lg border border-white/10 bg-white/5 px-3 text-[10px] font-semibold uppercase tracking-widest text-white/40 transition-colors hover:bg-white/8 hover:text-white disabled:opacity-40"
+            >
+              {packing ? "Running..." : "Build summary"}
+            </button>
             {report && (
               <button
                 onClick={() => printDocument("Project Status Report", report, "Onyx Intel")}
@@ -357,7 +434,7 @@ function OverviewTab({ projectId }: { projectId: string }) {
               disabled={reporting}
               className="h-8 rounded-lg border border-[#CCFF00]/30 bg-[#CCFF00]/10 px-4 text-[10px] font-bold uppercase tracking-widest text-[#CCFF00] transition-colors hover:bg-[#CCFF00]/20 disabled:opacity-40"
             >
-              {reporting ? "Generating…" : report ? "Regenerate" : "Generate Report"}
+              {reporting ? "Generating..." : report ? "Update report" : "Create report"}
             </button>
           </div>
         </div>
@@ -365,9 +442,10 @@ function OverviewTab({ projectId }: { projectId: string }) {
           <pre className="mt-2 whitespace-pre-wrap font-sans text-xs leading-relaxed text-white/60">{report}</pre>
         ) : (
           <p className="text-xs text-white/25">
-            Generate an executive summary from this project&apos;s live data — schedule, budget, open punch items, permits, procurement, and recent field activity.
+            Create a summary from this project&apos;s live data - schedule, budget, open punch items, permits, procurement, and recent field activity.
           </p>
         )}
+        {packStatus && <p className="mt-3 text-[11px] text-[#CCFF00]">{packStatus}</p>}
       </div>
     </div>
   );

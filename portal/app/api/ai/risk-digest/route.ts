@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { headerSafe } from "@/lib/http";
 import { logEvent } from "@/lib/activity";
+import { loadProjectKnowledgeSnapshot } from "@/lib/projects/knowledge";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -18,7 +19,7 @@ interface DigestResult {
   bullets: string[];
 }
 
-async function generateDigest(snapshot: Record<string, unknown>): Promise<DigestResult | null> {
+async function generateDigest(snapshot: unknown): Promise<DigestResult | null> {
   if (!GEMINI_API_KEY) throw new Error("NO_PROVIDER");
 
   const prompt = `You are a construction project risk analyst. Analyze this project data and identify the top 3 risks or concerns.
@@ -82,67 +83,6 @@ Be specific — reference actual numbers, counts, and dates from the data. Do no
   }
 }
 
-async function buildSnapshot(
-  db: Awaited<ReturnType<typeof createServiceClient>>,
-  projectId: string,
-  tenantId: string,
-) {
-  const today = new Date().toISOString().split("T")[0];
-
-  const [projectRes, rfisRes, scheduleRes] = await Promise.all([
-    db.from("projects")
-      .select("name, status, budget, start_date, end_date, meta")
-      .eq("id", projectId).eq("tenant_id", tenantId).single(),
-
-    db.from("rfi_items")
-      .select("id, status, due_date")
-      .eq("project_id", projectId).eq("tenant_id", tenantId),
-
-    db.from("schedule_tasks")
-      .select("id, status, end_date")
-      .eq("project_id", projectId).eq("tenant_id", tenantId),
-  ]);
-
-  const project = projectRes.data;
-  if (!project) return null;
-
-  const meta = (project.meta ?? {}) as Record<string, unknown>;
-  const estimate = typeof meta.estimate === "number" ? meta.estimate : null;
-
-  const rfis = rfisRes.data ?? [];
-  const openRfis = rfis.filter((r) => r.status === "open" || r.status === "pending");
-  const overdueRfis = openRfis.filter((r) => r.due_date && r.due_date < today);
-
-  const tasks = scheduleRes.data ?? [];
-  const incompleteTasks = tasks.filter((t) => t.status !== "complete" && t.status !== "done");
-  const overdueTasks = incompleteTasks.filter((t) => t.end_date && t.end_date < today);
-
-  const daysRemaining = project.end_date
-    ? Math.ceil((new Date(project.end_date).getTime() - new Date(today).getTime()) / 86_400_000)
-    : null;
-
-  const budgetVariance =
-    project.budget != null && estimate != null ? project.budget - estimate : null;
-
-  return {
-    name: project.name,
-    status: project.status,
-    budget: project.budget,
-    estimate,
-    budget_variance: budgetVariance,
-    start_date: project.start_date,
-    end_date: project.end_date,
-    days_remaining: daysRemaining,
-    total_rfis: rfis.length,
-    open_rfis: openRfis.length,
-    overdue_rfis: overdueRfis.length,
-    total_schedule_tasks: tasks.length,
-    incomplete_tasks: incompleteTasks.length,
-    overdue_tasks: overdueTasks.length,
-    analysis_date: today,
-  };
-}
-
 // GET /api/ai/risk-digest?project_id=... — fetch latest digest
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
@@ -187,8 +127,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .from("projects").select("id").eq("id", project_id).eq("tenant_id", tenantId).single();
     if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
 
-    const snapshot = await buildSnapshot(db, project_id, tenantId);
-    if (!snapshot) return NextResponse.json({ error: "Could not build project snapshot" }, { status: 500 });
+    const snapshot = await loadProjectKnowledgeSnapshot(tenantId, project_id);
+    if (!snapshot) return NextResponse.json({ error: "Could not build the project snapshot. Try again in a moment." }, { status: 500 });
 
     let digest: DigestResult | null;
     try {
@@ -196,7 +136,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg === "NO_PROVIDER") {
-        return NextResponse.json({ error: "AI is not configured (GEMINI_API_KEY missing).", code: "NO_PROVIDER" }, { status: 503 });
+        return NextResponse.json({ error: "No AI provider is connected yet. Open billing settings, connect a provider, and try again.", code: "NO_PROVIDER" }, { status: 503 });
       }
       throw e;
     }

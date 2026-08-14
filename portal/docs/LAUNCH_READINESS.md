@@ -1,57 +1,37 @@
-# Onyx Iron launch readiness
+# OnyxIntel launch readiness
 
-Updated: 2026-08-03
+Updated: 2026-08-14
 
-## Product work completed in this pass
+## Verified application state
 
-- Reports is now a real persisted workspace:
-  `/dashboard/reports`, `/api/reports`, `/api/reports/[id]`, and the
-  `report_runs` table.
-- Project Management is now a real cross-project workspace:
-  `/dashboard/project-management` and `/api/project-management/overview`.
-- Preconstruction is now a real bid-pipeline workspace:
-  `/dashboard/preconstruction`, `/api/preconstruction/opportunities`,
-  `/api/preconstruction/opportunities/[id]`, and the `bid_opportunities`
-  table.
-- Sidebar navigation no longer lists any unfinished workspace as "Coming Soon."
-- The local test runner now ignores stale `node_modules-*` backup folders so CI
-  does not accidentally execute third-party package tests.
+- The project workspace uses the governed automated takeoff and versioned estimate workflows; legacy estimate mutation routes are disabled.
+- Automated takeoff preserves source revision, geometry/text evidence, deterministic recomputation, immutable approvals, review state, and idempotent estimate import.
+- Estimating separates markup from margin, saves versions atomically, rejects stale writes, requires approved price provenance, and supports governed price review.
+- Reports, project management, procurement, financials, civil intelligence, preconstruction, documents, field operations, and administrative workspaces have real routes and persisted backends.
+- Project synchronization, document processing status/retry, estimate migration, and project knowledge snapshots are wired into the application.
+- AI-assisted output carries a persistent user disclaimer and does not become approved quantity or financial evidence without review.
+- Operational-role bootstrap is least privilege: personal owners become `Owner`, Clerk organization admins become `Admin`, and unassigned organization members become `ClientView`.
+- The isolated Supabase branch has zero security-advisor findings, zero unindexed foreign keys, zero duplicate indexes, and zero duplicate-policy warnings.
+- Current working-tree checks pass: TypeScript, ESLint, unit tests, production build, and the four governed browser acceptance tests.
+- `npm run launch` is fail-closed and includes type, lint, unit, isolated integration, browser, Python, takeoff certification, build, configuration audit, and live smoke checks.
 
-## Verification completed
+## Release blockers
 
-- `npm run typecheck`: passing.
-- `npm run lint`: passing with 30 pre-existing warnings and 0 errors.
-- `npm run build`: passing; production build includes the new Reports,
-  Project Management, and Preconstruction routes.
-- `npm run test:unit`: passing.
-- `npm run test:integration`: passing.
-- `npm audit --omit=dev`: 0 vulnerabilities.
-- Supabase production project `vvnigrbdsipriufhrwbs` confirms RLS enabled on
-  `report_runs` and `bid_opportunities`, each with service-role-only policies.
-- `npm run launch:audit`: passing; verifies app-owned auth routes, Vercel
-  linkage, and launch env presence from the repo.
-- `npm run launch:smoke`: failing on the live Clerk auth surface until the
-  external Clerk production config stops rendering `accounts.dev`.
+The product must not be represented as production-ready until every item below is evidenced:
 
-## Required before paid launch
+- Supply reviewed golden takeoff fixtures for the six certification boundaries. Current certification is intentionally `0 certified / 6 blocked`; synthetic or unreviewed quantities cannot satisfy this gate.
+- Configure and verify Paddle credentials, live price IDs, checkout, customer portal, webhook signature validation, and webhook replay for subscription creation, updates, past-due state, and cancellation.
+- Confirm production Clerk keys, redirect URLs, organization roles, and at least one owner/admin/member authorization acceptance flow.
+- Deploy this branch to a Vercel preview, run authenticated desktop/tablet/mobile workflow QA, and complete an actual document upload through storage, page splitting, extraction, review, approval, estimate import, and estimate approval.
+- Verify Railway document/takeoff service configuration and outage recovery from the preview environment.
+- Apply pending database migrations to production only after the isolated tests and preview canary pass. Production has not been migrated by this work.
+- Complete legal/commercial launch requirements: Terms, Privacy, AI limitation language, refund/cancellation policy, support contact, tax setup, and production account ownership.
 
-- Clerk must be switched from test keys to production keys in Vercel:
-  `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, and the sign-in,
-  sign-up, after-sign-in, and after-sign-up URLs.
-- Paddle live billing must be configured in Vercel:
-  `PADDLE_ENV=live`, `PADDLE_API_KEY`, `PADDLE_WEBHOOK_SECRET`,
-  `PADDLE_PRICE_SOLO_MONTHLY`, `PADDLE_PRICE_SOLO_YEARLY`,
-  `PADDLE_PRICE_CREW_MONTHLY`, `PADDLE_PRICE_CREW_YEARLY`,
-  `PADDLE_PRICE_BUSINESS_MONTHLY`, and `PADDLE_PRICE_BUSINESS_YEARLY`.
-- Paddle webhook replay must be verified against `/api/billing/webhook` for at
-  least `subscription.created`, `subscription.updated`,
-  `subscription.past_due`, and `subscription.canceled`.
-- Marketing integrations need real production credentials if those channels
-  are part of launch: Google Ads and Meta env vars are referenced by code but
-  were not present in the local app env.
-- A real browser QA pass is still required on production or preview for desktop,
-  tablet, and mobile. Code/build tests are green, but they do not prove layout,
-  auth redirects, checkout handoff, or interactive form behavior in Chrome.
-- Legal/commercial docs must be finalized outside the codebase: Terms of
-  Service, Privacy Policy, refund/cancellation policy, support contact, tax
-  settings, and Paddle/Clerk production account ownership.
+## Release sequence
+
+1. Keep all development and database validation on the isolated branch.
+2. Commit and push the reviewed integration branch.
+3. Deploy a Vercel preview with production-shaped non-production credentials.
+4. Run the complete launch gate and authenticated canary checklist.
+5. Resolve every failed or missing evidence item; do not waive certification failures.
+6. Back up production, apply reviewed migrations, deploy a controlled production canary, monitor, and roll back on any failed health or workflow check.

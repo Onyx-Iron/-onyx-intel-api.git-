@@ -1,3 +1,4 @@
+import { auth } from "@clerk/nextjs/server";
 import { createServiceClient } from "@/lib/supabase/server";
 
 // ── Operational roles (mirrors the CHECK constraint on project_profiles.role) ──
@@ -14,11 +15,22 @@ const KNOWN_ROLES: readonly Role[] = [
   "Owner", "Admin", "Estimator", "ProjectManager", "FieldSuperintendent", "Subcontractor", "ClientView",
 ];
 
-// A user with no project_profiles row yet (first login) defaults to the most
-// capable role rather than silently locking the tenant's own owner out —
-// `getOrCreateTenant` already gates workspace creation, so anyone reaching
-// this point is a legitimate member of the org.
-const DEFAULT_ROLE: Role = "Estimator";
+const DEFAULT_ROLE: Role = "ClientView";
+
+interface RoleIdentity {
+  requestedUserId: string;
+  authenticatedUserId: string | null;
+  orgId: string | null;
+  orgRole: string | null;
+}
+
+export function fallbackRoleForIdentity(identity: RoleIdentity): Role {
+  if (!identity.authenticatedUserId || identity.authenticatedUserId !== identity.requestedUserId) {
+    return DEFAULT_ROLE;
+  }
+  if (!identity.orgId) return "Owner";
+  return identity.orgRole === "org:admin" ? "Admin" : DEFAULT_ROLE;
+}
 
 // ── Resource categories the app currently gates ──
 export type ResourceCategory = "financial" | "field" | "admin";
@@ -59,7 +71,29 @@ export async function getUserRole(tenantId: string, clerkUserId: string): Promis
     .maybeSingle();
 
   const role = data?.role as string | undefined;
-  return (role && (KNOWN_ROLES as readonly string[]).includes(role)) ? (role as Role) : DEFAULT_ROLE;
+  if (role && (KNOWN_ROLES as readonly string[]).includes(role)) return role as Role;
+
+  let fallback = DEFAULT_ROLE;
+  try {
+    const identity = await auth();
+    fallback = fallbackRoleForIdentity({
+      requestedUserId: clerkUserId,
+      authenticatedUserId: identity.userId,
+      orgId: identity.orgId ?? null,
+      orgRole: identity.orgRole ?? null,
+    });
+  } catch {
+    // Outside a request context or when Clerk is unavailable, fail closed.
+  }
+
+  const { error } = await anyDb.from("project_profiles").upsert({
+    tenant_id: tenantId,
+    clerk_user_id: clerkUserId,
+    role: fallback,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "tenant_id,clerk_user_id", ignoreDuplicates: true });
+  if (error) throw new Error(`Unable to persist operational role: ${error.message}`);
+  return fallback;
 }
 
 // Financial-read gate (frontend-backend-reconciliation, item 4). Every role

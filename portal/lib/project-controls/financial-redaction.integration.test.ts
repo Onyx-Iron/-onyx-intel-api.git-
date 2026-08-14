@@ -48,7 +48,7 @@ if (!ENV.ready) {
       .eq("clerk_user_id", clerkUserId)
       .maybeSingle();
     const role = data?.role as string | undefined;
-    return (role && (KNOWN_ROLES as readonly string[]).includes(role)) ? (role as Role) : "Estimator";
+    return (role && (KNOWN_ROLES as readonly string[]).includes(role)) ? (role as Role) : "ClientView";
   }
 
   const TEST_MARK = `finredact_${Date.now()}`;
@@ -57,7 +57,7 @@ if (!ENV.ready) {
   const clerkUserOwner = `${TEST_MARK}_owner`;
   const clerkUserClient = `${TEST_MARK}_client`;
   const clerkUserSub = `${TEST_MARK}_sub`;
-  const clerkUserNoProfile = `${TEST_MARK}_noprofile`; // no project_profiles row -> defaults to Estimator
+  const clerkUserNoProfile = `${TEST_MARK}_noprofile`; // no profile fails closed to ClientView
 
   before(async () => {
     const { data: t } = await db.from("tenants").insert({ clerk_org_id: `${TEST_MARK}_org`, name: "Financial Redaction Test Tenant" }).select("id").single();
@@ -88,8 +88,8 @@ if (!ENV.ready) {
       assert.equal(await getRole(tenantId, clerkUserSub), "Subcontractor");
     });
 
-    it("defaults to Estimator when no project_profiles row exists", async () => {
-      assert.equal(await getRole(tenantId, clerkUserNoProfile), "Estimator");
+    it("defaults to ClientView when no project_profiles row exists", async () => {
+      assert.equal(await getRole(tenantId, clerkUserNoProfile), "ClientView");
     });
   });
 

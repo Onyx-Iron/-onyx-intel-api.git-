@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { FileText, Receipt, Plus } from "lucide-react";
 import UniversalImportButton from "@/components/common/UniversalImportButton";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
@@ -27,7 +28,6 @@ interface FormState {
   reference: string;
   notes: string;
 }
-
 const EMPTY_FORM: FormState = {
   invoice_number: "", vendor_or_customer: "", description: "",
   amount: "", retainage: "", invoice_date: "", due_date: "", paid_date: "",
@@ -50,7 +50,6 @@ interface InvoicePayload {
   reference: string | null;
   notes: string | null;
 }
-
 interface InvoiceListTabProps {
   projectId: string;
   /** Filter the API/list. Undefined = both directions (open/closed views). */
@@ -68,7 +67,6 @@ interface InvoiceListTabProps {
   /** Empty-state title. */
   emptyTitle?: string;
 }
-
 function SkeletonRows({ cols }: { cols: number }) {
   return (
     <>
@@ -103,7 +101,7 @@ export default function InvoiceListTab({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true);
     setError(null);
     const params = new URLSearchParams({ project_id: projectId });
@@ -116,11 +114,17 @@ export default function InvoiceListTab({
         setItems(data.items ?? []);
         setLoading(false);
       })
-      .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
-  };
+      .catch((e) => { setError(e?.message ?? "Could not load invoices. Refresh the page and try again."); setLoading(false); });
+  }, [direction, projectId, statusFilter]);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load();   }, [projectId, direction, statusFilter]);
+  useProjectSyncRefresh(load);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   const importItems = useBulkImport<InvoicePayload>(projectId, {
     endpoint: "/api/invoices",
@@ -216,13 +220,13 @@ export default function InvoiceListTab({
           });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Save failed (${res.status})`);
+        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Could not save this invoice (${res.status}). Check the form and try again.`);
         return;
       }
       cancelForm();
       load();
     } catch {
-      setErrorMsg("Network error — could not reach the server.");
+      setErrorMsg("Could not reach the server just now. Please try again in a moment.");
     } finally {
       setSubmitting(false);
     }
@@ -234,10 +238,10 @@ export default function InvoiceListTab({
     setItems((curr) => curr.filter((i) => i.id !== id));
     try {
       const res = await fetch(`/api/invoices/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, { method: "DELETE" });
-      if (!res.ok) { setItems(prev); setErrorMsg(`Delete failed (${res.status})`); }
+      if (!res.ok) { setItems(prev); setErrorMsg(`Could not delete that invoice (${res.status}). Refresh the list and try again.`); }
     } catch {
       setItems(prev);
-      setErrorMsg("Network error — could not delete.");
+      setErrorMsg("Could not delete that invoice just now. Refresh the list and try again in a moment.");
     }
   };
 
@@ -340,16 +344,18 @@ export default function InvoiceListTab({
                     <EmptyState
                       icon={<Receipt className="w-6 h-6" />}
                       title={emptyTitle}
-                      description="Track invoices, payments, and lien waivers."
+                      description="Track invoices, payments, and lien waivers, then keep the project billing picture in one place."
                       actionLabel="Add Invoice"
                       onAction={openAdd}
+                      secondaryLabel="View projects"
+                      secondaryHref="/dashboard/projects"
                     />
                   </div>
                 </td></tr>
               ) : (
                 items.map((it) => (
                   <tr key={it.id} className="hover:bg-white/[0.02] transition-colors group">
-                    <td className="px-4 py-3 text-white text-xs font-mono">{it.invoice_number ?? "—"}</td>
+                    <td className="px-4 py-3 text-white text-xs font-mono">{it.invoice_number ?? "-"}</td>
                     <td className="px-4 py-3 text-white text-xs">{it.vendor_or_customer}</td>
                     <td className="px-4 py-3 text-white text-xs font-mono">{fmtCurrency(it.amount)}</td>
                     <td className="px-4 py-3 text-gray-400 text-xs">
@@ -361,7 +367,7 @@ export default function InvoiceListTab({
                         {it.status}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-gray-500 text-xs font-mono">{it.reference ?? "—"}</td>
+                    <td className="px-4 py-3 text-gray-500 text-xs font-mono">{it.reference ?? "-"}</td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button type="button" aria-label="Edit invoice" onClick={() => openEdit(it)} className="min-h-[40px] text-gray-600 hover:text-white">

@@ -7,6 +7,7 @@ import { headerSafe } from "@/lib/http";
 import { logEvent } from "@/lib/activity";
 import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { generateText, availableProviders, NoProviderError, type Provider } from "@/lib/ai/providers";
+import { formatProjectKnowledgeForAi, loadProjectKnowledgeSnapshot } from "@/lib/projects/knowledge";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -496,7 +497,9 @@ async function handleRag(
     currentMessageCount = row?.message_count ?? 0;
   }
 
+  const projectKnowledge = await loadProjectKnowledgeSnapshot(tenantId, project_id);
   let SYSTEM = SYSTEM_BASE + "\n\n" + buildProjectBrief(project as ProjectRow, today);
+  if (projectKnowledge) SYSTEM += "\n\n" + formatProjectKnowledgeForAi(projectKnowledge);
   if (convSummary) {
     SYSTEM += `\n\n--- Prior Conversation Summary ---\n${convSummary}\n--- End Summary ---`;
   }
@@ -609,7 +612,9 @@ async function handleRag(
               fullText += text;
               await writer.write(encoder.encode(text));
             }
-          } catch { /* ignore */ }
+          } catch (err) {
+            console.warn("[ai/chat rag stream] skipped malformed chunk", err);
+          }
         }
       }
     } catch (err) {
@@ -680,7 +685,9 @@ async function handleAgentic(
   if (projErr || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
 
   const today = new Date().toISOString().split("T")[0];
-  const systemInstruction = SYSTEM_BASE_AGENTIC + "\n\n" + buildProjectBrief(project as ProjectRow, today);
+  const projectKnowledge = await loadProjectKnowledgeSnapshot(tenantId, project_id);
+  const systemInstruction = SYSTEM_BASE_AGENTIC + "\n\n" + buildProjectBrief(project as ProjectRow, today) +
+    (projectKnowledge ? "\n\n" + formatProjectKnowledgeForAi(projectKnowledge) : "");
 
   let convId = conversation_id;
   if (!convId) {

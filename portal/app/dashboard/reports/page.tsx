@@ -72,8 +72,8 @@ export default function ReportsPage() {
       ]);
       const projectData = await projectRes.json();
       const reportData = await reportRes.json();
-      if (!projectRes.ok) throw new Error(projectData.error ?? "Could not load projects");
-      if (!reportRes.ok) throw new Error(reportData.error ?? "Could not load reports");
+      if (!projectRes.ok) throw new Error(projectData.error ?? "Could not load projects. Refresh the page and try again.");
+      if (!reportRes.ok) throw new Error(reportData.error ?? "Could not load reports. Refresh the page and try again.");
       setProjects(projectData.projects ?? []);
       setReports(reportData.reports ?? []);
       setSelectedProject((current) => current || projectData.projects?.[0]?.id || "");
@@ -149,7 +149,7 @@ export default function ReportsPage() {
       <PageHero
         eyebrow="Workspace"
         title="Reports"
-        description="Generate, preserve, and export tenant-scoped executive project reports."
+        description="Generate, save, and export project reports."
         compact
         actions={
           <button
@@ -187,7 +187,7 @@ export default function ReportsPage() {
               disabled={!selectedProject || generating}
               className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#CCFF00] px-4 text-xs font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              <Wand2 size={14} /> {generating ? "Generating" : "Generate Report"}
+              <Wand2 size={14} /> {generating ? "Generating..." : "Create report"}
             </button>
           </div>
         </section>
@@ -195,7 +195,7 @@ export default function ReportsPage() {
         <div className="grid gap-5 xl:grid-cols-[360px_1fr]">
           <section className="min-h-[420px] overflow-hidden rounded-xl border border-white/8 bg-[#0E0F12]">
             <div className="border-b border-white/8 px-4 py-3">
-              <h2 className="text-xs font-bold uppercase tracking-[0.18em] text-white/55">History</h2>
+              <h2 className="text-xs font-bold uppercase tracking-[0.18em] text-white/55">Report history</h2>
             </div>
             {loading ? (
               <div className="space-y-3 p-4">
@@ -205,7 +205,11 @@ export default function ReportsPage() {
               <EmptyState
                 icon={<FileText className="h-6 w-6" />}
                 title="No reports yet"
-                description="Generate the first project report to create a preserved report history."
+                description="Create the first project report to start a saved report history. You can always come back here to review or export it."
+                actionLabel="Create report"
+                actionHref={selectedProject ? undefined : "/dashboard/projects"}
+                secondaryLabel="Open projects"
+                secondaryHref="/dashboard/projects"
               />
             ) : (
               <div className="divide-y divide-white/5">
@@ -253,7 +257,11 @@ export default function ReportsPage() {
               <EmptyState
                 icon={<FileText className="h-6 w-6" />}
                 title="Select a report"
-                description="Generated reports appear here with preserved source metrics and exportable text."
+                description="Generated reports appear here with saved metrics and exportable text. Pick one from the left or create a new report above."
+                actionLabel="Refresh"
+                onAction={() => void load()}
+                secondaryLabel="Open projects"
+                secondaryHref="/dashboard/projects"
               />
             ) : (
               <div className="p-5">

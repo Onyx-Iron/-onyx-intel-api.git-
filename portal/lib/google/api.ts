@@ -4,11 +4,13 @@ import { getAccessToken } from "./oauth";
 
 async function getOrCreateTenant(orgId: string, orgName: string): Promise<string> {
   const db = await createServiceClient();
-  const { data } = await db.from("tenants").select("id").eq("clerk_org_id", orgId).single();
-  if (data?.id) return data.id;
-  const { data: created, error } = await db.from("tenants").insert({ clerk_org_id: orgId, name: orgName }).select("id").single();
-  if (error || !created) throw new Error(`[tenant] ${error?.message}`);
-  return created.id;
+  const { data, error } = await db
+    .from("tenants")
+    .upsert({ clerk_org_id: orgId, name: orgName }, { onConflict: "clerk_org_id" })
+    .select("id")
+    .single();
+  if (error || !data) throw new Error(`[tenant] ${error?.message ?? "create failed"}`);
+  return data.id;
 }
 
 export type TokenResult =

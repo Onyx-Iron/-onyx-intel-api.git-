@@ -1,12 +1,13 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * Provider + model picker. Sits in the AI Command panel header. Persists via
  * PUT /api/ai/settings (cookies). Reads current state via GET on mount.
  *
- * Renders only providers with keys configured server-side — no dead options.
+ * Renders only providers with keys configured server-side - no dead options.
  */
 
 type Provider = "gemini" | "openai" | "anthropic";
@@ -35,14 +36,29 @@ export default function AIProviderPicker({ onChange }: { onChange?: (p: Provider
   const [state, setState] = useState<SettingsResponse | null>(null);
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let cancelled = false;
     fetch("/api/ai/settings", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((data: SettingsResponse) => { if (!cancelled) setState(data); })
-      .catch(() => { if (!cancelled) setState({ configured: [], models: {} as Record<Provider, ModelOption[]>, preference: { provider: null, model: null } }); });
+      .then(async (r) => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error((data as { error?: string }).error ?? `Could not load AI settings (${r.status}). Refresh and try again.`);
+        return data as SettingsResponse;
+      })
+      .then((data: SettingsResponse) => {
+        if (!cancelled) {
+          setState(data);
+          setLoadError(null);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setLoadError(err instanceof Error ? err.message : "Could not load AI settings. Refresh and try again.");
+          setState({ configured: [], models: {} as Record<Provider, ModelOption[]>, preference: { provider: null, model: null } });
+        }
+      });
     return () => { cancelled = true; };
   }, []);
 
@@ -72,7 +88,8 @@ export default function AIProviderPicker({ onChange }: { onChange?: (p: Provider
   const setPreference = async (provider: Provider, model: string) => {
     if (!state) return;
     setSaving(true);
-    // Optimistic update — snap the pill before the round trip.
+    // Optimistic update - snap the pill before the round trip.
+    const previous = state;
     setState({ ...state, preference: { provider, model } });
     try {
       const res = await fetch("/api/ai/settings", {
@@ -81,9 +98,14 @@ export default function AIProviderPicker({ onChange }: { onChange?: (p: Provider
         body: JSON.stringify({ provider, model }),
       });
       if (!res.ok) {
-        // Revert
-        const fresh = await fetch("/api/ai/settings", { cache: "no-store" }).then((r) => r.json());
-        setState(fresh);
+        const freshRes = await fetch("/api/ai/settings", { cache: "no-store" });
+        const fresh = await freshRes.json().catch(() => ({})) as Partial<SettingsResponse> & { error?: string };
+        if (!freshRes.ok) {
+          setState(previous);
+          setLoadError(fresh.error ?? `Could not save AI settings (${res.status}).`);
+        } else {
+          setState(fresh as SettingsResponse);
+        }
       } else {
         onChange?.(provider, model);
       }
@@ -97,8 +119,33 @@ export default function AIProviderPicker({ onChange }: { onChange?: (p: Provider
     return <span className="h-6 w-24 animate-pulse rounded-full bg-white/5" aria-hidden />;
   }
 
+  if (loadError && state.configured.length === 0) {
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-amber-200">{loadError}</span>
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          className="inline-flex h-7 items-center rounded-full border border-amber-300/20 bg-amber-300/10 px-3 text-[10px] font-bold uppercase tracking-widest text-amber-100 transition-colors hover:border-amber-300/30 hover:bg-amber-300/15"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
   if (state.configured.length === 0) {
-    return <span className="text-xs text-white/40">No AI provider configured</span>;
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-white/40">No AI provider is connected yet. Open billing settings to add one and unlock AI features.</span>
+        <Link
+          href="/dashboard/settings/billing"
+          className="inline-flex h-7 items-center rounded-full border border-white/10 bg-white/[0.03] px-3 text-[10px] font-bold uppercase tracking-widest text-white/70 transition-colors hover:border-white/30 hover:text-white"
+        >
+          Open billing settings
+        </Link>
+      </div>
+    );
   }
 
   const currentProvider = effective?.provider ?? state.configured[0];

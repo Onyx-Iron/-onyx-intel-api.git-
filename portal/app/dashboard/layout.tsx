@@ -22,6 +22,9 @@ export default async function DashboardLayout({
         <OnboardingTour />
         <main id="main-content" className="min-h-screen lg:pl-60">
           {children}
+          <footer className="px-6 pb-6 pt-2 text-center text-[10px] leading-relaxed text-white/25">
+            AI-assisted outputs can contain mistakes. Verify quantities, pricing, code requirements, and contractual decisions before approval or field use.
+          </footer>
         </main>
       </div>
     </AppProviders>

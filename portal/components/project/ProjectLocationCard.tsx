@@ -25,6 +25,7 @@ export default function ProjectLocationCard({ projectId, initial }: Props) {
   const [saving, setSaving] = useState(false);
   const [data, setData] = useState<LocationData>(initial);
   const [draft, setDraft] = useState<LocationData>(initial);
+  const [hint, setHint] = useState<string | null>(null);
   const addressInputRef = useRef<HTMLInputElement | null>(null);
   const autocompleteRef = useRef<GooglePlacesAutocomplete | null>(null);
 
@@ -34,8 +35,12 @@ export default function ProjectLocationCard({ projectId, initial }: Props) {
     const input = addressInputRef.current;
     if (!input) return;
     const places = window.google?.maps?.places;
-    if (!places) return;
-
+    if (!places) {
+      const timer = window.setTimeout(() => {
+        setHint("Google address autocomplete is unavailable right now. Type the address manually and save.");
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
     try {
       const ac = new places.Autocomplete(input, {
         types: ["address"],
@@ -65,7 +70,10 @@ export default function ProjectLocationCard({ projectId, initial }: Props) {
         }));
       });
     } catch {
-      // Silently ignore — fall back to manual entry.
+      const timer = window.setTimeout(() => {
+        setHint("Google address autocomplete could not start. Type the address manually and save.");
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
   }, [editing]);
 
@@ -106,7 +114,7 @@ export default function ProjectLocationCard({ projectId, initial }: Props) {
       setEditing(false);
       toast({ title: "Location updated", kind: "success" });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Save failed";
+      const msg = err instanceof Error ? err.message : "Could not save the project location. Check the fields and try again in a moment.";
       toast({ title: msg, kind: "error" });
     } finally {
       setSaving(false);
@@ -127,7 +135,7 @@ export default function ProjectLocationCard({ projectId, initial }: Props) {
             {data.zip_code && <span className="ml-1 text-white/40">{data.zip_code}</span>}
           </span>
         ) : (
-          <span className="text-xs text-white/40">No location set</span>
+          <span className="text-xs text-white/40">Add a location</span>
         )}
         <button
           type="button"
@@ -147,9 +155,9 @@ export default function ProjectLocationCard({ projectId, initial }: Props) {
       className="mt-2 w-full max-w-2xl rounded-xl border border-white/10 bg-[#0E0F12] p-4"
     >
       <div className="mb-3 flex items-center justify-between">
-        <p className="text-[10px] font-bold uppercase tracking-widest text-white/45">
-          Edit Project Location
-        </p>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-white/45">
+          Project location
+          </p>
         <button
           type="button"
           onClick={cancel}
@@ -161,21 +169,22 @@ export default function ProjectLocationCard({ projectId, initial }: Props) {
       </div>
 
       <div className="space-y-3">
+        {hint && <p className="text-[10px] text-amber-200">{hint}</p>}
         <div>
           <label className="mb-1 block text-[10px] font-bold uppercase tracking-widest text-white/45">
-            Address / Search
+            Address
           </label>
           <input
             ref={addressInputRef}
             type="text"
-            placeholder="Start typing an address…"
+            placeholder="Start typing an address..."
             className="h-9 w-full rounded border border-white/10 bg-[#08090C] px-3 text-sm text-white focus:border-[#CCFF00]/40 focus:outline-none"
             autoComplete="off"
           />
-          <p className="mt-1 text-[10px] text-white/40">
+            <p className="mt-1 text-[10px] text-white/40">
             {typeof window !== "undefined" && window.google?.maps?.places
-              ? "Google autocomplete enabled — selecting a result will fill the fields below."
-              : "Manual entry only — Google autocomplete not loaded."}
+              ? "Pick a result and we will fill in the rest."
+              : "Type the address manually, then save the project."}
           </p>
         </div>
 
@@ -259,7 +268,7 @@ export default function ProjectLocationCard({ projectId, initial }: Props) {
           disabled={saving}
           className="inline-flex h-8 items-center rounded-full bg-[#CCFF00] px-3 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85 disabled:opacity-50"
         >
-          {saving ? "Saving…" : "Save"}
+          {saving ? "Saving..." : "Save"}
         </button>
       </div>
     </form>

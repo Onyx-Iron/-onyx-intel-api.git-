@@ -28,17 +28,24 @@ function fireIngest(req: NextRequest, documentId: string): void {
   const url = new URL(`/api/documents/${documentId}/ingest`, req.url).toString();
   const cookie = req.headers.get("cookie") ?? "";
   after(async () => {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Cookie: cookie },
-      body: JSON.stringify({}),
-    });
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      console.error("[documents/upload-url] ingest failed", {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({}),
+      });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        console.error("[documents/upload-url] ingest failed", {
+          documentId,
+          status: response.status,
+          detail: detail.slice(0, 500),
+        });
+      }
+    } catch (error) {
+      console.error("[documents/upload-url] ingest crashed", {
         documentId,
-        status: response.status,
-        detail: detail.slice(0, 500),
+        message: error instanceof Error ? error.message : String(error),
       });
     }
   });
@@ -150,7 +157,11 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
 
     const nextMeta: UploadMeta = { ...meta, pending_upload: false };
     const { error: updateError } = await db.from("documents")
-      .update({ status: "processing", meta: nextMeta as unknown as never })
+      .update({
+        status: "processing",
+        processing_started_at: new Date().toISOString(),
+        meta: nextMeta as unknown as never,
+      } as never)
       .eq("id", document_id)
       .eq("tenant_id", tenantId);
     if (updateError) return NextResponse.json({ error: updateError.message }, { status: 500 });

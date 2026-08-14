@@ -29,6 +29,7 @@ export default function TeamManager({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<MemberRow | null>(null);
 
   async function invite(e: React.FormEvent) {
     e.preventDefault();
@@ -43,23 +44,23 @@ export default function TeamManager({
       });
       const data = await res.json();
       if (!res.ok) {
-        setError(data.error ?? "Invite failed");
+        setError(data.error ?? "Invite failed. Check the email address, your member limit, and your admin access, then try again.");
         return;
       }
       setSuccess(`Invitation sent to ${email}`);
       setEmail("");
       router.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Invite failed");
+      setError(err instanceof Error ? err.message : "Invite failed. Check the email address, your member limit, and your admin access, then try again.");
     } finally {
       setBusy(false);
     }
   }
 
   async function remove(membershipId: string) {
-    if (!confirm("Remove this teammate from the workspace?")) return;
     setBusy(true);
     setError(null);
+    const prevMembers = members;
     try {
       const res = await fetch("/api/team/members", {
         method: "DELETE",
@@ -68,13 +69,17 @@ export default function TeamManager({
       });
       const data = await res.json();
       if (!res.ok) {
-        setError(data.error ?? "Remove failed");
-        return;
+        setMembers(prevMembers);
+        setError(data.error ?? "Remove failed. Refresh and try again, or check whether the teammate is already gone.");
+        return false;
       }
       setMembers((m) => m.filter((x) => x.id !== membershipId));
       router.refresh();
+      return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Remove failed");
+      setMembers(prevMembers);
+      setError(err instanceof Error ? err.message : "Remove failed. Refresh and try again, or check whether the teammate is already gone.");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -127,6 +132,11 @@ export default function TeamManager({
               {busy ? "Sending..." : "Send Invite"}
             </button>
           </form>
+          {atLimit && (
+            <p className="mt-3 text-sm text-amber-300">
+              You&apos;ve reached the current member limit. Remove a member or upgrade the plan to invite more teammates.
+            </p>
+          )}
           {error && (
             <p className="mt-3 text-sm text-red-300">{error}</p>
           )}
@@ -158,7 +168,7 @@ export default function TeamManager({
                     colSpan={isAdmin ? 5 : 4}
                     className="py-6 text-center text-white/50"
                   >
-                    No members yet.
+                    No members yet. Invite the first teammate above to get the workspace moving.
                   </td>
                 </tr>
               )}
@@ -177,7 +187,7 @@ export default function TeamManager({
                   {isAdmin && (
                     <td className="py-3">
                       <button
-                        onClick={() => remove(m.id)}
+                        onClick={() => setRemoveTarget(m)}
                         disabled={busy}
                         className="rounded-full border border-red-500/30 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-red-300 transition-colors hover:bg-red-500/10 disabled:opacity-40"
                       >
@@ -191,6 +201,58 @@ export default function TeamManager({
           </table>
         </div>
       </div>
+      {removeTarget && (
+          <ConfirmRemoveModal
+          busy={busy}
+          member={removeTarget}
+          onCancel={() => setRemoveTarget(null)}
+          onConfirm={async () => {
+            const ok = await remove(removeTarget.id);
+            if (ok) setRemoveTarget(null);
+            return ok;
+          }}
+        />
+      )}
     </>
+  );
+}
+
+function ConfirmRemoveModal({
+  busy,
+  member,
+  onCancel,
+  onConfirm,
+}: {
+  busy: boolean;
+  member: MemberRow;
+  onCancel: () => void;
+  onConfirm: () => boolean | Promise<boolean>;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#0E0F12] p-5 shadow-2xl">
+        <h3 className="text-sm font-bold uppercase tracking-widest text-white">Remove teammate?</h3>
+        <p className="mt-2 text-sm leading-relaxed text-white/70">
+          {member.email} will lose access to the workspace until they’re invited again.
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="inline-flex h-9 items-center rounded-full border border-white/15 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/70 hover:text-white"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => void onConfirm()}
+            disabled={busy}
+            className="inline-flex h-9 items-center rounded-full bg-red-500 px-4 text-[11px] font-bold uppercase tracking-widest text-white hover:opacity-90 disabled:opacity-50"
+          >
+            {busy ? "Removing..." : "Remove"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

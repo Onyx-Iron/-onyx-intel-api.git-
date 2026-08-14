@@ -13,13 +13,11 @@ interface Campaign {
   status: string;
   project_id: string | null;
 }
-
 interface Lead {
   id: string;
   campaign_id: string | null;
   source: string | null;
 }
-
 const PLATFORM_LABEL: Record<string, string> = { google_ads: "Google Ads", meta: "Meta" };
 const PLATFORM_COLOR: Record<string, string> = { google_ads: "#4285F4", meta: "#0668E1" };
 
@@ -50,8 +48,12 @@ export default function MarketingCommandCenter() {
       setLoading(false);
     }
   }, []);
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   const totalSpend = campaigns.reduce((s, c) => s + Number(c.spend_total || 0), 0);
   const totalClicks = campaigns.reduce((s, c) => s + Number(c.clicks || 0), 0);
@@ -70,7 +72,7 @@ export default function MarketingCommandCenter() {
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h2 className="text-xs font-bold text-white uppercase tracking-widest">Marketing Command Center</h2>
-          <p className="text-[11px] text-gray-500">Field-to-funnel: project wins into live localized lead generation</p>
+          <p className="text-[11px] text-gray-500">Turn project wins into live local campaigns</p>
         </div>
         <button
           type="button"
@@ -83,7 +85,7 @@ export default function MarketingCommandCenter() {
 
       {!platformsConfigured.google_ads && !platformsConfigured.meta && (
         <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-900/10 px-4 py-2 text-[11px] text-amber-400">
-          Neither Google Ads nor Meta is configured yet — campaigns will save as drafts until API credentials are added to your environment.
+          Neither Google Ads nor Meta is configured yet. Campaigns will save as drafts until API credentials are added to your environment.
         </div>
       )}
 
@@ -92,7 +94,7 @@ export default function MarketingCommandCenter() {
         <KpiCard label="Total Spend" value={`$${totalSpend.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} />
         <KpiCard label="Total Clicks" value={totalClicks.toLocaleString()} />
         <KpiCard label="Leads Captured" value={totalLeads.toLocaleString()} accent />
-        <KpiCard label="Cost Per Acquisition" value={cpa != null ? `$${cpa.toFixed(2)}` : "—"} />
+        <KpiCard label="Cost Per Acquisition" value={cpa != null ? `$${cpa.toFixed(2)}` : "-"} />
       </div>
 
       {/* Conversion funnel */}
@@ -125,9 +127,9 @@ export default function MarketingCommandCenter() {
       <div className="rounded-xl border border-white/10 bg-[#0E0F12] overflow-hidden">
         <div className="border-b border-white/10 px-4 py-2 text-[10px] uppercase tracking-widest font-mono text-white/40">Campaigns</div>
         {loading ? (
-          <div className="p-8 text-center text-xs text-white/40">Loading…</div>
+          <div className="p-8 text-center text-xs text-white/40">Loading...</div>
         ) : campaigns.length === 0 ? (
-          <div className="p-8 text-center text-xs text-white/40">No campaigns yet. Launch one from a project&apos;s progress photos.</div>
+          <div className="p-8 text-center text-xs text-white/40">No campaigns yet. Launch one from a project&apos;s progress photos to start tracking spend and leads.</div>
         ) : (
           <table className="w-full text-xs">
             <thead>
@@ -162,7 +164,6 @@ export default function MarketingCommandCenter() {
     </div>
   );
 }
-
 function KpiCard({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
   return (
     <div className="rounded-xl border border-white/10 bg-[#0E0F12] px-4 py-3">

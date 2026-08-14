@@ -38,7 +38,7 @@ const INVOICE_STATUS_STYLES: Record<string, string> = {
 };
 
 function currency(n: number | null): string {
-  if (n == null) return "—";
+  if (n == null) return "-";
   return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 }
 
@@ -65,7 +65,7 @@ export default function GlobalFinancialsPage() {
         setProjects(p.projects ?? []);
         setLoading(false);
       })
-      .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
+      .catch((e) => { setError(e?.message ?? "Could not load financials. Refresh the page and try again."); setLoading(false); });
   };
 
   const loadWaivers = () => {
@@ -75,8 +75,13 @@ export default function GlobalFinancialsPage() {
       .catch(() => { /* non-critical secondary panel; main error banner covers invoices */ });
   };
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); loadWaivers(); }, []);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      load();
+      loadWaivers();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const projectNameById = useMemo(() => {
     const m = new Map<string, string>();
@@ -97,7 +102,7 @@ export default function GlobalFinancialsPage() {
       <PageHero
         eyebrow="Workspace"
         title="Financials"
-        description="Invoices (AR/AP) and lien waivers across all projects"
+        description="Invoices and lien waivers across all projects"
         compact
       />
 
@@ -107,19 +112,18 @@ export default function GlobalFinancialsPage() {
         <div className="mb-6 flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
           <Info size={12} className="shrink-0" />
           <span>
-            Read-only roll-up. Amounts are hidden for roles without financial access. Budget/commitment/actuals tracking
-            beyond invoicing and lien waivers doesn&apos;t exist yet — this shows what&apos;s real, not a placeholder for it.
+            Use a project&apos;s Financials tab to add or update records, then review the totals here across all projects.
           </span>
         </div>
 
         {!loading && !error && invoices.length > 0 && (
           <div className="mb-6 grid grid-cols-2 gap-3">
             <div className="rounded-xl border border-white/8 bg-[#111113] p-4">
-              <p className="text-2xl font-black leading-none text-white">{totals.anyRedacted ? "—" : currency(totals.receivable)}</p>
+              <p className="text-2xl font-black leading-none text-white">{totals.anyRedacted ? "-" : currency(totals.receivable)}</p>
               <p className="mt-2 text-[10px] font-semibold uppercase tracking-widest text-white/30">Open Accounts Receivable</p>
             </div>
             <div className="rounded-xl border border-white/8 bg-[#111113] p-4">
-              <p className="text-2xl font-black leading-none text-white">{totals.anyRedacted ? "—" : currency(totals.payable)}</p>
+              <p className="text-2xl font-black leading-none text-white">{totals.anyRedacted ? "-" : currency(totals.payable)}</p>
               <p className="mt-2 text-[10px] font-semibold uppercase tracking-widest text-white/30">Open Accounts Payable</p>
             </div>
           </div>
@@ -148,7 +152,15 @@ export default function GlobalFinancialsPage() {
                     <tr>
                       <td colSpan={5}>
                         <div className="py-4">
-                          <EmptyState icon={<DollarSign className="w-6 h-6" />} title="No invoices yet" description="Add invoices from a project's Financials tab to see them roll up here." />
+                          <EmptyState
+                            icon={<DollarSign className="w-6 h-6" />}
+                            title="No invoices yet"
+                            description="Add invoices in a project&apos;s Financials tab and they will appear here automatically for a workspace-wide view."
+                            actionLabel="Open projects"
+                            actionHref="/dashboard/projects"
+                            secondaryLabel="Back to projects"
+                            secondaryHref="/dashboard/projects"
+                          />
                         </div>
                       </td>
                     </tr>

@@ -114,7 +114,7 @@ export default function ProjectManagementPage() {
     try {
       const res = await fetch("/api/project-management/overview", { cache: "no-store" });
       const json = await res.json() as OverviewResponse;
-      if (!res.ok) throw new Error(json.error ?? "Could not load project management overview");
+      if (!res.ok) throw new Error(json.error ?? "Could not load project management overview. Refresh the page and try again.");
       setData(json);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -140,7 +140,7 @@ export default function ProjectManagementPage() {
       <PageHero
         eyebrow="Workspace"
         title="Project Management"
-        description="Cross-project control center for schedule, field logs, RFIs, submittals, change orders, punch list, and staffing."
+        description="Cross-project view for schedule, field logs, RFIs, submittals, change orders, punch list, and staffing"
         compact
         actions={
           <button
@@ -159,8 +159,8 @@ export default function ProjectManagementPage() {
         <section className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
           <Metric loading={loading} label="Active Projects" value={summary ? String(summary.active_project_count) : "-"} sub={summary ? `${summary.project_count} total` : ""} />
           <Metric loading={loading} label="Schedule Complete" value={summary ? `${summary.schedule_completion}%` : "-"} sub={summary ? `${summary.schedule_complete}/${summary.schedule_total} tasks` : ""} />
-          <Metric loading={loading} label="Open Controls" value={summary ? String(summary.open_rfis + summary.open_submittals + summary.pending_change_orders) : "-"} sub="RFIs, submittals, COs" />
-          <Metric loading={loading} label="Overdue / Critical" value={summary ? `${summary.overdue_items} / ${summary.critical_tasks}` : "-"} sub="Open items / critical tasks" tone={summary && (summary.overdue_items > 0 || summary.critical_tasks > 0) ? "warn" : "normal"} />
+          <Metric loading={loading} label="Open Items" value={summary ? String(summary.open_rfis + summary.open_submittals + summary.pending_change_orders) : "-"} sub="RFIs, submittals, and COs" />
+          <Metric loading={loading} label="Overdue / Critical" value={summary ? `${summary.overdue_items} / ${summary.critical_tasks}` : "-"} sub="Items needing attention" tone={summary && (summary.overdue_items > 0 || summary.critical_tasks > 0) ? "warn" : "normal"} />
           <Metric loading={loading} label="Pending CO Value" value={summary ? money(summary.pending_change_order_value) : "-"} sub={summary?.change_order_values_visible ? "Awaiting decision" : "Restricted by role"} />
         </section>
 
@@ -172,7 +172,7 @@ export default function ProjectManagementPage() {
 
         <section className="mb-8 overflow-hidden rounded-xl border border-white/8 bg-[#0E0F12]">
           <div className="flex items-center justify-between border-b border-white/8 px-4 py-3">
-            <h2 className="text-xs font-bold uppercase tracking-[0.18em] text-white/55">Open Work Across Projects</h2>
+            <h2 className="text-xs font-bold uppercase tracking-[0.18em] text-white/55">Work Across Projects</h2>
             {summary && summary.overdue_items > 0 && (
               <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-widest text-[#F5A623]">
                 <AlertTriangle size={12} /> {summary.overdue_items} overdue
@@ -196,10 +196,18 @@ export default function ProjectManagementPage() {
                   [...Array(6)].map((_, index) => (
                     <tr key={index}><td colSpan={6} className="px-4 py-3"><div className="h-3 w-2/3 animate-pulse rounded bg-white/5" /></td></tr>
                   ))
-                ) : !hasOpenItems && !error ? (
+        ) : !hasOpenItems && !error ? (
                   <tr>
                     <td colSpan={6}>
-                      <EmptyState icon={<ClipboardCheck className="h-6 w-6" />} title="No open project-management items" description="RFIs, submittals, schedule tasks, change orders, and punch items appear here when they need attention." />
+          <EmptyState
+            icon={<ClipboardCheck className="h-6 w-6" />}
+            title="No open items yet"
+            description="RFIs, submittals, schedule tasks, change orders, and punch items will appear here when they need attention."
+            actionLabel="Open projects"
+            actionHref="/dashboard/projects"
+            secondaryLabel="View takeoff"
+            secondaryHref="/dashboard/takeoff"
+          />
                     </td>
                   </tr>
                 ) : (
@@ -224,7 +232,7 @@ export default function ProjectManagementPage() {
         </section>
 
         <div className="grid gap-5 xl:grid-cols-[1.2fr_0.8fr]">
-          <LogPanel title="Recent Daily Logs" emptyTitle="No daily logs yet">
+      <LogPanel title="Recent Daily Logs" emptyTitle="No daily logs yet">
             {fieldLogs.map((log) => (
               <LogRow
                 key={log.id}
@@ -235,7 +243,7 @@ export default function ProjectManagementPage() {
             ))}
           </LogPanel>
 
-          <LogPanel title="Recent Weekly Logs" emptyTitle="No weekly logs yet">
+      <LogPanel title="Recent Weekly Logs" emptyTitle="No weekly logs yet">
             {weeklyLogs.map((log) => (
               <LogRow
                 key={log.id}
@@ -284,7 +292,15 @@ function LogPanel({ title, emptyTitle, children }: { title: string; emptyTitle: 
         <h2 className="text-xs font-bold uppercase tracking-[0.18em] text-white/55">{title}</h2>
       </div>
       {empty ? (
-        <EmptyState icon={<CalendarDays className="h-6 w-6" />} title={emptyTitle} description="Project field logs will roll up here as crews add them." />
+        <EmptyState
+          icon={<CalendarDays className="h-6 w-6" />}
+          title={emptyTitle}
+          description="Project field logs will appear here as crews add them. Open Projects to start a new one."
+          actionLabel="Open projects"
+          actionHref="/dashboard/projects"
+          secondaryLabel="View schedule"
+          secondaryHref="/dashboard/schedule"
+        />
       ) : (
         <div className="divide-y divide-white/5">{items}</div>
       )}

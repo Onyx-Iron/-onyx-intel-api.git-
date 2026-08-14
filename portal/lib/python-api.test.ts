@@ -25,3 +25,12 @@ test("uses the canonical Railway secret for every user", () => {
     "canonical-secret",
   );
 });
+
+test("fails before calling Railway when the portal secret is missing", () => {
+  delete process.env.ONYX_API_SECRET;
+
+  assert.throws(
+    () => pythonApiHeaders({ email: "estimator@example.com" }),
+    /Missing required environment variable: ONYX_API_SECRET/,
+  );
+});

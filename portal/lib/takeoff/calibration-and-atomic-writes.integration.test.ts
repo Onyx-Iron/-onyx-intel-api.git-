@@ -115,9 +115,9 @@ if (!HAS_DB) {
       // calculation at all, which is exactly the point: the formula only
       // ever consumes page-space points + the calibration factor.
       const renderScalesToSimulate = [0.5, 1.0, 1.5, 2.0, 1.73, 0.91, 2.4];
-      for (const _renderScale of renderScalesToSimulate) {
+      for (const renderScale of renderScalesToSimulate) {
         const recomputed = calculateLinearLength(pageSpacePts, scaleFactor);
-        assert.equal(recomputed, expected, `quantity must be identical regardless of render scale (got mismatch)`);
+        assert.equal(recomputed, expected, `quantity must be identical regardless of render scale ${renderScale} (got mismatch)`);
       }
 
       // A DB round trip (save/reload) does not change the stored page-space
@@ -133,7 +133,8 @@ if (!HAS_DB) {
       const areaPts = pointsToPageSpace([{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }], 0.6);
       const scaleFactor = 0.05;
       const expectedArea = calculatePolygonArea(areaPts, scaleFactor);
-      for (const _rs of [0.5, 1.0, 2.0]) {
+      for (const renderScale of [0.5, 1.0, 2.0]) {
+        assert.ok(renderScale > 0);
         assert.equal(calculatePolygonArea(areaPts, scaleFactor), expectedArea);
       }
       const countPts = [{ x: 5, y: 5 }];

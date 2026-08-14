@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { FolderOpen, FileText, X, RefreshCw, Sparkles, Send, Upload, ChevronDown, ChevronRight } from "lucide-react";
 import GoogleDrivePicker from "./GoogleDrivePicker";
 import GoogleConnect from "@/components/google/GoogleConnect";
@@ -219,6 +220,8 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
         setLoading(false);
       });
   }, [projectId]);
+
+  useProjectSyncRefresh(() => loadDocuments(false));
 
   useEffect(() => {
     loadDocuments();

@@ -1,7 +1,9 @@
 import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { generateText, NoProviderError } from "@/lib/ai/providers";
 import { buildEstimateQualityReport, type EstimateQcItem } from "@/lib/estimating/estimate-qc";
+import { listCurrentEstimateItems, normalizeCurrentEstimateItemForQc } from "@/lib/estimating/current-version";
 import { createServiceClient } from "@/lib/supabase/server";
+import { formatProjectKnowledgeForAi, loadProjectKnowledgeSnapshot } from "@/lib/projects/knowledge";
 
 const SYSTEM = buildGroundedSystemPrompt(
   "You are a senior construction project manager writing a concise executive status report. " +
@@ -38,15 +40,9 @@ export async function generateProjectStatusReport(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
 
-  const [proj, tasks, estimate, punch, permits, procurement, logs, rfis, submittals, changeOrders] = await Promise.all([
+  const [proj, tasks, punch, permits, procurement, logs, rfis, submittals, changeOrders] = await Promise.all([
     db.from("projects").select("id,name,status,budget,start_date,end_date,city,state").eq("tenant_id", tenantId).eq("id", projectId).single(),
     db.from("schedule_tasks").select("status").eq("tenant_id", tenantId).eq("project_id", projectId).limit(3000),
-    anyDb
-      .from("estimate_items")
-      .select("id,description,csi_code,trade,item_type,quantity,uom,unit_cost,source_takeoff_id,source_fingerprint,quantity_basis,drawing_ref,location_tag,pricing_status")
-      .eq("tenant_id", tenantId)
-      .eq("project_id", projectId)
-      .limit(5000),
     anyDb.from("punch_list_items").select("description,status,priority").eq("tenant_id", tenantId).eq("project_id", projectId).in("status", ["open", "in_progress"]).limit(50),
     anyDb.from("permit_items").select("permit_type,status").eq("tenant_id", tenantId).eq("project_id", projectId).limit(50),
     anyDb.from("procurement_items").select("description,status,required_date").eq("tenant_id", tenantId).eq("project_id", projectId).neq("status", "delivered").limit(50),
@@ -62,7 +58,8 @@ export async function generateProjectStatusReport(
   const taskRows = (tasks.data ?? []) as Array<{ status: string }>;
   const done = taskRows.filter((x) => x.status === "complete").length;
   const completion = taskRows.length ? Math.round((done / taskRows.length) * 100) : 0;
-  const estimateQuality = buildEstimateQualityReport((estimate.data ?? []) as EstimateQcItem[]);
+  const currentEstimateItems = await listCurrentEstimateItems(anyDb, tenantId, projectId);
+  const estimateQuality = buildEstimateQualityReport(currentEstimateItems.map(normalizeCurrentEstimateItemForQc) as EstimateQcItem[]);
   const estVal = estimateQuality.totals.grand_total;
   const punchRows = (punch.data ?? []) as Array<{ description: string; status: string; priority: string }>;
   const permitRows = (permits.data ?? []) as Array<{ permit_type: string; status: string }>;
@@ -71,6 +68,7 @@ export async function generateProjectStatusReport(
   const rfiRows = rfis.error ? [] : (rfis.data ?? []) as Array<{ number: string | null; subject: string; status: string; priority: string; due_date: string | null }>;
   const submittalRows = submittals.error ? [] : (submittals.data ?? []) as Array<{ number: string | null; title: string; status: string; due_date: string | null; responsible: string | null }>;
   const changeOrderRows = changeOrders.error ? [] : (changeOrders.data ?? []) as Array<{ number: string | null; description: string; status: string; amount: number | null }>;
+  const unifiedKnowledge = await loadProjectKnowledgeSnapshot(tenantId, projectId);
 
   const ctx = [
     `PROJECT: ${p.name} (${[p.city, p.state].filter(Boolean).join(", ") || "location n/a"})`,
@@ -100,7 +98,9 @@ export async function generateProjectStatusReport(
     "",
     "RECENT DAILY LOGS:",
     ...logRows.map((x) => `  - ${x.log_date} (${x.weather ?? "?"}, ${x.crew_count ?? "?"} crew): ${x.work_performed ?? "no description"}`),
-  ].join("\n");
+    unifiedKnowledge ? "" : null,
+    unifiedKnowledge ? formatProjectKnowledgeForAi(unifiedKnowledge) : null,
+  ].filter((line): line is string => line !== null).join("\n");
 
   try {
     const result = await generateText({ system: SYSTEM, prompt: ctx, maxTokens: 3000 });

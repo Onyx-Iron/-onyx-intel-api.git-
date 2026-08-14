@@ -7,10 +7,9 @@ import {
   getControlDb,
   getOrCreateTenant,
 } from "@/lib/project-controls/server";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
-
-const UNAVAILABLE = { error: "RFIs are not yet available in this workspace.", code: "FEATURE_UNAVAILABLE" };
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -29,6 +28,7 @@ export async function PUT(req: NextRequest, ctx: RouteContext): Promise<NextResp
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await getControlDb();
     const { data, error } = await db
       .from<unknown>("rfi_items")
@@ -38,9 +38,10 @@ export async function PUT(req: NextRequest, ctx: RouteContext): Promise<NextResp
       .select()
       .single();
 
-    if (error) return NextResponse.json({ ...UNAVAILABLE }, { status: 503 });
+    if (error) return NextResponse.json({ error: error.message }, { status: 422 });
     return NextResponse.json({ item: data });
   } catch (err: unknown) {
+    if (err instanceof PermissionError) return NextResponse.json({ error: err.message }, { status: err.status });
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: msg }, { status: 500 });
   }
@@ -53,6 +54,7 @@ export async function DELETE(_req: NextRequest, ctx: RouteContext): Promise<Next
 
     const { id } = await ctx.params;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     const db = await getControlDb();
     const { error } = await db
       .from<unknown>("rfi_items")
@@ -60,9 +62,10 @@ export async function DELETE(_req: NextRequest, ctx: RouteContext): Promise<Next
       .eq("id", id)
       .eq("tenant_id", tenantId);
 
-    if (error) return NextResponse.json({ ...UNAVAILABLE }, { status: 503 });
+    if (error) return NextResponse.json({ error: error.message }, { status: 422 });
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
+    if (err instanceof PermissionError) return NextResponse.json({ error: err.message }, { status: err.status });
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: msg }, { status: 500 });
   }

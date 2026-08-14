@@ -13,10 +13,9 @@ import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { auditInsert } from "@/lib/audit";
 import { rfiCreateSchema, parseBody } from "@/lib/validation";
+import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
-
-const UNAVAILABLE = { error: "RFIs are not yet available in this workspace.", code: "FEATURE_UNAVAILABLE" };
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
@@ -59,6 +58,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const projectId = requireProjectId(body.project_id);
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    await assertPermission(tenantId, userId, "field", "write");
     await assertProjectBelongsToTenant(projectId, tenantId);
     const payload = buildRfiPayload(body, { tenantId, projectId });
     const db = await getControlDb();
@@ -69,7 +69,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .select()
       .single();
 
-    if (error) return NextResponse.json({ ...UNAVAILABLE }, { status: 503 });
+    if (error) return NextResponse.json({ error: error.message }, { status: 422 });
 
     auditInsert({
       tenant_id: tenantId,
@@ -92,6 +92,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
+    if (err instanceof PermissionError) return NextResponse.json({ error: err.message }, { status: err.status });
     const msg = err instanceof Error ? err.message : String(err);
     const status = msg.includes("required") ? 400 : msg.includes("does not belong") ? 403 : 500;
     return NextResponse.json({ error: msg }, { status });

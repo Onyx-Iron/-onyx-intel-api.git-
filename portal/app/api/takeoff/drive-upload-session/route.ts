@@ -97,7 +97,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       tenant_id: tenantId,
       project_id,
       file_name,
-      status: "queued",
+      status: "pending",
       uploaded_at: new Date().toISOString(),
       meta: buildDocumentRevisionMeta(file_name, {
         source: "local_upload",

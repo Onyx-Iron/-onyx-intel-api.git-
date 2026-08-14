@@ -11,14 +11,34 @@ export default function NotFound() {
           404
         </h1>
         <p className="mt-4 max-w-md text-base text-white/60">
-          This page doesn&apos;t exist — let&apos;s get you back on track.
+          This page doesn&apos;t exist - let&apos;s get you back on track.
         </p>
-        <Link
-          href="/dashboard"
-          className="mt-10 inline-flex h-10 items-center justify-center rounded-full bg-[#CCFF00] px-6 text-xs font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85"
-        >
-          Back to dashboard
-        </Link>
+        <div className="mt-10 flex flex-wrap items-center justify-center gap-3">
+          <Link
+            href="/dashboard/command-center"
+            className="inline-flex h-10 items-center justify-center rounded-full border border-white/15 bg-white/[0.03] px-6 text-xs font-bold uppercase tracking-widest text-white transition-colors hover:border-white/30"
+          >
+            Command center
+          </Link>
+          <Link
+            href="/dashboard"
+            className="inline-flex h-10 items-center justify-center rounded-full bg-[#CCFF00] px-6 text-xs font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85"
+          >
+            Back to dashboard
+          </Link>
+          <Link
+            href="/dashboard/projects"
+            className="inline-flex h-10 items-center justify-center rounded-full border border-white/15 bg-white/[0.03] px-6 text-xs font-bold uppercase tracking-widest text-white transition-colors hover:border-white/30"
+          >
+            Projects
+          </Link>
+          <Link
+            href="/dashboard/documents"
+            className="inline-flex h-10 items-center justify-center rounded-full border border-white/15 bg-white/[0.03] px-6 text-xs font-bold uppercase tracking-widest text-white transition-colors hover:border-white/30"
+          >
+            Documents
+          </Link>
+        </div>
       </div>
     </div>
   );

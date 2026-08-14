@@ -5179,6 +5179,425 @@ export type Database = {
           week_start?: string
         }
         Relationships: []
+      },
+      price_observations: {
+        Row: {
+          approval_status: string
+          approved_at: string | null
+          approved_by: string | null
+          assumptions: Json
+          confidence: number
+          cost_code: string | null
+          country_code: string
+          created_at: string
+          created_by: string | null
+          currency: string
+          description: string
+          effective_date: string
+          equipment_cost: number
+          escalation_cost: number
+          expires_at: string | null
+          freight_cost: number
+          id: string
+          labor_cost: number
+          material_cost: number
+          metro_code: string | null
+          other_cost: number
+          postal_code: string | null
+          project_id: string | null
+          source_kind: string
+          source_ref: string | null
+          state_code: string | null
+          subcontract_cost: number
+          tax_cost: number
+          tenant_id: string | null
+          trade_key: string | null
+          unit: string
+          waste_cost: number
+        }
+        Insert: {
+          approval_status?: string
+          approved_at?: string | null
+          approved_by?: string | null
+          assumptions?: Json
+          confidence?: number
+          cost_code?: string | null
+          country_code?: string
+          created_at?: string
+          created_by?: string | null
+          currency?: string
+          description: string
+          effective_date: string
+          equipment_cost?: number
+          escalation_cost?: number
+          expires_at?: string | null
+          freight_cost?: number
+          id?: string
+          labor_cost?: number
+          material_cost?: number
+          metro_code?: string | null
+          other_cost?: number
+          postal_code?: string | null
+          project_id?: string | null
+          source_kind: string
+          source_ref?: string | null
+          state_code?: string | null
+          subcontract_cost?: number
+          tax_cost?: number
+          tenant_id?: string | null
+          trade_key?: string | null
+          unit: string
+          waste_cost?: number
+        }
+        Update: {
+          approval_status?: string
+          approved_at?: string | null
+          approved_by?: string | null
+          assumptions?: Json
+          confidence?: number
+          cost_code?: string | null
+          country_code?: string
+          created_at?: string
+          created_by?: string | null
+          currency?: string
+          description?: string
+          effective_date?: string
+          equipment_cost?: number
+          escalation_cost?: number
+          expires_at?: string | null
+          freight_cost?: number
+          id?: string
+          labor_cost?: number
+          material_cost?: number
+          metro_code?: string | null
+          other_cost?: number
+          postal_code?: string | null
+          project_id?: string | null
+          source_kind?: string
+          source_ref?: string | null
+          state_code?: string | null
+          subcontract_cost?: number
+          tax_cost?: number
+          tenant_id?: string | null
+          trade_key?: string | null
+          unit?: string
+          waste_cost?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "price_observations_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "projects"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "price_observations_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "tenants"
+            referencedColumns: ["id"]
+          },
+        ]
+      },
+      production_rates: {
+        Row: {
+          activity_key: string
+          approval_status: string
+          approved_at: string | null
+          approved_by: string | null
+          conditions: Json
+          confidence: number
+          cost_code: string | null
+          created_at: string
+          created_by: string | null
+          crew: Json
+          description: string
+          effective_date: string
+          equipment: Json
+          id: string
+          output_per_shift: number
+          output_unit: string
+          project_id: string | null
+          shift_hours: number
+          source_kind: string
+          source_manifest: Json
+          tenant_id: string | null
+          trade_key: string
+        }
+        Insert: {
+          activity_key: string
+          approval_status?: string
+          approved_at?: string | null
+          approved_by?: string | null
+          conditions?: Json
+          confidence?: number
+          cost_code?: string | null
+          created_at?: string
+          created_by?: string | null
+          crew?: Json
+          description: string
+          effective_date: string
+          equipment?: Json
+          id?: string
+          output_per_shift: number
+          output_unit: string
+          project_id?: string | null
+          shift_hours?: number
+          source_kind: string
+          source_manifest?: Json
+          tenant_id?: string | null
+          trade_key: string
+        }
+        Update: {
+          activity_key?: string
+          approval_status?: string
+          approved_at?: string | null
+          approved_by?: string | null
+          conditions?: Json
+          confidence?: number
+          cost_code?: string | null
+          created_at?: string
+          created_by?: string | null
+          crew?: Json
+          description?: string
+          effective_date?: string
+          equipment?: Json
+          id?: string
+          output_per_shift?: number
+          output_unit?: string
+          project_id?: string | null
+          shift_hours?: number
+          source_kind?: string
+          source_manifest?: Json
+          tenant_id?: string | null
+          trade_key?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "production_rates_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "projects"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "production_rates_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "tenants"
+            referencedColumns: ["id"]
+          },
+        ]
+      },
+      takeoff_scope_requests: {
+        Row: {
+          alternate_keys: string[]
+          bid_package_ids: string[]
+          completed_at: string | null
+          confirmed_at: string | null
+          created_at: string
+          division_codes: string[]
+          document_ids: string[]
+          estimated_work_units: number
+          id: string
+          mode: string
+          project_id: string
+          requested_by: string
+          sheet_ids: string[]
+          status: string
+          tenant_id: string
+          trade_keys: string[]
+        }
+        Insert: {
+          alternate_keys?: string[]
+          bid_package_ids?: string[]
+          completed_at?: string | null
+          confirmed_at?: string | null
+          created_at?: string
+          division_codes?: string[]
+          document_ids?: string[]
+          estimated_work_units: number
+          id?: string
+          mode: string
+          project_id: string
+          requested_by: string
+          sheet_ids?: string[]
+          status?: string
+          tenant_id: string
+          trade_keys?: string[]
+        }
+        Update: {
+          alternate_keys?: string[]
+          bid_package_ids?: string[]
+          completed_at?: string | null
+          confirmed_at?: string | null
+          created_at?: string
+          division_codes?: string[]
+          document_ids?: string[]
+          estimated_work_units?: number
+          id?: string
+          mode?: string
+          project_id?: string
+          requested_by?: string
+          sheet_ids?: string[]
+          status?: string
+          tenant_id?: string
+          trade_keys?: string[]
+        }
+        Relationships: [
+          {
+            foreignKeyName: "takeoff_scope_requests_project_id_fkey"
+            columns: ["project_id"]
+            isOneToOne: false
+            referencedRelation: "projects"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "takeoff_scope_requests_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "tenants"
+            referencedColumns: ["id"]
+          },
+        ]
+      },
+      trade_knowledge_items: {
+        Row: {
+          body: Json
+          certified_at: string | null
+          certified_by: string | null
+          confidence: number | null
+          created_at: string
+          id: string
+          item_key: string
+          item_kind: string
+          pack_id: string
+          source_manifest: Json
+          status: string
+          tenant_id: string | null
+          title: string
+          unit: string | null
+          updated_at: string
+        }
+        Insert: {
+          body?: Json
+          certified_at?: string | null
+          certified_by?: string | null
+          confidence?: number | null
+          created_at?: string
+          id?: string
+          item_key: string
+          item_kind: string
+          pack_id: string
+          source_manifest?: Json
+          status?: string
+          tenant_id?: string | null
+          title: string
+          unit?: string | null
+          updated_at?: string
+        }
+        Update: {
+          body?: Json
+          certified_at?: string | null
+          certified_by?: string | null
+          confidence?: number | null
+          created_at?: string
+          id?: string
+          item_key?: string
+          item_kind?: string
+          pack_id?: string
+          source_manifest?: Json
+          status?: string
+          tenant_id?: string | null
+          title?: string
+          unit?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "trade_knowledge_items_pack_id_fkey"
+            columns: ["pack_id"]
+            isOneToOne: false
+            referencedRelation: "trade_knowledge_packs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "trade_knowledge_items_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "tenants"
+            referencedColumns: ["id"]
+          },
+        ]
+      },
+      trade_knowledge_packs: {
+        Row: {
+          certified_at: string | null
+          certified_by: string | null
+          content: Json
+          created_at: string
+          effective_from: string | null
+          effective_to: string | null
+          geography: Json
+          id: string
+          masterformat_divisions: string[]
+          name: string
+          source_manifest: Json
+          status: string
+          tenant_id: string | null
+          trade_key: string
+          uniformat_codes: string[]
+          updated_at: string
+          version: number
+        }
+        Insert: {
+          certified_at?: string | null
+          certified_by?: string | null
+          content?: Json
+          created_at?: string
+          effective_from?: string | null
+          effective_to?: string | null
+          geography?: Json
+          id?: string
+          masterformat_divisions?: string[]
+          name: string
+          source_manifest?: Json
+          status?: string
+          tenant_id?: string | null
+          trade_key: string
+          uniformat_codes?: string[]
+          updated_at?: string
+          version?: number
+        }
+        Update: {
+          certified_at?: string | null
+          certified_by?: string | null
+          content?: Json
+          created_at?: string
+          effective_from?: string | null
+          effective_to?: string | null
+          geography?: Json
+          id?: string
+          masterformat_divisions?: string[]
+          name?: string
+          source_manifest?: Json
+          status?: string
+          tenant_id?: string | null
+          trade_key?: string
+          uniformat_codes?: string[]
+          updated_at?: string
+          version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "trade_knowledge_packs_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "tenants"
+            referencedColumns: ["id"]
+          },
+        ]
       }
     }
     Views: {

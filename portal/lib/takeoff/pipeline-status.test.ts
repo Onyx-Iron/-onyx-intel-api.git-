@@ -7,7 +7,7 @@ describe("takeoff pipeline status", () => {
   it("marks a nonterminal split stale after the recovery deadline", () => {
     const nowMs = Date.parse("2026-08-06T12:10:00Z");
     assert.equal(isSplitStartStale({
-      status: "queued",
+      status: "pending",
       updatedAt: new Date(nowMs - SPLIT_START_TIMEOUT_MS - 1).toISOString(),
       nowMs,
     }), true);
@@ -19,14 +19,14 @@ describe("takeoff pipeline status", () => {
   });
 
   it("never changes terminal or malformed status timestamps", () => {
-    assert.equal(isSplitStartStale({ status: "done", updatedAt: "2020-01-01" }), false);
-    assert.equal(isSplitStartStale({ status: "queued", updatedAt: "invalid" }), false);
+    assert.equal(isSplitStartStale({ status: "complete", updatedAt: "2020-01-01" }), false);
+    assert.equal(isSplitStartStale({ status: "pending", updatedAt: "invalid" }), false);
   });
 
   it("only finalizes after every page reaches a terminal state", () => {
     assert.equal(finalSplitStatus(4, 0, 5), null);
-    assert.equal(finalSplitStatus(4, 1, 5), "done");
-    assert.equal(finalSplitStatus(0, 5, 5), "failed");
+    assert.equal(finalSplitStatus(4, 1, 5), "complete");
+    assert.equal(finalSplitStatus(0, 5, 5), "error");
     assert.equal(finalSplitStatus(0, 0, 0), null);
   });
 });

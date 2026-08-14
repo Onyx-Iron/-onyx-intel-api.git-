@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useProjectSyncRefresh } from "@/components/project/ProjectSyncProvider";
 import { Users, HardHat, Plus } from "lucide-react";
 import UniversalImportButton from "@/components/common/UniversalImportButton";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
@@ -19,7 +20,6 @@ function pickField(row: Record<string, string | number | null>, keys: string[]):
   }
   return null;
 }
-
 interface Staff {
   id: string;
   name: string;
@@ -33,7 +33,6 @@ interface Staff {
   removed_at: string | null;
   notes: string | null;
 }
-
 interface FormState {
   name: string;
   role: string;
@@ -44,14 +43,13 @@ interface FormState {
   certifications: string;
   notes: string;
 }
-
 const EMPTY_FORM: FormState = {
   name: "", role: "", email: "", phone: "", hourly_rate: "",
   project_role: "", certifications: "", notes: "",
 };
 
 function fmtDate(d: string | null): string {
-  if (!d) return "—";
+  if (!d) return "-";
   return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
@@ -79,7 +77,7 @@ export default function StaffTab({ projectId }: { projectId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [showRemoved, setShowRemoved] = useState(false);
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true);
     setError(null);
     fetch(`/api/staff?project_id=${encodeURIComponent(projectId)}`)
@@ -89,11 +87,17 @@ export default function StaffTab({ projectId }: { projectId: string }) {
         setItems(data.items ?? []);
         setLoading(false);
       })
-      .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
-  };
+      .catch((e) => { setError(e?.message ?? "Could not load staff. Refresh the page and try again."); setLoading(false); });
+  }, [projectId]);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, [projectId]);
+  useProjectSyncRefresh(load);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   const importItems = useBulkImport<{ project_id: string; name: string; role: string | null; email: string | null; phone: string | null; hourly_rate: number | null; project_role: string | null; certifications: string[] | null; notes: string | null }>(projectId, {
     endpoint: "/api/staff",
@@ -165,13 +169,13 @@ export default function StaffTab({ projectId }: { projectId: string }) {
           });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Save failed (${res.status})`);
+        setErrorMsg(typeof (d as { error?: unknown })?.error === "string" ? (d as { error: string }).error : `Could not save this staff record (${res.status}). Check the form and try again.`);
         return;
       }
       cancelForm();
       load();
     } catch {
-      setErrorMsg("Network error.");
+      setErrorMsg("Could not reach the server just now. Please try again in a moment.");
     } finally {
       setSubmitting(false);
     }
@@ -179,25 +183,29 @@ export default function StaffTab({ projectId }: { projectId: string }) {
 
   const toggleRemoved = async (v: Staff) => {
     const removed_at = v.removed_at ? null : new Date().toISOString();
+    const prevItems = items;
     try {
       const res = await fetch(`/api/staff/${encodeURIComponent(v.id)}?project_id=${encodeURIComponent(projectId)}`, {
         method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ removed_at }),
       });
-      if (!res.ok) { setErrorMsg(`Update failed (${res.status})`); }
+      if (!res.ok) { setItems(prevItems); setErrorMsg(`Could not update that staff record (${res.status}). Refresh the list and try again.`); }
       load();
     } catch {
-      setErrorMsg("Network error.");
+      setItems(prevItems);
+      setErrorMsg("Could not reach the server just now. Please try again in a moment.");
     }
   };
 
   const deleteItem = async (id: string) => {
     if (!(await confirm({ title: String("Delete this staff record?"), destructive: true }))) return;
+    const prevItems = items;
     setItems((prev) => prev.filter((i) => i.id !== id));
     try {
       const res = await fetch(`/api/staff/${encodeURIComponent(id)}?project_id=${encodeURIComponent(projectId)}`, { method: "DELETE" });
-      if (!res.ok) { setErrorMsg(`Delete failed (${res.status})`); load(); }
+      if (!res.ok) { setItems(prevItems); setErrorMsg(`Could not delete that staff record (${res.status}). Refresh the list and try again.`); load(); }
     } catch {
-      setErrorMsg("Network error.");
+      setItems(prevItems);
+      setErrorMsg("Could not reach the server just now. Please try again in a moment.");
       load();
     }
   };
@@ -253,6 +261,8 @@ export default function StaffTab({ projectId }: { projectId: string }) {
                       description="Add crew, foremen, and PMs assigned to this project."
                       actionLabel="Add Staff"
                       onAction={openAdd}
+                      secondaryLabel="View projects"
+                      secondaryHref="/dashboard/projects"
                     />
                   </div>
                 </td></tr>
@@ -260,12 +270,12 @@ export default function StaffTab({ projectId }: { projectId: string }) {
                 visible.map((v) => (
                   <tr key={v.id} className={`hover:bg-white/[0.02] transition-colors group ${v.removed_at ? "opacity-50" : ""}`}>
                     <td className="px-4 py-3 text-white text-xs">{v.name}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs">{v.role ?? "—"}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs">{v.project_role ?? "—"}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs">{v.email ?? "—"}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs">{v.phone ?? "—"}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs font-mono">{v.hourly_rate == null ? "—" : `$${v.hourly_rate}/hr`}</td>
-                    <td className="px-4 py-3 text-white/55 text-xs">{v.certifications && v.certifications.length > 0 ? v.certifications.join(", ") : "—"}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs">{v.role ?? "-"}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs">{v.project_role ?? "-"}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs">{v.email ?? "-"}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs">{v.phone ?? "-"}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs font-mono">{v.hourly_rate == null ? "-" : `$${v.hourly_rate}/hr`}</td>
+                    <td className="px-4 py-3 text-white/55 text-xs">{v.certifications && v.certifications.length > 0 ? v.certifications.join(", ") : "-"}</td>
                     <td className="px-4 py-3 text-white/55 text-xs">{fmtDate(v.assigned_at)}</td>
                     <td className="px-4 py-3">
                       <button onClick={() => toggleRemoved(v)}

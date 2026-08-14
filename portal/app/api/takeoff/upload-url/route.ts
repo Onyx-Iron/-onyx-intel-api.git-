@@ -95,7 +95,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       tenant_id: tenantId,
       project_id,
       file_name,
-      status: "queued",
+      status: "pending",
       uploaded_at: new Date().toISOString(),
       meta: buildDocumentRevisionMeta(file_name, {
         source: "local_upload",
@@ -133,7 +133,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 }
 
 /** Remove an incomplete direct upload so failed browser PUTs do not leave
- * permanent queued documents. Only pending uploads owned by this tenant can
+ * permanent pending documents. Only pending uploads owned by this tenant can
  * be removed. */
 export async function DELETE(req: NextRequest): Promise<NextResponse> {
   try {
