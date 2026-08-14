@@ -4,7 +4,6 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { getAccessToken } from "@/lib/google/oauth";
 import { logEvent } from "@/lib/activity";
-import { requireEnv } from "@/lib/env";
 import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import type { TablesInsert } from "@/lib/supabase/types";
@@ -13,7 +12,10 @@ import { resolveDocumentStorageBucket } from "@/lib/documents/upload";
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const GEMINI_API_KEY = requireEnv("GEMINI_API_KEY");
+// Provider configuration is validated when this capability is invoked. Doing
+// so at module load makes the entire app undeployable in environments where
+// document AI is intentionally disabled or configured after the first build.
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? "";
 const EMBED_MODEL = "text-embedding-004";
 const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
 
@@ -163,6 +165,12 @@ export async function POST(
   try {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    if (!GEMINI_API_KEY) {
+      return NextResponse.json(
+        { error: "Document AI is not configured", code: "NO_PROVIDER" },
+        { status: 503 },
+      );
+    }
 
     const body = await req.json().catch(() => ({})) as { access_token?: string };
     const accessToken = body.access_token; // optional — server falls back to stored token
