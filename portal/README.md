@@ -20,6 +20,16 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## OpenAI Ads measurement
+
+The portal includes the OpenAI Ads Measurement Pixel. Set the following public environment variable in each environment where measurement should run:
+
+```bash
+NEXT_PUBLIC_OPENAI_ADS_PIXEL_ID=<your-pixel-id>
+```
+
+When the variable is unset, the integration is disabled and does not load the OpenAI Ads SDK or emit events. The current integration emits the documented `page_viewed` event on client-side route changes. Add conversion events only at confirmed success boundaries such as completed registration, checkout, or subscription creation.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
