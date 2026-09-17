@@ -163,7 +163,7 @@ class CSITakeoffStreamProcessor:
         """
         rows: list[dict[str, Any]] = []
         with open(self.file_path, "rb") as fh:
-            for item in ijson.items(fh, "item"):
+            for item in ijson.items(fh, "item", use_float=True):
                 rows.append(item)
         return rows
 
