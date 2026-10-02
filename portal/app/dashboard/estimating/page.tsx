@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Calculator, Info } from "lucide-react";
 import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
+import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
+import { useProjectContext } from "@/components/project/ProjectContext";
 
 interface EstimateItem {
   id: string;
@@ -16,11 +18,6 @@ interface EstimateItem {
   total_price: number | null;
   pricing_status: string | null;
   created_at: string | null;
-}
-
-interface Project {
-  id: string;
-  name: string;
 }
 
 const PRICING_STYLES: Record<string, string> = {
@@ -52,26 +49,20 @@ function SkeletonRows() {
 }
 
 export default function GlobalEstimatingPage() {
+  const { projects, activeProjectId, activeProject } = useProjectContext();
   const [items, setItems] = useState<EstimateItem[]>([]);
-  const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [projectFilter, setProjectFilter] = useState<string>("all");
 
   const load = () => {
     setLoading(true);
     setError(null);
-    Promise.all([
-      fetch("/api/estimate?limit=500").then((r) => r.json()),
-      fetch("/api/projects").then((r) => r.json()),
-    ])
-      .then(([estimateRes, projectsRes]: [unknown, unknown]) => {
+    fetch("/api/estimate?limit=500")
+      .then((r) => r.json())
+      .then((estimateRes: unknown) => {
         const e = estimateRes as { items?: EstimateItem[]; error?: string };
-        const p = projectsRes as { projects?: Project[]; error?: string };
         if (e.error) throw new Error(e.error);
-        if (p.error) throw new Error(p.error);
         setItems(e.items ?? []);
-        setProjects(p.projects ?? []);
         setLoading(false);
       })
       .catch((err) => { setError(err?.message ?? "Network error"); setLoading(false); });
@@ -86,42 +77,53 @@ export default function GlobalEstimatingPage() {
     return m;
   }, [projects]);
 
-  const filtered = useMemo(() => {
-    if (projectFilter === "all") return items;
-    return items.filter((i) => i.project_id === projectFilter);
-  }, [items, projectFilter]);
+  const filtered = useMemo(
+    () => filterByActiveProject(items, activeProjectId),
+    [items, activeProjectId],
+  );
 
   // total_price may be redacted (null) for restricted roles by the API's
   // financial-read gate -- sum only what's actually present, and show a
   // dash for the aggregate too rather than a misleading partial total.
   const grandTotal = useMemo(() => {
-    if (items.some((i) => i.total_price == null)) return null;
-    return items.reduce((sum, i) => sum + (i.total_price ?? 0), 0);
-  }, [items]);
+    if (filtered.some((i) => i.total_price == null)) return null;
+    return filtered.reduce((sum, i) => sum + (i.total_price ?? 0), 0);
+  }, [filtered]);
 
   const pricingCounts = useMemo(() => ({
-    unpriced: items.filter((i) => i.pricing_status === "unpriced").length,
-    review: items.filter((i) => i.pricing_status === "review").length,
-  }), [items]);
+    unpriced: filtered.filter((i) => i.pricing_status === "unpriced").length,
+    review: filtered.filter((i) => i.pricing_status === "review").length,
+  }), [filtered]);
+
+  const openWorkspaceHref = activeProject
+    ? `/dashboard/projects/${activeProject.id}?phase=estimate&tab=estimates`
+    : "/dashboard/projects";
 
   return (
     <div>
       <PageHero
         eyebrow="Workspace"
         title="Estimating"
-        description="Every estimate line item across all projects, in one roll-up view"
+        description={
+          activeProject
+            ? `Estimate roll-up scoped to ${activeProject.name}`
+            : "Every estimate line item across all projects, in one roll-up view"
+        }
         compact
       />
 
       <div className="px-4 py-6 sm:px-6 lg:px-10 lg:py-8">
         {error && <div className="mb-4"><ErrorState message={error} onRetry={load} /></div>}
 
-        <div className="mb-4 flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
-          <Info size={12} className="shrink-0" />
-          <span>Read-only roll-up. Build and price estimates from a project&apos;s Estimate tab. Cost/price fields are hidden here for roles without financial access.</span>
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <div className="flex flex-1 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
+            <Info size={12} className="shrink-0" />
+            <span>Read-only roll-up. Build and price estimates from a project&apos;s Estimate tab. Cost/price fields are hidden here for roles without financial access.</span>
+          </div>
+          <ProjectScopeSelect className="w-56" label="" />
         </div>
 
-        {!loading && !error && items.length > 0 && (
+        {!loading && !error && filtered.length > 0 && (
           <div className="mb-5 flex flex-wrap items-center gap-3">
             <div className="rounded-lg border border-white/10 bg-[#0E0F12] px-4 py-2">
               <p className="text-[9px] uppercase tracking-widest text-white/40">Total value</p>
@@ -134,18 +136,6 @@ export default function GlobalEstimatingPage() {
             <div className="rounded-lg border border-[#00D2FF]/20 bg-[#00D2FF]/10 px-4 py-2">
               <p className="text-[9px] uppercase tracking-widest text-[#00D2FF]/80">Needs review</p>
               <p className="font-mono text-sm text-white">{pricingCounts.review}</p>
-            </div>
-            <div className="ml-auto">
-              <select
-                value={projectFilter}
-                onChange={(e) => setProjectFilter(e.target.value)}
-                className="rounded-lg border border-white/10 bg-[#0E0F12] px-3 py-1.5 text-xs text-white/70 focus:border-[#CCFF00]/40 focus:outline-none"
-              >
-                <option value="all">All projects</option>
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
             </div>
           </div>
         )}
@@ -174,6 +164,8 @@ export default function GlobalEstimatingPage() {
                           icon={<Calculator className="w-6 h-6" />}
                           title="No estimate items yet"
                           description="Build estimates from a project's Estimate tab to see them roll up here."
+                          actionLabel={activeProject ? "Open estimate workspace" : "Go to projects"}
+                          actionHref={openWorkspaceHref}
                         />
                       </div>
                     </td>

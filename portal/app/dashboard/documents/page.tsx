@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Info, FileText } from "lucide-react";
 import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
+import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
+import { useProjectContext } from "@/components/project/ProjectContext";
 
 type DocStatus = "pending" | "processing" | "complete" | "error";
 type PipelineStatus = "pending" | "processing" | "done" | "error" | "partially_completed" | "skipped";
@@ -84,6 +86,7 @@ function SkeletonRows() {
 }
 
 export default function DocumentsPage() {
+  const { activeProjectId, activeProject } = useProjectContext();
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -104,20 +107,36 @@ export default function DocumentsPage() {
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { loadDocuments(); }, []);
 
+  const filtered = useMemo(
+    () => filterByActiveProject(documents, activeProjectId),
+    [documents, activeProjectId],
+  );
+
+  const openWorkspaceHref = activeProject
+    ? `/dashboard/projects/${activeProject.id}?phase=documents&tab=documents`
+    : "/dashboard/projects";
+
   return (
     <div>
       <PageHero
         eyebrow="Workspace"
         title="Documents"
-        description="Every file's ingestion pipeline status, across all projects"
+        description={
+          activeProject
+            ? `Ingestion pipeline status for ${activeProject.name}`
+            : "Every file's ingestion pipeline status, across all projects"
+        }
         compact
       />
 
       <div className="px-4 py-6 sm:px-6 lg:px-10 lg:py-8">
       {error && <div className="mb-4"><ErrorState message={error} onRetry={loadDocuments} /></div>}
-      <div className="mb-4 flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
-        <Info size={12} className="shrink-0" />
-        <span>Upload documents from a project&apos;s Documents tab — this view is read-only, aggregates across all projects, and tracks each file through split → OCR → vector → takeoff.</span>
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <div className="flex flex-1 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
+          <Info size={12} className="shrink-0" />
+          <span>Upload documents from a project&apos;s Documents tab — this view is read-only and tracks each file through split → OCR → vector → takeoff.</span>
+        </div>
+        <ProjectScopeSelect className="w-56" label="" />
       </div>
       <div className="rounded-xl border border-white/8 bg-[#0E0F12] overflow-hidden">
         <div className="overflow-x-auto">
@@ -135,21 +154,22 @@ export default function DocumentsPage() {
             <tbody className="divide-y divide-white/5">
               {loading ? (
                 <SkeletonRows />
-              ) : documents.length === 0 && !error ? (
+              ) : filtered.length === 0 && !error ? (
                 <tr>
                   <td colSpan={6}>
                     <div className="py-4">
                       <EmptyState
                         icon={<FileText className="w-6 h-6" />}
                         title="No documents yet"
-                        description="Upload contracts, plans, and shared docs."
-                        actionLabel="Upload"
+                        description="Upload contracts, plans, and shared docs from a project workspace."
+                        actionLabel={activeProject ? "Open documents workspace" : "Go to projects"}
+                        actionHref={openWorkspaceHref}
                       />
                     </div>
                   </td>
                 </tr>
               ) : (
-                documents.map((doc) => {
+                filtered.map((doc) => {
                   const statusKey = (doc.status as string) in STATUS_STYLES ? doc.status : "pending";
                   return (
                     <tr key={doc.id} className="hover:bg-white/[0.02] transition-colors">

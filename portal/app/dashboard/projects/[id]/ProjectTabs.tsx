@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   Award,
@@ -33,6 +34,7 @@ import DocumentsTab             from "@/components/documents/DocumentsTab";
 import DailyLogTab              from "@/components/dailylog/DailyLogTab";
 import ContactsTab              from "@/components/contacts/ContactsTab";
 import RiskDigestCard           from "@/components/project/RiskDigestCard";
+import ProjectMemoryPanel       from "@/components/project/ProjectMemoryPanel";
 import MaterialVendorsTab       from "@/components/material-vendors/MaterialVendorsTab";
 import EquipmentSuppliersTab    from "@/components/equipment-suppliers/EquipmentSuppliersTab";
 import StaffTab                 from "@/components/staff/StaffTab";
@@ -62,6 +64,25 @@ type Phase =
   | "Financials"
   | "Field"
   | "Closeout";
+
+const PHASE_SLUGS: Record<Phase, string> = {
+  Overview: "overview",
+  Documents: "documents",
+  Takeoff: "takeoff",
+  "Estimate & Budget": "estimate",
+  Schedule: "schedule",
+  "Project Controls": "controls",
+  Procurement: "procurement",
+  Financials: "financials",
+  Field: "field",
+  Closeout: "closeout",
+};
+
+function phaseFromSlug(slug: string | null): Phase | null {
+  if (!slug) return null;
+  const entry = (Object.entries(PHASE_SLUGS) as [Phase, string][]).find(([, s]) => s === slug);
+  return entry?.[0] ?? null;
+}
 
 interface SubTabDef {
   id: string;
@@ -160,18 +181,39 @@ interface ProjectTabsProps {
 }
 
 export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps) {
-  const [activePhase, setActivePhase] = useState<Phase>("Overview");
-  const [activeSubId, setActiveSubId] = useState<string>("summary");
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  // URL is the source of truth so back/forward and refresh keep the same tab
+  // without syncing search params into React state via an effect.
+  const activePhase = phaseFromSlug(searchParams.get("phase")) ?? "Overview";
+  const currentSubtabs = PHASES.find((p) => p.id === activePhase)?.subtabs ?? [];
+  const tabFromUrl = searchParams.get("tab");
+  const activeSubId =
+    (tabFromUrl && currentSubtabs.some((s) => s.id === tabFromUrl) ? tabFromUrl : null) ??
+    currentSubtabs[0]?.id ??
+    "summary";
+  const activeSub = currentSubtabs.find((s) => s.id === activeSubId);
+
+  const syncUrl = useCallback(
+    (phase: Phase, tab: string) => {
+      const params = new URLSearchParams(searchParams.toString());
+      params.set("phase", PHASE_SLUGS[phase]);
+      params.set("tab", tab);
+      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    },
+    [pathname, router, searchParams],
+  );
 
   const selectPhase = (phase: Phase) => {
-    setActivePhase(phase);
     const first = PHASES.find((p) => p.id === phase)?.subtabs[0];
-    if (first) setActiveSubId(first.id);
+    if (first) syncUrl(phase, first.id);
   };
 
-  const currentSubtabs = PHASES.find((p) => p.id === activePhase)?.subtabs ?? [];
-
-  const activeSub = currentSubtabs.find((s) => s.id === activeSubId);
+  const selectSub = (subId: string) => {
+    syncUrl(activePhase, subId);
+  };
 
   const pillScrollRef = useRef<HTMLDivElement>(null);
   const [pillsOverflow, setPillsOverflow] = useState(false);
@@ -193,6 +235,7 @@ export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps
           there's actually more to scroll to (checked via ResizeObserver,
           not assumed). */}
       <div
+        id="phase-tabs"
         className="border-b border-white/8 px-4 py-4 sm:px-6"
         style={pillsOverflow ? { maskImage: "linear-gradient(to right, black calc(100% - 28px), transparent 100%)", WebkitMaskImage: "linear-gradient(to right, black calc(100% - 28px), transparent 100%)" } : undefined}
       >
@@ -221,7 +264,7 @@ export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps
             {currentSubtabs.map((sub) => (
               <button
                 key={sub.id}
-                onClick={() => setActiveSubId(sub.id)}
+                onClick={() => selectSub(sub.id)}
                 className={`group flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-[10px] font-medium uppercase tracking-wider transition-colors ${
                   activeSubId === sub.id
                     ? "border-[#CCFF00] text-white"
@@ -323,8 +366,8 @@ function OverviewTab({ projectId }: { projectId: string }) {
   ];
 
   return (
-    <div>
-      <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-5">
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         {stats.map((s) => (
           <div
             key={s.label}
@@ -335,6 +378,8 @@ function OverviewTab({ projectId }: { projectId: string }) {
           </div>
         ))}
       </div>
+
+      <ProjectMemoryPanel projectId={projectId} />
 
       {/* AI Status Report */}
       <div className="rounded-xl border border-white/8 bg-[#111113] p-6">

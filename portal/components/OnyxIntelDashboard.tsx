@@ -25,6 +25,8 @@ import AuditActivityCard from "@/components/dashboard/AuditActivityCard";
 import AIProviderPicker from "@/components/ai/AIProviderPicker";
 import BrandMark from "@/components/brand/BrandMark";
 import GlobalSearch from "@/components/search/GlobalSearch";
+import { useOptionalProjectContext } from "@/components/project/ProjectContext";
+import ProjectScopeSelect from "@/components/project/ProjectScopeSelect";
 
 interface DashProject {
   id: string;
@@ -373,6 +375,8 @@ function AICommandPanel({
   setAiInput,
   onSubmit,
   chatEndRef,
+  projectLabel,
+  memoryMode,
 }: {
   aiInput: string;
   aiMessages: AIMessage[];
@@ -380,6 +384,8 @@ function AICommandPanel({
   setAiInput: (value: string) => void;
   onSubmit: (event: FormEvent) => Promise<void>;
   chatEndRef: React.RefObject<HTMLDivElement | null>;
+  projectLabel: string | null;
+  memoryMode: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   return (
@@ -389,6 +395,14 @@ function AICommandPanel({
       className="min-h-[520px]"
     >
       <div className="flex h-[460px] flex-col">
+        <div className="flex items-center justify-between gap-2 border-b border-white/6 px-4 py-2.5">
+          <p className="text-[10px] uppercase tracking-widest text-white/35">
+            {memoryMode
+              ? `Remembering ${projectLabel ?? "project"} — chat + project memory`
+              : "Portfolio assist — select a project for lasting memory"}
+          </p>
+          <ProjectScopeSelect className="w-44" label="" />
+        </div>
         <div className="flex-1 space-y-3 overflow-y-auto p-4">
           {aiMessages.map((message) => (
             <div key={message.id} className={`flex gap-3 ${message.role === "user" ? "flex-row-reverse" : ""}`}>
@@ -440,7 +454,7 @@ function AICommandPanel({
               type="text"
               value={aiInput}
               onChange={(event) => setAiInput(event.target.value)}
-              placeholder="Ask about specs, quantities, RFIs, or schedules"
+              placeholder={memoryMode ? "Ask this project — history and memory persist" : "Ask about specs, quantities, RFIs, or schedules"}
               className="h-10 min-w-0 flex-1 rounded-md border border-white/15 bg-white/5 px-3 text-sm text-white outline-none placeholder:text-white/30 focus:border-[#CCFF00]/50"
             />
             <button
@@ -465,13 +479,18 @@ interface OnyxIntelDashboardProps {
 }
 
 export default function OnyxIntelDashboard({ previewData, previewProviders }: OnyxIntelDashboardProps) {
+  const projectCtx = useOptionalProjectContext();
+  const activeProjectId = projectCtx?.activeProjectId ?? null;
+  const activeProject = projectCtx?.activeProject ?? null;
+
   const [data, setData] = useState<DashData | null>(previewData ?? null);
   const [dataLoading, setDataLoading] = useState(!previewData);
   const [dataError, setDataError] = useState<string | null>(null);
   const [aiInput, setAiInput] = useState("");
   const [aiMessages, setAiMessages] = useState<AIMessage[]>(INITIAL_AI_MESSAGES);
   const [aiLoading, setAiLoading] = useState(false);
-  const [providers, setProviders] = useState<string[]>(previewProviders ?? []);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [, setProviders] = useState<string[]>(previewProviders ?? []);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -495,6 +514,47 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
 
     return () => { cancelled = true; };
   }, [previewData]);
+
+  // Load persisted conversation when the active project changes.
+  useEffect(() => {
+    if (!activeProjectId) {
+      setConversationId(null);
+      setAiMessages(INITIAL_AI_MESSAGES);
+      return;
+    }
+    let cancelled = false;
+    fetch(`/api/ai/chat?project_id=${activeProjectId}`)
+      .then((res) => res.json())
+      .then((body: { conversation_id?: string | null; messages?: Array<{ id?: string; role: string; content: string; created_at?: string }> }) => {
+        if (cancelled) return;
+        setConversationId(body.conversation_id ?? null);
+        const history = (body.messages ?? []).map((m, i) => ({
+          id: m.id ?? `hist-${i}`,
+          role: (m.role === "user" ? "user" : "system") as AIMessage["role"],
+          content: m.content,
+          timestamp: m.created_at
+            ? new Date(m.created_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })
+            : "",
+        }));
+        setAiMessages(
+          history.length > 0
+            ? history
+            : [{
+                id: "welcome-project",
+                role: "system",
+                content: `Project memory is on for ${activeProject?.name ?? "this project"}. Ask about docs, takeoff, RFIs, or schedule — this chat persists.`,
+                timestamp: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+              }],
+        );
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setConversationId(null);
+          setAiMessages(INITIAL_AI_MESSAGES);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [activeProjectId, activeProject?.name]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -548,18 +608,63 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
     setAiLoading(true);
 
     try {
-      const response = await fetch("/api/ai/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "assist", assist_mode: "ask", prompt: trimmed, context: data ? buildProjectContext(data) : undefined }),
-      });
-      const body = (await response.json()) as { text?: string; error?: string; code?: string };
-      const content = response.ok
-        ? (body.text?.trim() || "(no response)")
-        : body.code === "NO_PROVIDER"
-          ? "No AI model is connected yet. Add an AI provider key before using command mode."
-          : `Error: ${body.error ?? response.status}`;
-      setAiMessages((previous) => [...previous, { id: `msg-${Date.now() + 1}`, role: "system", content, timestamp: timestamp() }]);
+      if (activeProjectId) {
+        const response = await fetch("/api/ai/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode: "rag",
+            project_id: activeProjectId,
+            message: trimmed,
+            conversation_id: conversationId ?? undefined,
+          }),
+        });
+        if (!response.ok) {
+          const body = (await response.json().catch(() => ({}))) as { error?: string; code?: string };
+          const content = body.code === "NO_PROVIDER"
+            ? "No AI model is connected yet. Add an AI provider key before using command mode."
+            : `Error: ${body.error ?? response.status}`;
+          setAiMessages((previous) => [...previous, { id: `msg-${Date.now() + 1}`, role: "system", content, timestamp: timestamp() }]);
+          return;
+        }
+        const convHeader = response.headers.get("X-Conversation-Id");
+        if (convHeader) setConversationId(convHeader);
+
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+        let full = "";
+        const msgId = `msg-${Date.now() + 1}`;
+        setAiMessages((previous) => [...previous, { id: msgId, role: "system", content: "", timestamp: timestamp() }]);
+        if (reader) {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            full += decoder.decode(value, { stream: true });
+            const snapshot = full;
+            setAiMessages((previous) =>
+              previous.map((m) => (m.id === msgId ? { ...m, content: snapshot } : m)),
+            );
+          }
+        }
+        if (!full.trim()) {
+          setAiMessages((previous) =>
+            previous.map((m) => (m.id === msgId ? { ...m, content: "(no response)" } : m)),
+          );
+        }
+      } else {
+        const response = await fetch("/api/ai/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: "assist", assist_mode: "ask", prompt: trimmed, context: data ? buildProjectContext(data) : undefined }),
+        });
+        const body = (await response.json()) as { text?: string; error?: string; code?: string };
+        const content = response.ok
+          ? (body.text?.trim() || "(no response)")
+          : body.code === "NO_PROVIDER"
+            ? "No AI model is connected yet. Add an AI provider key before using command mode."
+            : `Error: ${body.error ?? response.status}`;
+        setAiMessages((previous) => [...previous, { id: `msg-${Date.now() + 1}`, role: "system", content, timestamp: timestamp() }]);
+      }
     } catch (error) {
       setAiMessages((previous) => [...previous, { id: `msg-${Date.now() + 1}`, role: "system", content: `Request failed: ${error instanceof Error ? error.message : String(error)}`, timestamp: timestamp() }]);
     } finally {
@@ -689,6 +794,8 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
               setAiInput={setAiInput}
               onSubmit={handleAISubmit}
               chatEndRef={chatEndRef}
+              projectLabel={activeProject?.name ?? null}
+              memoryMode={Boolean(activeProjectId)}
             />
             <DocumentIntelligence data={data} loading={dataLoading} />
             <ActivityFeed items={data?.activity ?? []} loading={dataLoading} />

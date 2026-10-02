@@ -4,12 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Download, FileText, RefreshCw, Wand2 } from "lucide-react";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import PageHero from "@/components/layout/PageHero";
-
-interface Project {
-  id: string;
-  name: string;
-  status: string | null;
-}
+import ProjectScopeSelect from "@/components/project/ProjectScopeSelect";
+import { useProjectContext } from "@/components/project/ProjectContext";
 
 interface ReportRun {
   id: string;
@@ -48,9 +44,9 @@ function money(value?: number): string {
 }
 
 export default function ReportsPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
+  const { projects, activeProjectId, setActiveProjectId } = useProjectContext();
   const [reports, setReports] = useState<ReportRun[]>([]);
-  const [selectedProject, setSelectedProject] = useState("");
+  const selectedProject = activeProjectId ?? "";
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ReportRun | null>(null);
   const [loading, setLoading] = useState(true);
@@ -66,24 +62,18 @@ export default function ReportsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [projectRes, reportRes] = await Promise.all([
-        fetch("/api/projects?limit=200", { cache: "no-store" }),
-        fetch("/api/reports?limit=100", { cache: "no-store" }),
-      ]);
-      const projectData = await projectRes.json();
+      const reportRes = await fetch("/api/reports?limit=100", { cache: "no-store" });
       const reportData = await reportRes.json();
-      if (!projectRes.ok) throw new Error(projectData.error ?? "Could not load projects");
       if (!reportRes.ok) throw new Error(reportData.error ?? "Could not load reports");
-      setProjects(projectData.projects ?? []);
       setReports(reportData.reports ?? []);
-      setSelectedProject((current) => current || projectData.projects?.[0]?.id || "");
       setSelectedReportId((current) => current ?? reportData.reports?.[0]?.id ?? null);
+      if (!activeProjectId && projects[0]) setActiveProjectId(projects[0].id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeProjectId, projects, setActiveProjectId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -166,20 +156,7 @@ export default function ReportsPage() {
         {error && <div className="mb-4"><ErrorState message={error} onRetry={load} /></div>}
 
         <section className="mb-5 grid gap-3 border-b border-white/8 pb-5 lg:grid-cols-[1fr_auto]">
-          <div>
-            <label className="mb-1 block text-[10px] font-bold uppercase tracking-[0.22em] text-white/35">
-              Project
-            </label>
-            <select
-              value={selectedProject}
-              onChange={(event) => setSelectedProject(event.target.value)}
-              className="h-10 w-full max-w-xl rounded-lg border border-white/10 bg-[#0E0F12] px-3 text-sm text-white outline-none focus:border-[#CCFF00]/60"
-            >
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>{project.name}</option>
-              ))}
-            </select>
-          </div>
+          <ProjectScopeSelect allowAll={false} className="max-w-xl" />
           <div className="flex items-end">
             <button
               type="button"

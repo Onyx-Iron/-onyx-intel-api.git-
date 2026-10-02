@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Info, Ruler } from "lucide-react";
 import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
+import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
+import { useProjectContext } from "@/components/project/ProjectContext";
 
 interface TakeoffItem {
   id: string;
@@ -16,11 +18,6 @@ interface TakeoffItem {
   review_status: string | null;
   source_method: string | null;
   created_at: string | null;
-}
-
-interface Project {
-  id: string;
-  name: string;
 }
 
 interface PlanDocument {
@@ -59,38 +56,40 @@ function SkeletonRows() {
 }
 
 export default function GlobalTakeoffPage() {
+  const { projects, activeProjectId, activeProject } = useProjectContext();
   const [items, setItems] = useState<TakeoffItem[]>([]);
-  const [projects, setProjects] = useState<Project[]>([]);
   const [openPlans, setOpenPlans] = useState<PlanDocument[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [projectFilter, setProjectFilter] = useState<string>("all");
 
   const load = () => {
     setLoading(true);
     setError(null);
     Promise.all([
       fetch("/api/takeoff/items?limit=500").then((r) => r.json()),
-      fetch("/api/projects").then((r) => r.json()),
       fetch("/api/documents").then((r) => r.json()),
     ])
-      .then(([takeoffRes, projectsRes, documentsRes]: [unknown, unknown, unknown]) => {
+      .then(([takeoffRes, documentsRes]: [unknown, unknown]) => {
         const t = takeoffRes as { items?: TakeoffItem[]; error?: string };
-        const p = projectsRes as { projects?: Project[]; error?: string };
         const d = documentsRes as { documents?: PlanDocument[]; error?: string };
         if (t.error) throw new Error(t.error);
-        if (p.error) throw new Error(p.error);
         if (d.error) throw new Error(d.error);
         setItems(t.items ?? []);
-        setProjects(p.projects ?? []);
-        setOpenPlans((d.documents ?? []).filter((doc) => doc.takeoff_status !== "done"));
+        const docs = d.documents ?? [];
+        setOpenPlans(
+          docs.filter((doc) => {
+            if (doc.takeoff_status === "done") return false;
+            if (activeProjectId && doc.project_id !== activeProjectId) return false;
+            return true;
+          }),
+        );
         setLoading(false);
       })
       .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
   };
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [activeProjectId]);
 
   const projectNameById = useMemo(() => {
     const m = new Map<string, string>();
@@ -98,35 +97,56 @@ export default function GlobalTakeoffPage() {
     return m;
   }, [projects]);
 
-  const filtered = useMemo(() => {
-    if (projectFilter === "all") return items;
-    return items.filter((i) => i.project_id === projectFilter);
-  }, [items, projectFilter]);
+  const filtered = useMemo(
+    () => filterByActiveProject(items, activeProjectId),
+    [items, activeProjectId],
+  );
 
   const totals = useMemo(() => {
     const byStatus: Record<string, number> = {};
-    for (const i of items) {
+    for (const i of filtered) {
       const key = i.review_status ?? "unknown";
       byStatus[key] = (byStatus[key] ?? 0) + 1;
     }
     return byStatus;
-  }, [items]);
+  }, [filtered]);
+
+  const openWorkspaceHref = activeProject
+    ? `/dashboard/projects/${activeProject.id}?phase=takeoff&tab=takeoff`
+    : "/dashboard/projects";
 
   return (
     <div>
       <PageHero
         eyebrow="Workspace"
         title="Takeoff"
-        description="Every takeoff item across all projects, in one roll-up view"
+        description={
+          activeProject
+            ? `Takeoff roll-up scoped to ${activeProject.name}`
+            : "Every takeoff item across all projects, in one roll-up view"
+        }
         compact
       />
 
       <div className="px-4 py-6 sm:px-6 lg:px-10 lg:py-8">
         {error && <div className="mb-4"><ErrorState message={error} onRetry={load} /></div>}
 
-        <div className="mb-4 flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
-          <Info size={12} className="shrink-0" />
-          <span>Read-only roll-up. Draw and edit takeoffs from a project&apos;s Takeoff tab.</span>
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <div className="flex flex-1 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
+            <Info size={12} className="shrink-0" />
+            <span>
+              Read-only roll-up. Draw and edit takeoffs from a project&apos;s Takeoff tab.
+              {activeProject && (
+                <>
+                  {" "}
+                  <a href={openWorkspaceHref} className="text-[#CCFF00] hover:underline">
+                    Open {activeProject.name} takeoff
+                  </a>
+                </>
+              )}
+            </span>
+          </div>
+          <ProjectScopeSelect className="w-56" label="" />
         </div>
 
         {!loading && openPlans.length > 0 && (
@@ -145,7 +165,7 @@ export default function GlobalTakeoffPage() {
           </div>
         )}
 
-        {!loading && !error && items.length > 0 && (
+        {!loading && !error && filtered.length > 0 && (
           <div className="mb-5 flex flex-wrap items-center gap-3">
             <div className="flex flex-wrap gap-2">
               {Object.entries(totals).map(([status, count]) => (
@@ -156,18 +176,6 @@ export default function GlobalTakeoffPage() {
                   {status}: {count}
                 </span>
               ))}
-            </div>
-            <div className="ml-auto">
-              <select
-                value={projectFilter}
-                onChange={(e) => setProjectFilter(e.target.value)}
-                className="rounded-lg border border-white/10 bg-[#0E0F12] px-3 py-1.5 text-xs text-white/70 focus:border-[#CCFF00]/40 focus:outline-none"
-              >
-                <option value="all">All projects</option>
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
             </div>
           </div>
         )}
@@ -196,6 +204,8 @@ export default function GlobalTakeoffPage() {
                           icon={<Ruler className="w-6 h-6" />}
                           title="No takeoff items yet"
                           description="Draw takeoffs from a project's Takeoff tab to see them roll up here."
+                          actionLabel={activeProject ? "Open takeoff workspace" : "Go to projects"}
+                          actionHref={openWorkspaceHref}
                         />
                       </div>
                     </td>
