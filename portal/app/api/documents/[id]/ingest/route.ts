@@ -12,7 +12,9 @@ import type { TablesInsert } from "@/lib/supabase/types";
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const GEMINI_API_KEY = requireEnv("GEMINI_API_KEY");
+function geminiApiKey(): string {
+  return requireEnv("GEMINI_API_KEY");
+}
 const EMBED_MODEL = "text-embedding-004";
 const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
 const PLANS_BUCKET = "plans-bucket";
@@ -83,7 +85,7 @@ async function uploadToGeminiFiles(
     {
       method: "POST",
       headers: {
-        "X-Goog-Api-Key": GEMINI_API_KEY,
+        "X-Goog-Api-Key": geminiApiKey(),
         "Content-Type": `multipart/related; boundary=${boundary}`,
         "Content-Length": String(body.length),
       },
@@ -103,7 +105,7 @@ async function waitForActive(geminiName: string, maxMs = 60_000): Promise<void> 
   while (Date.now() < deadline) {
     const res = await fetchGemini(
       `https://generativelanguage.googleapis.com/v1beta/${geminiName}`,
-      { headers: { "X-Goog-Api-Key": GEMINI_API_KEY } },
+      { headers: { "X-Goog-Api-Key": geminiApiKey() } },
       { label: "Gemini file status", timeoutMs: 20_000 },
     );
     const data = (await res.json()) as { state: string };
@@ -117,13 +119,13 @@ async function waitForActive(geminiName: string, maxMs = 60_000): Promise<void> 
 async function deleteGeminiFile(geminiName: string): Promise<void> {
   await fetch(`https://generativelanguage.googleapis.com/v1beta/${geminiName}`, {
     method: "DELETE",
-    headers: { "X-Goog-Api-Key": GEMINI_API_KEY },
+    headers: { "X-Goog-Api-Key": geminiApiKey() },
   }).catch(() => {});
 }
 
 async function embedText(text: string): Promise<number[]> {
   const res = await fetchGemini(
-    `https://generativelanguage.googleapis.com/v1beta/models/${EMBED_MODEL}:embedContent?key=${GEMINI_API_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${EMBED_MODEL}:embedContent?key=${geminiApiKey()}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -244,7 +246,7 @@ export async function POST(
 
     // 4. Extract text + classify
     const extractRes = await fetchGemini(
-      `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${geminiApiKey()}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
