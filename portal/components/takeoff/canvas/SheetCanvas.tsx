@@ -8,6 +8,7 @@ import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
+import { useConfirm } from "@/components/common/ConfirmDialog";
 
 // Coordinate-space tag carried alongside each committed item (professional-
 // manual-takeoff milestone, PERMANENT RULE 1/2). 'page_space' points are
@@ -133,6 +134,7 @@ interface Props {
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
 export default function SheetCanvas({ projectId, projectName, pageId, pageNumber }: Props) {
+  const { confirm } = useConfirm();
   const wrapRef   = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [pdfUrl, setPdfUrl]         = useState<string | null>(null);
@@ -163,6 +165,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // optimistic concurrency). Vertex-level editing, and dragging for utility
   // runs/topo nodes/area bounds, is deferred — see REMAINING_RISKS.md.
   const [dragState, setDragState] = useState<{ key: string; startClient: Pt; originalPoints: Pt[]; originalRowVersion: number } | null>(null);
+  const [deletedTakeoffs, setDeletedTakeoffs] = useState<Array<{ id: string; quantity: number; unit: string | null; takeoff_type: string }>>([]);
   const [vectorDescriptions, setVectorDescriptions] = useState<string[]>([]);
   const [utilityRuns, setUtilityRuns] = useState<UtilityRun[]>([]);
   const [utilityDraftPts, setUtilityDraftPts] = useState<Pt[]>([]);
@@ -188,7 +191,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         const [urlRes, calRes, mtRes, utRes, topoRes, areaRes] = await Promise.all([
           fetch(`/api/takeoff/canvas/page-url?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/calibration?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
-          fetch(`/api/takeoff/canvas/manual?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
+          fetch(`/api/takeoff/canvas/manual?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}&include_deleted=1`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/utility?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/topo?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/area-bounds?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
@@ -202,9 +205,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           if (!cancelled) setCalibration(calData.calibration);
         }
         if (mtRes.ok) {
-          const mtData = await mtRes.json() as { items: Array<{ id: string; takeoff_type: "count" | "length" | "area"; cost_code: string | null; quantity: number; unit: string | null; row_version?: number; geometry: { points?: Pt[]; coordinate_space?: string } }> };
+          const mtData = await mtRes.json() as { items: Array<{ id: string; deleted_at?: string | null; takeoff_type: "count" | "length" | "area"; cost_code: string | null; quantity: number; unit: string | null; row_version?: number; geometry: { points?: Pt[]; coordinate_space?: string } }> };
           if (!cancelled) {
-            setShapes(mtData.items.map((it) => ({
+            setDeletedTakeoffs(mtData.items.filter((it) => it.deleted_at).map((it) => ({ id: it.id, quantity: it.quantity, unit: it.unit, takeoff_type: it.takeoff_type })));
+            setShapes(mtData.items.filter((it) => !it.deleted_at).map((it) => ({
               key: `saved-${it.id}`,
               id: it.id,
               row_version: it.row_version ?? 1,
@@ -711,11 +715,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       // Minimal conflict UX (STEP 2's required pair: reload server / discard
       // local) — a fuller side-by-side diff modal with "save as new object"
       // and "retry after review" is deferred, see REMAINING_RISKS.md.
-      const reload = window.confirm(
-        "This measurement was changed by someone else (or another tab) since you loaded it.\n\n" +
-        "OK = reload the server's current version (discarding your drag)\n" +
-        "Cancel = keep your local change (not saved yet — drag it again to retry)",
-      );
+      const reload = await confirm({
+        title: "Measurement changed elsewhere",
+        description: "Someone else, or another tab, saved this measurement after you loaded it. Reload the server version and discard this drag, or keep the unsaved local position and drag it again to retry.",
+        confirmLabel: "Reload server",
+        cancelLabel: "Keep local",
+      });
       if (reload && body.server_state) {
         const serverState = body.server_state as { points?: Pt[]; quantity: number; row_version: number };
         setShapes((prev) => prev.map((x) => (x.key === drag.key
@@ -739,7 +744,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
     const body = await res.json() as { manual_takeoff: { row_version: number }; quantity: number };
     setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, row_version: body.manual_takeoff.row_version, quantity: body.quantity } : x)));
-  }, [shapes]);
+  }, [shapes, confirm]);
 
   useEffect(() => {
     if (!dragState) return;
@@ -1060,17 +1065,20 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 )}
                 <button
                   type="button"
-                  onClick={() => {
+                  onClick={async () => {
                     // Existing saved measurements each store their OWN
                     // computed quantity independently — recalibrating never
                     // retroactively changes them (approved quantities can
                     // never silently change, STEP 5). It only changes what
                     // scale NEW draws use going forward, so the confirmation
                     // here is about that distinction, not a batch recompute.
-                    if (!window.confirm(
-                      "Recalibrating sets the scale for NEW measurements drawn from now on.\n\n" +
-                      "Existing saved measurements keep their already-computed quantities unchanged — recalibration never silently alters them.\n\nContinue?",
-                    )) return;
+                    const ok = await confirm({
+                      title: "Recalibrate this sheet?",
+                      description: "The new scale applies to measurements drawn from now on. Existing saved measurements keep their quantities.",
+                      confirmLabel: "Recalibrate",
+                      cancelLabel: "Cancel",
+                    });
+                    if (!ok) return;
                     setTool("calibrate"); setDraftPoints([]); setCalibPts([]);
                   }}
                   className="rounded-full border border-white/10 px-2 py-0.5 text-white/60 hover:text-white hover:bg-white/[0.06] normal-case tracking-normal"
@@ -1083,6 +1091,45 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             )}
           </div>
         </div>
+
+        {deletedTakeoffs.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 border-t border-white/5 bg-white/[0.02] px-4 py-2">
+            <span className="text-[10px] uppercase tracking-widest font-mono text-white/40">Deleted</span>
+            {deletedTakeoffs.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={async () => {
+                  const res = await fetch("/api/takeoff/canvas/manual", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ restore_id: item.id }),
+                  });
+                  if (!res.ok) return;
+                  const restored = await res.json() as { manual_takeoff?: { id: string; takeoff_type: "count" | "length" | "area"; cost_code: string | null; quantity: number; unit: string | null; row_version?: number; geometry: { points?: Pt[]; coordinate_space?: string } } };
+                  const row = restored.manual_takeoff;
+                  setDeletedTakeoffs((prev) => prev.filter((x) => x.id !== item.id));
+                  if (!row) return;
+                  setShapes((prev) => [...prev, {
+                    key: `saved-${row.id}`,
+                    id: row.id,
+                    row_version: row.row_version ?? 1,
+                    tool: row.takeoff_type,
+                    points: Array.isArray(row.geometry?.points) ? row.geometry.points : [],
+                    coordinateSpace: (row.geometry?.coordinate_space === "page_space" ? "page_space" : "legacy_pixel") as CoordinateSpace,
+                    quantity: Number(row.quantity),
+                    unit: (row.unit ?? (row.takeoff_type === "count" ? "EA" : row.takeoff_type === "length" ? "LF" : "SF")) as Shape["unit"],
+                    cost_code: row.cost_code ?? undefined,
+                    saved: true,
+                  }]);
+                }}
+                className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] text-white/70 hover:text-white"
+              >
+                Restore {item.takeoff_type} {item.quantity} {item.unit ?? ""}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Context bar: topo auto-match toggle + area-bounds boundary config */}
         {(tool === "contour_line" || tool === "spot_elevation") && (

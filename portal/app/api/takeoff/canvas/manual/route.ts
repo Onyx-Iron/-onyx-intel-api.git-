@@ -50,13 +50,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
   const db = await createServiceClient();
 
+  const includeDeleted = req.nextUrl.searchParams.get("include_deleted") === "1";
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let query = (db as any)
     .from("manual_takeoffs")
     .select("*")
     .eq("tenant_id", tenantId)
-    .eq("project_id", projectId)
-    .is("deleted_at", null);
+    .eq("project_id", projectId);
+  if (!includeDeleted) query = query.is("deleted_at", null);
   if (pageId) query = query.eq("page_id", pageId);
   const { data, error } = await query.order("created_at", { ascending: false });
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -80,7 +81,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = await req.json().catch(() => ({})) as { items?: Item[] };
+  const body = await req.json().catch(() => ({})) as { items?: Item[]; restore_id?: string };
+  if (body.restore_id) {
+    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const db = await createServiceClient();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyDb = db as any;
+    const { data, error } = await anyDb.rpc("restore_manual_takeoff_tx", {
+      p_id: body.restore_id, p_tenant_id: tenantId, p_actor_user_id: userId,
+    }).single();
+    if (error) {
+      if (error.message?.includes("not found")) return NextResponse.json({ error: "not found" }, { status: 404 });
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+    const row = data as { already_active: boolean; manual_takeoff: { id: string; project_id: string } };
+    let workerResult: Awaited<ReturnType<typeof processOutboxBatch>> | null = null;
+    try {
+      workerResult = await processOutboxBatch(anyDb, `inline-restore-${Date.now()}`, 20);
+    } catch (err) {
+      console.error("[canvas/manual] restore outbox processing failed", err);
+    }
+    return NextResponse.json({ ok: true, already_active: row.already_active, manual_takeoff: row.manual_takeoff, outbox_processed: workerResult });
+  }
   const items = Array.isArray(body.items) ? body.items : [];
   if (items.length === 0) return NextResponse.json({ error: "items required" }, { status: 400 });
 
