@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Info, Truck } from "lucide-react";
 import PageHero from "@/components/layout/PageHero";
@@ -70,7 +70,7 @@ export default function GlobalProcurementPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true);
     setError(null);
     const qs = activeProjectId ? `?project_id=${encodeURIComponent(activeProjectId)}` : "";
@@ -89,10 +89,12 @@ export default function GlobalProcurementPage() {
         setLoading(false);
       })
       .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
-  };
+  }, [activeProjectId]);
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, [activeProjectId]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => { load(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   const projectNameById = useMemo(() => {
     const m = new Map<string, string>();
