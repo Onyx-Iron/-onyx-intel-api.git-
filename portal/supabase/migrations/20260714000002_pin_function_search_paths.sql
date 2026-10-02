@@ -1,9 +1,45 @@
--- Security advisor: mutable search_path on these 5 functions is an
+-- Security advisor: mutable search_path on these functions is an
 -- injection-adjacent risk (a caller could manipulate search_path to shadow
 -- objects the function references with malicious ones). Pinning
 -- search_path doesn't change behavior — it just fixes schema resolution.
-ALTER FUNCTION public._set_updated_at() SET search_path = public;
-ALTER FUNCTION public.set_updated_at() SET search_path = public;
-ALTER FUNCTION public.touch_manual_measurements_updated_at() SET search_path = public;
-ALTER FUNCTION public.match_chunks(vector, uuid, uuid, integer) SET search_path = public;
-ALTER FUNCTION public.match_chunks(vector, uuid, uuid, text, integer, integer) SET search_path = public;
+--
+-- On production these functions already existed when this migration first
+-- ran. On a fresh stack several are created later by
+-- 20260812000000_baseline_foreign_keys_functions_and_triggers.sql (already
+-- with search_path pinned). Skip any that are not present yet so
+-- `supabase start` / `db push --local` can replay cleanly.
+
+DO $$
+BEGIN
+  ALTER FUNCTION public._set_updated_at() SET search_path = public;
+EXCEPTION
+  WHEN undefined_function THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  ALTER FUNCTION public.set_updated_at() SET search_path = public;
+EXCEPTION
+  WHEN undefined_function THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  ALTER FUNCTION public.touch_manual_measurements_updated_at() SET search_path = public;
+EXCEPTION
+  WHEN undefined_function THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  ALTER FUNCTION public.match_chunks(vector, uuid, uuid, integer) SET search_path = public;
+EXCEPTION
+  WHEN undefined_function THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  ALTER FUNCTION public.match_chunks(vector, uuid, uuid, text, integer, integer) SET search_path = public;
+EXCEPTION
+  WHEN undefined_function THEN NULL;
+END $$;
