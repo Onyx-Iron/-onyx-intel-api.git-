@@ -2,11 +2,12 @@
  * Scope Gap Verification Agent
  * -------------------------------
  * Reads vision-extracted items for a page and compares them against the
- * project's current `project_estimates` ledger. Anything that appears in
- * the drawing notes but has no matching cost book line becomes a flagged
- * audit trail entry the human can approve into a real estimate line.
+ * project's current authoritative estimate (`estimate_items` on the current
+ * version). Anything that appears in the drawing notes but has no matching
+ * cost book line becomes a flagged audit trail entry the human can approve
+ * into a real estimate line.
  *
- * Invariant: this file NEVER writes to `project_estimates` directly. It
+ * Invariant: this file NEVER writes to the estimate ledger directly. It
  * only produces `ai_agent_audit_trails` rows with `status =
  * 'pending_human_review'` and structured `recommendations` the approval
  * route consumes.
@@ -62,17 +63,31 @@ export async function runScopeGapAgent({ db, tenantId, projectId, pageId, docume
   const eligible = visionItems.filter((v) => v.confidence >= 0.6 && v.quantity > 0 && v.description.trim().length > 3);
   if (eligible.length === 0) return { inserted: 0 };
 
-  // Pull existing estimate lines' descriptions + cost codes for match testing.
-  const { data: existing } = await db
-    .from("project_estimates")
-    .select("description, cost_code")
+  // Pull existing estimate lines from the authoritative versioned system.
+  const { data: estimate } = await db
+    .from("estimates")
+    .select("id, current_version_id")
     .eq("tenant_id", tenantId)
-    .eq("project_id", projectId);
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  let existing: Array<{ description: string | null; cost_code: string | null; csi_code: string | null }> = [];
+  if (estimate?.current_version_id) {
+    const { data } = await db
+      .from("estimate_items")
+      .select("description, cost_code, csi_code")
+      .eq("tenant_id", tenantId)
+      .eq("estimate_version_id", estimate.current_version_id);
+    existing = (data ?? []) as typeof existing;
+  }
 
   const seenCodes = new Set<string>();
   const seenDescs: string[] = [];
-  for (const r of (existing ?? []) as Array<{ description: string | null; cost_code: string | null }>) {
-    if (r.cost_code) seenCodes.add(r.cost_code);
+  for (const r of existing) {
+    const code = r.cost_code ?? r.csi_code;
+    if (code) seenCodes.add(code);
     if (r.description) seenDescs.push(r.description.toLowerCase());
   }
 
@@ -137,7 +152,7 @@ export async function runScopeGapAgent({ db, tenantId, projectId, pageId, docume
     document_id: documentId,
     page_id: pageId,
     agent_name: "scope_gap_verifier",
-    execution_trigger: "vision_extractions_updated",
+    execution_trigger: "vision_extracted_updated",
     finding_summary:
       `${gaps.length} construction item${gaps.length === 1 ? " is" : "s are"} referenced on this sheet but missing from the estimate.`,
     recommendations: { gaps },

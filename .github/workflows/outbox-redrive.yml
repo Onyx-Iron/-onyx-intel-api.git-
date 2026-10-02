@@ -1,0 +1,31 @@
+# Periodic estimate-sync outbox re-drive. Vercel Hobby only allows daily
+# crons (see portal/vercel.json); this workflow covers the short interval
+# so pending/failed events don't sit forever between opportunistic saves.
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   OUTBOX_APP_URL  — production portal origin, e.g. https://app.onyx-iron.com
+#   CRON_SECRET     — same value as Vercel env CRON_SECRET (Bearer token)
+name: Outbox redrive
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Process estimate_sync_outbox
+        env:
+          APP_URL: ${{ secrets.OUTBOX_APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$APP_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "::warning::OUTBOX_APP_URL or CRON_SECRET not configured — outbox redrive skipped."
+            echo "Add both Actions secrets so this job can call /api/internal/outbox/process."
+            exit 0
+          fi
+          curl -fsS -X GET \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "${APP_URL%/}/api/internal/outbox/process?batch_size=50"

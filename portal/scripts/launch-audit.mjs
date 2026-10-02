@@ -59,6 +59,14 @@ const requiredLaunchEnv = [
   "PADDLE_WEBHOOK_SECRET",
 ];
 
+/** Ops secrets that unlock scheduled outbox redrive + real CI integration gates. */
+const opsReliabilityEnv = [
+  "CRON_SECRET",
+  "INTERNAL_WORKER_SECRET",
+  "TEST_SUPABASE_URL",
+  "TEST_SUPABASE_SERVICE_ROLE_KEY",
+];
+
 console.log("# Launch Audit");
 console.log("");
 console.log(`- app root: ${appRoot}`);
@@ -80,6 +88,16 @@ for (const key of requiredLaunchEnv) {
 }
 
 console.log("");
+console.log("## Ops / reliability");
+for (const key of opsReliabilityEnv) {
+  const sourceValue = localEnv[key] ?? testEnv[key] ?? process.env[key];
+  console.log(`- ${key}: ${present(sourceValue)}${sourceValue ? ` (${mask(sourceValue)})` : ""}`);
+}
+console.log("- OUTBOX_APP_URL: (GitHub Actions secret only — not a portal env var)");
+console.log("  Set OUTBOX_APP_URL + CRON_SECRET as repo Actions secrets for .github/workflows/outbox-redrive.yml");
+console.log("  Set CRON_SECRET (same value) on Vercel so /api/internal/outbox/process accepts cron calls");
+console.log("");
+
 console.log("## Clerk routing");
 console.log(`- sign-in route: ${localEnv.NEXT_PUBLIC_CLERK_SIGN_IN_URL ?? "/sign-in (default)"}`);
 console.log(`- sign-up route: ${localEnv.NEXT_PUBLIC_CLERK_SIGN_UP_URL ?? "/sign-up (default)"}`);

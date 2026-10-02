@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { logEvent } from "@/lib/activity";
+import { getOrCreateDraftVersion } from "@/lib/estimating/versioning";
+import { calculateItem } from "@/lib/estimating/calculations";
 
 export const runtime = "nodejs";
 
@@ -11,8 +13,8 @@ export const runtime = "nodejs";
  * Body: { decision: "approve" | "reject" | "modify", overrides?: { ... } }
  *
  * This is the ONLY route allowed to translate an agent finding into a
- * mutation to `project_estimates` (or into an outbound RFI record).
- * Nothing else in the codebase writes to those tables on behalf of an
+ * mutation to `estimate_items` (or into an outbound RFI record).
+ * Nothing else in the codebase writes estimate lines on behalf of an
  * agent — the invariant "no autonomous mutation" is enforced HERE.
  */
 
@@ -71,28 +73,67 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       if (gaps.length === 0) {
         appliedResult.note = "no gaps to insert";
       } else {
-        const merged = gaps.map((g) => ({
-          ...g.item,
-          ...(overrides.item as Record<string, unknown> | undefined ?? {}),
-          tenant_id: tenantId,
-          project_id: audit.project_id,
-        }));
+        const { versionId } = await getOrCreateDraftVersion(anyDb, tenantId, audit.project_id, userId);
+        const overrideItem = (overrides.item as Record<string, unknown> | undefined) ?? {};
+        const toInsert = gaps.map((g) => {
+          const item = { ...g.item, ...overrideItem };
+          const quantity = Number(item.quantity ?? 0);
+          const laborCost = Number(item.labor_unit ?? 0) * quantity;
+          const materialCost = Number(item.material_unit ?? 0) * quantity;
+          const equipmentCost = Number(item.equipment_unit ?? 0) * quantity;
+          const subcontractCost = Number(item.subcontractor_unit ?? 0) * quantity;
+          const truckingCost = Number(item.trucking_unit ?? 0) * quantity;
+          const disposalCost = Number(item.disposal_unit ?? 0) * quantity;
+          const calc = calculateItem({
+            laborCost, materialCost, equipmentCost, subcontractCost, truckingCost, disposalCost, quantity,
+          });
+          const costCode = (item.cost_code as string | null) ?? null;
+          return {
+            tenant_id: tenantId,
+            project_id: audit.project_id,
+            estimate_version_id: versionId,
+            cost_code: costCode,
+            csi_code: costCode,
+            description: String(item.description ?? "Scope gap item"),
+            quantity,
+            uom: (item.unit as string | null) ?? null,
+            labor_cost: laborCost,
+            material_cost: materialCost,
+            equipment_cost: equipmentCost,
+            subcontract_cost: subcontractCost,
+            trucking_cost: truckingCost,
+            disposal_cost: disposalCost,
+            total_direct_cost: calc.totalDirectCost,
+            total_price: calc.totalPrice,
+            unit_price: calc.unitPrice,
+            notes: (item.notes as string | null) ?? null,
+            pricing_status: "manual",
+            created_by: userId,
+            updated_by: userId,
+            meta: { source: item.source ?? "scope_gap_agent", audit_id: id },
+          };
+        });
         const { data: inserted, error: insErr } = await anyDb
-          .from("project_estimates")
-          .insert(merged)
+          .from("estimate_items")
+          .insert(toInsert)
           .select("id");
         if (insErr) throw new Error(`insert estimate: ${insErr.message}`);
-        appliedResult = { decision, inserted_ids: (inserted ?? []).map((r: { id: string }) => r.id), count: inserted?.length ?? 0 };
+        appliedResult = {
+          decision,
+          estimate_version_id: versionId,
+          inserted_ids: (inserted ?? []).map((r: { id: string }) => r.id),
+          count: inserted?.length ?? 0,
+        };
 
         void logEvent({
           projectId: audit.project_id,
           tenantId,
           userId,
           entityType: "estimate",
-          entityId: (inserted?.[0]?.id as string) ?? audit.project_id,
+          entityId: versionId,
           action: "created",
           title: `Scope-gap approved: ${gaps.length} line${gaps.length === 1 ? "" : "s"} added to estimate`,
-          meta: { audit_id: id },
+          meta: { audit_id: id, estimate_version_id: versionId },
         });
       }
     }

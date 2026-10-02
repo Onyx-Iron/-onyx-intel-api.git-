@@ -230,11 +230,41 @@ function QuotePackagingWizard({ projectId, onClose, onDone }: { projectId: strin
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    fetch(`/api/estimate/matrix?project_id=${encodeURIComponent(projectId)}`, { cache: "no-store" })
-      .then((r) => r.json())
-      .then((d: { rows?: EstimateRow[] }) => setRows(d.rows ?? []))
-      .catch(() => setRows([]))
-      .finally(() => setLoading(false));
+    // Authoritative estimate_items via versions API (project_estimates/matrix is deprecated).
+    (async () => {
+      try {
+        const listRes = await fetch(`/api/estimate/versions?project_id=${encodeURIComponent(projectId)}`, { cache: "no-store" });
+        if (!listRes.ok) { setRows([]); return; }
+        const list = await listRes.json() as {
+          estimate: { current_version_id: string | null } | null;
+        };
+        const versionId = list.estimate?.current_version_id;
+        if (!versionId) { setRows([]); return; }
+        const verRes = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}`, { cache: "no-store" });
+        if (!verRes.ok) { setRows([]); return; }
+        const ver = await verRes.json() as {
+          items?: Array<{
+            id: string;
+            cost_code?: string | null;
+            csi_code?: string | null;
+            description?: string | null;
+            quantity?: number | null;
+            uom?: string | null;
+          }>;
+        };
+        setRows((ver.items ?? []).map((it) => ({
+          id: it.id,
+          cost_code: it.cost_code ?? it.csi_code ?? "",
+          description: it.description ?? "",
+          quantity: Number(it.quantity ?? 0),
+          unit: it.uom ?? "",
+        })));
+      } catch {
+        setRows([]);
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, [projectId]);
 
   const toggle = (i: number) => setChecked((prev) => {
