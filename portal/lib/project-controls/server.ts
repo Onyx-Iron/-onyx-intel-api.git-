@@ -1,5 +1,6 @@
 import { createServiceClient } from "@/lib/supabase/server";
 import { seedStarterCostCatalog } from "@/lib/cost/starter-catalog";
+import { auditInsert } from "@/lib/audit";
 
 interface QueryError {
   message: string;
@@ -41,6 +42,14 @@ export async function getOrCreateTenant(orgId: string, orgName: string): Promise
     .single();
 
   if (error || !created) throw new Error(`[tenant] ${error?.message ?? "create failed"}`);
+
+  auditInsert({
+    tenant_id: created.id,
+    user_id: null,
+    table_name: "tenants",
+    record_id: created.id,
+    new_values: { clerk_org_id: orgId, name: orgName },
+  });
 
   // Auto-seed starter cost rates so a brand-new tenant never silently sits
   // with an empty cost_catalog until someone manually finds and clicks

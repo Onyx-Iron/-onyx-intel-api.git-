@@ -235,16 +235,45 @@ Deno.serve(async (req) => {
         }),
       }),
     ]));
-    const fanoutFailures = fanoutResults.filter((r) => r.status === "rejected").length;
+    // fetch() fulfills on HTTP 4xx/5xx — count those as failures too so a
+    // cold-start 5xx doesn't look like a successful enqueue.
+    let fanoutFailures = 0;
+    for (const r of fanoutResults) {
+      if (r.status === "rejected") {
+        fanoutFailures++;
+        continue;
+      }
+      if (!r.value.ok) fanoutFailures++;
+    }
     if (fanoutFailures > 0) {
-      await recordEvent("failed", `fan-out rejected for ${fanoutFailures} page jobs`);
+      await recordEvent("failed", `fan-out failed for ${fanoutFailures}/${fanoutResults.length} page jobs`);
     }
 
     // Mark documents.status="split" — pages are now the unit of work.
+    // Persist fan-out summary so clients can surface partial enqueue failures.
+    const { data: docMetaRow } = await db
+      .from("documents")
+      .select("meta")
+      .eq("id", body.document_id)
+      .eq("tenant_id", body.tenant_id)
+      .maybeSingle();
+    const prevMeta = (docMetaRow?.meta && typeof docMetaRow.meta === "object")
+      ? docMetaRow.meta as Record<string, unknown>
+      : {};
     await db.from("documents")
       .update({
         status: "split",
         page_count: pageCount,
+        meta: {
+          ...prevMeta,
+          processing_summary: {
+            pages_enqueued: pageRows.length,
+            fanout_jobs: fanoutResults.length,
+            fanout_failures: fanoutFailures,
+            failed_uploads: failedUploads,
+            updated_at: new Date().toISOString(),
+          },
+        },
         ...(failedUploads > 0
           ? {
               last_error: `${failedUploads} of ${pageCount} pages failed to upload`,
@@ -258,13 +287,15 @@ Deno.serve(async (req) => {
       p_document_id: body.document_id,
     });
     if (summaryErr) console.warn("[page-split] summary refresh failed", summaryErr.message);
-    await recordEvent("succeeded");
+    if (fanoutFailures === 0) await recordEvent("succeeded");
+    else await recordEvent("succeeded", `split ok with ${fanoutFailures} fan-out failures`);
 
     return new Response(JSON.stringify({
       ok: true,
       document_id: body.document_id,
       page_count: pageCount,
       pages_enqueued: pageRows.length,
+      fanout_failures: fanoutFailures,
       elapsed_ms: Date.now() - started,
     }), { status: 200, headers: { "Content-Type": "application/json" } });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -154,30 +154,51 @@ Deno.serve(async (req) => {
     // ── 4. Embed (batched — text-embedding-004 supports batch mode) ─────────
     await recordEvent("embedding", "started");
     const embeddings = await embedBatch(chunks);
+    const embeddedCount = embeddings.filter((e) => Array.isArray(e) && e.length > 0).length;
+    if (embeddedCount === 0) {
+      throw new Error(`embedBatch returned no usable vectors for ${chunks.length} chunk(s)`);
+    }
 
-    // ── 5. Insert chunks ────────────────────────────────────────────────────
-    const rows = chunks.map((content, i) => ({
-      id: crypto.randomUUID(),
-      tenant_id: body.tenant_id,
-      document_id: body.document_id,
-      page_id: body.page_id,
-      page_number: body.page_number,
-      chunk_index: i,
-      content,
-      embedding: embeddings[i] ?? null,
-    }));
+    // ── 5. Insert chunks (skip slots with null embeddings rather than
+    // claiming success with unsearchable null vectors) ───────────────────────
+    const rows = chunks
+      .map((content, i) => ({
+        id: crypto.randomUUID(),
+        tenant_id: body.tenant_id,
+        document_id: body.document_id,
+        page_id: body.page_id,
+        page_number: body.page_number,
+        chunk_index: i,
+        content,
+        embedding: embeddings[i] ?? null,
+      }))
+      .filter((r) => Array.isArray(r.embedding) && r.embedding.length > 0);
+    if (rows.length === 0) {
+      throw new Error("no chunks with embeddings to insert");
+    }
     const { error: insErr } = await db.from("document_chunks").insert(rows);
     if (insErr) throw new Error(`insert chunks: ${insErr.message}`);
 
     // ── 6. Done ─────────────────────────────────────────────────────────────
+    // Partial embed success still marks the page done for OCR, but records
+    // how many chunks were dropped so ops can see search coverage gaps.
+    const embedNote = embeddedCount < chunks.length
+      ? `${chunks.length - embeddedCount} chunk embed(s) dropped`
+      : undefined;
     await db.from("document_pages")
       .update({ status: "done", ocr_text: text, updated_at: new Date().toISOString() })
       .eq("id", body.page_id);
     await recordEvent("ocr", "succeeded");
-    await recordEvent("embedding", "succeeded");
+    await recordEvent("embedding", "succeeded", embedNote);
     await refreshDocumentSummary();
 
-    return new Response(JSON.stringify({ ok: true, page_id: body.page_id, chunks: rows.length }), { status: 200 });
+    return new Response(JSON.stringify({
+      ok: true,
+      page_id: body.page_id,
+      chunks: rows.length,
+      chunks_requested: chunks.length,
+      embeds_missing: chunks.length - embeddedCount,
+    }), { status: 200 });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
     console.error("[page-processor]", err);
