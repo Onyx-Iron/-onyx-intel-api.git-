@@ -182,7 +182,21 @@ class EnhancedDeterministicParser:
                 row.estimated_unit_cost = cost_record.base_unit_cost
                 row.estimated_line_total = adjusted_cost
 
-                # Track breakdown
+                split = (
+                    cost_record.labor_cost
+                    + cost_record.material_cost
+                    + cost_record.equipment_cost
+                )
+                if split > 0:
+                    row.labor_pct = cost_record.labor_cost / split
+                    row.material_pct = cost_record.material_cost / split
+                    row.equipment_pct = cost_record.equipment_cost / split
+                else:
+                    # Unit price only. Book it as material; do not invent a split.
+                    row.labor_pct = 0.0
+                    row.material_pct = 1.0
+                    row.equipment_pct = 0.0
+
                 labor_total += adjusted_cost * row.labor_pct
                 material_total += adjusted_cost * row.material_pct
                 equipment_total += adjusted_cost * row.equipment_pct
