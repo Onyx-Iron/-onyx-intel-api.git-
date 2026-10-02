@@ -1,9 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { Info, Truck } from "lucide-react";
 import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
+import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
+import { useProjectContext } from "@/components/project/ProjectContext";
 
 interface VendorBid {
   id: string;
@@ -60,6 +63,7 @@ function currency(n: number | null | undefined): string {
 }
 
 export default function GlobalProcurementPage() {
+  const { activeProjectId, activeProject, projects: contextProjects } = useProjectContext();
   const [batches, setBatches] = useState<Batch[]>([]);
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -69,8 +73,9 @@ export default function GlobalProcurementPage() {
   const load = () => {
     setLoading(true);
     setError(null);
+    const qs = activeProjectId ? `?project_id=${encodeURIComponent(activeProjectId)}` : "";
     Promise.all([
-      fetch("/api/procurement/requests").then((r) => r.json()),
+      fetch(`/api/procurement/requests${qs}`).then((r) => r.json()),
       fetch("/api/projects").then((r) => r.json()),
     ])
       .then(([procRes, projectsRes]: [unknown, unknown]) => {
@@ -87,31 +92,56 @@ export default function GlobalProcurementPage() {
   };
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [activeProjectId]);
 
   const projectNameById = useMemo(() => {
     const m = new Map<string, string>();
-    for (const p of projects) m.set(p.id, p.name);
+    for (const p of projects.length ? projects : contextProjects) m.set(p.id, p.name);
     return m;
-  }, [projects]);
+  }, [projects, contextProjects]);
 
   const allItems = useMemo(() => batches.flatMap((b) => b.items.map((it) => ({ ...it, batch: b }))), [batches]);
+  const filteredPurchaseOrders = useMemo(
+    () => filterByActiveProject(purchaseOrders, activeProjectId),
+    [purchaseOrders, activeProjectId],
+  );
+
+  const openWorkspaceHref = activeProject
+    ? `/dashboard/projects/${activeProject.id}?phase=procurement&tab=procurement`
+    : "/dashboard/projects";
 
   return (
     <div>
       <PageHero
         eyebrow="Workspace"
         title="Procurement"
-        description="Every RFQ, vendor bid, and purchase order across all projects"
+        description={
+          activeProject
+            ? `RFQs, bids, and POs for ${activeProject.name}`
+            : "Every RFQ, vendor bid, and purchase order across all projects"
+        }
         compact
       />
 
       <div className="px-4 py-6 sm:px-6 lg:px-10 lg:py-8">
         {error && <div className="mb-4"><ErrorState message={error} onRetry={load} /></div>}
 
-        <div className="mb-6 flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
-          <Info size={12} className="shrink-0" />
-          <span>Read-only roll-up. Package RFQs and award bids from a project&apos;s Procurement tab.</span>
+        <div className="mb-6 flex flex-wrap items-center gap-3">
+          <div className="flex flex-1 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
+            <Info size={12} className="shrink-0" />
+            <span>
+              Read-only roll-up. Package RFQs and award bids from a project&apos;s Procurement tab.
+              {activeProject && (
+                <>
+                  {" "}
+                  <Link href={openWorkspaceHref} className="text-[#CCFF00] hover:underline">
+                    Open {activeProject.name} procurement
+                  </Link>
+                </>
+              )}
+            </span>
+          </div>
+          <ProjectScopeSelect className="w-56" label="" />
         </div>
 
         <section className="mb-8">
@@ -181,7 +211,7 @@ export default function GlobalProcurementPage() {
                     [...Array(3)].map((_, i) => (
                       <tr key={i}><td colSpan={4} className="px-4 py-3"><div className="h-3 w-1/2 bg-white/5 animate-pulse rounded" /></td></tr>
                     ))
-                  ) : purchaseOrders.length === 0 && !error ? (
+                  ) : filteredPurchaseOrders.length === 0 && !error ? (
                     <tr>
                       <td colSpan={4}>
                         <div className="py-4">
@@ -190,7 +220,7 @@ export default function GlobalProcurementPage() {
                       </td>
                     </tr>
                   ) : (
-                    purchaseOrders.map((po) => {
+                    filteredPurchaseOrders.map((po) => {
                       const key = po.status in PO_STATUS_STYLES ? po.status : "draft";
                       return (
                         <tr key={po.id} className="hover:bg-white/[0.02] transition-colors">

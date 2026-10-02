@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Users } from "lucide-react";
 import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
+import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
+import { useProjectContext } from "@/components/project/ProjectContext";
 
 import { useConfirm } from "@/components/common/ConfirmDialog";
 
@@ -62,6 +64,7 @@ function SkeletonRows() {
 
 export default function ContactsPage() {
   const { confirm } = useConfirm();
+  const { activeProjectId, activeProject } = useProjectContext();
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -85,6 +88,11 @@ export default function ContactsPage() {
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { loadContacts(); }, []);
+
+  const filteredContacts = useMemo(
+    () => filterByActiveProject(contacts, activeProjectId),
+    [contacts, activeProjectId],
+  );
 
   const openAdd = () => {
     setEditId(null);
@@ -122,6 +130,7 @@ export default function ContactsPage() {
       email: form.email.trim() || null,
       phone: form.phone.trim() || null,
       notes: form.notes.trim() || null,
+      ...(activeProjectId && !editId ? { project_id: activeProjectId } : {}),
     };
     try {
       if (editId) {
@@ -156,7 +165,11 @@ export default function ContactsPage() {
       <PageHero
         eyebrow="Workspace"
         title="Contacts"
-        description="All team members, subs, and vendors"
+        description={
+          activeProject
+            ? `Contacts linked to ${activeProject.name}`
+            : "All team members, subs, and vendors"
+        }
         compact
         actions={
           <button
@@ -170,6 +183,9 @@ export default function ContactsPage() {
 
       <div className="px-4 py-6 sm:px-6 lg:px-10 lg:py-8">
       {error && <div className="mb-4"><ErrorState message={error} onRetry={loadContacts} /></div>}
+      <div className="mb-4 flex justify-end">
+        <ProjectScopeSelect className="w-56" label="" />
+      </div>
       <div className="rounded-xl border border-white/8 bg-[#0E0F12] overflow-hidden mb-6">
         <div className="overflow-x-auto">
           <table className="w-full">
@@ -186,14 +202,18 @@ export default function ContactsPage() {
             <tbody className="divide-y divide-white/5">
               {loading ? (
                 <SkeletonRows />
-              ) : contacts.length === 0 && !error ? (
+              ) : filteredContacts.length === 0 && !error ? (
                 <tr>
                   <td colSpan={6}>
                     <div className="py-4">
                       <EmptyState
                         icon={<Users className="w-6 h-6" />}
                         title="No contacts yet"
-                        description="Add subs, vendors, and stakeholders across all your projects."
+                        description={
+                          activeProject
+                            ? `No contacts are linked to ${activeProject.name} yet.`
+                            : "Add subs, vendors, and stakeholders across all your projects."
+                        }
                         actionLabel="Add Contact"
                         onAction={openAdd}
                       />
@@ -201,7 +221,7 @@ export default function ContactsPage() {
                   </td>
                 </tr>
               ) : (
-                contacts.map((contact) => (
+                filteredContacts.map((contact) => (
                   <tr key={contact.id} className="hover:bg-white/[0.02] transition-colors">
                     <td className="px-4 py-3 text-white text-xs font-medium">{contact.name}</td>
                     <td className="px-4 py-3 text-gray-400 text-xs">{contact.company || "—"}</td>

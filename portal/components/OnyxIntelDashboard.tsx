@@ -1,10 +1,9 @@
 "use client";
 
-import React, { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import React, { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
-  CheckCircle2,
   ChevronRight,
   Clock,
   DollarSign,
@@ -560,16 +559,56 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [aiMessages]);
 
-  const filteredProjects = data?.projects ?? [];
+  const filteredProjects = useMemo(() => {
+    const projects = data?.projects ?? [];
+    if (!activeProjectId) return projects;
+    return projects.filter((project) => project.id === activeProjectId);
+  }, [data?.projects, activeProjectId]);
 
-  const pendingTakeoffs = data?.projects.filter((project) => project.takeoffItems === 0).length ?? 0;
-  const overBudget = data?.projects.filter((project) => project.budget > 0 && project.estimated > project.budget).length ?? 0;
+  const pendingTakeoffs = filteredProjects.filter((project) => project.takeoffItems === 0).length;
+  const overBudget = filteredProjects.filter((project) => project.budget > 0 && project.estimated > project.budget).length;
+  const scopedDocs = filteredProjects.reduce((sum, project) => sum + project.documents, 0);
+  const scopedTakeoffItems = filteredProjects.reduce((sum, project) => sum + project.takeoffItems, 0);
+  const scopedEstimateValue = filteredProjects.reduce((sum, project) => sum + project.estimated, 0);
+  const scopedScheduleTasks = activeProjectId
+    ? filteredProjects.reduce((sum, project) => sum + project.tasks, 0)
+    : (data?.kpis.scheduleTasks ?? 0);
 
   const metrics: Metric[] = data ? [
-    { label: "Active Projects",  value: String(data.kpis.activeProjects), detail: `${data.kpis.projects} total projects in workspace`, icon: <TrendingUp size={16} />, tone: "lime" },
-    { label: "Pending Takeoffs", value: String(pendingTakeoffs), detail: `${data.kpis.takeoffItems} takeoff line items indexed`, icon: <Layers size={16} />, tone: "blue" },
-    { label: "Documents",        value: String(data.kpis.documents), detail: "Specs, drawings, photos, and contracts", icon: <FileText size={16} />, tone: "slate" },
-    { label: "Estimate Value",   value: formatCurrency(data.kpis.estimatedValue), detail: overBudget > 0 ? `${overBudget} project${overBudget === 1 ? "" : "s"} above budget` : "No budget alerts", icon: <DollarSign size={16} />, tone: overBudget > 0 ? "amber" : "lime" },
+    {
+      label: activeProjectId ? "This Project" : "Active Projects",
+      value: activeProjectId ? (filteredProjects[0]?.completion != null ? `${filteredProjects[0].completion}%` : "—") : String(data.kpis.activeProjects),
+      detail: activeProject
+        ? `${activeProject.name}${filteredProjects[0]?.status ? ` · ${filteredProjects[0].status}` : ""}`
+        : `${data.kpis.projects} total projects in workspace`,
+      icon: <TrendingUp size={16} />,
+      tone: "lime",
+    },
+    {
+      label: "Pending Takeoffs",
+      value: String(pendingTakeoffs),
+      detail: activeProjectId
+        ? `${scopedTakeoffItems} takeoff line items on this project`
+        : `${data.kpis.takeoffItems} takeoff line items indexed`,
+      icon: <Layers size={16} />,
+      tone: "blue",
+    },
+    {
+      label: "Documents",
+      value: String(activeProjectId ? scopedDocs : data.kpis.documents),
+      detail: activeProjectId ? "Docs on the active project" : "Specs, drawings, photos, and contracts",
+      icon: <FileText size={16} />,
+      tone: "slate",
+    },
+    {
+      label: "Estimate Value",
+      value: formatCurrency(activeProjectId ? scopedEstimateValue : data.kpis.estimatedValue),
+      detail: overBudget > 0
+        ? `${overBudget} project${overBudget === 1 ? "" : "s"} above budget`
+        : activeProjectId ? "Active project estimate" : "No budget alerts",
+      icon: <DollarSign size={16} />,
+      tone: overBudget > 0 ? "amber" : "lime",
+    },
   ] : [];
 
   function buildProjectContext(dashData: DashData): string {
@@ -795,9 +834,9 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
             <Panel title="What needs attention">
               <div className="divide-y divide-white/5">
                 {([
-                  { label: "Projects needing takeoff", value: pendingTakeoffs, tone: "text-[#CCFF00] bg-[#CCFF00]/10", icon: <Layers size={13} /> },
+                  { label: activeProjectId ? "Needs takeoff" : "Projects needing takeoff", value: pendingTakeoffs, tone: "text-[#CCFF00] bg-[#CCFF00]/10", icon: <Layers size={13} /> },
                   { label: "Budget alerts",            value: overBudget,      tone: "text-amber-400 bg-amber-400/10", icon: <AlertTriangle size={13} /> },
-                  { label: "Schedule tasks",           value: data?.kpis.scheduleTasks ?? 0, tone: "text-[#00D2FF] bg-[#00D2FF]/10", icon: <Clock size={13} /> },
+                  { label: "Schedule tasks",           value: scopedScheduleTasks, tone: "text-[#00D2FF] bg-[#00D2FF]/10", icon: <Clock size={13} /> },
                 ] as { label: string; value: number; tone: string; icon: React.ReactNode }[]).map((item) => (
                   <div key={item.label} className="flex items-center justify-between px-4 py-3.5">
                     <div className="flex items-center gap-2.5">
@@ -830,7 +869,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
         <footer className="mt-8 flex items-center justify-between border-t border-white/5 pt-4 text-xs text-white/20">
           <span>All in one construction platform · A Onyx &amp; Iron Company</span>
           <span className="inline-flex items-center gap-1.5">
-            <FolderOpen size={12} /> {data?.kpis.projects ?? 0} projects
+            <FolderOpen size={12} /> {activeProjectId ? 1 : (data?.kpis.projects ?? 0)} projects
           </span>
         </footer>
       </main>
