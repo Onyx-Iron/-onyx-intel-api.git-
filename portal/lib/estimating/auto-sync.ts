@@ -3,6 +3,7 @@ import { buildEstimateImportRows, type CostCatalogForImport } from "@/lib/estima
 import { resolveCostsBatch } from "@/lib/cost/resolver";
 import { applyVersionPercentages, calculateItem } from "@/lib/estimating/calculations";
 import { getOrCreateDraftVersion } from "@/lib/estimating/versioning";
+import { allocateDirectCosts } from "../../supabase/functions/_shared/estimate-sync-contract";
 
 /**
  * Pushes every APPROVED takeoff_items row for a project that isn't already
@@ -163,9 +164,11 @@ export async function syncTakeoffToEstimate(
     // material_cost (a documented, deliberate default — see
     // docs/milestones/estimating-core-consolidation/REMAINING_RISKS.md).
     // Do NOT fabricate a labor/equipment split that wasn't actually resolved.
-    const laborCost = (breakdown?.labor ?? 0) * quantity;
-    const materialCost = (breakdown ? breakdown.material : (row.unit_cost ?? 0)) * quantity;
-    const equipmentCost = (breakdown?.equipment ?? 0) * quantity;
+    const { laborCost, materialCost, equipmentCost } = allocateDirectCosts(
+      quantity,
+      row.unit_cost,
+      breakdown ?? null,
+    );
 
     const totalDirectCost = laborCost + materialCost + equipmentCost;
     const { contingency, overhead, profit } = applyVersionPercentages(totalDirectCost, 0, pct);

@@ -8,6 +8,14 @@ import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 type DocStatus = "pending" | "processing" | "complete" | "error";
 type PipelineStatus = "pending" | "processing" | "done" | "error" | "partially_completed" | "skipped";
 
+interface ProcessingSummary {
+  pages_total: number;
+  pages_ocr_ok: number;
+  pages_ocr_failed: number;
+  pages_takeoff_ok: number;
+  pages_takeoff_failed: number;
+}
+
 interface Document {
   id: string;
   file_name: string;
@@ -22,6 +30,7 @@ interface Document {
   takeoff_status: PipelineStatus | null;
   last_error: string | null;
   last_error_step: string | null;
+  meta?: { processing_summary?: ProcessingSummary } | null;
 }
 
 const STATUS_STYLES: Record<DocStatus, string> = {
@@ -174,7 +183,16 @@ export default function DocumentsPage() {
                         </div>
                       </td>
                       <td className="px-4 py-3 text-right text-gray-400 font-mono text-xs">
-                        {doc.page_count != null ? doc.page_count : doc.pages != null ? doc.pages : "—"}
+                        <div>{doc.page_count != null ? doc.page_count : doc.pages != null ? doc.pages : "—"}</div>
+                        {doc.meta?.processing_summary && (
+                          <p className="mt-1 text-[9px] font-sans leading-snug text-white/40">
+                            OCR {doc.meta.processing_summary.pages_ocr_ok}/{doc.meta.processing_summary.pages_total}
+                            {doc.meta.processing_summary.pages_ocr_failed > 0 ? ` · ${doc.meta.processing_summary.pages_ocr_failed} failed` : ""}
+                            {" · "}
+                            takeoff {doc.meta.processing_summary.pages_takeoff_ok}/{doc.meta.processing_summary.pages_total}
+                            {doc.meta.processing_summary.pages_takeoff_failed > 0 ? ` · ${doc.meta.processing_summary.pages_takeoff_failed} failed` : ""}
+                          </p>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-gray-400 text-xs">{fmt(doc.uploaded_at)}</td>
                     </tr>

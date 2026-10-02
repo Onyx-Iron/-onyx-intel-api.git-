@@ -189,7 +189,21 @@ class EnhancedDeterministicParser:
                 row.estimated_unit_cost = cost_record.base_unit_cost
                 row.estimated_line_total = adjusted_cost
 
-                # Track breakdown
+                split = (
+                    cost_record.labor_cost
+                    + cost_record.material_cost
+                    + cost_record.equipment_cost
+                )
+                if split > 0:
+                    row.labor_pct = cost_record.labor_cost / split
+                    row.material_pct = cost_record.material_cost / split
+                    row.equipment_pct = cost_record.equipment_cost / split
+                else:
+                    # Unit price only. Book it as material; do not invent a split.
+                    row.labor_pct = 0.0
+                    row.material_pct = 1.0
+                    row.equipment_pct = 0.0
+
                 labor_total += adjusted_cost * row.labor_pct
                 material_total += adjusted_cost * row.material_pct
                 equipment_total += adjusted_cost * row.equipment_pct
@@ -538,6 +552,119 @@ class CostDatabase:
                 labor_cost=2.10,
                 material_cost=1.80,
                 equipment_cost=0.30,
+            ),
+            # Plumbing — codes the extractor emits
+            CostDatabaseReference(
+                trade="Plumbing",
+                cost_code="22-11-16",
+                description="Domestic water piping, copper",
+                region="US_EAST",
+                base_unit_cost=48.00,  # $ per LF
+                labor_cost=22.00,
+                material_cost=24.00,
+                equipment_cost=2.00,
+            ),
+            CostDatabaseReference(
+                trade="Plumbing",
+                cost_code="22-13-16",
+                description="Sanitary waste piping",
+                region="US_EAST",
+                base_unit_cost=36.00,  # $ per LF
+                labor_cost=18.00,
+                material_cost=16.00,
+                equipment_cost=2.00,
+            ),
+            # HVAC
+            CostDatabaseReference(
+                trade="HVAC",
+                cost_code="23-31-13",
+                description="Sheet metal ductwork",
+                region="US_EAST",
+                base_unit_cost=12.50,  # $ per SF
+                labor_cost=6.00,
+                material_cost=5.50,
+                equipment_cost=1.00,
+            ),
+            CostDatabaseReference(
+                trade="HVAC",
+                cost_code="23-23-00",
+                description="Refrigerant piping",
+                region="US_EAST",
+                base_unit_cost=42.00,  # $ per LF
+                labor_cost=20.00,
+                material_cost=19.00,
+                equipment_cost=3.00,
+            ),
+            CostDatabaseReference(
+                trade="Electrical",
+                cost_code="26-24-16",
+                description="Panelboard",
+                region="US_EAST",
+                base_unit_cost=1850.00,  # $ per EA
+                labor_cost=650.00,
+                material_cost=1100.00,
+                equipment_cost=100.00,
+            ),
+            CostDatabaseReference(
+                trade="Fire Alarm",
+                cost_code="28-31-00",
+                description="Fire alarm device",
+                region="US_EAST",
+                base_unit_cost=285.00,  # $ per EA
+                labor_cost=120.00,
+                material_cost=155.00,
+                equipment_cost=10.00,
+            ),
+            CostDatabaseReference(
+                trade="Utilities",
+                cost_code="33-40-00",
+                description="Storm drainage utility",
+                region="US_EAST",
+                base_unit_cost=72.00,  # $ per LF
+                labor_cost=28.00,
+                material_cost=38.00,
+                equipment_cost=6.00,
+            ),
+            # TxDOT-mapped civil codes
+            CostDatabaseReference(
+                trade="Earthwork",
+                cost_code="31-23-23",
+                description="Flexible base",
+                region="US_EAST",
+                base_unit_cost=41.20,  # $ per CY
+                labor_cost=12.00,
+                material_cost=22.20,
+                equipment_cost=7.00,
+            ),
+            CostDatabaseReference(
+                trade="Paving",
+                cost_code="32-12-16",
+                description="Hot mix asphalt",
+                region="US_EAST",
+                base_unit_cost=98.10,  # $ per TON
+                labor_cost=18.00,
+                material_cost=68.10,
+                equipment_cost=12.00,
+            ),
+            CostDatabaseReference(
+                trade="Earthwork",
+                cost_code="31-37-00",
+                description="Riprap",
+                region="US_EAST",
+                base_unit_cost=134.50,  # $ per CY
+                labor_cost=40.00,
+                material_cost=74.50,
+                equipment_cost=20.00,
+            ),
+            CostDatabaseReference(
+                trade="Utilities",
+                cost_code="33-41-00",
+                description="Reinforced concrete pipe",
+                region="US_EAST",
+                base_unit_cost=82.40,  # $ per LF
+                labor_cost=24.00,
+                material_cost=50.40,
+                equipment_cost=8.00,
             ),
         ]
         

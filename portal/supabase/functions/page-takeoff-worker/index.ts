@@ -30,6 +30,12 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import {
+  allocateDirectCosts,
+  blocksEstimateImport,
+  pricingStatus,
+  takeoffSyncFingerprint,
+} from "../_shared/estimate-sync-contract.ts";
 
 const SUPABASE_URL     = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -80,14 +86,8 @@ interface TakeoffRow {
   confidence?: number | null;
 }
 
-// Mirrors lib/estimating/takeoff-import.ts + auto-sync.ts — duplicated here
-// because Deno Edge Functions can't import the Next.js module. Keep fingerprint
-// / pricing / version-targeting in sync with the portal implementation.
-function fingerprint(label: string | null, csi: string | null, qty: number | null, unit: string | null, drawingRef: string | null, locationTag: string | null): string {
-  const norm = (v: string | null) => (v ?? "").trim().toLowerCase().replace(/\s+/g, " ");
-  const normNum = (v: number | null) => (v == null ? "" : String(v));
-  return [norm(label), norm(csi), normNum(qty), norm(unit), norm(drawingRef), norm(locationTag)].join("|");
-}
+// Pricing, review gate, and fingerprint live in _shared/estimate-sync-contract.ts
+// so this worker and portal/lib/estimating/auto-sync.ts cannot drift.
 
 /** Minimal port of portal getOrCreateDraftVersion — never writes to a locked version. */
 // deno-lint-ignore no-explicit-any
@@ -263,10 +263,21 @@ async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: strin
   const rows: Record<string, unknown>[] = [];
   // deno-lint-ignore no-explicit-any
   for (const t of takeoff.data ?? []) {
+    // Hard gate: only 'approved' items reach the estimate (mirrors
+    // lib/estimating/takeoff-import.ts's identical check). 'suggested' and
+    // 'reviewed' are both still unapproved; 'rejected' is permanent.
+    if (blocksEstimateImport(t.review_status)) continue;
+
     const meta = (t.meta ?? {}) as Record<string, unknown>;
     const drawingRef = typeof meta.drawing_ref === "string" ? meta.drawing_ref : null;
     const locationTag = typeof meta.location_tag === "string" ? meta.location_tag : null;
-    const fp = fingerprint(t.label, t.csi_code, t.quantity, t.unit, drawingRef, locationTag);
+    const fp = takeoffSyncFingerprint({
+      label: t.label,
+      csi_code: t.csi_code,
+      quantity: t.quantity,
+      unit: t.unit,
+      meta: { drawing_ref: drawingRef, location_tag: locationTag },
+    });
     if (existingKeys.has(`id:${t.id}`) || existingKeys.has(`fp:${fp}`)) continue;
     existingKeys.add(`fp:${fp}`);
 
@@ -275,8 +286,9 @@ async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: strin
       ? costLookup.get(`${t.csi_code}|${uom}`) ?? costLookup.get(`${t.csi_code}|*`) ?? null
       : null;
     const aiVision = meta.extraction_method === "ai_vision";
-    const quantity = t.quantity ?? 0;
-    const materialCost = (unitCost ?? 0) * quantity;
+    const allocated = allocateDirectCosts(t.quantity ?? 0, unitCost, null);
+    const totalDirect =
+      allocated.laborCost + allocated.materialCost + allocated.equipmentCost;
 
     rows.push({
       tenant_id: tenantId,
@@ -290,18 +302,18 @@ async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: strin
       quantity: t.quantity ?? null,
       uom,
       unit_cost: unitCost,
-      labor_cost: 0,
-      material_cost: materialCost,
-      equipment_cost: 0,
-      total_direct_cost: materialCost,
-      total_price: materialCost,
+      labor_cost: allocated.laborCost,
+      material_cost: allocated.materialCost,
+      equipment_cost: allocated.equipmentCost,
+      total_direct_cost: totalDirect,
+      total_price: totalDirect,
       unit_price: unitCost,
       source_takeoff_id: t.id,
       source_fingerprint: fp,
       quantity_basis: typeof meta.quantity_basis === "string" ? meta.quantity_basis : null,
       drawing_ref: drawingRef,
       location_tag: locationTag,
-      pricing_status: aiVision ? "review" : unitCost != null ? "priced" : "unpriced",
+      pricing_status: pricingStatus(aiVision, unitCost),
       notes: [
         aiVision ? "Review required: AI vision quantity" : null,
         drawingRef ? `Source: ${drawingRef}` : null,
@@ -339,6 +351,12 @@ Deno.serve(async (req) => {
       error_message: errorMessage?.slice(0, 2000) ?? null,
       completed_at: status === "started" ? null : new Date().toISOString(),
     }).then(() => {}).catch(() => {});
+  }
+  async function refreshDocumentSummary(): Promise<void> {
+    const { error } = await db.rpc("refresh_document_processing_summary", {
+      p_document_id: body.document_id,
+    });
+    if (error) console.warn("[page-takeoff-worker] summary refresh failed", error.message);
   }
 
   await db.from("document_pages")
@@ -438,6 +456,7 @@ Deno.serve(async (req) => {
       .eq("id", body.page_id)
       .eq("tenant_id", body.tenant_id);
     await recordEvent("succeeded");
+    await refreshDocumentSummary();
 
     return new Response(JSON.stringify({ ok: true, page_id: body.page_id, rows: rows.length }), {
       status: 200, headers: { "Content-Type": "application/json" },
@@ -451,6 +470,7 @@ Deno.serve(async (req) => {
       .update({ takeoff_status: "error", takeoff_error: String(err?.message ?? err).slice(0, 500), updated_at: new Date().toISOString() })
       .eq("id", body.page_id)
       .eq("tenant_id", body.tenant_id);
+    await refreshDocumentSummary();
     return new Response(JSON.stringify({ error: String(err?.message ?? err) }), {
       status: 500, headers: { "Content-Type": "application/json" },
     });
