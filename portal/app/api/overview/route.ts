@@ -1,6 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { projectMoneyFromAggregate, projectMoneyFromRows, type ProjectMoney } from "@/lib/project-controls/money";
+import { overviewFromSnapshot, scheduleCompletion, type ProjectOverview } from "@/lib/project-controls/overview";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 
@@ -50,6 +51,23 @@ async function loadProjectMoney(db: {
   );
 }
 
+// One query for every overview card. Missing until the snapshot migration
+// is applied, in which case the caller uses the per-table counts.
+async function loadOverviewSnapshot(db: {
+  rpc: (fn: string, args: Record<string, string>) => Promise<{ data: unknown; error: { message: string } | null }>;
+}, tenantId: string, projectId: string): Promise<ProjectOverview | null> {
+  try {
+    const aggregated = await db.rpc("project_overview_snapshot", { p_tenant_id: tenantId, p_project_id: projectId });
+    const row = Array.isArray(aggregated.data) ? aggregated.data[0] : aggregated.data;
+    if (!aggregated.error && row && typeof row === "object") {
+      return overviewFromSnapshot(row as Record<string, number | string | null | undefined>);
+    }
+  } catch {
+    // The snapshot is optional until the migration is applied.
+  }
+  return null;
+}
+
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
     const { userId, orgId, orgSlug } = await auth();
@@ -62,6 +80,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const db = await createServiceClient();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const anyDb = db as any;
+
+    const snapshot = await loadOverviewSnapshot(anyDb, tenantId, projectId);
+    if (snapshot) return NextResponse.json(snapshot);
 
     const [
       takeoff_items, documents, schedule_tasks, contacts, daily_logs, generated_docs,
@@ -92,7 +113,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       countTable(db, "submittal_items", tenantId, projectId, (q: any) => q.in("status", ["submitted", "under_review", "revise_resubmit", "rejected"])),
     ]);
 
-    const completion = schedule_tasks > 0 ? Math.round((scheduleDone / schedule_tasks) * 100) : 0;
+    const completion = scheduleCompletion(schedule_tasks, scheduleDone);
 
     return NextResponse.json({
       takeoff_items, documents, schedule_tasks, contacts, daily_logs, generated_docs,
