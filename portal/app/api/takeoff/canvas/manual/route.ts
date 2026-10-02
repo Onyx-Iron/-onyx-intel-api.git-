@@ -25,6 +25,8 @@ export const runtime = "nodejs";
  *        retries actually rely on the dedup behavior.
  * DELETE ?id=  → soft-deletes the source AND hard-deletes its mirror in one
  *        transaction via `soft_delete_manual_takeoff_tx` (STEP 9).
+ * PUT   { id } → restores a soft-deleted takeoff via `restore_manual_takeoff_tx`
+ *        (clears deleted_at, recreates mirror, enqueues estimate sync upsert).
  *
  * Server-side quantity validation (STEP 7): when the page has a VERIFIED
  * page-space calibration, the server recalculates quantity from geometry +
@@ -280,6 +282,52 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   }
 
   return NextResponse.json({ ok: true, already_deleted: row.already_deleted, outbox_processed: workerResult });
+}
+
+/**
+ * PUT { id } → restore a soft-deleted manual takeoff (inverse of DELETE).
+ */
+export async function PUT(req: NextRequest): Promise<NextResponse> {
+  const { userId, orgId, orgSlug } = await auth();
+  if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const body = await req.json().catch(() => ({})) as { id?: string };
+  const id = body.id ?? req.nextUrl.searchParams.get("id");
+  if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
+
+  const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const db = await createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const anyDb = db as any;
+
+  const { data, error } = await anyDb.rpc("restore_manual_takeoff_tx", {
+    p_id: id, p_tenant_id: tenantId, p_actor_user_id: userId,
+  }).single();
+  if (error) {
+    if (error.message?.includes("not found")) return NextResponse.json({ error: "not found" }, { status: 404 });
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  const row = data as {
+    already_active: boolean;
+    manual_takeoff: { id: string; project_id: string };
+    mirror_takeoff_item_id: string | null;
+  };
+
+  let workerResult: Awaited<ReturnType<typeof processOutboxBatch>> | null = null;
+  try {
+    workerResult = await processOutboxBatch(anyDb, `inline-restore-${Date.now()}`, 20);
+  } catch (err) {
+    console.error("[canvas/manual] restore outbox processing failed", err);
+  }
+
+  return NextResponse.json({
+    ok: true,
+    already_active: row.already_active,
+    item: row.manual_takeoff,
+    mirror_takeoff_item_id: row.mirror_takeoff_item_id,
+    outbox_processed: workerResult,
+  });
 }
 
 interface UpdateBody {

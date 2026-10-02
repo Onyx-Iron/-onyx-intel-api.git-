@@ -6,11 +6,12 @@ import {
   authTenantKey,
   authTenantName,
 } from "@/lib/project-controls/server";
+import { auditDelete, auditInsert, auditUpdate } from "@/lib/audit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-async function tenant(): Promise<{ tenantId: string } | NextResponse> {
+async function tenant(): Promise<{ tenantId: string; userId: string } | NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
   if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -19,7 +20,7 @@ async function tenant(): Promise<{ tenantId: string } | NextResponse> {
     authTenantKey(userId, orgId),
     authTenantName(userId, orgSlug),
   );
-  return { tenantId };
+  return { tenantId, userId };
 }
 
 export async function GET(): Promise<NextResponse> {
@@ -109,6 +110,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       updated_at: new Date().toISOString(),
     };
 
+    // Capture prior row so upsert can be audited as update vs insert.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let priorQuery = db.from("cost_overrides" as any)
+      .select("*")
+      .eq("tenant_id", t.tenantId)
+      .eq("cost_code_id", costCodeId!);
+    priorQuery = payload.region_code == null
+      ? priorQuery.is("region_code", null)
+      : priorQuery.eq("region_code", payload.region_code);
+    const { data: prior } = await priorQuery.maybeSingle();
+
     const { data, error } = await db
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .from("cost_overrides" as any)
@@ -119,6 +131,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .single();
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 422 });
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const recordId = String((data as any)?.id ?? costCodeId);
+    if (prior) {
+      auditUpdate({
+        tenant_id: t.tenantId,
+        user_id: t.userId,
+        table_name: "cost_overrides",
+        record_id: recordId,
+        old_values: prior as unknown as Record<string, unknown>,
+        new_values: data as unknown as Record<string, unknown>,
+      });
+    } else {
+      auditInsert({
+        tenant_id: t.tenantId,
+        user_id: t.userId,
+        table_name: "cost_overrides",
+        record_id: recordId,
+        new_values: data as unknown as Record<string, unknown>,
+      });
     }
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
@@ -135,6 +167,13 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ error: "id required" }, { status: 400 });
     }
     const db = await createServiceClient();
+    const { data: prior } = await db
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .from("cost_overrides" as any)
+      .select("*")
+      .eq("id", id)
+      .eq("tenant_id", t.tenantId)
+      .maybeSingle();
     const { error } = await db
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .from("cost_overrides" as any)
@@ -143,6 +182,15 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
       .eq("tenant_id", t.tenantId);
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+    if (prior) {
+      auditDelete({
+        tenant_id: t.tenantId,
+        user_id: t.userId,
+        table_name: "cost_overrides",
+        record_id: id,
+        old_values: prior as unknown as Record<string, unknown>,
+      });
     }
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {

@@ -139,6 +139,9 @@ async function embedText(text: string): Promise<number[]> {
   return data.embedding.values;
 }
 
+/** Leave headroom under Vercel maxDuration=300 so we can write error status before kill. */
+const INGEST_BUDGET_MS = 270_000;
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -146,6 +149,7 @@ export async function POST(
   const { id: docId } = await params;
   let geminiName: string | null = null;
   let tenantId: string | null = null;
+  const startedAt = Date.now();
 
   const markError = async (message: string, step: string) => {
     try {
@@ -160,6 +164,13 @@ export async function POST(
     } catch { /* best effort */ }
   };
 
+  const assertWithinBudget = async (step: string) => {
+    if (Date.now() - startedAt < INGEST_BUDGET_MS) return;
+    const msg = `Ingest timed out during ${step} (budget ${INGEST_BUDGET_MS}ms). Re-run ingest to retry.`;
+    await markError(msg, step);
+    throw new Error(msg);
+  };
+
   try {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -172,6 +183,14 @@ export async function POST(
     // which blocks TS's normal control-flow narrowing of the `let` for the rest of this function.
     const resolvedTenantId: string = tenantId;
     const db = await createServiceClient();
+
+    // Claim the work unit so a concurrent retry / sweeper can see progress.
+    await db.from("documents").update({
+      status: "processing",
+      last_error: null,
+      last_error_step: null,
+    }).eq("id", docId).eq("tenant_id", resolvedTenantId);
+
     await logDocumentProcessingEvent({
       tenantId: resolvedTenantId,
       documentId: docId,
@@ -306,12 +325,14 @@ export async function POST(
 
     const BATCH = 8;
     for (let i = 0; i < pages.length; i += BATCH) {
+      await assertWithinBudget("embed");
       const batch = pages.slice(i, i + BATCH);
       await Promise.all(
         batch.map(async (page) => {
           const text = `${page.summary}\nKey terms: ${(page.key_terms ?? []).join(", ")}`;
           const chunks = splitChunks(text);
           for (const chunk of chunks) {
+            await assertWithinBudget("embed");
             const values = await embedText(chunk);
             chunkRows.push({
               document_id: docId,
@@ -325,6 +346,19 @@ export async function POST(
           }
         }),
       );
+      // Checkpoint progress so a timeout/retry can see how far we got.
+      await db.from("documents").update({
+        meta: {
+          ...meta,
+          title: extraction.title ?? null,
+          gemini_file_uri: fileUri,
+          ingest_progress: {
+            pages_embedded_through: Math.min(i + BATCH, pages.length),
+            pages_total: pages.length,
+            updated_at: new Date().toISOString(),
+          },
+        },
+      }).eq("id", docId).eq("tenant_id", tenantId);
     }
 
     if (chunkRows.length > 0) {

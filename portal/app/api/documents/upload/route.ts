@@ -249,6 +249,8 @@ async function insertDriveRow(args: {
 
 function fireIngest(req: NextRequest, docId: string): void {
   // Fire-and-forget: do NOT await, so the upload response stays fast.
+  // If the ingest request never starts (network/platform failure), mark the
+  // document errored so it cannot sit in "processing" forever with no worker.
   void fetch(new URL(`/api/documents/${docId}/ingest`, req.url).toString(), {
     method: "POST",
     headers: {
@@ -256,5 +258,32 @@ function fireIngest(req: NextRequest, docId: string): void {
       "Cookie": req.headers.get("cookie") ?? "",
     },
     body: JSON.stringify({}),
-  }).catch(() => {});
+  }).then(async (res) => {
+    if (res.ok) return;
+    const detail = (await res.text().catch(() => "")).slice(0, 500);
+    try {
+      const { createServiceClient } = await import("@/lib/supabase/server");
+      const db = await createServiceClient();
+      await db.from("documents").update({
+        status: "error",
+        last_error: `Ingest failed to start (${res.status}): ${detail}`.slice(0, 2000),
+        last_error_step: "ingest_start",
+      }).eq("id", docId).eq("status", "processing");
+    } catch (err) {
+      console.error("[fireIngest] failed to mark document error", err);
+    }
+  }).catch(async (err) => {
+    console.error("[fireIngest] fetch failed", err);
+    try {
+      const { createServiceClient } = await import("@/lib/supabase/server");
+      const db = await createServiceClient();
+      await db.from("documents").update({
+        status: "error",
+        last_error: `Ingest request failed to start: ${err instanceof Error ? err.message : String(err)}`.slice(0, 2000),
+        last_error_step: "ingest_start",
+      }).eq("id", docId).eq("status", "processing");
+    } catch (markErr) {
+      console.error("[fireIngest] failed to mark document error", markErr);
+    }
+  });
 }
