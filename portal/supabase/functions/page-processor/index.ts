@@ -86,6 +86,12 @@ Deno.serve(async (req) => {
       completed_at: status === "started" ? null : new Date().toISOString(),
     }).then(() => {}).catch(() => {});
   }
+  async function refreshDocumentSummary(): Promise<void> {
+    const { error } = await db.rpc("refresh_document_processing_summary", {
+      p_document_id: body.document_id,
+    });
+    if (error) console.warn("[page-processor] summary refresh failed", error.message);
+  }
 
   await db.from("document_pages")
     .update({ status: "processing" })
@@ -141,6 +147,7 @@ Deno.serve(async (req) => {
         .eq("id", body.page_id);
       await recordEvent("ocr", "succeeded");
       await recordEvent("embedding", "skipped", "no chunks extracted");
+      await refreshDocumentSummary();
       return new Response(JSON.stringify({ ok: true, page_id: body.page_id, chunks: 0 }), { status: 200 });
     }
 
@@ -182,7 +189,8 @@ Deno.serve(async (req) => {
       .update({ status: "done", ocr_text: text, updated_at: new Date().toISOString() })
       .eq("id", body.page_id);
     await recordEvent("ocr", "succeeded");
-    await recordEvent("embedding", embeddedCount < chunks.length ? "succeeded" : "succeeded", embedNote);
+    await recordEvent("embedding", "succeeded", embedNote);
+    await refreshDocumentSummary();
 
     return new Response(JSON.stringify({
       ok: true,
@@ -199,6 +207,7 @@ Deno.serve(async (req) => {
     await db.from("document_pages")
       .update({ status: "error", error: String(err?.message ?? err).slice(0, 500), updated_at: new Date().toISOString() })
       .eq("id", body.page_id);
+    await refreshDocumentSummary();
     return new Response(JSON.stringify({ error: String(err?.message ?? err) }), { status: 500 });
   }
 });

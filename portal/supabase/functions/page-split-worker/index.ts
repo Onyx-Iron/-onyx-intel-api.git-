@@ -163,6 +163,7 @@ Deno.serve(async (req) => {
     // pdf-lib doesn't stream; iterate sequentially. For huge decks (500+ pages)
     // we may want to batch these uploads later, but for typical 20-200 page
     // plansets this is well within the 150s Edge Function ceiling.
+    let failedUploads = 0;
     for (let i = 0; i < pageCount; i++) {
       const single = await PDFDocument.create();
       const [copied] = await single.copyPages(pdf, [i]);
@@ -179,6 +180,7 @@ Deno.serve(async (req) => {
         });
       if (upPage.error) {
         console.warn(`[page-split] upload page ${pageNumber} failed: ${upPage.error.message}`);
+        failedUploads += 1;
         continue;
       }
 
@@ -261,18 +263,30 @@ Deno.serve(async (req) => {
     await db.from("documents")
       .update({
         status: "split",
+        page_count: pageCount,
         meta: {
           ...prevMeta,
           processing_summary: {
             pages_enqueued: pageRows.length,
             fanout_jobs: fanoutResults.length,
             fanout_failures: fanoutFailures,
+            failed_uploads: failedUploads,
             updated_at: new Date().toISOString(),
           },
         },
+        ...(failedUploads > 0
+          ? {
+              last_error: `${failedUploads} of ${pageCount} pages failed to upload`,
+              last_error_step: "split",
+            }
+          : {}),
       })
       .eq("id", body.document_id)
       .eq("tenant_id", body.tenant_id);
+    const { error: summaryErr } = await db.rpc("refresh_document_processing_summary", {
+      p_document_id: body.document_id,
+    });
+    if (summaryErr) console.warn("[page-split] summary refresh failed", summaryErr.message);
     if (fanoutFailures === 0) await recordEvent("succeeded");
     else await recordEvent("succeeded", `split ok with ${fanoutFailures} fan-out failures`);
 
