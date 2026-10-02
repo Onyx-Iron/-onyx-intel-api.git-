@@ -98,7 +98,7 @@ function colorHint(hex: string): string {
 
 interface TextToken { text: string; x: number; y: number }
 
-function nearestText(cx: number, cy: number, tokens: TextToken[], maxDist: number): TextToken | null {
+export function nearestText(cx: number, cy: number, tokens: TextToken[], maxDist: number): TextToken | null {
   let best: TextToken | null = null;
   let bestD = maxDist;
   for (const t of tokens) {
@@ -108,21 +108,56 @@ function nearestText(cx: number, cy: number, tokens: TextToken[], maxDist: numbe
   return best;
 }
 
+export function textTokenGrid(tokens: TextToken[], cell: number): Map<string, TextToken[]> {
+  const grid = new Map<string, TextToken[]>();
+  for (const token of tokens) {
+    const key = `${Math.floor(token.x / cell)}:${Math.floor(token.y / cell)}`;
+    const bucket = grid.get(key);
+    if (bucket) bucket.push(token);
+    else grid.set(key, [token]);
+  }
+  return grid;
+}
+
+/** Same hit as nearestText. The cell size must be >= maxDist. */
+export function nearestTextInGrid(
+  cx: number,
+  cy: number,
+  grid: Map<string, TextToken[]>,
+  cell: number,
+  maxDist: number,
+): TextToken | null {
+  const ix = Math.floor(cx / cell);
+  const iy = Math.floor(cy / cell);
+  const nearby: TextToken[] = [];
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      const bucket = grid.get(`${ix + dx}:${iy + dy}`);
+      if (bucket) nearby.push(...bucket);
+    }
+  }
+  return nearestText(cx, cy, nearby, maxDist);
+}
+
 /**
  * Extract polylines + labels from a pdfjs page proxy.
  * Returns page-unit coordinates (typically points, 72/inch).
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function extractVectorsFromPdfPage(page: any): Promise<ExtractedVector[]> {
-  const ops = await page.getOperatorList();
-  const textContent = await page.getTextContent();
+export interface VectorExtractInput {
+  fnArray: number[];
+  argsArray: unknown[];
+  textItems: Array<{ str?: string; transform?: number[] }>;
+}
+
+export function extractVectorsFromOperatorList(input: VectorExtractInput): ExtractedVector[] {
   const tokens: TextToken[] = [];
-  for (const item of (textContent.items ?? []) as Array<{ str: string; transform?: number[] }>) {
+  for (const item of input.textItems) {
     const s = (item.str ?? "").trim();
     if (!s) continue;
     const tm = item.transform ?? [1, 0, 0, 1, 0, 0];
     tokens.push({ text: s, x: tm[4], y: tm[5] });
   }
+  const textGrid = textTokenGrid(tokens, 50);
 
   // Transform stack starts identity.
   const ctmStack: number[][] = [[1, 0, 0, 1, 0, 0]];
@@ -140,9 +175,9 @@ export async function extractVectorsFromPdfPage(page: any): Promise<ExtractedVec
     constructPath: 91, stroke: 20, fillStroke: 22, endPath: 27,
   } as const;
 
-  const fnArray: number[] = ops.fnArray;
+  const fnArray = input.fnArray;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const argsArray: any[] = ops.argsArray;
+  const argsArray = input.argsArray as any[];
 
   for (let i = 0; i < fnArray.length; i++) {
     const fn = fnArray[i];
@@ -189,7 +224,7 @@ export async function extractVectorsFromPdfPage(page: any): Promise<ExtractedVec
           for (const p of pts) { cx += p[0]; cy += p[1]; }
           cx /= pts.length; cy /= pts.length;
 
-          const tag = nearestText(cx, cy, tokens, 50); // 50 pt search radius
+          const tag = nearestTextInGrid(cx, cy, textGrid, 50, 50);
           const layer = tag ? `PDF-${tag.text.toUpperCase().replace(/[^\w-]/g, "-")}` : colorHint(color);
 
           emitted.push({
@@ -223,4 +258,18 @@ export async function extractVectorsFromPdfPage(page: any): Promise<ExtractedVec
     for (let i = 1; i < v.points.length; i++) span += Math.hypot(v.points[i][0] - v.points[i-1][0], v.points[i][1] - v.points[i-1][1]);
     return span > 2;
   });
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function extractVectorsFromPdfPage(page: any): Promise<ExtractedVector[]> {
+  const ops = await page.getOperatorList();
+  const textContent = await page.getTextContent();
+  const input: VectorExtractInput = {
+    fnArray: Array.from(ops.fnArray as ArrayLike<number>),
+    argsArray: ops.argsArray as unknown[],
+    textItems: (textContent.items ?? []) as VectorExtractInput["textItems"],
+  };
+  if (typeof window === "undefined") return extractVectorsFromOperatorList(input);
+  const { extractVectorsOffMainThread } = await import("./vector-extract-client");
+  return extractVectorsOffMainThread(input);
 }
