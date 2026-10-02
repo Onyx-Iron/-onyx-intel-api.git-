@@ -19,6 +19,7 @@ import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 
 import { useToast } from "@/components/common/Toast";
 import { useConfirm } from "@/components/common/ConfirmDialog";
+import { useProjectContext } from "@/components/project/ProjectContext";
 
 type Project = Tables<"projects">;
 
@@ -141,6 +142,7 @@ function ProjectCard({ project, onDeleted }: { project: Project; onDeleted: () =
 }
 
 export default function ProjectsPage() {
+  const { setActiveProjectId, refreshProjects } = useProjectContext();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -159,12 +161,13 @@ export default function ProjectsPage() {
       }
       const data = await res.json();
       setProjects(data.projects ?? []);
+      void refreshProjects();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [refreshProjects]);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { loadProjects(); }, [loadProjects]);
@@ -183,6 +186,8 @@ export default function ProjectsPage() {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error ?? `HTTP ${res.status}`);
       }
+      const created = await res.json() as { project?: { id?: string } };
+      if (created.project?.id) setActiveProjectId(created.project.id);
       setForm(EMPTY_FORM);
       setShowForm(false);
       await loadProjects();
@@ -202,6 +207,7 @@ export default function ProjectsPage() {
         compact
         actions={
           <button
+            id="new-project-button"
             onClick={() => setShowForm(true)}
             className="inline-flex h-9 items-center gap-2 rounded-full bg-[#CCFF00] px-4 text-xs font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85"
           >

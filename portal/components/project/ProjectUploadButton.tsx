@@ -133,6 +133,7 @@ export default function ProjectUploadButton({
         onChange={onChange}
       />
       <button
+        id="upload-plans-pill"
         type="button"
         onClick={() => fileInputRef.current?.click()}
         disabled={uploading}

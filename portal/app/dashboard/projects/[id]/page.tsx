@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { auth } from "@clerk/nextjs/server";
 import { notFound } from "next/navigation";
 import { createServiceClient } from "@/lib/supabase/server";
@@ -9,6 +10,7 @@ import PageHero from "@/components/layout/PageHero";
 import ProjectUploadButton from "@/components/project/ProjectUploadButton";
 import GenerateDocDropdown from "@/components/common/GenerateDocDropdown";
 import ProjectLocationCard from "@/components/project/ProjectLocationCard";
+import SyncActiveProject from "@/components/project/SyncActiveProject";
 
 interface PageProps {
   params: Promise<{ id: string }>;
@@ -49,6 +51,7 @@ export default async function ProjectDetailPage({ params }: PageProps) {
 
   return (
     <div className="min-h-screen">
+      <SyncActiveProject projectId={id} projectName={project.name} status={project.status} />
       <PageHero
         eyebrow="Project"
         title={project.name}
@@ -87,7 +90,9 @@ export default async function ProjectDetailPage({ params }: PageProps) {
         </div>
       </div>
 
-      <ProjectTabs projectId={id} projectName={project.name} />
+      <Suspense fallback={<div className="px-4 py-10 text-sm text-white/40 sm:px-6">Loading workspace…</div>}>
+        <ProjectTabs projectId={id} projectName={project.name} />
+      </Suspense>
     </div>
   );
 }

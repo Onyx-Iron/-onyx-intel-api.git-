@@ -7,6 +7,7 @@ import { headerSafe } from "@/lib/http";
 import { logEvent } from "@/lib/activity";
 import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { generateText, availableProviders, NoProviderError, type Provider } from "@/lib/ai/providers";
+import { formatMemoriesBlock, listProjectMemories } from "@/lib/ai/project-memories";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -500,6 +501,12 @@ async function handleRag(
   if (convSummary) {
     SYSTEM += `\n\n--- Prior Conversation Summary ---\n${convSummary}\n--- End Summary ---`;
   }
+  try {
+    const memories = await listProjectMemories(db, tenantId, project_id, 30);
+    SYSTEM += formatMemoriesBlock(memories);
+  } catch {
+    // non-fatal — chat still works without the memory block
+  }
 
   await db.from("messages").insert({
     conversation_id: convId,
@@ -680,7 +687,13 @@ async function handleAgentic(
   if (projErr || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
 
   const today = new Date().toISOString().split("T")[0];
-  const systemInstruction = SYSTEM_BASE_AGENTIC + "\n\n" + buildProjectBrief(project as ProjectRow, today);
+  let systemInstruction = SYSTEM_BASE_AGENTIC + "\n\n" + buildProjectBrief(project as ProjectRow, today);
+  try {
+    const memories = await listProjectMemories(db, tenantId, project_id, 30);
+    systemInstruction += formatMemoriesBlock(memories);
+  } catch {
+    // non-fatal
+  }
 
   let convId = conversation_id;
   if (!convId) {
