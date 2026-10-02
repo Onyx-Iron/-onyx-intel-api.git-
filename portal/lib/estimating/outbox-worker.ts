@@ -128,6 +128,9 @@ export async function processOutboxBatch(
 
   for (const event of deleteEvents) {
     try {
+      if (!event.manual_takeoff_id) {
+        throw new Error("delete outbox event missing manual_takeoff_id");
+      }
       await reconcileDeletedTakeoffEstimateItems(db, event.tenant_id, event.project_id, event.manual_takeoff_id);
       await markComplete(event);
     } catch (err) {
