@@ -8,6 +8,7 @@ import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
+import { canvasEndpoints, nearestEndpoint, type VectorPolyline } from "@/lib/takeoff/canvas/snap";
 
 // Coordinate-space tag carried alongside each committed item (professional-
 // manual-takeoff milestone, PERMANENT RULE 1/2). 'page_space' points are
@@ -132,6 +133,15 @@ interface Props {
 // ─────────────────────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
+function polylinesOf(value: unknown): VectorPolyline[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is VectorPolyline => {
+    if (!item || typeof item !== "object") return false;
+    const points = (item as VectorPolyline).points;
+    return Array.isArray(points);
+  });
+}
+
 export default function SheetCanvas({ projectId, projectName, pageId, pageNumber }: Props) {
   const wrapRef   = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -164,6 +174,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // runs/topo nodes/area bounds, is deferred — see REMAINING_RISKS.md.
   const [dragState, setDragState] = useState<{ key: string; startClient: Pt; originalPoints: Pt[]; originalRowVersion: number } | null>(null);
   const [vectorDescriptions, setVectorDescriptions] = useState<string[]>([]);
+  const [snapVectors, setSnapVectors] = useState<VectorPolyline[]>([]);
+  const [snapHint, setSnapHint] = useState<Pt | null>(null);
   const [utilityRuns, setUtilityRuns] = useState<UtilityRun[]>([]);
   const [utilityDraftPts, setUtilityDraftPts] = useState<Pt[]>([]);
   const [utilityModalPts, setUtilityModalPts] = useState<Pt[] | null>(null); // non-null while the input overlay is open
@@ -337,8 +349,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // Vector extraction waits until a civil tool needs the CAD overlay.
   const vectorExtractKey = useRef<string | null>(null);
   useEffect(() => {
-    const vectorTools = new Set<Tool>(["utility_pipe", "contour_line", "spot_elevation", "civil_area_bounds"]);
-    if (!pdfUrl || !vectorTools.has(tool)) return;
+    if (!pdfUrl || tool === "pan") return;
     const key = `${pdfUrl}:${pageId}`;
     if (vectorExtractKey.current === key) return;
     vectorExtractKey.current = key;
@@ -348,7 +359,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       try {
         const check = await fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
         const existing = check.ok ? (await check.json() as { vectors?: unknown[] }) : { vectors: [] };
-        if ((existing.vectors ?? []).length > 0 || cancelled) {
+        const stored = polylinesOf(existing.vectors);
+        if (stored.length > 0 || cancelled) {
+          if (!cancelled) setSnapVectors(stored);
           finished = true;
           return;
         }
@@ -362,6 +375,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         const page = await doc.getPage(1);
         const vectors = await extractVectorsFromPdfPage(page);
         if (vectors.length > 0 && !cancelled) {
+          setSnapVectors(vectors);
           await fetch("/api/takeoff/canvas/vectors", {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
@@ -437,9 +451,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }, [draftPoints, tool, scale]);
 
   // ── Click handling ────────────────────────────────────────────────────────
+  const snapEndpoints = useMemo(
+    () => (renderSize ? canvasEndpoints(snapVectors, renderSize) : []),
+    [snapVectors, renderSize],
+  );
+  const snapPoint = useCallback((point: Pt): Pt => nearestEndpoint(point, snapEndpoints) ?? point, [snapEndpoints]);
+
   const onCanvasClick: React.MouseEventHandler<SVGSVGElement> = (e) => {
     if (!renderSize) return;
-    const p = toLocal(e.clientX, e.clientY, e.currentTarget);
+    const p = snapPoint(toLocal(e.clientX, e.clientY, e.currentTarget));
 
     if (tool === "calibrate") {
       const next = [...calibPts, p];
@@ -515,6 +535,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (tool === "civil_area_bounds") {
       setAreaDraftPts((prev) => [...prev, p]);
     }
+  };
+
+  const onCanvasMove: React.MouseEventHandler<SVGSVGElement> = (e) => {
+    if (!renderSize || tool === "pan") {
+      setSnapHint(null);
+      return;
+    }
+    const hit = nearestEndpoint(toLocal(e.clientX, e.clientY, e.currentTarget), snapEndpoints);
+    setSnapHint((prev) => (prev?.x === hit?.x && prev?.y === hit?.y ? prev : hit));
   };
 
   const finishUtilityDraft = useCallback(() => {
@@ -1152,6 +1181,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               viewBox={`0 0 ${renderSize.w} ${renderSize.h}`}
               className={`absolute inset-0 select-none ${tool === "pan" ? "cursor-grab" : "cursor-crosshair"}`}
               onClick={onCanvasClick}
+              onMouseMove={onCanvasMove}
+              onMouseLeave={() => setSnapHint(null)}
               onDoubleClick={finishDraft}
             >
               {/* Committed shapes */}
@@ -1289,6 +1320,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                     <circle key={i} cx={p.x} cy={p.y} r={3} fill="#fff" stroke="#000" strokeWidth={1} />
                   ))}
                 </g>
+              )}
+
+              {snapHint && (
+                <circle cx={snapHint.x} cy={snapHint.y} r={8} fill="none" stroke="#CCFF00" strokeWidth={2} />
               )}
 
               {/* Calibration guide */}
