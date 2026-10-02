@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { classifyLayer, type LayerClassification } from "@/lib/cad/layer-classify";
+import { shapesInView, type Box } from "@/lib/takeoff/canvas/visible-shapes";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -50,6 +51,8 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
   const [editingPoints, setEditingPoints] = useState<Array<[number, number]> | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [layerFilter, setLayerFilter] = useState<Set<string>>(new Set());
+  const [view, setView] = useState<Box | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
 
   // ── Load vectors (initial + on refresh signal from PDF extractor) ─────────
   useEffect(() => {
@@ -161,7 +164,40 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
     return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
   }, [rendered]);
 
-  const visible = useMemo(() => rendered.filter((v) => !layerFilter.has(v.layer)), [rendered, layerFilter]);
+  useEffect(() => {
+    if (!canvasSize) return;
+    const update = () => {
+      const el = svgRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const sx = canvasSize.w / rect.width;
+      const sy = canvasSize.h / rect.height;
+      const left = Math.max(0, -rect.left);
+      const top = Math.max(0, -rect.top);
+      const right = Math.min(rect.width, window.innerWidth - rect.left);
+      const bottom = Math.min(rect.height, window.innerHeight - rect.top);
+      setView({
+        minX: left * sx,
+        minY: top * sy,
+        maxX: Math.max(left, right) * sx,
+        maxY: Math.max(top, bottom) * sy,
+      });
+    };
+    update();
+    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+    };
+  }, [canvasSize, enabled]);
+
+  const visible = useMemo(() => {
+    const layered = rendered.filter((v) => !layerFilter.has(v.layer));
+    if (!view) return layered;
+    return shapesInView(layered, view, 80);
+  }, [rendered, layerFilter, view]);
   const hover = useMemo(() => visible.find((v) => v.key === hoverKey) ?? null, [visible, hoverKey]);
 
   // ── Approve → persist as manual_takeoff ───────────────────────────────────
@@ -256,6 +292,7 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
       {/* Vector SVG overlay */}
       {enabled && (
         <svg
+          ref={svgRef}
           width={canvasSize.w}
           height={canvasSize.h}
           viewBox={`0 0 ${canvasSize.w} ${canvasSize.h}`}

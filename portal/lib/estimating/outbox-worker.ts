@@ -72,19 +72,20 @@ export async function processOutboxBatch(
   if (claimErr) throw claimErr;
 
   const events = (claimed ?? []) as Array<{
-    id: string; tenant_id: string; project_id: string; manual_takeoff_id: string;
-    event_type: "upsert" | "delete"; attempts: number;
+    id: string; tenant_id: string; project_id: string; manual_takeoff_id: string | null;
+    event_type: "upsert" | "delete" | "project_sync"; attempts: number;
   }>;
   result.claimed = events.length;
 
   // syncTakeoffToEstimate reloads the whole project — running it once per
-  // claimed upsert is O(N) identical full syncs when a canvas save enqueues
-  // many measurements for the same project. Dedupe upserts by project first.
+  // claimed upsert/project_sync is O(N) identical full syncs when a canvas
+  // save or page-takeoff fan-out enqueues many rows for the same project.
+  // Dedupe sync events by project first.
   type OutboxEvent = (typeof events)[number];
   const upsertGroups = new Map<string, OutboxEvent[]>();
   const deleteEvents: OutboxEvent[] = [];
   for (const event of events) {
-    if (event.event_type === "upsert") {
+    if (event.event_type === "upsert" || event.event_type === "project_sync") {
       const key = `${event.tenant_id}:${event.project_id}`;
       const group = upsertGroups.get(key);
       if (group) group.push(event);
@@ -127,6 +128,9 @@ export async function processOutboxBatch(
 
   for (const event of deleteEvents) {
     try {
+      if (!event.manual_takeoff_id) {
+        throw new Error("delete outbox event missing manual_takeoff_id");
+      }
       await reconcileDeletedTakeoffEstimateItems(db, event.tenant_id, event.project_id, event.manual_takeoff_id);
       await markComplete(event);
     } catch (err) {

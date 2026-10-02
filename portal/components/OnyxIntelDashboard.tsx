@@ -709,19 +709,37 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
           </div>
 
           {/* Editorial headline */}
-          <div className="mt-10 max-w-4xl sm:mt-14 lg:mt-20">
-            <h1 className="text-[34px] font-light leading-[1] tracking-[-0.02em] text-white sm:text-[56px] lg:text-[88px]">
-              We build the<br />
-              intelligence behind<br />
-              <span className="italic text-[#CCFF00]">every</span> jobsite.
+          <div className="mt-10 max-w-4xl sm:mt-14 lg:mt-16">
+            <h1 className="text-[34px] font-light leading-[1] tracking-[-0.02em] text-white sm:text-[48px] lg:text-[64px]">
+              {activeProject ? (
+                <>
+                  Continue on<br />
+                  <span className="italic text-[#CCFF00]">{activeProject.name}</span>
+                </>
+              ) : (
+                <>
+                  We build the<br />
+                  intelligence behind<br />
+                  <span className="italic text-[#CCFF00]">every</span> jobsite.
+                </>
+              )}
             </h1>
-            <div className="mt-7 flex items-center gap-6 sm:mt-10">
-              <Link
-                href="/dashboard/projects"
-                className="inline-flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.22em] text-white transition-colors hover:text-[#CCFF00]"
-              >
-                Explore Workspace <ChevronRight size={14} />
-              </Link>
+            <div className="mt-7 flex flex-wrap items-center gap-4 sm:mt-8">
+              {activeProject ? (
+                <Link
+                  href={`/dashboard/projects/${activeProject.id}`}
+                  className="inline-flex items-center gap-2 rounded-full bg-[#CCFF00] px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-black transition-opacity hover:opacity-85"
+                >
+                  Open workspace <ChevronRight size={14} />
+                </Link>
+              ) : (
+                <Link
+                  href="/dashboard/projects"
+                  className="inline-flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.22em] text-white transition-colors hover:text-[#CCFF00]"
+                >
+                  Choose a project <ChevronRight size={14} />
+                </Link>
+              )}
             </div>
           </div>
         </div>
@@ -757,36 +775,9 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
           )}
         </div>
 
-        {/* Main Grid */}
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(340px,0.9fr)]">
+        {/* Focused home: AI + projects first; extras stay available but tucked away */}
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.85fr)]">
           <div className="grid min-w-0 grid-cols-1 gap-4">
-            <ProjectPipeline projects={filteredProjects} loading={dataLoading} />
-            <div className="grid grid-cols-1 gap-4 2xl:grid-cols-2">
-              <ScheduleRiskPanel projects={filteredProjects} loading={dataLoading} />
-              <Panel title="Operations Snapshot">
-                <div className="divide-y divide-white/5">
-                  {([
-                    { label: "Schedule tasks",           value: data?.kpis.scheduleTasks ?? 0, tone: "text-[#00D2FF] bg-[#00D2FF]/10", icon: <Clock size={13} /> },
-                    { label: "Projects needing takeoff", value: pendingTakeoffs,                tone: "text-[#CCFF00] bg-[#CCFF00]/10", icon: <Layers size={13} /> },
-                    { label: "Budget alerts",            value: overBudget,                     tone: "text-amber-400 bg-amber-400/10", icon: <AlertTriangle size={13} /> },
-                    { label: "Clean records",            value: Math.max((data?.kpis.projects ?? 0) - pendingTakeoffs - overBudget, 0), tone: "text-white/50 bg-white/5", icon: <CheckCircle2 size={13} /> },
-                  ] as { label: string; value: number; tone: string; icon: React.ReactNode }[]).map((item) => (
-                    <div key={item.label} className="flex items-center justify-between px-4 py-3.5">
-                      <div className="flex items-center gap-2.5">
-                        <span className={`flex items-center justify-center rounded-md p-1.5 ${item.tone}`}>{item.icon}</span>
-                        <span className="text-sm text-white/50">{item.label}</span>
-                      </div>
-                      <span className={`rounded-lg px-3 py-1 text-lg font-black ${item.tone}`}>{dataLoading ? "--" : item.value}</span>
-                    </div>
-                  ))}
-                </div>
-              </Panel>
-            </div>
-          </div>
-
-          <div className="grid min-w-0 grid-cols-1 gap-4">
-            <GoogleCalendarCard />
-            <GmailInboxCard />
             <AICommandPanel
               aiInput={aiInput}
               aiMessages={aiMessages}
@@ -797,10 +788,42 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
               projectLabel={activeProject?.name ?? null}
               memoryMode={Boolean(activeProjectId)}
             />
-            <DocumentIntelligence data={data} loading={dataLoading} />
+            <ProjectPipeline projects={filteredProjects} loading={dataLoading} />
+          </div>
+
+          <div className="grid min-w-0 grid-cols-1 gap-4 content-start">
+            <Panel title="What needs attention">
+              <div className="divide-y divide-white/5">
+                {([
+                  { label: "Projects needing takeoff", value: pendingTakeoffs, tone: "text-[#CCFF00] bg-[#CCFF00]/10", icon: <Layers size={13} /> },
+                  { label: "Budget alerts",            value: overBudget,      tone: "text-amber-400 bg-amber-400/10", icon: <AlertTriangle size={13} /> },
+                  { label: "Schedule tasks",           value: data?.kpis.scheduleTasks ?? 0, tone: "text-[#00D2FF] bg-[#00D2FF]/10", icon: <Clock size={13} /> },
+                ] as { label: string; value: number; tone: string; icon: React.ReactNode }[]).map((item) => (
+                  <div key={item.label} className="flex items-center justify-between px-4 py-3.5">
+                    <div className="flex items-center gap-2.5">
+                      <span className={`flex items-center justify-center rounded-md p-1.5 ${item.tone}`}>{item.icon}</span>
+                      <span className="text-sm text-white/50">{item.label}</span>
+                    </div>
+                    <span className={`rounded-lg px-3 py-1 text-lg font-black ${item.tone}`}>{dataLoading ? "--" : item.value}</span>
+                  </div>
+                ))}
+              </div>
+            </Panel>
             <ActivityFeed items={data?.activity ?? []} loading={dataLoading} />
-            <RecentContactsCard />
-            <AuditActivityCard />
+            <details className="rounded-xl border border-white/8 bg-[#0E0F12] open:pb-1">
+              <summary className="cursor-pointer list-none px-4 py-3 text-[10px] font-bold uppercase tracking-[0.2em] text-white/40 marker:content-none [&::-webkit-details-marker]:hidden">
+                More panels
+                <span className="ml-2 font-normal normal-case tracking-normal text-white/25">calendar, mail, docs, contacts</span>
+              </summary>
+              <div className="grid gap-4 border-t border-white/6 p-3">
+                <ScheduleRiskPanel projects={filteredProjects} loading={dataLoading} />
+                <GoogleCalendarCard />
+                <GmailInboxCard />
+                <DocumentIntelligence data={data} loading={dataLoading} />
+                <RecentContactsCard />
+                <AuditActivityCard />
+              </div>
+            </details>
           </div>
         </div>
 

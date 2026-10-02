@@ -51,18 +51,24 @@ function SkeletonRows() {
 export default function GlobalEstimatingPage() {
   const { projects, activeProjectId, activeProject } = useProjectContext();
   const [items, setItems] = useState<EstimateItem[]>([]);
+  const [missingCodes, setMissingCodes] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
     setError(null);
-    fetch("/api/estimate?limit=500")
-      .then((r) => r.json())
-      .then((estimateRes: unknown) => {
+    Promise.all([
+      fetch("/api/estimate?limit=500").then((r) => r.json()),
+      fetch("/api/cost-catalog/coverage").then((r) => r.json()),
+    ])
+      .then(([estimateRes, coverageRes]: [unknown, unknown]) => {
         const e = estimateRes as { items?: EstimateItem[]; error?: string };
+        const c = coverageRes as { missing?: string[]; error?: string };
         if (e.error) throw new Error(e.error);
+        if (c.error) throw new Error(c.error);
         setItems(e.items ?? []);
+        setMissingCodes(c.missing ?? []);
         setLoading(false);
       })
       .catch((err) => { setError(err?.message ?? "Network error"); setLoading(false); });
@@ -122,6 +128,13 @@ export default function GlobalEstimatingPage() {
           </div>
           <ProjectScopeSelect className="w-56" label="" />
         </div>
+
+        {!loading && !error && missingCodes.length > 0 && (
+          <div className="mb-5 rounded-xl border border-[#E50914]/20 bg-[#E50914]/5 px-4 py-3">
+            <p className="text-[10px] uppercase tracking-widest text-[#E50914]/80">Takeoff codes with no price</p>
+            <p className="mt-2 font-mono text-xs text-white/80">{missingCodes.slice(0, 24).join(" · ")}{missingCodes.length > 24 ? ` · +${missingCodes.length - 24}` : ""}</p>
+          </div>
+        )}
 
         {!loading && !error && filtered.length > 0 && (
           <div className="mb-5 flex flex-wrap items-center gap-3">

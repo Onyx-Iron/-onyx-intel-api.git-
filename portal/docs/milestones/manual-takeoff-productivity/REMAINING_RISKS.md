@@ -1,8 +1,8 @@
 # Remaining Risks
 
-1. **No scheduled outbox re-driver.** The worker is fully built and proven (claim/backoff/dead-letter), but nothing periodically calls `POST /api/internal/outbox/process` yet — it only runs opportunistically after a save/update/delete on the SAME or a related object. An event for an object nobody touches again could sit `pending`/`failed` indefinitely. Wiring the documented `pg_cron` + `pg_net` trigger (see `OUTBOX_WORKER.md`) requires a deployed app URL and a Vault secret — environment-specific setup left to the user.
+1. **~~No scheduled outbox re-driver.~~ Mitigated.** Daily Vercel Cron (`portal/vercel.json`, Hobby-safe) plus optional GitHub Actions every 15 minutes (`.github/workflows/outbox-redrive.yml` when `OUTBOX_APP_URL` + `CRON_SECRET` secrets exist). Opportunistic inline processing after manual-takeoff writes remains the primary path.
 
-2. **No restore RPC.** Soft-deleted `manual_takeoffs` rows have no application-level path back to active — only `deleted_at` exists, set by `soft_delete_manual_takeoff_tx`, with nothing symmetric to clear it. A `restore_manual_takeoff_tx` (re-creating the mirror, writing a `restored` history action, re-queuing an `upsert` outbox event) is a reasonably small follow-up given the existing pattern.
+2. **~~No restore RPC.~~ Mitigated.** `restore_manual_takeoff_tx` (migration `20261002_restore_manual_takeoff_and_outbox_notes.sql`) clears `deleted_at`, recreates the takeoff_items mirror, writes a `restored` history action, and enqueues an `upsert` outbox event. Wired via `PUT /api/takeoff/canvas/manual` with `{ id }`.
 
 3. **Vertex-level and multi-object geometry editing is not built.** Only whole-object translation (move) for `count`/`length`/`area` shapes exists. Per-vertex add/remove/move for polylines/polygons, rectangle resize handles, multi-point count dragging, and dragging for utility runs/topo nodes/area bounds all still require delete-and-redraw. The `beginShapeDrag`/`commitShapeDrag` pattern generalizes reasonably directly to these, but each needs its own hit-testing and handle UI.
 

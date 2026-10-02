@@ -108,6 +108,11 @@ function ActionIcon({ d, onClick, hoverClass, label }: { d: string; onClick: () 
   );
 }
 
+/**
+ * @deprecated Prefer `EstimateMatrix` — the project Estimate tab and
+ * `/dashboard/projects/[id]/estimate` both render the versioned matrix now.
+ * Kept temporarily for any deep links or storybook mounts.
+ */
 export default function EstimateTab({ projectId }: { projectId: string }) {
   const { toast } = useToast();
   const { confirm } = useConfirm();

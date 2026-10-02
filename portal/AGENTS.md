@@ -14,3 +14,9 @@ Two processes make up a working environment:
 Cloud Agents start both on boot. The portal calls the takeoff API at `http://127.0.0.1:5050`. Set `NEXT_PUBLIC_APP_URL=http://localhost:3000` so Clerk sign-in and sign-up stay on the local origin; the code otherwise falls back to `https://app.onyx-iron.com`.
 
 Without Clerk keys, `next dev` uses Clerk keyless mode and writes secrets under `portal/.clerk/` (gitignored). Signed-in project data needs Supabase: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` or `SUPABASE_SERVICE_KEY`. Use an isolated project, not production.
+
+### Ops secrets (outbox + integration CI)
+
+- **Vercel:** set `CRON_SECRET` (and optionally `INTERNAL_WORKER_SECRET`) so `GET /api/internal/outbox/process` accepts the daily Hobby cron in `portal/vercel.json`.
+- **GitHub Actions:** set `OUTBOX_APP_URL` (e.g. `https://app.onyx-iron.com`) and the same `CRON_SECRET` for `.github/workflows/outbox-redrive.yml` (every 15 minutes).
+- **Integration CI:** set `TEST_SUPABASE_URL` + `TEST_SUPABASE_SERVICE_ROLE_KEY` to an *isolated* Supabase project (never production `vvnigrbdsipriufhrwbs`). Locally copy `portal/.env.test.local.example` → `.env.test.local`.

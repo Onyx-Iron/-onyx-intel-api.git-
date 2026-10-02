@@ -4,13 +4,21 @@ import Link from "next/link";
 import { FolderKanban, ChevronRight } from "lucide-react";
 import { useProjectContext } from "./ProjectContext";
 
+const QUICK_JUMPS = [
+  { label: "Overview", phase: "overview", tab: "summary" },
+  { label: "Docs", phase: "documents", tab: "documents" },
+  { label: "Takeoff", phase: "takeoff", tab: "takeoff" },
+  { label: "Estimate", phase: "estimate", tab: "estimates" },
+  { label: "Field", phase: "field", tab: "daily-log" },
+] as const;
+
 export default function ActiveProjectPicker({ onNavigate }: { onNavigate?: () => void }) {
   const { projects, activeProjectId, activeProject, setActiveProjectId, loading } = useProjectContext();
 
   return (
-    <div className="mx-3 mb-4 rounded-xl border border-white/8 bg-white/[0.03] p-3">
+    <div className="mx-3 mb-3 rounded-xl border border-white/8 bg-white/[0.03] p-3">
       <p className="mb-2 text-[9px] font-bold uppercase tracking-[0.22em] text-white/30">
-        Active project
+        Working on
       </p>
 
       {loading && projects.length === 0 ? (
@@ -42,14 +50,28 @@ export default function ActiveProjectPicker({ onNavigate }: { onNavigate?: () =>
           </select>
 
           {activeProject && (
-            <Link
-              href={`/dashboard/projects/${activeProject.id}`}
-              onClick={onNavigate}
-              className="mt-2 flex items-center justify-between gap-2 rounded-lg px-1 py-1.5 text-[11px] text-white/45 transition-colors hover:text-[#CCFF00]"
-            >
-              <span className="truncate">Open workspace</span>
-              <ChevronRight size={12} className="shrink-0" />
-            </Link>
+            <>
+              <Link
+                href={`/dashboard/projects/${activeProject.id}`}
+                onClick={onNavigate}
+                className="mt-2 flex items-center justify-between gap-2 rounded-lg px-1 py-1.5 text-[11px] font-medium text-[#CCFF00]/90 transition-colors hover:text-[#CCFF00]"
+              >
+                <span className="truncate">Open workspace</span>
+                <ChevronRight size={12} className="shrink-0" />
+              </Link>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {QUICK_JUMPS.map((jump) => (
+                  <Link
+                    key={jump.phase}
+                    href={`/dashboard/projects/${activeProject.id}?phase=${jump.phase}&tab=${jump.tab}`}
+                    onClick={onNavigate}
+                    className="rounded-md border border-white/8 bg-white/[0.02] px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-white/40 transition-colors hover:border-white/15 hover:text-white/70"
+                  >
+                    {jump.label}
+                  </Link>
+                ))}
+              </div>
+            </>
           )}
         </>
       )}

@@ -6,6 +6,7 @@ import { getUserRole, redactFinancialFields } from "@/lib/project-controls/permi
 import { ESTIMATE_FINANCIAL_FIELDS } from "@/lib/project-controls/financial-redaction";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
+import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
 
 export const runtime = "nodejs";
@@ -117,13 +118,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     if (error) return NextResponse.json({ error: `[POST /api/estimate] ${error.message}` }, { status: 422 });
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const itemId = String((data as any)?.id ?? "");
+    if (itemId) {
+      auditInsert({
+        tenant_id: tenantId,
+        user_id: userId,
+        table_name: "estimate_items",
+        record_id: itemId,
+        new_values: data as unknown as Record<string, unknown>,
+      });
+    }
+
     void logEvent({
       projectId: pidParse.data,
       tenantId,
       userId,
       entityType: "estimate",
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      entityId: (data as any)?.id,
+      entityId: itemId || pidParse.data,
       action: "created",
       title: `Estimate item created: ${body.description.trim().slice(0, 100)}`,
     });

@@ -5,6 +5,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { uuidSchema } from "@/lib/validation";
+import { reclaimStuckProcessingDocuments } from "@/lib/documents/reclaimStuck";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
@@ -18,6 +19,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const { page, limit, offset } = parsePagination(req.nextUrl.searchParams);
 
     const db = await createServiceClient();
+    // Opportunistic reclaim: docs left in "processing" after a platform kill
+    // never get markError() — surface them as retryable errors on list.
+    void reclaimStuckProcessingDocuments(db, tenantId).catch((err) =>
+      console.error("[GET /api/documents] stuck reclaim failed", err),
+    );
+
     let query = db
       .from("documents")
       .select("*", { count: "exact" })

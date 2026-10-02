@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
@@ -27,7 +27,7 @@ import type { JSX } from "react";
 import { printDocument } from "@/lib/print";
 import TakeoffTab               from "@/components/takeoff/TakeoffTab";
 import ScheduleTab              from "@/components/schedule/ScheduleTab";
-import EstimateTab              from "@/components/estimate/EstimateTab";
+import EstimateMatrix           from "@/components/estimate/EstimateMatrix";
 import ProjectControlsTab       from "@/components/project-controls/ProjectControlsTab";
 import PunchListTab             from "@/components/punchlist/PunchListTab";
 import DocumentsTab             from "@/components/documents/DocumentsTab";
@@ -115,7 +115,7 @@ const PHASES: { id: Phase; subtabs: SubTabDef[] }[] = [
   {
     id: "Estimate & Budget",
     subtabs: [
-      { id: "estimates", label: "Estimate & Budget", icon: <Calculator size={13} />, render: (p) => <EstimateTab projectId={p} /> },
+      { id: "estimates", label: "Estimate & Budget", icon: <Calculator size={13} />, render: (p, name) => <EstimateMatrix projectId={p} projectName={name} /> },
     ],
   },
   {
@@ -215,75 +215,99 @@ export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps
     syncUrl(activePhase, subId);
   };
 
-  const pillScrollRef = useRef<HTMLDivElement>(null);
-  const [pillsOverflow, setPillsOverflow] = useState(false);
-
-  useEffect(() => {
-    const el = pillScrollRef.current;
-    if (!el) return;
-    const checkOverflow = () => setPillsOverflow(el.scrollWidth > el.clientWidth + 1);
-    checkOverflow();
-    const ro = new ResizeObserver(checkOverflow);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
   return (
-    <div>
-      {/* Section pills. On narrow viewports the 10 pills don't all fit --
-          they scroll horizontally, with a right-edge fade shown only while
-          there's actually more to scroll to (checked via ResizeObserver,
-          not assumed). */}
-      <div
-        id="phase-tabs"
-        className="border-b border-white/8 px-4 py-4 sm:px-6"
-        style={pillsOverflow ? { maskImage: "linear-gradient(to right, black calc(100% - 28px), transparent 100%)", WebkitMaskImage: "linear-gradient(to right, black calc(100% - 28px), transparent 100%)" } : undefined}
-      >
-        <div ref={pillScrollRef} className="flex items-center gap-2 overflow-x-auto scrollbar-hide">
+    <div id="phase-tabs" className="lg:grid lg:grid-cols-[11.5rem_minmax(0,1fr)] lg:items-start">
+      {/* Mobile: one section control instead of 10 scrolling pills */}
+      <div className="border-b border-white/8 px-4 py-3 sm:px-6 lg:hidden">
+        <label htmlFor="project-section-select" className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.2em] text-white/35">
+          Section
+        </label>
+        <select
+          id="project-section-select"
+          value={activePhase}
+          onChange={(e) => selectPhase(e.target.value as Phase)}
+          className="h-10 w-full rounded-lg border border-white/10 bg-[#0E0F12] px-3 text-sm text-white outline-none focus:border-[#CCFF00]/50"
+        >
           {PHASES.map((phase) => (
-            <button
-              key={phase.id}
-              onClick={() => selectPhase(phase.id)}
-              className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-full border px-5 text-xs font-bold uppercase tracking-[0.18em] transition-colors ${
-                activePhase === phase.id
-                  ? "border-[#CCFF00]/40 bg-[#CCFF00]/10 text-[#CCFF00]"
-                  : "border-white/10 bg-white/5 text-white/60 hover:text-white/80"
-              }`}
-            >
-              {phase.id === "Overview" && <LayoutGrid size={13} />}
+            <option key={phase.id} value={phase.id}>
               {phase.id}
-            </button>
+            </option>
           ))}
-        </div>
-      </div>
-
-      {/* Sub-tabs */}
-      {currentSubtabs.length > 1 && (
-        <div className="border-b border-white/8 px-4 sm:px-6">
-          <div className="flex items-end overflow-x-auto scrollbar-hide">
+        </select>
+        {currentSubtabs.length > 1 && (
+          <div className="mt-3 flex gap-1 overflow-x-auto scrollbar-hide">
             {currentSubtabs.map((sub) => (
               <button
                 key={sub.id}
+                type="button"
                 onClick={() => selectSub(sub.id)}
-                className={`group flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-[10px] font-medium uppercase tracking-wider transition-colors ${
+                className={`shrink-0 rounded-full border px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider transition-colors ${
                   activeSubId === sub.id
-                    ? "border-[#CCFF00] text-white"
-                    : "border-transparent text-white/30 hover:text-white/60"
+                    ? "border-[#CCFF00]/40 bg-[#CCFF00]/10 text-[#CCFF00]"
+                    : "border-white/10 text-white/45 hover:text-white/70"
                 }`}
               >
-                <span className={activeSubId === sub.id ? "text-[#CCFF00]" : "text-white/25 group-hover:text-white/50"}>
-                  {sub.icon}
-                </span>
-                <span className="hidden sm:inline">{sub.label}</span>
+                {sub.label}
               </button>
             ))}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
-      {/* Tab content */}
-      <div className="px-4 py-6 sm:px-6 sm:py-8">
-        {activeSub ? activeSub.render(projectId, projectName ?? "") : null}
+      {/* Desktop: calm vertical section list — no pill storm */}
+      <aside className="hidden border-r border-white/8 lg:block lg:sticky lg:top-0 lg:self-start lg:py-6">
+        <p className="mb-3 px-4 text-[9px] font-bold uppercase tracking-[0.22em] text-white/30">
+          Project sections
+        </p>
+        <nav className="space-y-0.5 px-2" aria-label="Project sections">
+          {PHASES.map((phase) => {
+            const active = activePhase === phase.id;
+            return (
+              <button
+                key={phase.id}
+                type="button"
+                onClick={() => selectPhase(phase.id)}
+                className={`flex w-full items-center rounded-lg px-3 py-2 text-left text-[12px] font-medium transition-colors ${
+                  active
+                    ? "bg-[#CCFF00]/10 text-[#CCFF00]"
+                    : "text-white/45 hover:bg-white/[0.03] hover:text-white/80"
+                }`}
+              >
+                {phase.id}
+              </button>
+            );
+          })}
+        </nav>
+      </aside>
+
+      <div>
+        {currentSubtabs.length > 1 && (
+          <div className="hidden border-b border-white/8 px-6 lg:block">
+            <div className="flex items-end gap-1">
+              {currentSubtabs.map((sub) => (
+                <button
+                  key={sub.id}
+                  type="button"
+                  onClick={() => selectSub(sub.id)}
+                  className={`group flex items-center gap-1.5 border-b-2 px-3 py-3 text-[10px] font-medium uppercase tracking-wider transition-colors ${
+                    activeSubId === sub.id
+                      ? "border-[#CCFF00] text-white"
+                      : "border-transparent text-white/30 hover:text-white/60"
+                  }`}
+                >
+                  <span className={activeSubId === sub.id ? "text-[#CCFF00]" : "text-white/25 group-hover:text-white/50"}>
+                    {sub.icon}
+                  </span>
+                  {sub.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="px-4 py-6 sm:px-6 sm:py-8">
+          {activeSub ? activeSub.render(projectId, projectName ?? "") : null}
+        </div>
       </div>
     </div>
   );
@@ -324,6 +348,7 @@ function OverviewTab({ projectId }: { projectId: string }) {
   const [counts, setCounts] = useState<OverviewCounts | null>(null);
   const [report, setReport] = useState<string | null>(null);
   const [reporting, setReporting] = useState(false);
+  const [showMoreStats, setShowMoreStats] = useState(false);
 
   useEffect(() => {
     fetch(`/api/overview?project_id=${projectId}`)
@@ -352,23 +377,25 @@ function OverviewTab({ projectId }: { projectId: string }) {
   };
 
   const c = counts;
-  const stats: { label: string; value: string; alert?: boolean }[] = [
+  const primaryStats: { label: string; value: string; alert?: boolean }[] = [
     { label: "Completion",     value: c ? `${c.completion}%` : "—" },
     { label: "Estimate Value", value: c ? money(c.estimate_value) : "—" },
+    { label: "Open Controls",  value: c ? String(c.rfis_open + c.submittals_open) : "—", alert: !!(c && c.rfis_open + c.submittals_open > 0) },
+    { label: "Open Punch",     value: c ? `${c.punch_open}/${c.punch_total}` : "—",    alert: !!(c && c.punch_open > 0) },
+  ];
+  const moreStats: { label: string; value: string; alert?: boolean }[] = [
     { label: "Takeoff Items",  value: c ? String(c.takeoff_items) : "—" },
     { label: "Documents",      value: c ? String(c.documents) : "—" },
-    { label: "Open Punch",     value: c ? `${c.punch_open}/${c.punch_total}` : "—",    alert: !!(c && c.punch_open > 0) },
     { label: "Permits OK",     value: c ? `${c.permits_approved}/${c.permits_total}` : "—" },
     { label: "Procurement",    value: c ? `${c.procurement_pending} pending` : "—" },
-    { label: "Open Controls",  value: c ? String(c.rfis_open + c.submittals_open) : "—", alert: !!(c && c.rfis_open + c.submittals_open > 0) },
     { label: "Pending COs",    value: c ? money(c.pending_change_order_value) : "—" },
     { label: "Daily Logs",     value: c ? String(c.daily_logs) : "—" },
   ];
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
-        {stats.map((s) => (
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        {primaryStats.map((s) => (
           <div
             key={s.label}
             className={`rounded-xl border bg-[#111113] p-4 transition-colors hover:border-white/20 ${s.alert ? "border-red-500/20" : "border-white/8"}`}
@@ -377,6 +404,29 @@ function OverviewTab({ projectId }: { projectId: string }) {
             <p className="mt-2 text-[10px] font-semibold uppercase tracking-widest text-white/30">{s.label}</p>
           </div>
         ))}
+      </div>
+
+      <div>
+        <button
+          type="button"
+          onClick={() => setShowMoreStats((v) => !v)}
+          className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/35 transition-colors hover:text-white/60"
+        >
+          {showMoreStats ? "Hide more metrics" : "Show more metrics"}
+        </button>
+        {showMoreStats && (
+          <div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-3">
+            {moreStats.map((s) => (
+              <div
+                key={s.label}
+                className={`rounded-xl border bg-[#111113] p-4 ${s.alert ? "border-red-500/20" : "border-white/8"}`}
+              >
+                <p className={`text-xl font-black leading-none ${s.alert ? "text-red-400" : "text-white"}`}>{s.value}</p>
+                <p className="mt-2 text-[10px] font-semibold uppercase tracking-widest text-white/30">{s.label}</p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <ProjectMemoryPanel projectId={projectId} />

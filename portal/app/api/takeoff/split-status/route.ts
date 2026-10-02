@@ -33,7 +33,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const { data: docRow, error: docErr } = await anyDb
     .from("documents")
-    .select("id, status, page_count, project_id, last_error")
+    .select("id, status, page_count, project_id, last_error, meta")
     .eq("id", documentId).eq("tenant_id", tenantId)
     .maybeSingle();
   if (docErr) return NextResponse.json({ error: docErr.message }, { status: 500 });
@@ -67,10 +67,41 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   }
 
   // Finalize documents.status once every page has a terminal takeoff_status.
-  if (settled === total && docRow.status !== "done" && docRow.status !== "failed") {
-    const finalStatus = errored === total ? "failed" : "done";
+  // Partial takeoff loss must not look like a quiet success — use
+  // complete_with_errors whenever any page failed but others succeeded.
+  if (
+    settled === total
+    && docRow.status !== "done"
+    && docRow.status !== "failed"
+    && docRow.status !== "complete_with_errors"
+  ) {
+    const finalStatus = errored === total
+      ? "failed"
+      : errored > 0
+        ? "complete_with_errors"
+        : "done";
+    const prevMeta = (docRow.meta && typeof docRow.meta === "object")
+      ? docRow.meta as Record<string, unknown>
+      : {};
+    const summary = {
+      ...(typeof prevMeta.processing_summary === "object" && prevMeta.processing_summary
+        ? prevMeta.processing_summary as Record<string, unknown>
+        : {}),
+      pages_total: total,
+      pages_done: done,
+      pages_error: errored,
+      finalized_at: new Date().toISOString(),
+    };
     await anyDb.from("documents")
-      .update({ status: finalStatus, processed_at: new Date().toISOString() })
+      .update({
+        status: finalStatus,
+        processed_at: new Date().toISOString(),
+        last_error: errored > 0
+          ? `${errored} of ${total} page(s) failed takeoff extraction`
+          : null,
+        last_error_step: errored > 0 ? "takeoff" : null,
+        meta: { ...prevMeta, processing_summary: summary },
+      })
       .eq("id", documentId).eq("tenant_id", tenantId);
     docRow.status = finalStatus;
   }

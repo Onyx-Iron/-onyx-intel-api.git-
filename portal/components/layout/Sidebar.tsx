@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { UserButton } from "@clerk/nextjs";
@@ -8,6 +8,7 @@ import {
   BookOpen,
   Bot,
   Calculator,
+  ChevronDown,
   ClipboardList,
   DollarSign,
   FileText,
@@ -17,7 +18,6 @@ import {
   Megaphone,
   Mountain,
   Ruler,
-  Settings,
   Truck,
   Users,
   X,
@@ -31,25 +31,29 @@ interface NavItem {
   exact?: boolean;
 }
 
-// Live, fully-wired workspaces only. Per the reconciliation's explicit rule:
-// a workspace is only presented as production-ready when its underlying
-// workflow is actually connected and verified — every route below loads
-// real, tenant-scoped data from a real API, not a placeholder.
-const WORKSPACE_NAV: NavItem[] = [
-  { href: "/dashboard", label: "Command Center", icon: <LayoutDashboard size={15} />, exact: true },
+/** Day-to-day destinations — keep this short so the shell stays calm. */
+const PRIMARY_NAV: NavItem[] = [
+  { href: "/dashboard", label: "Home", icon: <LayoutDashboard size={15} />, exact: true },
   { href: "/dashboard/projects", label: "Projects", icon: <FolderKanban size={15} /> },
-  { href: "/dashboard/project-management", label: "Project Management", icon: <ListChecks size={15} /> },
-  { href: "/dashboard/takeoff", label: "Takeoff", icon: <Ruler size={15} /> },
-  { href: "/dashboard/estimating", label: "Estimating", icon: <Calculator size={15} /> },
-  { href: "/dashboard/documents", label: "Documents", icon: <FileText size={15} /> },
-  { href: "/dashboard/contacts", label: "Contacts & Companies", icon: <Users size={15} /> },
-  { href: "/dashboard/price-book", label: "Price Book", icon: <BookOpen size={15} /> },
-  { href: "/dashboard/procurement", label: "Procurement", icon: <Truck size={15} /> },
-  { href: "/dashboard/financials", label: "Financials", icon: <DollarSign size={15} /> },
-  { href: "/dashboard/civil-intelligence", label: "Civil Intelligence", icon: <Mountain size={15} /> },
-  { href: "/dashboard/marketing", label: "Marketing", icon: <Megaphone size={15} /> },
   { href: "/dashboard/reports", label: "Reports", icon: <ClipboardList size={15} /> },
   { href: "/dashboard/agents/pending", label: "AI Workforce", icon: <Bot size={15} /> },
+];
+
+/**
+ * Cross-project roll-ups and specialty tools. Still fully available —
+ * just tucked under “More tools” so the default nav isn’t a wall of links.
+ */
+const MORE_TOOLS: NavItem[] = [
+  { href: "/dashboard/project-management", label: "Project Management", icon: <ListChecks size={14} /> },
+  { href: "/dashboard/takeoff", label: "Takeoff", icon: <Ruler size={14} /> },
+  { href: "/dashboard/estimating", label: "Estimating", icon: <Calculator size={14} /> },
+  { href: "/dashboard/documents", label: "Documents", icon: <FileText size={14} /> },
+  { href: "/dashboard/contacts", label: "Contacts", icon: <Users size={14} /> },
+  { href: "/dashboard/price-book", label: "Price Book", icon: <BookOpen size={14} /> },
+  { href: "/dashboard/procurement", label: "Procurement", icon: <Truck size={14} /> },
+  { href: "/dashboard/financials", label: "Financials", icon: <DollarSign size={14} /> },
+  { href: "/dashboard/civil-intelligence", label: "Civil Intelligence", icon: <Mountain size={14} /> },
+  { href: "/dashboard/marketing", label: "Marketing", icon: <Megaphone size={14} /> },
 ];
 
 const SETTINGS_NAV: NavItem[] = [
@@ -58,19 +62,13 @@ const SETTINGS_NAV: NavItem[] = [
   { href: "/dashboard/settings/cost-overrides", label: "Cost Overrides", icon: <BookOpen size={13} /> },
 ];
 
-// Target-IA workspaces with no real backend workflow wired up yet. Listed so
-// the full intended IA is visible, but deliberately non-navigable rather
-// than an empty page pretending to be finished — "label incomplete modules
-// as experimental or unavailable" rather than ship a shell. See
-// docs/frontend-backend-reconciliation/PHASE_4_GAP_ANALYSIS.md for the exact
-// missing APIs/tables/workflows behind each of these.
-const COMING_SOON = [
-  "Preconstruction",
-];
+function pathMatches(pathname: string, item: NavItem): boolean {
+  return item.exact ? pathname === item.href : pathname.startsWith(item.href);
+}
 
 function NavLink({ item, onNavigate, small }: { item: NavItem; onNavigate?: () => void; small?: boolean }) {
   const pathname = usePathname();
-  const active = item.exact ? pathname === item.href : pathname.startsWith(item.href);
+  const active = pathMatches(pathname, item);
 
   return (
     <Link
@@ -93,55 +91,100 @@ function NavLink({ item, onNavigate, small }: { item: NavItem; onNavigate?: () =
   );
 }
 
-function ComingSoonRow({ label }: { label: string }) {
+function CollapsibleNav({
+  title,
+  items,
+  defaultOpen,
+  forceOpen,
+  onNavigate,
+  small,
+}: {
+  title: string;
+  items: NavItem[];
+  defaultOpen?: boolean;
+  forceOpen?: boolean;
+  onNavigate?: () => void;
+  small?: boolean;
+}) {
+  const [open, setOpen] = useState(Boolean(defaultOpen));
+  const expanded = forceOpen || open;
+
   return (
-    <div
-      className="flex cursor-default items-center gap-3 rounded-lg px-3 py-2 text-xs text-white/20"
-      title={`${label} — not yet available. Backend workflow isn't connected/verified yet.`}
-    >
-      <Settings size={13} className="text-white/15" />
-      <span className="flex-1">{label}</span>
-      <span className="rounded border border-white/10 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-widest text-white/25">Soon</span>
+    <div className="mt-5">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="mb-1 flex w-full items-center justify-between px-3 py-1.5 text-[9px] font-bold uppercase tracking-[0.22em] text-white/30 transition-colors hover:text-white/55"
+        aria-expanded={expanded}
+      >
+        <span>{title}</span>
+        <ChevronDown
+          size={12}
+          className={`transition-transform ${expanded ? "rotate-0" : "-rotate-90"}`}
+        />
+      </button>
+      {expanded && (
+        <div className="space-y-0.5">
+          {items.map((item) => (
+            <NavLink key={item.label} item={item} onNavigate={onNavigate} small={small} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+  const pathname = usePathname();
+  const moreActive = useMemo(
+    () => MORE_TOOLS.some((item) => pathMatches(pathname, item)),
+    [pathname],
+  );
+  const settingsActive = useMemo(
+    () => SETTINGS_NAV.some((item) => pathMatches(pathname, item)),
+    [pathname],
+  );
+
   return (
     <>
-      <div className="h-5" />
+      <div className="px-4 pt-5 pb-1">
+        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/35">Onyx &amp; Iron</p>
+        <p className="mt-0.5 text-sm font-semibold text-white/80">Onyx Intel</p>
+      </div>
 
       <ActiveProjectPicker onNavigate={onNavigate} />
 
-      <nav className="flex-1 overflow-y-auto px-3 py-4">
+      <nav className="flex-1 overflow-y-auto px-3 pb-4">
         <div className="space-y-0.5">
-          <p className="mb-3 px-3 text-[9px] font-bold uppercase tracking-[0.22em] text-white/25">Workspace</p>
-          {WORKSPACE_NAV.map((item) => (
+          <p className="mb-2 px-3 text-[9px] font-bold uppercase tracking-[0.22em] text-white/25">Main</p>
+          {PRIMARY_NAV.map((item) => (
             <NavLink key={item.label} item={item} onNavigate={onNavigate} />
           ))}
         </div>
 
-        <div className="mt-6 space-y-0.5">
-          <p className="mb-3 px-3 text-[9px] font-bold uppercase tracking-[0.22em] text-white/25">Settings & Administration</p>
-          {SETTINGS_NAV.map((item) => (
-            <NavLink key={item.label} item={item} onNavigate={onNavigate} small />
-          ))}
-        </div>
+        <CollapsibleNav
+          title="More tools"
+          items={MORE_TOOLS}
+          forceOpen={moreActive}
+          onNavigate={onNavigate}
+          small
+        />
 
-        <div className="mt-6 space-y-0.5">
-          <p className="mb-3 px-3 text-[9px] font-bold uppercase tracking-[0.22em] text-white/25">Coming Soon</p>
-          {COMING_SOON.map((label) => (
-            <ComingSoonRow key={label} label={label} />
-          ))}
-        </div>
+        <CollapsibleNav
+          title="Settings"
+          items={SETTINGS_NAV}
+          forceOpen={settingsActive}
+          onNavigate={onNavigate}
+          small
+        />
       </nav>
 
       <div className="border-t border-white/5 p-4">
         <div className="flex items-center gap-3">
           <UserButton />
           <div className="min-w-0">
-            <p className="truncate text-xs font-semibold text-white/70">My Workspace</p>
-            <p className="truncate text-[9px] uppercase tracking-[0.15em] text-white/30">Onyx &amp; Iron</p>
+            <p className="truncate text-xs font-semibold text-white/70">Account</p>
+            <p className="truncate text-[9px] uppercase tracking-[0.15em] text-white/30">Signed in</p>
           </div>
         </div>
       </div>
