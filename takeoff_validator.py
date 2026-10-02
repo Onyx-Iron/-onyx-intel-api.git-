@@ -31,6 +31,17 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
+
+def json_default(value: Any) -> Any:
+    """Serialize values ijson and cost math leave as Decimal (or dates)."""
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
+
 from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
@@ -610,6 +621,6 @@ def validate_rows_from_list(
 
     Raises DataIntegrityBreachException on any checksum mismatch.
     """
-    raw_json = json.dumps(rows, ensure_ascii=False)
+    raw_json = json.dumps(rows, ensure_ascii=False, default=json_default)
     parser   = DeterministicOnyxParser(raw_json)
     return parser.execute_zero_skip_parse()
