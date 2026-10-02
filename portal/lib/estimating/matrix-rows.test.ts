@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { mergeSavedRows, type MatrixRow } from "./matrix-rows.ts";
+import { embeddedCurrentVersion, mergeSavedRows, type MatrixRow } from "./matrix-rows.ts";
 
 function row(patch: Partial<MatrixRow> = {}): MatrixRow {
   return {
@@ -22,6 +22,40 @@ function row(patch: Partial<MatrixRow> = {}): MatrixRow {
     ...patch,
   };
 }
+
+describe("embeddedCurrentVersion", () => {
+  const version = {
+    id: "ver-1",
+    version_number: 2,
+    status: "draft",
+    contingency_pct: 5,
+    overhead_pct: 10,
+    profit_pct: 15,
+  };
+
+  it("uses the rows that belong to the current version", () => {
+    const loaded = embeddedCurrentVersion({
+      estimate: { current_version_id: "ver-1" },
+      version,
+      items: [],
+    });
+    assert.equal(loaded?.version.id, "ver-1");
+    assert.deepEqual(loaded?.items, []);
+  });
+
+  it("ignores rows for a different version", () => {
+    assert.equal(embeddedCurrentVersion({
+      estimate: { current_version_id: "ver-2" },
+      version,
+      items: [],
+    }), null);
+    assert.equal(embeddedCurrentVersion({
+      estimate: null,
+      version,
+      items: [],
+    }), null);
+  });
+});
 
 describe("mergeSavedRows", () => {
   it("clears the dirty flag and keeps rows that were not in the save", () => {

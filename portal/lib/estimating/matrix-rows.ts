@@ -16,6 +16,29 @@ export interface MatrixRow {
   _local?: string;
 }
 
+export interface LoadedEstimateVersion {
+  id: string;
+  version_number: number;
+  status: string;
+  contingency_pct: number | null;
+  overhead_pct: number | null;
+  profit_pct: number | null;
+}
+
+/**
+ * The versions list includes the current version's rows so the grid can open
+ * in one request. Ignore that payload when it does not belong to the current id.
+ */
+export function embeddedCurrentVersion(list: {
+  estimate: { current_version_id: string | null } | null;
+  version?: LoadedEstimateVersion | null;
+  items?: SavedMatrixItem[] | null;
+}): { version: LoadedEstimateVersion; items: SavedMatrixItem[] } | null {
+  const currentId = list.estimate?.current_version_id;
+  if (!currentId || !list.version || list.version.id !== currentId || !Array.isArray(list.items)) return null;
+  return { version: list.version, items: list.items };
+}
+
 export interface SavedMatrixItem {
   id: string;
   cost_code: string | null;

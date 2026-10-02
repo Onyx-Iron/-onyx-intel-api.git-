@@ -191,3 +191,26 @@ export function calculateEstimateTotals(items: EstimateTotalsItemInput[]): Estim
     margin: computeMargin(totalProfit, totalPrice),
   };
 }
+
+/** Recalculate version totals from the columns stored on estimate_items. */
+export function totalsFromStoredItems(items: ReadonlyArray<{
+  total_direct_cost?: unknown;
+  indirect_cost?: unknown;
+  contingency?: unknown;
+  overhead?: unknown;
+  profit?: unknown;
+  total_price?: unknown;
+  is_alternate?: unknown;
+  alternate_accepted?: unknown;
+}>): EstimateTotals {
+  return calculateEstimateTotals(items.map((it) => ({
+    totalDirectCost: it.total_direct_cost as number,
+    indirectCost: it.indirect_cost as number,
+    contingency: it.contingency as number,
+    overhead: it.overhead as number,
+    profit: it.profit as number,
+    totalPrice: it.total_price as number,
+    isAlternate: it.is_alternate as boolean,
+    alternateAccepted: it.alternate_accepted as boolean,
+  })));
+}

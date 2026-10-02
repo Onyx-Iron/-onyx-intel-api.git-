@@ -3,7 +3,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import VersionDiffPanel from "@/components/estimate/VersionDiffPanel";
-import { itemToRow, mergeSavedRows, type MatrixRow, type SavedMatrixItem } from "@/lib/estimating/matrix-rows";
+import { embeddedCurrentVersion, itemToRow, mergeSavedRows, type LoadedEstimateVersion, type MatrixRow, type SavedMatrixItem } from "@/lib/estimating/matrix-rows";
 import { calculateAssemblyQuantities, type RebarSize, REBAR_UNIT_WEIGHT_LBS_PER_FT } from "@/lib/math/assemblies";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -90,10 +90,33 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      const showVersion = (version: LoadedEstimateVersion, items: SavedMatrixItem[]) => {
+        setVersionId(version.id);
+        setVersionNumber(version.version_number);
+        setVersionStatus(version.status);
+        setRows(items.map((it, i) => itemToRow(it, i)));
+        setSettings({
+          overhead_pct: numericOr(version.overhead_pct, 10),
+          profit_pct: numericOr(version.profit_pct, 15),
+          contingency_pct: numericOr(version.contingency_pct, 5),
+        });
+      };
+
       const listRes = await fetch(`/api/estimate/versions?project_id=${encodeURIComponent(projectId)}`, { cache: "no-store" });
       if (!listRes.ok) throw new Error(await listRes.text());
-      const list = await listRes.json() as { estimate: { id: string; current_version_id: string | null } | null; versions: { id: string; version_number: number; status: string }[] };
+      const list = await listRes.json() as {
+        estimate: { id: string; current_version_id: string | null } | null;
+        versions: { id: string; version_number: number; status: string }[];
+        version?: LoadedEstimateVersion | null;
+        items?: SavedMatrixItem[] | null;
+      };
       setVersions(list.versions ?? []);
+
+      const embedded = embeddedCurrentVersion(list);
+      if (embedded) {
+        showVersion(embedded.version, embedded.items);
+        return;
+      }
 
       let activeVersionId = list.estimate?.current_version_id ?? null;
       if (!activeVersionId) {
@@ -103,27 +126,19 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
           body: JSON.stringify({ project_id: projectId }),
         });
         if (createRes.ok) {
-          const created = await createRes.json() as { version: { id: string } };
+          const created = await createRes.json() as { version: LoadedEstimateVersion };
           activeVersionId = created.version.id;
+          setVersions([{ id: created.version.id, version_number: created.version.version_number, status: created.version.status }]);
+          showVersion(created.version, []);
+          return;
         }
       }
-      if (!activeVersionId) { setLoading(false); return; }
+      if (!activeVersionId) return;
 
       const verRes = await fetch(`/api/estimate/versions/${encodeURIComponent(activeVersionId)}`, { cache: "no-store" });
       if (!verRes.ok) throw new Error(await verRes.text());
-      const ver = await verRes.json() as {
-        version: { id: string; version_number: number; status: string; contingency_pct: number | null; overhead_pct: number | null; profit_pct: number | null };
-        items: Parameters<typeof itemToRow>[0][];
-      };
-      setVersionId(ver.version.id);
-      setVersionNumber(ver.version.version_number);
-      setVersionStatus(ver.version.status);
-      setRows(ver.items.map((it, i) => itemToRow(it, i)));
-      setSettings({
-        overhead_pct: numericOr(ver.version.overhead_pct, 10),
-        profit_pct:   numericOr(ver.version.profit_pct, 15),
-        contingency_pct: numericOr(ver.version.contingency_pct, 5),
-      });
+      const ver = await verRes.json() as { version: LoadedEstimateVersion; items: SavedMatrixItem[] };
+      showVersion(ver.version, ver.items);
     } catch (e) {
       console.error("[estimate] load failed", e);
     } finally {

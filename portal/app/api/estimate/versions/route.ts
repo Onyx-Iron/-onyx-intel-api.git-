@@ -3,13 +3,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { totalsFromStoredItems } from "@/lib/estimating/calculations";
 import { createDraftFromVersion, loadVersionForTenant, NotFoundError } from "@/lib/estimating/versioning";
 import { recordEstimateAudit } from "@/lib/estimating/audit";
 
 export const runtime = "nodejs";
 
 /**
- * GET  ?project_id=          -> { estimate, versions: [...] } for the project's one authoritative estimate
+ * GET  ?project_id=          -> { estimate, versions, version, items, totals }
+ *      version/items/totals are the current version, so the grid can open without a second request.
  * POST { project_id }        -> create the estimate + Version 1 draft (if none exists yet)
  * POST { source_version_id, duplicate: true } -> create a new draft copied from an existing version
  *      (used for both "edit an approved estimate" and "restore as new draft" / "duplicate version")
@@ -40,16 +42,40 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     .limit(1)
     .maybeSingle();
 
-  if (!estimate) return NextResponse.json({ estimate: null, versions: [] });
+  if (!estimate) return NextResponse.json({ estimate: null, versions: [], version: null, items: [], totals: null });
 
-  const { data: versions, error } = await anyDb
+  const currentVersionId = estimate.current_version_id as string | null;
+  const versionsQuery = anyDb
     .from("estimate_versions")
     .select("*")
     .eq("estimate_id", estimate.id)
     .order("version_number", { ascending: false });
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  const itemsQuery = currentVersionId
+    ? anyDb
+      .from("estimate_items")
+      .select("*")
+      .eq("estimate_version_id", currentVersionId)
+      .order("sort_order", { ascending: true })
+      .order("created_at", { ascending: true })
+    : Promise.resolve({ data: [], error: null });
 
-  return NextResponse.json({ estimate, versions: versions ?? [] });
+  const [{ data: versions, error }, { data: items, error: itemsError }] = await Promise.all([versionsQuery, itemsQuery]);
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (itemsError) return NextResponse.json({ error: itemsError.message }, { status: 500 });
+
+  const versionList = versions ?? [];
+  const version = currentVersionId
+    ? versionList.find((row: { id: string }) => row.id === currentVersionId) ?? null
+    : null;
+  const currentItems = version ? (items ?? []) : [];
+
+  return NextResponse.json({
+    estimate,
+    versions: versionList,
+    version,
+    items: currentItems,
+    totals: version ? totalsFromStoredItems(currentItems) : null,
+  });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
