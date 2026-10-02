@@ -13,26 +13,26 @@ interface Step {
 const STEPS: Step[] = [
   {
     title: "Welcome to Onyx & Iron",
-    body: "Your AI command center for construction. Plans, takeoffs, estimates, field logs, and reports — unified around each project.",
+    body: "A calmer workspace for construction. Pick a project, then do the work — takeoff, estimate, field, closeout — without hunting through menus.",
   },
   {
-    title: "Pick an active project",
-    body: "Use Active project in the sidebar. Takeoff, Estimating, Reports, and AI all stay scoped to that project until you change it.",
+    title: "Start with a project",
+    body: "Use Working on in the sidebar. Everything important lives inside that project workspace.",
     targetId: "active-project-picker",
   },
   {
-    title: "Create your first project",
-    body: "Spin up a project to anchor every plan, budget, and report. Open Projects and click New to get started.",
+    title: "Create when you need one",
+    body: "Open Projects and click New. The new project becomes your active focus automatically.",
     targetId: "new-project-button",
   },
   {
     title: "Upload plans",
-    body: "Inside a project, use Upload Plans. We extract scope, takeoffs, and key details automatically into shared project memory.",
+    body: "Inside a project, use Upload Plans. We extract scope and takeoffs into shared project memory.",
     targetId: "upload-plans-pill",
   },
   {
-    title: "Work the project workspace",
-    body: "Jump between Overview, Documents, Takeoff, Estimate, Field, and Closeout. Tabs deep-link, and project memory carries facts between them.",
+    title: "One section at a time",
+    body: "Use the section list (or mobile dropdown) to move through Documents, Takeoff, Estimate, Field, and the rest — same power, less chrome.",
     targetId: "phase-tabs",
   },
 ];
