@@ -7,15 +7,21 @@ import { logEvent } from "@/lib/activity";
 import { requireEnv } from "@/lib/env";
 import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
+import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const GEMINI_API_KEY = requireEnv("GEMINI_API_KEY");
 const EMBED_MODEL = "text-embedding-004";
 const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
 const PLANS_BUCKET = "plans-bucket";
+const ASYNC_SPLIT_BYTES = 3.5 * 1024 * 1024;
+const INGEST_BUDGET_MS = 240_000;
+
+function geminiApiKey(): string {
+  return requireEnv("GEMINI_API_KEY");
+}
 
 const EXTRACTION_PROMPT = `Analyze this construction document and return ONLY a JSON object with this exact structure — no markdown, no explanation:
 {
@@ -83,7 +89,7 @@ async function uploadToGeminiFiles(
     {
       method: "POST",
       headers: {
-        "X-Goog-Api-Key": GEMINI_API_KEY,
+        "X-Goog-Api-Key": geminiApiKey(),
         "Content-Type": `multipart/related; boundary=${boundary}`,
         "Content-Length": String(body.length),
       },
@@ -103,7 +109,7 @@ async function waitForActive(geminiName: string, maxMs = 60_000): Promise<void> 
   while (Date.now() < deadline) {
     const res = await fetchGemini(
       `https://generativelanguage.googleapis.com/v1beta/${geminiName}`,
-      { headers: { "X-Goog-Api-Key": GEMINI_API_KEY } },
+      { headers: { "X-Goog-Api-Key": geminiApiKey() } },
       { label: "Gemini file status", timeoutMs: 20_000 },
     );
     const data = (await res.json()) as { state: string };
@@ -117,13 +123,13 @@ async function waitForActive(geminiName: string, maxMs = 60_000): Promise<void> 
 async function deleteGeminiFile(geminiName: string): Promise<void> {
   await fetch(`https://generativelanguage.googleapis.com/v1beta/${geminiName}`, {
     method: "DELETE",
-    headers: { "X-Goog-Api-Key": GEMINI_API_KEY },
+    headers: { "X-Goog-Api-Key": geminiApiKey() },
   }).catch(() => {});
 }
 
 async function embedText(text: string): Promise<number[]> {
   const res = await fetchGemini(
-    `https://generativelanguage.googleapis.com/v1beta/models/${EMBED_MODEL}:embedContent?key=${GEMINI_API_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${EMBED_MODEL}:embedContent?key=${geminiApiKey()}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -163,6 +169,13 @@ export async function POST(
   try {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    try {
+      geminiApiKey();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return NextResponse.json({ error: msg }, { status: 503 });
+    }
+    const startedAt = Date.now();
 
     const body = await req.json().catch(() => ({})) as { access_token?: string };
     const accessToken = body.access_token; // optional — server falls back to stored token
@@ -235,6 +248,41 @@ export async function POST(
       pdfBytes = Buffer.from(await storageRes.arrayBuffer());
     }
 
+    const projectIdForSplit = doc.project_id as string | null;
+    if (pdfBytes.length >= ASYNC_SPLIT_BYTES) {
+      if (storagePath && projectIdForSplit) {
+        await db.from("documents").update({
+          status: "processing",
+          split_status: "pending",
+          processing_started_at: new Date().toISOString(),
+          last_error: null,
+          last_error_step: null,
+        }).eq("id", docId).eq("tenant_id", tenantId);
+        await invokePageSplitWorker({
+          document_id: docId,
+          tenant_id: resolvedTenantId,
+          project_id: projectIdForSplit,
+          original_path: storagePath,
+          user_id: userId,
+          is_local_upload: true,
+        });
+        return NextResponse.json({
+          ok: true,
+          queued: true,
+          reason: "large_plan_set",
+          bytes: pdfBytes.length,
+        }, { status: 202 });
+      }
+      const message = "Plan set is too large for synchronous ingest. Upload it through takeoff so it can be split by page.";
+      await markError(message, "split");
+      return NextResponse.json({ error: message }, { status: 409 });
+    }
+
+    await db.from("documents").update({
+      status: "processing",
+      processing_started_at: new Date().toISOString(),
+    }).eq("id", docId).eq("tenant_id", tenantId);
+
     // 2. Upload to Gemini Files API
     const { uri: fileUri, name: gName } = await uploadToGeminiFiles(pdfBytes, doc.file_name);
     geminiName = gName;
@@ -244,7 +292,7 @@ export async function POST(
 
     // 4. Extract text + classify
     const extractRes = await fetchGemini(
-      `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${geminiApiKey()}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -306,6 +354,15 @@ export async function POST(
 
     const BATCH = 8;
     for (let i = 0; i < pages.length; i += BATCH) {
+      if (Date.now() - startedAt > INGEST_BUDGET_MS) {
+        if (chunkRows.length > 0) {
+          const { error: partialErr } = await db.from("chunks").insert(chunkRows);
+          if (partialErr) throw new Error(`Chunks insert failed: ${partialErr.message}`);
+        }
+        const message = `Ingest stopped after ${Math.round((Date.now() - startedAt) / 1000)}s with ${chunkRows.length} chunks saved. Re-run page split for the remaining sheets.`;
+        await markError(message, "ingest_timeout");
+        return NextResponse.json({ error: message, partial_chunks: chunkRows.length }, { status: 504 });
+      }
       const batch = pages.slice(i, i + BATCH);
       await Promise.all(
         batch.map(async (page) => {

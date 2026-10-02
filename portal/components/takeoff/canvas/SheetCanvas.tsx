@@ -7,6 +7,7 @@ import VisionExtractionsPanel from "./VisionExtractionsPanel";
 import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
+import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
 
 // Coordinate-space tag carried alongside each committed item (professional-
 // manual-takeoff milestone, PERMANENT RULE 1/2). 'page_space' points are
@@ -310,7 +311,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           "pdfjs-dist/build/pdf.worker.min.mjs",
           import.meta.url,
         ).toString();
-        const doc = await pdfjs.getDocument({ url: pdfUrl }).promise;
+        const doc = await cachedPdfDocument(pdfUrl, () => pdfjs.getDocument({ url: pdfUrl }).promise);
+        // Split plan sets store one sheet per file. Always paint page 1 of that file.
         const page = await doc.getPage(1);
 
         const containerWidth = wrapRef.current?.clientWidth ?? 1200;

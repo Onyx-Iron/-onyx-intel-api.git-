@@ -1,32 +1,14 @@
 """
-fetch_dot_tx.py — TxDOT bid-tabulation fetcher (skeleton).
+fetch_dot_tx.py — TxDOT bid-tabulation fetcher.
 
-TxDOT (Texas Department of Transportation) publishes bid tabulations for every
-state highway construction letting. Each "bid tab" is a PDF/CSV that lists the
-items bid by every contractor on a project, by item code + quantity + unit
-price. This is gold for cost calibration because it's:
+Parses a TxDOT item-bid CSV or a bid-tab PDF table into the portal ingest
+shape `{ state, rows: [{ csi_code, unit_cost, uom, observed_at, ... }] }`.
+Labor, material, and equipment are copied only when those columns exist.
+A unit price alone is never split.
 
-  1. Public domain (no licensing fee).
-  2. Item-level (down to a specific TxDOT item code, e.g. 247-203 "Flexible
-     Base Type A Grade 1") with quantities and per-unit prices.
-  3. Tied to a specific county / district, so we get geographic granularity.
-
-Where to find the data:
-  • Bid tab archive:  https://www.txdot.gov/business/let-bids/bid-tab-archive.html
-  • Item-bid history: https://apps.dot.state.tx.us/apps/bidhist/avgprice.htm
-                     (provides per-item statewide averages by quarter)
-  • Project archive:  https://www.txdot.gov/business/let-bids.html
-
-TODO (data-engineering follow-up):
-  • Parse the published CSV index, walk each project's bid tab PDF/XLS
-  • Map TxDOT item codes → CSI MasterFormat divisions (lookup table needed)
-  • Normalize quantities (TxDOT mixes EA, CY, SY, LB, TON, LF, …)
-  • Compute weighted average unit price per item per quarter per district
-
-For now this script:
-  • Has a `parse_tx_bid_tab(file_path)` stub
-  • Has a `main()` that POSTs a small sample payload so the ingest flow on the
-    portal can be developed and tested end-to-end.
+Item-code prefixes mapped to CSI when the file has no CSI column:
+  247 → 31-23-23, 340 → 32-12-16, 432 → 31-37-00, 464 → 33-41-00.
+Rows that still have no CSI are skipped.
 
 Env:
     ONYX_PORTAL_URL   — portal base URL (default http://localhost:3000)
@@ -34,19 +16,29 @@ Env:
 
 Run:
     python scripts/fetch_dot_tx.py --sample
-    python scripts/fetch_dot_tx.py --file path/to/bid_tab.pdf  # TODO
+    python scripts/fetch_dot_tx.py --sample --dry-run
+    python scripts/fetch_dot_tx.py --file path/to/bid_tab.csv --dry-run
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
+
+TXDOT_ITEM_TO_CSI = {
+    "247": "31-23-23",
+    "340": "32-12-16",
+    "432": "31-37-00",
+    "464": "33-41-00",
+}
 
 SAMPLE_BID_TAB = {
     "source": "txdot_bidtab",
@@ -100,19 +92,139 @@ SAMPLE_BID_TAB = {
 }
 
 
-def parse_tx_bid_tab(file_path: str) -> dict[str, Any]:
-    """STUB — to be implemented.
+def _norm_header(value: str) -> str:
+    return value.strip().lower().replace(" ", "_")
 
-    Real implementation will need to:
-      • Detect file type (CSV from item-bid history vs. PDF bid tab)
-      • For PDFs: pdfplumber / camelot to lift the bid-tab table
-      • Map TxDOT item codes to CSI MasterFormat divisions
-      • Compute statistics across bidders per item
-    """
-    raise NotImplementedError(
-        "TxDOT bid-tab PDF parsing is not implemented yet. "
-        f"Would parse: {file_path}"
+
+def _cell(record: dict[str, str], *names: str) -> str:
+    for name in names:
+        value = record.get(name, "")
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _float_or_none(value: str) -> float | None:
+    cleaned = value.replace(",", "").replace("$", "").strip()
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def csi_for_item(item_code: str, explicit_csi: str) -> str | None:
+    csi = explicit_csi.strip()
+    if csi:
+        return csi
+    prefix = item_code.split("-", 1)[0].strip()
+    return TXDOT_ITEM_TO_CSI.get(prefix)
+
+
+def row_from_record(record: dict[str, str], observed_at: str) -> dict[str, Any] | None:
+    item_code = _cell(record, "item_code", "item")
+    csi = csi_for_item(item_code, _cell(record, "csi_code", "csi"))
+    if not csi:
+        return None
+    unit_cost = _float_or_none(
+        _cell(record, "avg_unit_price", "unit_price", "low_bid_unit_price")
     )
+    if unit_cost is None:
+        return None
+    row: dict[str, Any] = {
+        "csi_code": csi,
+        "description": _cell(record, "description") or csi,
+        "unit_cost": unit_cost,
+        "uom": _cell(record, "unit", "uom") or None,
+        "observed_at": observed_at,
+    }
+    for source, dest in (
+        ("labor_cost", "labor_cost"),
+        ("material_cost", "material_cost"),
+        ("equipment_cost", "equipment_cost"),
+    ):
+        if source in record and str(record.get(source, "")).strip():
+            parsed = _float_or_none(str(record[source]))
+            if parsed is not None:
+                row[dest] = parsed
+    return row
+
+
+def records_to_ingest(records: list[dict[str, str]], observed_at: str | None = None) -> dict[str, Any]:
+    stamp = observed_at or datetime.now(timezone.utc).isoformat()
+    rows = []
+    for record in records:
+        normalized = {_norm_header(k): ("" if v is None else str(v)) for k, v in record.items()}
+        row = row_from_record(normalized, stamp)
+        if row:
+            rows.append(row)
+    return {"state": "TX", "rows": rows}
+
+
+def _records_from_csv(file_path: str) -> list[dict[str, str]]:
+    with open(file_path, newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            raise ValueError(f"CSV has no header row: {file_path}")
+        return [dict(row) for row in reader]
+
+
+def _records_from_pdf(file_path: str) -> list[dict[str, str]]:
+    try:
+        import pdfplumber
+    except ImportError as exc:
+        raise RuntimeError("pdfplumber is required to parse a TxDOT PDF bid tab") from exc
+
+    tables: list[list[list[Any]]] = []
+    with pdfplumber.open(file_path) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables() or []:
+                if table and len(table) >= 2:
+                    tables.append(table)
+    if not tables:
+        raise ValueError(
+            f"No bid-tab table found in {file_path}. "
+            "Export the letting as CSV or supply a PDF whose first table has a header row."
+        )
+    records: list[dict[str, str]] = []
+    for table in tables:
+        headers = [_norm_header(str(cell or f"col_{i}")) for i, cell in enumerate(table[0])]
+        for raw in table[1:]:
+            record = {
+                headers[i]: "" if i >= len(raw) or raw[i] is None else str(raw[i])
+                for i in range(len(headers))
+            }
+            records.append(record)
+    return records
+
+
+def parse_tx_bid_tab(file_path: str) -> dict[str, Any]:
+    """Parse a TxDOT CSV or PDF bid tab into the DOT ingest body."""
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(file_path)
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        records = _records_from_csv(file_path)
+    elif suffix == ".pdf":
+        records = _records_from_pdf(file_path)
+    else:
+        raise ValueError(f"Unsupported bid-tab type {suffix or '(none)'}. Use .csv or .pdf.")
+    return records_to_ingest(records)
+
+
+def sample_ingest_payload(sample: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = sample or SAMPLE_BID_TAB
+    observed = str(source.get("letting_date") or datetime.now(timezone.utc).date().isoformat())
+    if "T" not in observed:
+        observed = f"{observed}T00:00:00+00:00"
+    items = source.get("items") or []
+    records = []
+    for item in items:
+        record = {str(k): "" if v is None else str(v) for k, v in item.items()}
+        records.append(record)
+    return records_to_ingest(records, observed_at=observed)
 
 
 def portal_url() -> str:
@@ -135,16 +247,16 @@ def post_to_ingest(payload: dict[str, Any]) -> requests.Response:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="TxDOT bid-tab ingest")
-    parser.add_argument("--file", help="Bid-tab file to parse (NOT IMPLEMENTED)")
+    parser.add_argument("--file", help="Bid-tab CSV or PDF to parse")
     parser.add_argument("--sample", action="store_true",
-                        help="POST embedded sample payload for end-to-end testing")
+                        help="POST the embedded sample in ingest shape")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     if args.file:
         payload = parse_tx_bid_tab(args.file)
     else:
-        payload = SAMPLE_BID_TAB
+        payload = sample_ingest_payload()
 
     if args.dry_run:
         print(json.dumps(payload, indent=2))

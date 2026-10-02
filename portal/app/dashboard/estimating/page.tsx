@@ -99,6 +99,11 @@ export default function GlobalEstimatingPage() {
     return items.reduce((sum, i) => sum + (i.total_price ?? 0), 0);
   }, [items]);
 
+  const pricingCounts = useMemo(() => ({
+    unpriced: items.filter((i) => i.pricing_status === "unpriced").length,
+    review: items.filter((i) => i.pricing_status === "review").length,
+  }), [items]);
+
   return (
     <div>
       <PageHero
@@ -121,6 +126,14 @@ export default function GlobalEstimatingPage() {
             <div className="rounded-lg border border-white/10 bg-[#0E0F12] px-4 py-2">
               <p className="text-[9px] uppercase tracking-widest text-white/40">Total value</p>
               <p className="font-mono text-sm text-white">{grandTotal != null ? currency(grandTotal) : "—"}</p>
+            </div>
+            <div className="rounded-lg border border-[#E50914]/20 bg-[#E50914]/10 px-4 py-2">
+              <p className="text-[9px] uppercase tracking-widest text-[#E50914]/80">Unpriced</p>
+              <p className="font-mono text-sm text-white">{pricingCounts.unpriced}</p>
+            </div>
+            <div className="rounded-lg border border-[#00D2FF]/20 bg-[#00D2FF]/10 px-4 py-2">
+              <p className="text-[9px] uppercase tracking-widest text-[#00D2FF]/80">Needs review</p>
+              <p className="font-mono text-sm text-white">{pricingCounts.review}</p>
             </div>
             <div className="ml-auto">
               <select
