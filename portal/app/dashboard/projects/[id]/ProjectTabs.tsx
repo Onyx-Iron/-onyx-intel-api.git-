@@ -27,7 +27,7 @@ import type { JSX } from "react";
 import { printDocument } from "@/lib/print";
 import TakeoffTab               from "@/components/takeoff/TakeoffTab";
 import ScheduleTab              from "@/components/schedule/ScheduleTab";
-import EstimateTab              from "@/components/estimate/EstimateTab";
+import EstimateMatrix           from "@/components/estimate/EstimateMatrix";
 import ProjectControlsTab       from "@/components/project-controls/ProjectControlsTab";
 import PunchListTab             from "@/components/punchlist/PunchListTab";
 import DocumentsTab             from "@/components/documents/DocumentsTab";
@@ -115,7 +115,7 @@ const PHASES: { id: Phase; subtabs: SubTabDef[] }[] = [
   {
     id: "Estimate & Budget",
     subtabs: [
-      { id: "estimates", label: "Estimate & Budget", icon: <Calculator size={13} />, render: (p) => <EstimateTab projectId={p} /> },
+      { id: "estimates", label: "Estimate & Budget", icon: <Calculator size={13} />, render: (p, name) => <EstimateMatrix projectId={p} projectName={name} /> },
     ],
   },
   {
