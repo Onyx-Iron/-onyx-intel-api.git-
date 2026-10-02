@@ -3,15 +3,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
+import { utilityRecipeLines } from "@/lib/math/scope-recipes";
 import { logEvent } from "@/lib/activity";
 import { mirrorCivilItemsToTakeoff, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
-
-const SYSTEM_CSI: Record<string, string> = {
-  "Sanitary Sewer": "33-30-00",
-  "Storm Drain": "33-40-00",
-  "Water Line": "33-10-00",
-  "Fire Line": "33-10-00",
-};
 
 export const runtime = "nodejs";
 
@@ -136,25 +130,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // exists to carry trench-engineering inputs an estimate line can't hold,
   // but the computed excavation/pipe quantities themselves need to reach
   // pricing the same way any other takeoff finding does.
-  const takeoffRows: CivilMirrorRow[] = rows.flatMap((r) => {
-    const csi = SYSTEM_CSI[r.system_type] ?? "33-10-00";
-    return [
-      {
-        label: `${r.system_type} pipe (${r.pipe_diameter_in}" dia)`,
-        csi_code: r.cost_code ?? csi,
-        quantity: r.run_length_lf,
-        unit: "LF",
-        drawing_ref: null,
-      },
-      {
-        label: `${r.system_type} trench excavation`,
-        csi_code: "31-23-16",
-        quantity: r.computed_trench_json.trench_excavation_bcy,
-        unit: "CY",
-        drawing_ref: null,
-      },
-    ];
-  });
+  const takeoffRows: CivilMirrorRow[] = rows.flatMap((r) =>
+    utilityRecipeLines({
+      name: r.system_type,
+      system: r.system_type,
+      diameter_in: r.pipe_diameter_in,
+      length_lf: r.run_length_lf,
+      embedment: r.computed_trench_json,
+      pipe_csi: r.cost_code,
+    }).map((line) => ({ ...line, drawing_ref: null })),
+  );
   await mirrorCivilItemsToTakeoff(anyDb, tenantId, projectId, items[0].page_id ?? null, "civil_utility_takeoffs", (data?.[0]?.id as string) ?? "", takeoffRows, userId);
 
   void logEvent({
