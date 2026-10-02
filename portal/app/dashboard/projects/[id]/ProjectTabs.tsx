@@ -185,18 +185,16 @@ export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  const phaseFromUrl = phaseFromSlug(searchParams.get("phase"));
+  // URL is the source of truth so back/forward and refresh keep the same tab
+  // without syncing search params into React state via an effect.
+  const activePhase = phaseFromSlug(searchParams.get("phase")) ?? "Overview";
+  const currentSubtabs = PHASES.find((p) => p.id === activePhase)?.subtabs ?? [];
   const tabFromUrl = searchParams.get("tab");
-
-  const initialPhase = phaseFromUrl ?? "Overview";
-  const initialSubs = PHASES.find((p) => p.id === initialPhase)?.subtabs ?? PHASES[0].subtabs;
-  const initialTab =
-    (tabFromUrl && initialSubs.some((s) => s.id === tabFromUrl) ? tabFromUrl : null) ??
-    initialSubs[0]?.id ??
+  const activeSubId =
+    (tabFromUrl && currentSubtabs.some((s) => s.id === tabFromUrl) ? tabFromUrl : null) ??
+    currentSubtabs[0]?.id ??
     "summary";
-
-  const [activePhase, setActivePhase] = useState<Phase>(initialPhase);
-  const [activeSubId, setActiveSubId] = useState<string>(initialTab);
+  const activeSub = currentSubtabs.find((s) => s.id === activeSubId);
 
   const syncUrl = useCallback(
     (phase: Phase, tab: string) => {
@@ -208,33 +206,14 @@ export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps
     [pathname, router, searchParams],
   );
 
-  // Keep React state aligned when the user navigates via browser back/forward.
-  useEffect(() => {
-    const phase = phaseFromSlug(searchParams.get("phase"));
-    const tab = searchParams.get("tab");
-    if (!phase) return;
-    setActivePhase(phase);
-    const subs = PHASES.find((p) => p.id === phase)?.subtabs ?? [];
-    if (tab && subs.some((s) => s.id === tab)) setActiveSubId(tab);
-    else if (subs[0]) setActiveSubId(subs[0].id);
-  }, [searchParams]);
-
   const selectPhase = (phase: Phase) => {
-    setActivePhase(phase);
     const first = PHASES.find((p) => p.id === phase)?.subtabs[0];
-    if (first) {
-      setActiveSubId(first.id);
-      syncUrl(phase, first.id);
-    }
+    if (first) syncUrl(phase, first.id);
   };
 
   const selectSub = (subId: string) => {
-    setActiveSubId(subId);
     syncUrl(activePhase, subId);
   };
-
-  const currentSubtabs = PHASES.find((p) => p.id === activePhase)?.subtabs ?? [];
-  const activeSub = currentSubtabs.find((s) => s.id === activeSubId);
 
   const pillScrollRef = useRef<HTMLDivElement>(null);
   const [pillsOverflow, setPillsOverflow] = useState(false);

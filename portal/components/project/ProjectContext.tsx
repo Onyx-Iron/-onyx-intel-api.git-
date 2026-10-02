@@ -51,15 +51,10 @@ function writeStoredId(id: string | null) {
 }
 
 export function ProjectProvider({ children }: { children: ReactNode }) {
+  // Lazy init from localStorage on the client; SSR stays null until mount fetch.
   const [projects, setProjects] = useState<ActiveProject[]>([]);
-  const [activeProjectId, setActiveProjectIdState] = useState<string | null>(null);
+  const [activeProjectId, setActiveProjectIdState] = useState<string | null>(() => readStoredId());
   const [loading, setLoading] = useState(true);
-  const [hydrated, setHydrated] = useState(false);
-
-  useEffect(() => {
-    setActiveProjectIdState(readStoredId());
-    setHydrated(true);
-  }, []);
 
   const refreshProjects = useCallback(async () => {
     setLoading(true);
@@ -91,9 +86,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!hydrated) return;
-    void refreshProjects();
-  }, [hydrated, refreshProjects]);
+    const timer = window.setTimeout(() => {
+      void refreshProjects();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [refreshProjects]);
 
   const setActiveProjectId = useCallback((id: string | null) => {
     setActiveProjectIdState(id);

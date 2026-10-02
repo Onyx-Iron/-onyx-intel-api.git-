@@ -490,7 +490,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
   const [aiMessages, setAiMessages] = useState<AIMessage[]>(INITIAL_AI_MESSAGES);
   const [aiLoading, setAiLoading] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
-  const [providers, setProviders] = useState<string[]>(previewProviders ?? []);
+  const [, setProviders] = useState<string[]>(previewProviders ?? []);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
