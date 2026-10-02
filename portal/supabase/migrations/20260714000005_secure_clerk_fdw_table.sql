@@ -6,4 +6,20 @@
 -- or destroy Clerk invitation records directly. It's genuinely used by
 -- team/invite/route.ts via the service-role client, so we keep that access
 -- and only strip anon/authenticated.
-REVOKE ALL ON public."1" FROM anon, authenticated, PUBLIC;
+--
+-- The FDW table is provisioned outside the migration timeline (Clerk
+-- integration setup). Skip cleanly on fresh local replay when it is absent.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relname = '1'
+  ) THEN
+    RAISE NOTICE 'public."1" not present — skipping Clerk FDW grant revoke';
+    RETURN;
+  END IF;
+  REVOKE ALL ON public."1" FROM anon, authenticated, PUBLIC;
+END $$;
