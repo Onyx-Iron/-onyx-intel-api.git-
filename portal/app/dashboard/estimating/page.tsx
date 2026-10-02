@@ -57,6 +57,7 @@ export default function GlobalEstimatingPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [projectFilter, setProjectFilter] = useState<string>("all");
+  const [missingCodes, setMissingCodes] = useState<string[]>([]);
 
   const load = () => {
     setLoading(true);
@@ -64,14 +65,18 @@ export default function GlobalEstimatingPage() {
     Promise.all([
       fetch("/api/estimate?limit=500").then((r) => r.json()),
       fetch("/api/projects").then((r) => r.json()),
+      fetch("/api/cost-catalog/coverage").then((r) => r.json()),
     ])
-      .then(([estimateRes, projectsRes]: [unknown, unknown]) => {
+      .then(([estimateRes, projectsRes, coverageRes]: [unknown, unknown, unknown]) => {
         const e = estimateRes as { items?: EstimateItem[]; error?: string };
         const p = projectsRes as { projects?: Project[]; error?: string };
+        const c = coverageRes as { missing?: string[]; error?: string };
         if (e.error) throw new Error(e.error);
         if (p.error) throw new Error(p.error);
+        if (c.error) throw new Error(c.error);
         setItems(e.items ?? []);
         setProjects(p.projects ?? []);
+        setMissingCodes(c.missing ?? []);
         setLoading(false);
       })
       .catch((err) => { setError(err?.message ?? "Network error"); setLoading(false); });
@@ -120,6 +125,13 @@ export default function GlobalEstimatingPage() {
           <Info size={12} className="shrink-0" />
           <span>Read-only roll-up. Build and price estimates from a project&apos;s Estimate tab. Cost/price fields are hidden here for roles without financial access.</span>
         </div>
+
+        {!loading && !error && missingCodes.length > 0 && (
+          <div className="mb-5 rounded-xl border border-[#E50914]/20 bg-[#E50914]/5 px-4 py-3">
+            <p className="text-[10px] uppercase tracking-widest text-[#E50914]/80">Takeoff codes with no price</p>
+            <p className="mt-2 font-mono text-xs text-white/80">{missingCodes.slice(0, 24).join(" · ")}{missingCodes.length > 24 ? ` · +${missingCodes.length - 24}` : ""}</p>
+          </div>
+        )}
 
         {!loading && !error && items.length > 0 && (
           <div className="mb-5 flex flex-wrap items-center gap-3">
