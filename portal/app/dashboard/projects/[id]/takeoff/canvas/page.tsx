@@ -22,10 +22,9 @@ interface PageRow {
 
 /**
  * Sheet Canvas workspace. Renders a single page of a project drawing with
- * calibration + count/length/area tools overlaid. Persistence hits:
- *   - /api/takeoff/canvas/page-url        (signed URL for the PDF)
- *   - /api/takeoff/canvas/calibration     (get/put scale)
- *   - /api/takeoff/canvas/manual          (list/save takeoffs)
+ * calibration + count/length/area tools overlaid. Opening a sheet loads
+ *   /api/takeoff/canvas/sheet. Calibration and takeoff saves still post to
+ *   their own routes.
  *
  * Query params:
  *   ?page_id=<uuid>            → open a specific page directly
