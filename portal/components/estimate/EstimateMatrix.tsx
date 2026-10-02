@@ -107,6 +107,14 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   const [versionId, setVersionId] = useState<string | null>(null);
   const [versionNumber, setVersionNumber] = useState<number | null>(null);
   const [versionStatus, setVersionStatus] = useState<string | null>(null);
+  const [versions, setVersions] = useState<{ id: string; version_number: number; status: string }[]>([]);
+  const [compareLeft, setCompareLeft] = useState("");
+  const [compareRight, setCompareRight] = useState("");
+  const [versionDiff, setVersionDiff] = useState<{
+    added: { description?: string | null; csi_code?: string | null }[];
+    removed: { description?: string | null; csi_code?: string | null }[];
+    changed: { key: string; quantityDelta: number | null; totalDelta: number | null; right: { description?: string | null } }[];
+  } | null>(null);
   const saveTimer = useRef<number | null>(null);
 
   const pricingRestricted = role != null && RESTRICTED_ROLES.has(role);
@@ -127,6 +135,12 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
       const listRes = await fetch(`/api/estimate/versions?project_id=${encodeURIComponent(projectId)}`, { cache: "no-store" });
       if (!listRes.ok) throw new Error(await listRes.text());
       const list = await listRes.json() as { estimate: { id: string; current_version_id: string | null } | null; versions: { id: string; version_number: number; status: string }[] };
+      const loadedVersions = list.versions ?? [];
+      setVersions(loadedVersions);
+      if (loadedVersions.length > 1) {
+        setCompareRight((current) => current || loadedVersions[0].id);
+        setCompareLeft((current) => current || loadedVersions[1].id);
+      }
 
       let activeVersionId = list.estimate?.current_version_id ?? null;
       if (!activeVersionId) {
@@ -176,6 +190,39 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         body: JSON.stringify({ source_version_id: versionId }),
       });
       if (res.ok) await load();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function compareVersions() {
+    if (!compareLeft || !compareRight || compareLeft === compareRight) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/estimate/versions/diff?left=${encodeURIComponent(compareLeft)}&right=${encodeURIComponent(compareRight)}`, { cache: "no-store" });
+      const data = await res.json() as { diff?: typeof versionDiff; error?: string };
+      if (!res.ok || !data.diff) {
+        setSeedResult(data.error ?? "Compare failed");
+        return;
+      }
+      setVersionDiff(data.diff);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveBudget() {
+    if (!versionId) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}/budget`, { method: "POST" });
+      const data = await res.json() as { created?: boolean; budget?: { line_count?: number; total_price?: number }; error?: string };
+      if (!res.ok) {
+        setSeedResult(data.error ?? "Budget save failed");
+        return;
+      }
+      const count = data.budget?.line_count ?? 0;
+      setSeedResult(data.created ? `Budget saved from this approved version (${count} lines).` : `Budget already exists for this version (${count} lines).`);
     } finally {
       setSaving(false);
     }
@@ -481,7 +528,12 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
           </div>
           <div className="flex items-center gap-2">
             {locked ? (
-              <button type="button" onClick={createNewDraft} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-amber-400/40 bg-amber-400/10 px-4 text-[11px] font-semibold uppercase tracking-widest text-amber-300 hover:bg-amber-400/20 disabled:opacity-40">New Draft to Edit</button>
+              <>
+                {versionStatus === "approved" && (
+                  <button type="button" onClick={saveBudget} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-[#CCFF00]/40 bg-[#CCFF00]/10 px-4 text-[11px] font-semibold uppercase tracking-widest text-[#CCFF00] hover:bg-[#CCFF00]/20 disabled:opacity-40">Save as budget</button>
+                )}
+                <button type="button" onClick={createNewDraft} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-amber-400/40 bg-amber-400/10 px-4 text-[11px] font-semibold uppercase tracking-widest text-amber-300 hover:bg-amber-400/20 disabled:opacity-40">New Draft to Edit</button>
+              </>
             ) : (
               <>
                 <button type="button" onClick={seed} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white disabled:opacity-40">Load from Takeoffs</button>
@@ -517,6 +569,35 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         )}
 
         {seedResult && <div className="border-t border-white/5 bg-white/[0.03] px-4 py-1.5 text-[11px] text-white/70">{seedResult}</div>}
+        {versions.length > 1 && (
+          <div className="border-t border-white/5 px-4 py-2 flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="uppercase tracking-widest text-white/40">Compare</span>
+            <select value={compareLeft} onChange={(e) => setCompareLeft(e.target.value)} className="rounded border border-white/10 bg-black/40 px-2 py-1 text-white">
+              {versions.map((version) => <option key={version.id} value={version.id}>v{version.version_number} {version.status}</option>)}
+            </select>
+            <span className="text-white/40">to</span>
+            <select value={compareRight} onChange={(e) => setCompareRight(e.target.value)} className="rounded border border-white/10 bg-black/40 px-2 py-1 text-white">
+              {versions.map((version) => <option key={`right-${version.id}`} value={version.id}>v{version.version_number} {version.status}</option>)}
+            </select>
+            <button type="button" onClick={compareVersions} disabled={saving || compareLeft === compareRight} className="rounded-full border border-white/15 px-3 py-1 uppercase tracking-widest text-white/70 hover:text-white disabled:opacity-40">Show diff</button>
+            {versionDiff && (
+              <span className="text-white/70">
+                {versionDiff.added.length} added · {versionDiff.removed.length} removed · {versionDiff.changed.length} changed
+              </span>
+            )}
+          </div>
+        )}
+        {versionDiff && versionDiff.changed.length > 0 && (
+          <ul className="border-t border-white/5 px-4 py-2 text-[11px] text-white/60">
+            {versionDiff.changed.slice(0, 8).map((change) => (
+              <li key={change.key}>
+                {change.right.description ?? change.key}
+                {change.quantityDelta != null ? ` · qty ${change.quantityDelta > 0 ? "+" : ""}${change.quantityDelta}` : ""}
+                {change.totalDelta != null ? ` · total ${change.totalDelta > 0 ? "+" : ""}${change.totalDelta}` : ""}
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       {/* Grid */}
