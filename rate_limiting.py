@@ -25,9 +25,8 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
-from collections import defaultdict
-from dataclasses import dataclass, field
+import sqlite3
+import tempfile
 from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
@@ -42,27 +41,50 @@ REQUESTS_PER_MIN = int(os.getenv("RATE_LIMIT_REQUESTS_PER_MIN", "10"))
 UPLOAD_MB_PER_HOUR = float(os.getenv("RATE_LIMIT_UPLOAD_MB_PER_HOUR", "500"))
 
 # ────────────────────────────────────────────────────────────────────────────
-# In-Memory Store (use Redis for production)
+# Shared store
 # ────────────────────────────────────────────────────────────────────────────
-
-@dataclass
-class TenantQuota:
-    """Mutable quota usage for a single tenant in current window.
-
-    Was previously a NamedTuple, which caused AttributeError on
-    ``quota.request_count += 1`` since NamedTuple fields are immutable.
-    """
-    request_count: int = 0
-    request_window_start: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    bytes_uploaded: int = 0
-    upload_window_start: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+# sqlite file so uvicorn --workers 2 on one host share counters.
+# A second Railway replica still has its own disk; this does not replace Redis
+# across machines. Set RATE_LIMIT_DB to pin the file (tests do).
 
 
-# In-memory store: tenant_id -> TenantQuota
-# For production, replace with Redis (this store is per-worker; multi-worker
-# uvicorn = per-worker limits, and the `_quota_lock` doesn't cross processes).
-_quota_store: dict[str, TenantQuota] = defaultdict(TenantQuota)
-_quota_lock = threading.Lock()
+def _db_path() -> str:
+    configured = os.environ.get("RATE_LIMIT_DB", "").strip()
+    if configured:
+        return configured
+    return os.path.join(tempfile.gettempdir(), "onyx_rate_limit.sqlite")
+
+
+def _connect() -> sqlite3.Connection:
+    path = _db_path()
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=5, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS quotas (
+            tenant_id TEXT PRIMARY KEY,
+            request_count INTEGER NOT NULL,
+            request_window_start TEXT NOT NULL,
+            bytes_uploaded INTEGER NOT NULL,
+            upload_window_start TEXT NOT NULL
+        )
+        """
+    )
+    return conn
+
+
+def _iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat()
+
+
+def _parse(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 class RateLimitExceeded(Exception):
@@ -132,39 +154,56 @@ def check_rate_limit(
 
     tid = tenant_id or "anonymous"
     now = datetime.now(timezone.utc)
+    exceeded: RateLimitExceeded | None = None
 
-    with _quota_lock:
-        quota = _quota_store[tid]
-
-        # ── Request rate limit (per minute) ──
-        min_window_elapsed = now - quota.request_window_start
-        if min_window_elapsed >= timedelta(minutes=1):
-            quota.request_count = 1
-            quota.request_window_start = now
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT request_count, request_window_start, bytes_uploaded, upload_window_start
+            FROM quotas WHERE tenant_id = ?
+            """,
+            (tid,),
+        ).fetchone()
+        if row is None:
+            request_count = 0
+            request_window_start = now
+            bytes_uploaded = 0
+            upload_window_start = now
         else:
-            quota.request_count += 1
-            if quota.request_count > REQUESTS_PER_MIN:
-                raise RateLimitExceeded(
+            request_count = int(row[0])
+            request_window_start = _parse(row[1])
+            bytes_uploaded = int(row[2])
+            upload_window_start = _parse(row[3])
+
+        min_window_elapsed = now - request_window_start
+        if min_window_elapsed >= timedelta(minutes=1):
+            request_count = 1
+            request_window_start = now
+        else:
+            request_count += 1
+            if request_count > REQUESTS_PER_MIN:
+                exceeded = RateLimitExceeded(
                     reason=f"Request limit exceeded: {REQUESTS_PER_MIN} requests per minute. "
                     f"Retry in {(timedelta(minutes=1) - min_window_elapsed).total_seconds():.0f}s.",
                     tenant_id=tid,
                     limit_type="requests_per_minute",
-                    current=quota.request_count,
+                    current=request_count,
                     limit=REQUESTS_PER_MIN,
                 )
 
-        # ── Upload size limit (per hour) ──
-        if file_size_mb > 0:
-            hour_window_elapsed = now - quota.upload_window_start
+        if exceeded is None and file_size_mb > 0:
+            hour_window_elapsed = now - upload_window_start
             add_bytes = int(file_size_mb * 1024 * 1024)
             if hour_window_elapsed >= timedelta(hours=1):
-                quota.bytes_uploaded = add_bytes
-                quota.upload_window_start = now
+                bytes_uploaded = add_bytes
+                upload_window_start = now
             else:
-                new_total_bytes = quota.bytes_uploaded + add_bytes
+                new_total_bytes = bytes_uploaded + add_bytes
                 limit_bytes = int(UPLOAD_MB_PER_HOUR * 1024 * 1024)
                 if new_total_bytes > limit_bytes:
-                    raise RateLimitExceeded(
+                    exceeded = RateLimitExceeded(
                         reason=f"Upload quota exceeded: {UPLOAD_MB_PER_HOUR} MB per hour. "
                         f"Current: {new_total_bytes / (1024 * 1024):.1f} MB. "
                         f"Retry in {(timedelta(hours=1) - hour_window_elapsed).total_seconds():.0f}s.",
@@ -173,10 +212,34 @@ def check_rate_limit(
                         current=new_total_bytes / (1024 * 1024),
                         limit=UPLOAD_MB_PER_HOUR,
                     )
-                quota.bytes_uploaded = new_total_bytes
+                else:
+                    bytes_uploaded = new_total_bytes
 
-        current_requests = quota.request_count
-        current_bytes = quota.bytes_uploaded
+        conn.execute(
+            """
+            INSERT INTO quotas (
+                tenant_id, request_count, request_window_start, bytes_uploaded, upload_window_start
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(tenant_id) DO UPDATE SET
+                request_count = excluded.request_count,
+                request_window_start = excluded.request_window_start,
+                bytes_uploaded = excluded.bytes_uploaded,
+                upload_window_start = excluded.upload_window_start
+            """,
+            (tid, request_count, _iso(request_window_start), bytes_uploaded, _iso(upload_window_start)),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+    if exceeded is not None:
+        raise exceeded
+
+    current_requests = request_count
+    current_bytes = bytes_uploaded
 
     logger.info(
         f"[RateLimit] tenant={tid} requests={current_requests}/{REQUESTS_PER_MIN} "
@@ -194,38 +257,68 @@ def check_rate_limit(
 
 def reset_tenant_quota(tenant_id: str) -> None:
     """Reset quota for a specific tenant (admin use only)."""
-    _quota_store[tenant_id] = TenantQuota(
-        request_count=0,
-        request_window_start=datetime.now(timezone.utc),
-        bytes_uploaded=0,
-        upload_window_start=datetime.now(timezone.utc),
-    )
+    now = datetime.now(timezone.utc)
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            INSERT INTO quotas (
+                tenant_id, request_count, request_window_start, bytes_uploaded, upload_window_start
+            ) VALUES (?, 0, ?, 0, ?)
+            ON CONFLICT(tenant_id) DO UPDATE SET
+                request_count = 0,
+                request_window_start = excluded.request_window_start,
+                bytes_uploaded = 0,
+                upload_window_start = excluded.upload_window_start
+            """,
+            (tenant_id, _iso(now), _iso(now)),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
     logger.info(f"[RateLimit] Reset quota for tenant {tenant_id}")
 
 
 def get_tenant_quota(tenant_id: str) -> dict:
     """Get current quota status for a tenant."""
-    quota = _quota_store.get(
-        tenant_id,
-        TenantQuota(
-            request_count=0,
-            request_window_start=datetime.now(timezone.utc),
-            bytes_uploaded=0,
-            upload_window_start=datetime.now(timezone.utc),
-        ),
-    )
+    conn = _connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT request_count, request_window_start, bytes_uploaded, upload_window_start
+            FROM quotas WHERE tenant_id = ?
+            """,
+            (tenant_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    now = datetime.now(timezone.utc)
+    if row is None:
+        request_count = 0
+        request_window_start = now
+        bytes_uploaded = 0
+        upload_window_start = now
+    else:
+        request_count = int(row[0])
+        request_window_start = _parse(row[1])
+        bytes_uploaded = int(row[2])
+        upload_window_start = _parse(row[3])
+
     return {
         "tenant_id": tenant_id,
-        "requests_current": quota.request_count,
+        "requests_current": request_count,
         "requests_limit": REQUESTS_PER_MIN,
-        "upload_mb_current": round(quota.bytes_uploaded / (1024 * 1024), 2),
+        "upload_mb_current": round(bytes_uploaded / (1024 * 1024), 2),
         "upload_mb_limit": UPLOAD_MB_PER_HOUR,
         "request_window_reset_in_seconds": (
-            (quota.request_window_start + timedelta(minutes=1) - datetime.now(timezone.utc))
-            .total_seconds()
+            (request_window_start + timedelta(minutes=1) - now).total_seconds()
         ),
         "upload_window_reset_in_seconds": (
-            (quota.upload_window_start + timedelta(hours=1) - datetime.now(timezone.utc))
-            .total_seconds()
+            (upload_window_start + timedelta(hours=1) - now).total_seconds()
         ),
     }
