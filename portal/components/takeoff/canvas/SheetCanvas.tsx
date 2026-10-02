@@ -1,13 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import CADVectorLayer from "./CADVectorLayer";
 import VisionExtractionsPanel from "./VisionExtractionsPanel";
 import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
-import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
+import { pointsToPageSpace, pointsToScreenSpace, samePoints, toPageSpace, translateStoredPoints } from "@/lib/takeoff/canvas/coordinates";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
+import { markPageVectorScanDone, pageVectorScanDone } from "@/lib/takeoff/canvas/vector-scan-cache";
 import { useConfirm } from "@/components/common/ConfirmDialog";
 
 // Coordinate-space tag carried alongside each committed item (professional-
@@ -130,6 +131,141 @@ interface Props {
   documentId: string;
 }
 
+function displayPoints(points: Pt[], coordinateSpace: CoordinateSpace, renderScale: number): Pt[] {
+  return coordinateSpace === "page_space" ? pointsToScreenSpace(points, renderScale) : points;
+}
+
+const ShapeGlyph = memo(function ShapeGlyph({
+  shape,
+  selected,
+  renderScale,
+  canDrag,
+  onSelect,
+  onDragStart,
+}: {
+  shape: Shape;
+  selected: boolean;
+  renderScale: number;
+  canDrag: boolean;
+  onSelect: (key: string) => void;
+  onDragStart: (event: React.MouseEvent, shape: Shape) => void;
+}) {
+  const color = shape.tool === "count" ? "#CCFF00" : shape.tool === "length" ? "#00D2FF" : "#f97316";
+  const pts = displayPoints(shape.points, shape.coordinateSpace, renderScale);
+  const cursorClass = canDrag && shape.saved && shape.id ? "cursor-move" : "";
+  const onMouseDown = (event: React.MouseEvent) => onDragStart(event, shape);
+  const onClick = (event: React.MouseEvent) => {
+    event.stopPropagation();
+    onSelect(shape.key);
+  };
+
+  if (shape.tool === "count") {
+    const p = pts[0];
+    if (!p) return null;
+    return (
+      <g className={cursorClass} onClick={onClick} onMouseDown={onMouseDown}>
+        <circle cx={p.x} cy={p.y} r={selected ? 9 : 7} fill={color} stroke="#000" strokeWidth={2} />
+      </g>
+    );
+  }
+
+  const d = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + (shape.tool === "area" ? " Z" : "");
+  if (shape.tool === "length") {
+    return (
+      <g className={cursorClass} onClick={onClick} onMouseDown={onMouseDown}>
+        <path d={d} stroke={color} strokeWidth={selected ? 4 : 3} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      </g>
+    );
+  }
+  return (
+    <g className={cursorClass} onClick={onClick} onMouseDown={onMouseDown}>
+      <path d={d} fill={`${color}44`} stroke={color} strokeWidth={selected ? 3 : 2} />
+    </g>
+  );
+});
+
+/** Saved sheet geometry. Draft points live outside this memo so drawing does not rebuild every path. */
+const SavedMarkup = memo(function SavedMarkup({
+  shapes,
+  utilityRuns,
+  topoNodes,
+  areaBounds,
+  selectedKey,
+  renderScale,
+  canDrag,
+  onSelect,
+  onDragStart,
+}: {
+  shapes: Shape[];
+  utilityRuns: UtilityRun[];
+  topoNodes: TopoNode[];
+  areaBounds: AreaBound[];
+  selectedKey: string | null;
+  renderScale: number;
+  canDrag: boolean;
+  onSelect: (key: string) => void;
+  onDragStart: (event: React.MouseEvent, shape: Shape) => void;
+}) {
+  return (
+    <>
+      {shapes.map((shape) => (
+        <ShapeGlyph
+          key={shape.key}
+          shape={shape}
+          selected={shape.key === selectedKey}
+          renderScale={renderScale}
+          canDrag={canDrag}
+          onSelect={onSelect}
+          onDragStart={onDragStart}
+        />
+      ))}
+      {utilityRuns.map((run) => {
+        const pts = displayPoints(run.points, run.coordinateSpace, renderScale);
+        const d = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+        return (
+          <g key={run.key}>
+            <path d={d} stroke="#a855f7" strokeWidth={4} fill="none" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="10 4" />
+            {pts.map((p, i) => (
+              <circle key={i} cx={p.x} cy={p.y} r={3.5} fill="#a855f7" stroke="#000" strokeWidth={1} />
+            ))}
+          </g>
+        );
+      })}
+      {topoNodes.map((node) => {
+        const pts = displayPoints(node.points, node.coordinateSpace, renderScale);
+        if (node.node_type === "spot_elevation") {
+          const p = pts[0];
+          if (!p) return null;
+          return (
+            <g key={node.key}>
+              <line x1={p.x - 7} y1={p.y} x2={p.x + 7} y2={p.y} stroke="#22d3ee" strokeWidth={2} />
+              <line x1={p.x} y1={p.y - 7} x2={p.x} y2={p.y + 7} stroke="#22d3ee" strokeWidth={2} />
+              <circle cx={p.x} cy={p.y} r={2} fill="#22d3ee" />
+              <text x={p.x + 10} y={p.y - 8} fontSize={11} fill="#22d3ee" fontFamily="monospace">{node.elevation.toFixed(2)}&apos;</text>
+            </g>
+          );
+        }
+        const d = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+        const mid = pts[Math.floor(pts.length / 2)];
+        return (
+          <g key={node.key}>
+            <path d={d} stroke="#22d3ee" strokeWidth={2.5} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            {mid && <text x={mid.x + 6} y={mid.y - 6} fontSize={11} fill="#22d3ee" fontFamily="monospace">{node.elevation.toFixed(2)}&apos;</text>}
+          </g>
+        );
+      })}
+      {areaBounds.map((bound) => {
+        const d = displayPoints(bound.points, bound.coordinateSpace, renderScale).map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z";
+        return (
+          <g key={bound.key}>
+            <path d={d} fill="#f9731633" stroke="#f97316" strokeWidth={2} />
+          </g>
+        );
+      })}
+    </>
+  );
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
@@ -164,7 +300,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // manual-takeoff-productivity milestone, STEP 4/2 (core geometry editing +
   // optimistic concurrency). Vertex-level editing, and dragging for utility
   // runs/topo nodes/area bounds, is deferred — see REMAINING_RISKS.md.
-  const [dragState, setDragState] = useState<{ key: string; startClient: Pt; originalPoints: Pt[]; originalRowVersion: number } | null>(null);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+  const commitShapeDragRef = useRef<(drag: { key: string; originalPoints: Pt[]; originalRowVersion: number }, finalPoints: Pt[]) => Promise<void>>(async () => {});
   const [deletedTakeoffs, setDeletedTakeoffs] = useState<Array<{ id: string; quantity: number; unit: string | null; takeoff_type: string }>>([]);
   const [vectorDescriptions, setVectorDescriptions] = useState<string[]>([]);
   const [utilityRuns, setUtilityRuns] = useState<UtilityRun[]>([]);
@@ -307,6 +444,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   useEffect(() => {
     if (!pdfUrl) return;
     let cancelled = false;
+    let idleId: number | null = null;
+    let timeoutId: number | null = null;
+    let cleaned = false;
     (async () => {
       try {
         const pdfjs = await import("pdfjs-dist");
@@ -336,35 +476,58 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           setRenderScale(scale);
         }
 
-        // ── PDF vector extraction (once per page) ─────────────────────────
-        // Check if vectors already exist server-side; if not, extract + PUT.
-        try {
-          const check = await fetch(
-            `/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`,
-            { cache: "no-store" },
-          );
-          const existing = check.ok ? (await check.json() as { vectors?: unknown[] }) : { vectors: [] };
-          if ((existing.vectors ?? []).length === 0) {
-            const vectors = await extractVectorsFromPdfPage(page);
-            if (vectors.length > 0 && !cancelled) {
-              await fetch("/api/takeoff/canvas/vectors", {
+        // Vector extraction walks the whole operator list. The sheet is
+        // already painted, and a page scanned earlier this session does not
+        // need another GET or another walk.
+        if (!cancelled && !pageVectorScanDone(pageId)) {
+          const extractVectors = async () => {
+            if (cancelled || pageVectorScanDone(pageId)) return;
+            try {
+              const check = await fetch(
+                `/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`,
+                { cache: "no-store" },
+              );
+              const existing = check.ok ? (await check.json() as { vectors?: unknown[] }) : { vectors: [] };
+              if ((existing.vectors ?? []).length > 0) {
+                markPageVectorScanDone(pageId);
+                return;
+              }
+              const vectors = await extractVectorsFromPdfPage(page);
+              if (cancelled) return;
+              if (vectors.length === 0) {
+                markPageVectorScanDone(pageId);
+                return;
+              }
+              const saved = await fetch("/api/takeoff/canvas/vectors", {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ page_id: pageId, vectors }),
               });
-              // Nudge the CAD overlay to re-fetch — a small delay ensures the
-              // PUT has landed before the overlay's GET runs.
+              if (!saved.ok || cancelled) return;
+              markPageVectorScanDone(pageId);
               window.setTimeout(() => window.dispatchEvent(new CustomEvent("onyx:cad-vectors-refresh", { detail: { pageId } })), 300);
+            } catch (extractErr) {
+              console.warn("[SheetCanvas] PDF vector extraction skipped:", extractErr);
             }
+          };
+          if (typeof window.requestIdleCallback === "function") {
+            idleId = window.requestIdleCallback(() => { void extractVectors(); });
+            if (cleaned) window.cancelIdleCallback(idleId);
+          } else {
+            timeoutId = window.setTimeout(() => { void extractVectors(); }, 1);
+            if (cleaned) window.clearTimeout(timeoutId);
           }
-        } catch (extractErr) {
-          console.warn("[SheetCanvas] PDF vector extraction skipped:", extractErr);
         }
       } catch (e) {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      cleaned = true;
+      if (idleId != null && typeof window.cancelIdleCallback === "function") window.cancelIdleCallback(idleId);
+      if (timeoutId != null) window.clearTimeout(timeoutId);
+    };
   }, [pdfUrl, pageId]);
 
   // ── Coordinate conversion (SVG uses canvas pixel space directly) ──────────
@@ -690,15 +853,56 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (tool !== "pan" || !s.saved || !s.id || s.row_version == null) return;
     e.stopPropagation();
     setSelectedKey(s.key);
-    setDragState({ key: s.key, startClient: { x: e.clientX, y: e.clientY }, originalPoints: s.points, originalRowVersion: s.row_version });
-  }, [tool]);
+    dragCleanupRef.current?.();
 
-  const commitShapeDrag = useCallback(async (drag: { key: string; originalPoints: Pt[]; originalRowVersion: number }) => {
+    const drag = {
+      key: s.key,
+      originalPoints: s.points,
+      originalRowVersion: s.row_version,
+      coordinateSpace: s.coordinateSpace,
+    };
+    const originX = e.clientX;
+    const originY = e.clientY;
+    const scaleAtDrag = renderScale;
+    const node = e.currentTarget as SVGGElement;
+    let frame = 0;
+    let dx = 0;
+    let dy = 0;
+    let cleanup = () => {};
+    const onUp = () => {
+      cleanup();
+      node.removeAttribute("transform");
+      if (dx === 0 && dy === 0) return;
+      const finalPoints = translateStoredPoints(drag.originalPoints, drag.coordinateSpace, dx, dy, scaleAtDrag);
+      setShapes((prev) => prev.map((shape) => (shape.key === drag.key ? { ...shape, points: finalPoints } : shape)));
+      void commitShapeDragRef.current(drag, finalPoints);
+    };
+    const onMove = (ev: MouseEvent) => {
+      dx = ev.clientX - originX;
+      dy = ev.clientY - originY;
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        node.setAttribute("transform", `translate(${dx} ${dy})`);
+      });
+    };
+    cleanup = () => {
+      if (frame) cancelAnimationFrame(frame);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      if (dragCleanupRef.current === cleanup) dragCleanupRef.current = null;
+    };
+    dragCleanupRef.current = cleanup;
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [tool, renderScale]);
+
+  const commitShapeDrag = useCallback(async (drag: { key: string; originalPoints: Pt[]; originalRowVersion: number }, finalPoints: Pt[]) => {
     const s = shapes.find((x) => x.key === drag.key);
     if (!s || !s.id) return;
     // No actual movement (e.g. a click that never crossed drag threshold) —
     // nothing to persist.
-    if (JSON.stringify(s.points) === JSON.stringify(drag.originalPoints)) return;
+    if (samePoints(finalPoints, drag.originalPoints)) return;
 
     const res = await fetch("/api/takeoff/canvas/manual", {
       method: "PATCH",
@@ -706,7 +910,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       body: JSON.stringify({
         id: s.id, row_version: drag.originalRowVersion,
         quantity: s.quantity, unit: s.unit, cost_code: s.cost_code || null,
-        geometry: { points: s.points, coordinate_space: "page_space" },
+        geometry: { points: finalPoints, coordinate_space: "page_space" },
       }),
     });
 
@@ -745,29 +949,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     const body = await res.json() as { manual_takeoff: { row_version: number }; quantity: number };
     setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, row_version: body.manual_takeoff.row_version, quantity: body.quantity } : x)));
   }, [shapes, confirm]);
+  commitShapeDragRef.current = commitShapeDrag;
 
-  useEffect(() => {
-    if (!dragState) return;
-    const onMove = (e: MouseEvent) => {
-      const dx = e.clientX - dragState.startClient.x;
-      const dy = e.clientY - dragState.startClient.y;
-      setShapes((prev) => prev.map((s) => {
-        if (s.key !== dragState.key) return s;
-        // Drag delta is measured in CURRENT-render screen pixels (raw
-        // clientX/Y deltas) — apply it in display space, then convert back
-        // to the shape's own storage space, mirroring the
-        // toDisplayPoints/toPersistedPoints pattern used everywhere else.
-        const originalDisplay = toDisplayPoints(dragState.originalPoints, s.coordinateSpace);
-        const movedDisplay = originalDisplay.map((p) => ({ x: p.x + dx, y: p.y + dy }));
-        const movedStorage = s.coordinateSpace === "page_space" ? pointsToPageSpace(movedDisplay, renderScale) : movedDisplay;
-        return { ...s, points: movedStorage };
-      }));
-    };
-    const onUp = () => { void commitShapeDrag(dragState); setDragState(null); };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp, { once: true });
-    return () => window.removeEventListener("mousemove", onMove);
-  }, [dragState, renderScale, commitShapeDrag, toDisplayPoints]);
+  useEffect(() => () => { dragCleanupRef.current?.(); }, []);
 
   async function saveAllUnsaved() {
     const unsaved = shapes.filter((s) => !s.saved);
@@ -1183,50 +1367,17 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               onClick={onCanvasClick}
               onDoubleClick={finishDraft}
             >
-              {/* Committed shapes */}
-              {shapes.map((s) => {
-                const isSel = s.key === selectedKey;
-                const color = s.tool === "count" ? "#CCFF00" : s.tool === "length" ? "#00D2FF" : "#f97316";
-                const sPts = toDisplayPoints(s.points, s.coordinateSpace);
-                const cursorClass = tool === "pan" && s.saved && s.id ? "cursor-move" : "";
-                if (s.tool === "count") {
-                  const p = sPts[0];
-                  return (
-                    <g key={s.key} className={cursorClass} onClick={(e) => { e.stopPropagation(); setSelectedKey(s.key); }} onMouseDown={(e) => beginShapeDrag(e, s)}>
-                      <circle cx={p.x} cy={p.y} r={isSel ? 9 : 7} fill={color} stroke="#000" strokeWidth={2} />
-                    </g>
-                  );
-                }
-                if (s.tool === "length") {
-                  const d = sPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
-                  return (
-                    <g key={s.key} className={cursorClass} onClick={(e) => { e.stopPropagation(); setSelectedKey(s.key); }} onMouseDown={(e) => beginShapeDrag(e, s)}>
-                      <path d={d} stroke={color} strokeWidth={isSel ? 4 : 3} fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                    </g>
-                  );
-                }
-                // area
-                const d = sPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z";
-                return (
-                  <g key={s.key} className={cursorClass} onClick={(e) => { e.stopPropagation(); setSelectedKey(s.key); }} onMouseDown={(e) => beginShapeDrag(e, s)}>
-                    <path d={d} fill={`${color}44`} stroke={color} strokeWidth={isSel ? 3 : 2} />
-                  </g>
-                );
-              })}
-
-              {/* Committed utility pipe runs */}
-              {utilityRuns.map((u) => {
-                const uPts = toDisplayPoints(u.points, u.coordinateSpace);
-                const d = uPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
-                return (
-                  <g key={u.key}>
-                    <path d={d} stroke="#a855f7" strokeWidth={4} fill="none" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="10 4" />
-                    {uPts.map((p, i) => (
-                      <circle key={i} cx={p.x} cy={p.y} r={3.5} fill="#a855f7" stroke="#000" strokeWidth={1} />
-                    ))}
-                  </g>
-                );
-              })}
+              <SavedMarkup
+                shapes={shapes}
+                utilityRuns={utilityRuns}
+                topoNodes={topoNodes}
+                areaBounds={areaBounds}
+                selectedKey={selectedKey}
+                renderScale={renderScale}
+                canDrag={tool === "pan"}
+                onSelect={setSelectedKey}
+                onDragStart={beginShapeDrag}
+              />
 
               {/* Draft (in-progress) utility pipe run */}
               {tool === "utility_pipe" && utilityDraftPts.length > 0 && (
@@ -1244,30 +1395,6 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 </g>
               )}
 
-              {/* Committed topo nodes (contours + spot elevations) */}
-              {topoNodes.map((n) => {
-                const nPts = toDisplayPoints(n.points, n.coordinateSpace);
-                if (n.node_type === "spot_elevation") {
-                  const p = nPts[0];
-                  return (
-                    <g key={n.key}>
-                      <line x1={p.x - 7} y1={p.y} x2={p.x + 7} y2={p.y} stroke="#22d3ee" strokeWidth={2} />
-                      <line x1={p.x} y1={p.y - 7} x2={p.x} y2={p.y + 7} stroke="#22d3ee" strokeWidth={2} />
-                      <circle cx={p.x} cy={p.y} r={2} fill="#22d3ee" />
-                      <text x={p.x + 10} y={p.y - 8} fontSize={11} fill="#22d3ee" fontFamily="monospace">{n.elevation.toFixed(2)}&apos;</text>
-                    </g>
-                  );
-                }
-                const d = nPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
-                const mid = nPts[Math.floor(nPts.length / 2)];
-                return (
-                  <g key={n.key}>
-                    <path d={d} stroke="#22d3ee" strokeWidth={2.5} fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                    {mid && <text x={mid.x + 6} y={mid.y - 6} fontSize={11} fill="#22d3ee" fontFamily="monospace">{n.elevation.toFixed(2)}&apos;</text>}
-                  </g>
-                );
-              })}
-
               {/* Draft (in-progress) contour line */}
               {tool === "contour_line" && contourDraftPts.length > 0 && (
                 <g>
@@ -1280,16 +1407,6 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   ))}
                 </g>
               )}
-
-              {/* Committed area bounds polygons */}
-              {areaBounds.map((a) => {
-                const d = toDisplayPoints(a.points, a.coordinateSpace).map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z";
-                return (
-                  <g key={a.key}>
-                    <path d={d} fill="#f9731633" stroke="#f97316" strokeWidth={2} />
-                  </g>
-                );
-              })}
 
               {/* Draft (in-progress) area bounds polygon */}
               {tool === "civil_area_bounds" && areaDraftPts.length > 0 && (

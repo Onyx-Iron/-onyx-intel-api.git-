@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   clientToPageSpace, computeBoundingBox, distanceToSegment, hitTestShape,
-  toPageSpace, toScreenSpace, pointsToPageSpace, pointsToScreenSpace,
+  toPageSpace, toScreenSpace, pointsToPageSpace, pointsToScreenSpace, translateStoredPoints, samePoints,
 } from "./coordinates";
 
 describe("toPageSpace / toScreenSpace", () => {
@@ -105,5 +105,25 @@ describe("distanceToSegment / hitTestShape", () => {
 
   it("hitTestShape returns false for an empty shape", () => {
     assert.equal(hitTestShape({ x: 0, y: 0 }, [], 100), false);
+  });
+});
+
+describe("translateStoredPoints", () => {
+  it("shifts page-space geometry by the screen drag divided by render scale", () => {
+    const moved = translateStoredPoints([{ x: 10, y: 20 }], "page_space", 20, -10, 2);
+    assert.deepEqual(moved, [{ x: 20, y: 15 }]);
+  });
+
+  it("shifts legacy pixel geometry by the raw screen drag", () => {
+    const moved = translateStoredPoints([{ x: 10, y: 20 }, { x: 30, y: 40 }], "legacy_pixel", 5, 7, 2);
+    assert.deepEqual(moved, [{ x: 15, y: 27 }, { x: 35, y: 47 }]);
+  });
+
+  it("treats a zero drag as the same stored points", () => {
+    const original = [{ x: 10, y: 20 }, { x: 30, y: 40 }];
+    const moved = translateStoredPoints(original, "page_space", 0, 0, 1.5);
+    assert.equal(samePoints(original, moved), true);
+    assert.equal(samePoints(original, translateStoredPoints(original, "page_space", 3, 0, 1.5)), false);
+    assert.equal(samePoints(original, original.slice(0, 1)), false);
   });
 });
