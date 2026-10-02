@@ -72,17 +72,17 @@ export async function processOutboxBatch(
   if (claimErr) throw claimErr;
 
   const events = (claimed ?? []) as Array<{
-    id: string; tenant_id: string; project_id: string; manual_takeoff_id: string;
-    event_type: "upsert" | "delete"; attempts: number;
+    id: string; tenant_id: string; project_id: string; manual_takeoff_id: string | null;
+    event_type: "upsert" | "delete" | "project_sync"; attempts: number;
   }>;
   result.claimed = events.length;
 
   for (const event of events) {
     try {
-      if (event.event_type === "upsert") {
+      if (event.event_type === "upsert" || event.event_type === "project_sync") {
         await syncFn(event.tenant_id, event.project_id);
       } else {
-        await reconcileDeletedTakeoffEstimateItems(db, event.tenant_id, event.project_id, event.manual_takeoff_id);
+        await reconcileDeletedTakeoffEstimateItems(db, event.tenant_id, event.project_id, event.manual_takeoff_id ?? "");
       }
       const { error } = await db.rpc("complete_outbox_event", { p_id: event.id });
       if (error) throw error;

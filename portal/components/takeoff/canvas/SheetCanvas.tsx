@@ -296,10 +296,6 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }, [pageId, projectId]);
 
   // ── Render the PDF page onto <canvas> via pdfjs-dist ──────────────────────
-  //
-  // After render, kick off a one-time PDF vector extraction for the page if
-  // no CAD vectors have been persisted yet. This makes civil takeoffs work
-  // from vector-authored PDFs (Bluebeam / Civil 3D exports) not just DWG/DXF.
   useEffect(() => {
     if (!pdfUrl) return;
     let cancelled = false;
@@ -331,37 +327,59 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           setRenderSize({ w: viewport.width, h: viewport.height });
           setRenderScale(scale);
         }
-
-        // ── PDF vector extraction (once per page) ─────────────────────────
-        // Check if vectors already exist server-side; if not, extract + PUT.
-        try {
-          const check = await fetch(
-            `/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`,
-            { cache: "no-store" },
-          );
-          const existing = check.ok ? (await check.json() as { vectors?: unknown[] }) : { vectors: [] };
-          if ((existing.vectors ?? []).length === 0) {
-            const vectors = await extractVectorsFromPdfPage(page);
-            if (vectors.length > 0 && !cancelled) {
-              await fetch("/api/takeoff/canvas/vectors", {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ page_id: pageId, vectors }),
-              });
-              // Nudge the CAD overlay to re-fetch — a small delay ensures the
-              // PUT has landed before the overlay's GET runs.
-              window.setTimeout(() => window.dispatchEvent(new CustomEvent("onyx:cad-vectors-refresh", { detail: { pageId } })), 300);
-            }
-          }
-        } catch (extractErr) {
-          console.warn("[SheetCanvas] PDF vector extraction skipped:", extractErr);
-        }
       } catch (e) {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
       }
     })();
     return () => { cancelled = true; };
   }, [pdfUrl, pageId]);
+
+  // Vector extraction waits until a civil tool needs the CAD overlay.
+  const vectorExtractKey = useRef<string | null>(null);
+  useEffect(() => {
+    const vectorTools = new Set<Tool>(["utility_pipe", "contour_line", "spot_elevation", "civil_area_bounds"]);
+    if (!pdfUrl || !vectorTools.has(tool)) return;
+    const key = `${pdfUrl}:${pageId}`;
+    if (vectorExtractKey.current === key) return;
+    vectorExtractKey.current = key;
+    let cancelled = false;
+    let finished = false;
+    (async () => {
+      try {
+        const check = await fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
+        const existing = check.ok ? (await check.json() as { vectors?: unknown[] }) : { vectors: [] };
+        if ((existing.vectors ?? []).length > 0 || cancelled) {
+          finished = true;
+          return;
+        }
+        const pdfjs = await import("pdfjs-dist");
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (pdfjs as any).GlobalWorkerOptions.workerSrc = new URL(
+          "pdfjs-dist/build/pdf.worker.min.mjs",
+          import.meta.url,
+        ).toString();
+        const doc = await cachedPdfDocument(pdfUrl, () => pdfjs.getDocument({ url: pdfUrl }).promise);
+        const page = await doc.getPage(1);
+        const vectors = await extractVectorsFromPdfPage(page);
+        if (vectors.length > 0 && !cancelled) {
+          await fetch("/api/takeoff/canvas/vectors", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ page_id: pageId, vectors }),
+          });
+          window.setTimeout(() => window.dispatchEvent(new CustomEvent("onyx:cad-vectors-refresh", { detail: { pageId } })), 300);
+        }
+        finished = true;
+      } catch (extractErr) {
+        vectorExtractKey.current = null;
+        console.warn("[SheetCanvas] PDF vector extraction skipped:", extractErr);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (!finished) vectorExtractKey.current = null;
+    };
+  }, [pdfUrl, pageId, tool]);
 
   // ── Coordinate conversion (SVG uses canvas pixel space directly) ──────────
   const toLocal = useCallback((clientX: number, clientY: number, svgEl: SVGSVGElement): Pt => {
