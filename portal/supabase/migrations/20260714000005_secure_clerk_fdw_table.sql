@@ -7,6 +7,7 @@
 -- team/invite/route.ts via the service-role client, so we keep that access
 -- and only strip anon/authenticated.
 --
+<<<<<<< HEAD
 -- The FDW table is provisioned outside the migration timeline (Clerk
 -- integration setup). Skip cleanly on fresh local replay when it is absent.
 DO $$
@@ -22,4 +23,13 @@ BEGIN
     RETURN;
   END IF;
   REVOKE ALL ON public."1" FROM anon, authenticated, PUBLIC;
+=======
+-- This FDW table is provisioned outside tracked migrations (dashboard /
+-- production setup). On a fresh local stack it may not exist — skip then.
+DO $$
+BEGIN
+  IF to_regclass('public."1"') IS NOT NULL THEN
+    REVOKE ALL ON public."1" FROM anon, authenticated, PUBLIC;
+  END IF;
+>>>>>>> origin/main
 END $$;

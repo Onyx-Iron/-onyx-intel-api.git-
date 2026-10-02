@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import Link from "next/link";
 import { AlertCircle, RefreshCw } from "lucide-react";
 
 interface EmptyStateProps {
@@ -9,6 +10,7 @@ interface EmptyStateProps {
   description?: string;
   actionLabel?: string;
   onAction?: () => void;
+  actionHref?: string;
 }
 
 export default function EmptyState({
@@ -17,7 +19,11 @@ export default function EmptyState({
   description,
   actionLabel,
   onAction,
+  actionHref,
 }: EmptyStateProps) {
+  const actionClass =
+    "mt-5 inline-flex h-9 items-center gap-2 rounded-lg bg-[#CCFF00] px-5 text-xs font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85";
+
   return (
     <div className="flex flex-col items-center justify-center text-center py-10 px-4">
       <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#CCFF00]/8 text-[#CCFF00] mb-4">
@@ -27,12 +33,13 @@ export default function EmptyState({
       {description && (
         <p className="mt-1.5 text-xs text-white/40 max-w-md">{description}</p>
       )}
-      {actionLabel && onAction && (
-        <button
-          type="button"
-          onClick={onAction}
-          className="mt-5 inline-flex h-9 items-center gap-2 rounded-lg bg-[#CCFF00] px-5 text-xs font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85"
-        >
+      {actionLabel && actionHref && (
+        <Link href={actionHref} className={actionClass}>
+          {actionLabel}
+        </Link>
+      )}
+      {actionLabel && !actionHref && onAction && (
+        <button type="button" onClick={onAction} className={actionClass}>
           {actionLabel}
         </button>
       )}

@@ -3,6 +3,7 @@
 import React from "react";
 import { ToastProvider, Toaster } from "./Toast";
 import { ConfirmProvider } from "./ConfirmDialog";
+import { ProjectProvider } from "@/components/project/ProjectContext";
 
 export default function AppProviders({
   children,
@@ -12,8 +13,10 @@ export default function AppProviders({
   return (
     <ToastProvider>
       <ConfirmProvider>
-        {children}
-        <Toaster />
+        <ProjectProvider>
+          {children}
+          <Toaster />
+        </ProjectProvider>
       </ConfirmProvider>
     </ToastProvider>
   );

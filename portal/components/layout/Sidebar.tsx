@@ -22,6 +22,7 @@ import {
   Users,
   X,
 } from "lucide-react";
+import ActiveProjectPicker from "@/components/project/ActiveProjectPicker";
 
 interface NavItem {
   href: string;
@@ -109,6 +110,8 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <>
       <div className="h-5" />
+
+      <ActiveProjectPicker onNavigate={onNavigate} />
 
       <nav className="flex-1 overflow-y-auto px-3 py-4">
         <div className="space-y-0.5">
