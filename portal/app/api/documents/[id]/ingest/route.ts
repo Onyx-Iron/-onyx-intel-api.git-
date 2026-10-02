@@ -7,6 +7,7 @@ import { logEvent } from "@/lib/activity";
 import { requireEnv } from "@/lib/env";
 import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
+import { pagesStillNeedingChunks } from "@/lib/documents/ingest-resume";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import type { TablesInsert } from "@/lib/supabase/types";
 
@@ -211,6 +212,31 @@ export async function POST(
       return NextResponse.json({ error: "Document has no source (no drive_file_id or storage_path)" }, { status: 400 });
     }
 
+    const [{ data: storedPages }, { data: storedChunks }] = await Promise.all([
+      db.from("pages").select("page_number, extracted_text").eq("document_id", docId).eq("tenant_id", resolvedTenantId),
+      db.from("chunks").select("page_number").eq("document_id", docId).eq("tenant_id", resolvedTenantId),
+    ]);
+    const chunkedPageNumbers = (storedChunks ?? []).flatMap((row) => typeof row.page_number === "number" ? [row.page_number] : []);
+    const storedGeminiPages: GeminiPage[] = (storedPages ?? []).flatMap((row) => (
+      typeof row.page_number === "number"
+        ? [{ page_number: row.page_number, summary: row.extracted_text ?? "", key_terms: [] }]
+        : []
+    ));
+    const resumePages = pagesStillNeedingChunks(storedGeminiPages, chunkedPageNumbers);
+    if (storedGeminiPages.length > 0 && resumePages.length === 0 && chunkedPageNumbers.length > 0) {
+      await db.from("documents").update({
+        status: "complete",
+        processed_at: new Date().toISOString(),
+        last_error: null,
+        last_error_step: null,
+      }).eq("id", docId).eq("tenant_id", tenantId);
+      return NextResponse.json({ ok: true, resumed: true, already_complete: true });
+    }
+
+    let pagesToEmbed: GeminiPage[] = resumePages;
+    let docType = "other";
+    let pageCount = storedGeminiPages.length;
+    if (resumePages.length === 0) {
     // 1. Download PDF from Drive or Supabase Storage
     let pdfBytes: Buffer;
 
@@ -323,10 +349,10 @@ export async function POST(
     }
 
     const VALID_TYPES = ["drawing", "spec", "rfi", "submittal", "other"] as const;
-    const docType = VALID_TYPES.includes(extraction.doc_type as (typeof VALID_TYPES)[number])
+    docType = VALID_TYPES.includes(extraction.doc_type as (typeof VALID_TYPES)[number])
       ? extraction.doc_type
       : "other";
-    const pageCount = extraction.page_count ?? extraction.pages?.length ?? 0;
+    pageCount = extraction.page_count ?? extraction.pages?.length ?? 0;
     const pages = extraction.pages ?? [];
 
     // 5. Update doc with classification
@@ -347,23 +373,36 @@ export async function POST(
       const { error: upsertErr } = await db.from("pages").upsert(pageRows, { onConflict: "document_id,page_number" });
       if (upsertErr) throw new Error(`Pages upsert failed: ${upsertErr.message}`);
     }
+    pagesToEmbed = pagesStillNeedingChunks(pages, chunkedPageNumbers);
+    } else {
+      await db.from("documents").update({
+        status: "processing",
+        processing_started_at: new Date().toISOString(),
+        last_error: null,
+        last_error_step: null,
+      }).eq("id", docId).eq("tenant_id", tenantId);
+    }
 
     // 7. Chunk + embed (batches of 8 to stay within rate limits)
     const projectId = doc.project_id as string;
     const chunkRows: TablesInsert<"chunks">[] = [];
 
     const BATCH = 8;
-    for (let i = 0; i < pages.length; i += BATCH) {
+    for (let i = 0; i < pagesToEmbed.length; i += BATCH) {
       if (Date.now() - startedAt > INGEST_BUDGET_MS) {
         if (chunkRows.length > 0) {
           const { error: partialErr } = await db.from("chunks").insert(chunkRows);
           if (partialErr) throw new Error(`Chunks insert failed: ${partialErr.message}`);
         }
-        const message = `Ingest stopped after ${Math.round((Date.now() - startedAt) / 1000)}s with ${chunkRows.length} chunks saved. Re-run page split for the remaining sheets.`;
-        await markError(message, "ingest_timeout");
-        return NextResponse.json({ error: message, partial_chunks: chunkRows.length }, { status: 504 });
+        const message = `Ingest paused after ${Math.round((Date.now() - startedAt) / 1000)}s with ${chunkRows.length} new chunks saved. Run ingest again to continue the remaining pages.`;
+        await db.from("documents").update({
+          status: "processing",
+          last_error: message.slice(0, 2000),
+          last_error_step: "ingest_timeout",
+        }).eq("id", docId).eq("tenant_id", tenantId);
+        return NextResponse.json({ error: message, partial_chunks: chunkRows.length, resume: true }, { status: 504 });
       }
-      const batch = pages.slice(i, i + BATCH);
+      const batch = pagesToEmbed.slice(i, i + BATCH);
       await Promise.all(
         batch.map(async (page) => {
           const text = `${page.summary}\nKey terms: ${(page.key_terms ?? []).join(", ")}`;
@@ -396,7 +435,7 @@ export async function POST(
     }).eq("id", docId).eq("tenant_id", tenantId);
 
     // 9. Cleanup Gemini file (best effort)
-    await deleteGeminiFile(geminiName);
+    if (geminiName) await deleteGeminiFile(geminiName);
     geminiName = null;
     await logDocumentProcessingEvent({
       tenantId: resolvedTenantId,

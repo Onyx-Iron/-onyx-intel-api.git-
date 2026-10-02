@@ -262,8 +262,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       : { data: null };
     projectId = (doc as { project_id?: string } | null)?.project_id ?? null;
   }
+  let skippedDecided = 0;
   if (projectId && page.document_id) {
-    const { error: rpcErr } = await anyDb.rpc("apply_vision_extraction_takeoff_items", {
+    const { data: inserted, error: rpcErr } = await anyDb.rpc("apply_vision_extraction_takeoff_items", {
       p_tenant_id: tenantId,
       p_project_id: projectId,
       p_document_id: page.document_id,
@@ -281,6 +282,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       })),
     });
     if (rpcErr) console.error("[vision-extract] apply_vision_extraction_takeoff_items failed", rpcErr);
+    else skippedDecided = Math.max(0, items.length - (Array.isArray(inserted) ? inserted.length : 0));
     // Do NOT sync to estimate here — "suggested" items are excluded by
     // buildEstimateImportRows anyway, so a sync call here would be wasted
     // work (nothing new can be approved without a human action first).
@@ -301,7 +303,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }).catch((e) => console.error("[agents]", e));
 
   const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, page.document_id ?? null, body.page_id);
-  return NextResponse.json({ result, cached: false, takeoffItems });
+  return NextResponse.json({ result, cached: false, takeoffItems, skipped_decided: skippedDecided });
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

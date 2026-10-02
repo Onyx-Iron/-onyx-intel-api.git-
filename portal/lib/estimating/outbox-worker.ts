@@ -128,7 +128,7 @@ async function reconcileDeletedTakeoffEstimateItems(
     .select("takeoff_item_id")
     .eq("tenant_id", tenantId)
     .eq("action", "deleted")
-    .contains("before", { source_manual_takeoff_id: manualTakeoffId });
+    .filter("before->>source_manual_takeoff_id", "eq", manualTakeoffId);
   const deletedMirrorIds = new Set(
     (historyRows ?? [])
       .filter((h: { takeoff_item_id: string }) => Boolean(h.takeoff_item_id))

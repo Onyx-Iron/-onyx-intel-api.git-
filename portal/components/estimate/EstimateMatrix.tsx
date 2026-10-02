@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
+import VersionDiffPanel from "@/components/estimate/VersionDiffPanel";
 import { calculateAssemblyQuantities, type RebarSize, REBAR_UNIT_WEIGHT_LBS_PER_FT } from "@/lib/math/assemblies";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,6 +108,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   const [versionId, setVersionId] = useState<string | null>(null);
   const [versionNumber, setVersionNumber] = useState<number | null>(null);
   const [versionStatus, setVersionStatus] = useState<string | null>(null);
+  const [versions, setVersions] = useState<{ id: string; version_number: number; status: string }[]>([]);
   const saveTimer = useRef<number | null>(null);
 
   const pricingRestricted = role != null && RESTRICTED_ROLES.has(role);
@@ -127,6 +129,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
       const listRes = await fetch(`/api/estimate/versions?project_id=${encodeURIComponent(projectId)}`, { cache: "no-store" });
       if (!listRes.ok) throw new Error(await listRes.text());
       const list = await listRes.json() as { estimate: { id: string; current_version_id: string | null } | null; versions: { id: string; version_number: number; status: string }[] };
+      setVersions(list.versions ?? []);
 
       let activeVersionId = list.estimate?.current_version_id ?? null;
       if (!activeVersionId) {
@@ -517,6 +520,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         )}
 
         {seedResult && <div className="border-t border-white/5 bg-white/[0.03] px-4 py-1.5 text-[11px] text-white/70">{seedResult}</div>}
+        <VersionDiffPanel key={versions.map((v) => v.id).join(",")} versions={versions} currentId={versionId} />
       </div>
 
       {/* Grid */}

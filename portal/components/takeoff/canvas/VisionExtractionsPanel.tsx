@@ -67,6 +67,7 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
   const [open, setOpen] = useState(true);
   const [acting, setActing] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [skippedDecided, setSkippedDecided] = useState(0);
 
   const runExtract = useCallback(async (force: boolean) => {
     setState((s) => ({ ...s, loading: true, err: null }));
@@ -77,9 +78,10 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
         body: JSON.stringify({ page_id: pageId, force }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? String(res.status));
-      const data = await res.json() as { result: VisionResult; takeoffItems?: Record<string, TakeoffItemRef> };
+      const data = await res.json() as { result: VisionResult; takeoffItems?: Record<string, TakeoffItemRef>; skipped_decided?: number };
       setState({ result: data.result, loading: false, err: null });
       setTakeoffItemsByKey(data.takeoffItems ?? {});
+      setSkippedDecided(data.skipped_decided ?? 0);
       if (onCommitted) for (const it of data.result.items) onCommitted(it);
     } catch (e) {
       setState({ result: null, loading: false, err: e instanceof Error ? e.message : String(e) });
@@ -196,6 +198,11 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
             <div className="text-[11px] text-red-400 px-2 py-2 flex items-center gap-2">
               <span>Approve/Reject failed: {actionError}</span>
               <button type="button" onClick={() => setActionError(null)} className="ml-auto text-white/40 hover:text-white">dismiss</button>
+            </div>
+          )}
+          {skippedDecided > 0 && (
+            <div className="text-[11px] text-white/50 px-2 py-1">
+              Extraction found items that were already approved or rejected. {skippedDecided} already-decided finding{skippedDecided === 1 ? "" : "s"} skipped.
             </div>
           )}
           {state.result?.page_summary && (

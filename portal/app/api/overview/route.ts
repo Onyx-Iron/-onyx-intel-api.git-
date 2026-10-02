@@ -34,7 +34,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const [
       takeoff_items, documents, schedule_tasks, contacts, daily_logs, generated_docs,
       procurement_total, procurement_pending, punch_total, punch_open, permits_total, permits_approved,
-      estimateRows, scheduleDone, rfiRows, submittalRows, changeOrderRows,
+      estimateRows, scheduleDone, rfisOpen, submittalsOpen, changeOrderRows,
     ] = await Promise.all([
       countTable(db, "takeoff_items", tenantId, projectId),
       countTable(db, "documents", tenantId, projectId),
@@ -55,8 +55,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       db.from("estimate_items" as never).select("quantity,unit_cost").eq("tenant_id", tenantId).eq("project_id", projectId).limit(5000),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       countTable(db, "schedule_tasks", tenantId, projectId, (q: any) => q.eq("status", "complete")),
-      anyDb.from("rfi_items").select("status").eq("tenant_id", tenantId).eq("project_id", projectId).limit(5000),
-      anyDb.from("submittal_items").select("status").eq("tenant_id", tenantId).eq("project_id", projectId).limit(5000),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      countTable(db, "rfi_items", tenantId, projectId, (q: any) => q.in("status", ["open", "answered"])),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      countTable(db, "submittal_items", tenantId, projectId, (q: any) => q.in("status", ["submitted", "under_review", "revise_resubmit", "rejected"])),
       anyDb.from("change_order_items").select("status,amount").eq("tenant_id", tenantId).eq("project_id", projectId).limit(5000),
     ]);
 
@@ -68,8 +70,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     }
     const completion = schedule_tasks > 0 ? Math.round((scheduleDone / schedule_tasks) * 100) : 0;
     const controls = getControlSummary({
-      rfis: rfiRows.error ? [] : (rfiRows.data ?? []),
-      submittals: submittalRows.error ? [] : (submittalRows.data ?? []),
+      rfis: [],
+      submittals: [],
       changeOrders: changeOrderRows.error ? [] : (changeOrderRows.data ?? []),
     });
 
@@ -78,6 +80,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       procurement_total, procurement_pending, punch_total, punch_open,
       permits_total, permits_approved,
       ...controls,
+      rfis_open: rfisOpen,
+      submittals_open: submittalsOpen,
       estimate_value: Math.round(estimate_value),
       completion,
     });

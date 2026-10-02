@@ -48,6 +48,34 @@ export function pointsToScreenSpace(points: Point[], renderScale: number): Point
 }
 
 /**
+ * Move stored geometry by a screen-pixel drag. Page-space points are
+ * projected, shifted, and stored again so a window resize does not change
+ * the saved location. Legacy pixel points stay in that pixel space.
+ */
+export function translateStoredPoints(
+  originalPoints: Point[],
+  coordinateSpace: "page_space" | "legacy_pixel",
+  dx: number,
+  dy: number,
+  renderScale: number,
+): Point[] {
+  const display = coordinateSpace === "page_space"
+    ? pointsToScreenSpace(originalPoints, renderScale)
+    : originalPoints;
+  const moved = display.map((p) => ({ x: p.x + dx, y: p.y + dy }));
+  return coordinateSpace === "page_space" ? pointsToPageSpace(moved, renderScale) : moved;
+}
+
+/** True when two polylines are the same stored geometry, including point order. */
+export function samePoints(a: Point[], b: Point[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].x !== b[i].x || a[i].y !== b[i].y) return false;
+  }
+  return true;
+}
+
+/**
  * Converts client (mouse-event) coordinates to page space in one step,
  * given the SVG element's bounding rect and the current render size —
  * combines the DPI/viewport-rect normalization pdf.js rendering requires
