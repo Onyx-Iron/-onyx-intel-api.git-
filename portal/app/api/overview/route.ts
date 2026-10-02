@@ -1,6 +1,6 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
-import { getControlSummary } from "@/lib/project-controls/schema";
+import { projectMoneyFromAggregate, projectMoneyFromRows, type ProjectMoney } from "@/lib/project-controls/money";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 
@@ -16,6 +16,38 @@ async function countTable(db: Awaited<ReturnType<typeof createServiceClient>>, t
     if (error) return 0;
     return count ?? 0;
   } catch { return 0; }
+}
+
+// Prefer the SQL aggregate. If the function is not installed yet, fall back to
+// the previous row download so the overview still renders.
+async function loadProjectMoney(db: {
+  rpc: (fn: string, args: Record<string, string>) => Promise<{ data: unknown; error: { message: string } | null }>;
+  from: (table: string) => {
+    select: (columns: string) => {
+      eq: (column: string, value: string) => {
+        eq: (column: string, value: string) => {
+          limit: (count: number) => Promise<{ data: unknown; error: { message: string } | null }>;
+        };
+      };
+    };
+  };
+}, tenantId: string, projectId: string): Promise<ProjectMoney> {
+  try {
+    const aggregated = await db.rpc("project_money_totals", { p_tenant_id: tenantId, p_project_id: projectId });
+    const row = Array.isArray(aggregated.data) ? aggregated.data[0] : aggregated.data;
+    if (!aggregated.error && row) return projectMoneyFromAggregate(row);
+  } catch {
+    // The aggregate is optional until the migration is applied.
+  }
+
+  const [estimates, changeOrders] = await Promise.all([
+    db.from("estimate_items").select("quantity,unit_cost").eq("tenant_id", tenantId).eq("project_id", projectId).limit(5000),
+    db.from("change_order_items").select("status,amount").eq("tenant_id", tenantId).eq("project_id", projectId).limit(5000),
+  ]);
+  return projectMoneyFromRows(
+    estimates.error ? [] : (estimates.data as Array<{ quantity: number | null; unit_cost: number | null }> ?? []),
+    changeOrders.error ? [] : (changeOrders.data as Array<{ status: string | null; amount: number | null }> ?? []),
+  );
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
@@ -34,7 +66,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const [
       takeoff_items, documents, schedule_tasks, contacts, daily_logs, generated_docs,
       procurement_total, procurement_pending, punch_total, punch_open, permits_total, permits_approved,
-      estimateRows, scheduleDone, rfisOpen, submittalsOpen, changeOrderRows,
+      money, scheduleDone, rfisOpen, submittalsOpen,
     ] = await Promise.all([
       countTable(db, "takeoff_items", tenantId, projectId),
       countTable(db, "documents", tenantId, projectId),
@@ -51,38 +83,28 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       countTable(db, "permit_items", tenantId, projectId),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       countTable(db, "permit_items", tenantId, projectId, (q: any) => q.eq("status", "approved")),
-      // estimate value
-      db.from("estimate_items" as never).select("quantity,unit_cost").eq("tenant_id", tenantId).eq("project_id", projectId).limit(5000),
+      loadProjectMoney(anyDb, tenantId, projectId),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       countTable(db, "schedule_tasks", tenantId, projectId, (q: any) => q.eq("status", "complete")),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       countTable(db, "rfi_items", tenantId, projectId, (q: any) => q.in("status", ["open", "answered"])),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       countTable(db, "submittal_items", tenantId, projectId, (q: any) => q.in("status", ["submitted", "under_review", "revise_resubmit", "rejected"])),
-      anyDb.from("change_order_items").select("status,amount").eq("tenant_id", tenantId).eq("project_id", projectId).limit(5000),
     ]);
 
-    let estimate_value = 0;
-    if (!estimateRows.error) {
-      for (const r of (estimateRows.data ?? []) as Array<{ quantity: number | null; unit_cost: number | null }>) {
-        if (r.quantity != null && r.unit_cost != null) estimate_value += r.quantity * r.unit_cost;
-      }
-    }
     const completion = schedule_tasks > 0 ? Math.round((scheduleDone / schedule_tasks) * 100) : 0;
-    const controls = getControlSummary({
-      rfis: [],
-      submittals: [],
-      changeOrders: changeOrderRows.error ? [] : (changeOrderRows.data ?? []),
-    });
 
     return NextResponse.json({
       takeoff_items, documents, schedule_tasks, contacts, daily_logs, generated_docs,
       procurement_total, procurement_pending, punch_total, punch_open,
       permits_total, permits_approved,
-      ...controls,
       rfis_open: rfisOpen,
       submittals_open: submittalsOpen,
-      estimate_value: Math.round(estimate_value),
+      change_orders_pending: money.change_orders_pending,
+      change_orders_approved: money.change_orders_approved,
+      pending_change_order_value: money.pending_change_order_value,
+      approved_change_order_value: money.approved_change_order_value,
+      estimate_value: money.estimate_value,
       completion,
     });
   } catch (err: unknown) {
