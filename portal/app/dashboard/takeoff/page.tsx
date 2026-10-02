@@ -23,6 +23,13 @@ interface Project {
   name: string;
 }
 
+interface PlanDocument {
+  id: string;
+  file_name: string;
+  project_id: string | null;
+  takeoff_status: string | null;
+}
+
 const REVIEW_STYLES: Record<string, string> = {
   suggested: "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
   reviewed: "bg-white/5 text-white/60 border-white/10",
@@ -54,6 +61,7 @@ function SkeletonRows() {
 export default function GlobalTakeoffPage() {
   const [items, setItems] = useState<TakeoffItem[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [openPlans, setOpenPlans] = useState<PlanDocument[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [projectFilter, setProjectFilter] = useState<string>("all");
@@ -64,14 +72,18 @@ export default function GlobalTakeoffPage() {
     Promise.all([
       fetch("/api/takeoff/items?limit=500").then((r) => r.json()),
       fetch("/api/projects").then((r) => r.json()),
+      fetch("/api/documents").then((r) => r.json()),
     ])
-      .then(([takeoffRes, projectsRes]: [unknown, unknown]) => {
+      .then(([takeoffRes, projectsRes, documentsRes]: [unknown, unknown, unknown]) => {
         const t = takeoffRes as { items?: TakeoffItem[]; error?: string };
         const p = projectsRes as { projects?: Project[]; error?: string };
+        const d = documentsRes as { documents?: PlanDocument[]; error?: string };
         if (t.error) throw new Error(t.error);
         if (p.error) throw new Error(p.error);
+        if (d.error) throw new Error(d.error);
         setItems(t.items ?? []);
         setProjects(p.projects ?? []);
+        setOpenPlans((d.documents ?? []).filter((doc) => doc.takeoff_status !== "done"));
         setLoading(false);
       })
       .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
@@ -116,6 +128,22 @@ export default function GlobalTakeoffPage() {
           <Info size={12} className="shrink-0" />
           <span>Read-only roll-up. Draw and edit takeoffs from a project&apos;s Takeoff tab.</span>
         </div>
+
+        {!loading && openPlans.length > 0 && (
+          <div className="mb-5 rounded-xl border border-white/8 bg-[#0E0F12] px-4 py-3">
+            <p className="text-[10px] uppercase tracking-widest text-white/40">Plans still in takeoff</p>
+            <ul className="mt-2 space-y-1">
+              {openPlans.map((doc) => (
+                <li key={doc.id} className="flex items-center justify-between gap-3 text-xs">
+                  <span className="truncate text-white/80">{doc.file_name}</span>
+                  <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-[#00D2FF]">
+                    {doc.takeoff_status ?? "pending"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {!loading && !error && items.length > 0 && (
           <div className="mb-5 flex flex-wrap items-center gap-3">
