@@ -1,5 +1,5 @@
 import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
-import { recordTakeoffHistory } from "@/lib/takeoff/history";
+import { recordTakeoffHistoryBatch } from "@/lib/takeoff/history";
 
 export interface CivilMirrorRow {
   label: string;
@@ -66,13 +66,18 @@ export async function mirrorCivilItemsToTakeoff(
     console.error(`[civil-mirror] takeoff_items insert failed for ${sourceTable}`, error);
     return;
   }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  for (const row of (inserted ?? []) as any[]) {
-    await recordTakeoffHistory(db, {
-      tenantId, projectId, takeoffItemId: row.id, action: "created",
-      actorUserId: actorUserId ?? null, after: { source: sourceTable },
-    });
-  }
+  await recordTakeoffHistoryBatch(
+    db,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ((inserted ?? []) as any[]).map((row) => ({
+      tenantId,
+      projectId,
+      takeoffItemId: row.id as string,
+      action: "created" as const,
+      actorUserId: actorUserId ?? null,
+      after: { source: sourceTable },
+    })),
+  );
   await syncTakeoffToEstimate(tenantId, projectId).catch((e) =>
     console.error(`[civil-mirror] estimate sync failed for ${sourceTable}`, e),
   );

@@ -89,12 +89,127 @@ interface TakeoffRow {
 // Pricing, review gate, and fingerprint live in _shared/estimate-sync-contract.ts
 // so this worker and portal/lib/estimating/auto-sync.ts cannot drift.
 
+/** Minimal port of portal getOrCreateDraftVersion — never writes to a locked version. */
+// deno-lint-ignore no-explicit-any
+async function getOrCreateDraftVersion(db: any, tenantId: string, projectId: string): Promise<string | null> {
+  const { data: estimate } = await db
+    .from("estimates")
+    .select("id, current_version_id")
+    .eq("tenant_id", tenantId).eq("project_id", projectId)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (!estimate) {
+    const { data: newEstimate, error } = await db
+      .from("estimates")
+      .insert({
+        tenant_id: tenantId, project_id: projectId,
+        estimate_number: `EST-${crypto.randomUUID().slice(0, 8)}`,
+        name: "Estimate", status: "draft",
+      })
+      .select("id").single();
+    if (error || !newEstimate) {
+      console.error("[page-takeoff-worker] create estimate failed", error);
+      return null;
+    }
+    const { data: version, error: vErr } = await db
+      .from("estimate_versions")
+      .insert({ estimate_id: newEstimate.id, version_number: 1, version_name: "Version 1", status: "draft" })
+      .select("id").single();
+    if (vErr || !version) {
+      console.error("[page-takeoff-worker] create version failed", vErr);
+      return null;
+    }
+    await db.from("estimates").update({ current_version_id: version.id }).eq("id", newEstimate.id);
+    return version.id as string;
+  }
+
+  if (estimate.current_version_id) {
+    const { data: current } = await db
+      .from("estimate_versions")
+      .select("id, status, version_number")
+      .eq("id", estimate.current_version_id)
+      .single();
+    if (current && (current.status === "draft" || current.status === "review")) {
+      return current.id as string;
+    }
+    // Locked — open a new draft seeded from the locked version's items.
+    const nextNum = (current?.version_number ?? 0) + 1;
+    const { data: newDraft, error: dErr } = await db
+      .from("estimate_versions")
+      .insert({
+        estimate_id: estimate.id,
+        version_number: nextNum,
+        version_name: `Version ${nextNum}`,
+        status: "draft",
+        notes: "Auto-created because the current version was locked.",
+      })
+      .select("id").single();
+    if (dErr || !newDraft) {
+      console.error("[page-takeoff-worker] create draft failed", dErr);
+      return null;
+    }
+    if (current?.id) {
+      const { data: sourceItems } = await db
+        .from("estimate_items")
+        .select("description,csi_code,cost_code,trade,item_type,quantity,uom,unit_cost,labor_cost,material_cost,equipment_cost,total_direct_cost,contingency,overhead,profit,total_price,unit_price,pricing_status,notes,source_takeoff_id,source_fingerprint,quantity_basis,drawing_ref,location_tag")
+        .eq("estimate_version_id", current.id);
+      if (sourceItems && sourceItems.length > 0) {
+        await db.from("estimate_items").insert(
+          sourceItems.map((it: Record<string, unknown>) => ({
+            ...it,
+            tenant_id: tenantId,
+            project_id: projectId,
+            estimate_version_id: newDraft.id,
+            created_by: "system_takeoff_sync",
+            updated_by: "system_takeoff_sync",
+          })),
+        );
+      }
+    }
+    await db.from("estimates").update({ current_version_id: newDraft.id }).eq("id", estimate.id);
+    return newDraft.id as string;
+  }
+
+  const { data: version, error: vErr } = await db
+    .from("estimate_versions")
+    .insert({ estimate_id: estimate.id, version_number: 1, version_name: "Version 1", status: "draft" })
+    .select("id").single();
+  if (vErr || !version) {
+    console.error("[page-takeoff-worker] create version failed", vErr);
+    return null;
+  }
+  await db.from("estimates").update({ current_version_id: version.id }).eq("id", estimate.id);
+  return version.id as string;
+}
+
 // deno-lint-ignore no-explicit-any
 async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: string): Promise<void> {
+  const versionId = await getOrCreateDraftVersion(db, tenantId, projectId);
+  if (!versionId) return;
+
+  const { data: versionMeta } = await db
+    .from("estimate_versions")
+    .select("estimate_id")
+    .eq("id", versionId)
+    .single();
+  const { data: versionIds } = versionMeta?.estimate_id
+    ? await db.from("estimate_versions").select("id").eq("estimate_id", versionMeta.estimate_id)
+    : { data: [{ id: versionId }] };
+
+  const estimateVersionIds = ((versionIds ?? []) as Array<{ id: string }>).map((v) => v.id);
+  if (estimateVersionIds.length === 0) estimateVersionIds.push(versionId);
+
   const [takeoff, existing, catalog] = await Promise.all([
-    db.from("takeoff_items").select("id,label,csi_code,division,quantity,unit,type,meta,review_status").eq("tenant_id", tenantId).eq("project_id", projectId),
-    db.from("estimate_items").select("source_takeoff_id,source_fingerprint").eq("tenant_id", tenantId).eq("project_id", projectId),
-    // Legacy per-tenant flat-rate catalog — fallback only, see below.
+    // SQL-filter non-approved rows — same gate as takeoff-import.ts.
+    db.from("takeoff_items")
+      .select("id,label,csi_code,division,quantity,unit,type,meta,review_status")
+      .eq("tenant_id", tenantId).eq("project_id", projectId)
+      .or("review_status.is.null,review_status.eq.approved"),
+    db.from("estimate_items")
+      .select("source_takeoff_id,source_fingerprint")
+      .in("estimate_version_id", estimateVersionIds),
     db.from("cost_catalog").select("csi_code,uom,unit_cost").eq("tenant_id", tenantId),
   ]);
   if (takeoff.error || existing.error || catalog.error) {
@@ -110,11 +225,6 @@ async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: strin
   }
 
   const costLookup = new Map<string, number>();
-
-  // Real pricing engine: cost_codes + tenant cost_overrides + national
-  // cost_prices. Mirrors (a simplified version of) lib/cost/resolver.ts's
-  // resolveCostsBatch — skips regional-price/actuals precedence for brevity
-  // in this Deno runtime, but tenant overrides still win over national.
   // deno-lint-ignore no-explicit-any
   const distinctCodes = [...new Set((takeoff.data ?? []).map((t: any) => t.csi_code).filter(Boolean))] as string[];
   if (distinctCodes.length > 0) {
@@ -141,8 +251,6 @@ async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: strin
     }
   }
 
-  // Legacy per-tenant flat-rate catalog — only fills codes the resolver
-  // above couldn't price.
   // deno-lint-ignore no-explicit-any
   for (const c of catalog.data ?? []) {
     const cost = c.unit_cost ?? null;
@@ -179,12 +287,16 @@ async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: strin
       : null;
     const aiVision = meta.extraction_method === "ai_vision";
     const allocated = allocateDirectCosts(t.quantity ?? 0, unitCost, null);
+    const totalDirect =
+      allocated.laborCost + allocated.materialCost + allocated.equipmentCost;
 
     rows.push({
       tenant_id: tenantId,
       project_id: projectId,
+      estimate_version_id: versionId,
       description: t.label ?? "Takeoff item",
       csi_code: t.csi_code ?? null,
+      cost_code: t.csi_code ?? null,
       trade: typeof meta.trade === "string" ? meta.trade : null,
       item_type: "material",
       quantity: t.quantity ?? null,
@@ -193,6 +305,9 @@ async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: strin
       labor_cost: allocated.laborCost,
       material_cost: allocated.materialCost,
       equipment_cost: allocated.equipmentCost,
+      total_direct_cost: totalDirect,
+      total_price: totalDirect,
+      unit_price: unitCost,
       source_takeoff_id: t.id,
       source_fingerprint: fp,
       quantity_basis: typeof meta.quantity_basis === "string" ? meta.quantity_basis : null,
@@ -203,6 +318,8 @@ async function syncTakeoffToEstimate(db: any, tenantId: string, projectId: strin
         aiVision ? "Review required: AI vision quantity" : null,
         drawingRef ? `Source: ${drawingRef}` : null,
       ].filter(Boolean).join(" | ") || "Source: takeoff import",
+      created_by: "system_takeoff_sync",
+      updated_by: "system_takeoff_sync",
     });
   }
 

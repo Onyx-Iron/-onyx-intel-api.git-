@@ -17,7 +17,8 @@ const EMBED_MODEL = "text-embedding-004";
 const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
 const PLANS_BUCKET = "plans-bucket";
 const ASYNC_SPLIT_BYTES = 3.5 * 1024 * 1024;
-const INGEST_BUDGET_MS = 240_000;
+/** Leave headroom under Vercel maxDuration=300 so we can write error status before kill. */
+const INGEST_BUDGET_MS = 270_000;
 
 function geminiApiKey(): string {
   return requireEnv("GEMINI_API_KEY");
@@ -128,21 +129,33 @@ async function deleteGeminiFile(geminiName: string): Promise<void> {
 }
 
 async function embedText(text: string): Promise<number[]> {
+  const values = await embedBatch([text]);
+  if (!values[0]) throw new Error("Gemini embedding returned empty values");
+  return values[0];
+}
+
+/** Batch-embed texts via Gemini batchEmbedContents (same path as page-processor). */
+async function embedBatch(inputs: string[]): Promise<Array<number[] | null>> {
+  if (inputs.length === 0) return [];
   const res = await fetchGemini(
-    `https://generativelanguage.googleapis.com/v1beta/models/${EMBED_MODEL}:embedContent?key=${geminiApiKey()}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${EMBED_MODEL}:batchEmbedContents?key=${geminiApiKey()}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        content: { parts: [{ text }] },
-        taskType: "RETRIEVAL_DOCUMENT",
+        requests: inputs.map((text) => ({
+          model: `models/${EMBED_MODEL}`,
+          content: { parts: [{ text }] },
+          taskType: "RETRIEVAL_DOCUMENT",
+          outputDimensionality: 768,
+        })),
       }),
     },
-    { label: "Gemini embedding", timeoutMs: 45_000 },
+    { label: "Gemini batch embedding", timeoutMs: 60_000 },
   );
-  if (!res.ok) await readGeminiError(res, "Gemini embedding");
-  const data = (await res.json()) as { embedding: { values: number[] } };
-  return data.embedding.values;
+  if (!res.ok) await readGeminiError(res, "Gemini batch embedding");
+  const data = (await res.json()) as { embeddings?: Array<{ values?: number[] }> };
+  return (data.embeddings ?? []).map((e) => (Array.isArray(e?.values) ? e.values : null));
 }
 
 export async function POST(
@@ -348,12 +361,22 @@ export async function POST(
       if (upsertErr) throw new Error(`Pages upsert failed: ${upsertErr.message}`);
     }
 
-    // 7. Chunk + embed (batches of 8 to stay within rate limits)
+    // 7. Chunk + embed via batchEmbedContents (one API call per page-batch,
+    // not one call per chunk). Caps request size to stay within rate limits.
     const projectId = doc.project_id as string;
     const chunkRows: TablesInsert<"chunks">[] = [];
 
-    const BATCH = 8;
-    for (let i = 0; i < pages.length; i += BATCH) {
+    type PendingChunk = { page_number: number; content: string };
+    const pending: PendingChunk[] = [];
+    for (const page of pages) {
+      const text = `${page.summary}\nKey terms: ${(page.key_terms ?? []).join(", ")}`;
+      for (const chunk of splitChunks(text)) {
+        pending.push({ page_number: page.page_number, content: chunk });
+      }
+    }
+
+    const EMBED_BATCH = 16;
+    for (let i = 0; i < pending.length; i += EMBED_BATCH) {
       if (Date.now() - startedAt > INGEST_BUDGET_MS) {
         if (chunkRows.length > 0) {
           const { error: partialErr } = await db.from("chunks").insert(chunkRows);
@@ -363,25 +386,32 @@ export async function POST(
         await markError(message, "ingest_timeout");
         return NextResponse.json({ error: message, partial_chunks: chunkRows.length }, { status: 504 });
       }
-      const batch = pages.slice(i, i + BATCH);
-      await Promise.all(
-        batch.map(async (page) => {
-          const text = `${page.summary}\nKey terms: ${(page.key_terms ?? []).join(", ")}`;
-          const chunks = splitChunks(text);
-          for (const chunk of chunks) {
-            const values = await embedText(chunk);
-            chunkRows.push({
-              document_id: docId,
-              tenant_id: resolvedTenantId,
-              project_id: projectId,
-              page_number: page.page_number,
-              content: chunk,
-              // pgvector accepts the vector literal string format
-              embedding: `[${values.join(",")}]` as unknown as never,
-            });
-          }
-        }),
-      );
+      const batch = pending.slice(i, i + EMBED_BATCH);
+      const vectors = await embedBatch(batch.map((c) => c.content));
+      for (let j = 0; j < batch.length; j++) {
+        const values = vectors[j];
+        if (!values) {
+          // Fall back to single-embed for any slot the batch response omitted.
+          const solo = await embedText(batch[j].content);
+          chunkRows.push({
+            document_id: docId,
+            tenant_id: resolvedTenantId,
+            project_id: projectId,
+            page_number: batch[j].page_number,
+            content: batch[j].content,
+            embedding: `[${solo.join(",")}]` as unknown as never,
+          });
+          continue;
+        }
+        chunkRows.push({
+          document_id: docId,
+          tenant_id: resolvedTenantId,
+          project_id: projectId,
+          page_number: batch[j].page_number,
+          content: batch[j].content,
+          embedding: `[${values.join(",")}]` as unknown as never,
+        });
+      }
     }
 
     if (chunkRows.length > 0) {

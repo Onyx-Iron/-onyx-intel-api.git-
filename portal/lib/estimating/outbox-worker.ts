@@ -77,23 +77,60 @@ export async function processOutboxBatch(
   }>;
   result.claimed = events.length;
 
+  // syncTakeoffToEstimate reloads the whole project — running it once per
+  // claimed upsert is O(N) identical full syncs when a canvas save enqueues
+  // many measurements for the same project. Dedupe upserts by project first.
+  type OutboxEvent = (typeof events)[number];
+  const upsertGroups = new Map<string, OutboxEvent[]>();
+  const deleteEvents: OutboxEvent[] = [];
   for (const event of events) {
+    if (event.event_type === "upsert") {
+      const key = `${event.tenant_id}:${event.project_id}`;
+      const group = upsertGroups.get(key);
+      if (group) group.push(event);
+      else upsertGroups.set(key, [event]);
+    } else {
+      deleteEvents.push(event);
+    }
+  }
+
+  async function markComplete(event: OutboxEvent): Promise<void> {
+    const { error } = await db.rpc("complete_outbox_event", { p_id: event.id });
+    if (error) throw error;
+    result.completed++;
+  }
+
+  async function markFailed(event: OutboxEvent, err: unknown): Promise<void> {
+    const message = err instanceof Error ? err.message : String(err);
+    const { error } = await db.rpc("fail_outbox_event", { p_id: event.id, p_error: message, p_max_attempts: MAX_ATTEMPTS });
+    if (error) console.error("[outbox-worker] fail_outbox_event itself failed", error);
+    if (event.attempts + 1 >= MAX_ATTEMPTS) result.deadLettered++;
+    else result.failed++;
+    result.errors.push({ id: event.id, error: message });
+  }
+
+  for (const group of upsertGroups.values()) {
+    const head = group[0];
     try {
-      if (event.event_type === "upsert") {
-        await syncFn(event.tenant_id, event.project_id);
-      } else {
-        await reconcileDeletedTakeoffEstimateItems(db, event.tenant_id, event.project_id, event.manual_takeoff_id);
+      await syncFn(head.tenant_id, head.project_id);
+      for (const event of group) {
+        try {
+          await markComplete(event);
+        } catch (err) {
+          await markFailed(event, err);
+        }
       }
-      const { error } = await db.rpc("complete_outbox_event", { p_id: event.id });
-      if (error) throw error;
-      result.completed++;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const { error } = await db.rpc("fail_outbox_event", { p_id: event.id, p_error: message, p_max_attempts: MAX_ATTEMPTS });
-      if (error) console.error("[outbox-worker] fail_outbox_event itself failed", error);
-      if (event.attempts + 1 >= MAX_ATTEMPTS) result.deadLettered++;
-      else result.failed++;
-      result.errors.push({ id: event.id, error: message });
+      for (const event of group) await markFailed(event, err);
+    }
+  }
+
+  for (const event of deleteEvents) {
+    try {
+      await reconcileDeletedTakeoffEstimateItems(db, event.tenant_id, event.project_id, event.manual_takeoff_id);
+      await markComplete(event);
+    } catch (err) {
+      await markFailed(event, err);
     }
   }
 

@@ -189,3 +189,5 @@ jobs:
           ALLOW_INTEGRATION_TESTS: "true"
           TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
           TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+
+# Retrigger marker

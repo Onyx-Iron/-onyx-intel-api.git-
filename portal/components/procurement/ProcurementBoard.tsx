@@ -230,9 +230,18 @@ function QuotePackagingWizard({ projectId, onClose, onDone }: { projectId: strin
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    fetch(`/api/estimate/matrix?project_id=${encodeURIComponent(projectId)}`, { cache: "no-store" })
+    // Authoritative estimate_items (matrix/project_estimates is deprecated).
+    fetch(`/api/estimate?project_id=${encodeURIComponent(projectId)}&limit=200`, { cache: "no-store" })
       .then((r) => r.json())
-      .then((d: { rows?: EstimateRow[] }) => setRows(d.rows ?? []))
+      .then((d: { items?: Array<{ id?: string; cost_code?: string | null; csi_code?: string | null; description?: string | null; quantity?: number | null; uom?: string | null }> }) => {
+        setRows((d.items ?? []).map((item) => ({
+          id: item.id,
+          cost_code: item.cost_code ?? item.csi_code ?? "",
+          description: item.description ?? "",
+          quantity: item.quantity ?? 0,
+          unit: item.uom ?? "",
+        })));
+      })
       .catch(() => setRows([]))
       .finally(() => setLoading(false));
   }, [projectId]);
