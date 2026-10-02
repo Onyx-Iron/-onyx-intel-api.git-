@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { logEvent } from "@/lib/activity";
+import { getOrCreateDraftVersion } from "@/lib/estimating/versioning";
+import { applyVersionPercentages, calculateItem } from "@/lib/estimating/calculations";
 
 export const runtime = "nodejs";
 
@@ -11,7 +13,7 @@ export const runtime = "nodejs";
  * Body: { decision: "approve" | "reject" | "modify", overrides?: { ... } }
  *
  * This is the ONLY route allowed to translate an agent finding into a
- * mutation to `project_estimates` (or into an outbound RFI record).
+ * mutation to `estimate_items` (or into an outbound RFI record).
  * Nothing else in the codebase writes to those tables on behalf of an
  * agent — the invariant "no autonomous mutation" is enforced HERE.
  */
@@ -71,18 +73,73 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       if (gaps.length === 0) {
         appliedResult.note = "no gaps to insert";
       } else {
-        const merged = gaps.map((g) => ({
-          ...g.item,
-          ...(overrides.item as Record<string, unknown> | undefined ?? {}),
-          tenant_id: tenantId,
-          project_id: audit.project_id,
-        }));
+        const { versionId } = await getOrCreateDraftVersion(anyDb, tenantId, audit.project_id, userId);
+        const { data: versionRow } = await anyDb
+          .from("estimate_versions")
+          .select("contingency_pct, overhead_pct, profit_pct")
+          .eq("id", versionId)
+          .single();
+        const pct = {
+          contingencyPct: versionRow?.contingency_pct ?? 0,
+          overheadPct: versionRow?.overhead_pct ?? 0,
+          profitPct: versionRow?.profit_pct ?? 0,
+        };
+
+        const payload = gaps.map((g) => {
+          const item = {
+            ...g.item,
+            ...(overrides.item as Record<string, unknown> | undefined ?? {}),
+          };
+          const quantity = Number(item.quantity ?? 0) || 0;
+          const laborUnit = Number(item.labor_unit ?? 0) || 0;
+          const materialUnit = Number(item.material_unit ?? 0) || 0;
+          const equipmentUnit = Number(item.equipment_unit ?? 0) || 0;
+          const laborCost = laborUnit * quantity;
+          const materialCost = materialUnit * quantity;
+          const equipmentCost = equipmentUnit * quantity;
+          const totalDirectCost = laborCost + materialCost + equipmentCost;
+          const unitCost = quantity > 0
+            ? (laborUnit + materialUnit + equipmentUnit)
+            : (laborUnit + materialUnit + equipmentUnit);
+          const { contingency, overhead, profit } = applyVersionPercentages(totalDirectCost, 0, pct);
+          const calc = calculateItem({
+            laborCost, materialCost, equipmentCost, quantity,
+            indirectCost: 0, contingency, overhead, profit,
+          });
+          const costCode = (item.cost_code as string | null | undefined) ?? null;
+          return {
+            tenant_id: tenantId,
+            project_id: audit.project_id,
+            estimate_version_id: versionId,
+            description: String(item.description ?? "Scope gap item"),
+            csi_code: costCode,
+            cost_code: costCode,
+            quantity,
+            uom: (item.unit as string | null | undefined) ?? null,
+            unit_cost: unitCost,
+            labor_cost: laborCost,
+            material_cost: materialCost,
+            equipment_cost: equipmentCost,
+            total_direct_cost: calc.totalDirectCost,
+            contingency,
+            overhead,
+            profit,
+            total_price: calc.totalPrice,
+            unit_price: calc.unitPrice,
+            pricing_status: unitCost > 0 ? "priced" : "unpriced",
+            notes: (item.notes as string | null | undefined) ?? null,
+            item_type: "material",
+            created_by: userId,
+            updated_by: userId,
+          };
+        });
+
         const { data: inserted, error: insErr } = await anyDb
-          .from("project_estimates")
-          .insert(merged)
+          .from("estimate_items")
+          .insert(payload)
           .select("id");
         if (insErr) throw new Error(`insert estimate: ${insErr.message}`);
-        appliedResult = { decision, inserted_ids: (inserted ?? []).map((r: { id: string }) => r.id), count: inserted?.length ?? 0 };
+        appliedResult = { decision, inserted_ids: (inserted ?? []).map((r: { id: string }) => r.id), count: inserted?.length ?? 0, version_id: versionId };
 
         void logEvent({
           projectId: audit.project_id,
@@ -92,7 +149,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           entityId: (inserted?.[0]?.id as string) ?? audit.project_id,
           action: "created",
           title: `Scope-gap approved: ${gaps.length} line${gaps.length === 1 ? "" : "s"} added to estimate`,
-          meta: { audit_id: id },
+          meta: { audit_id: id, version_id: versionId },
         });
       }
     }

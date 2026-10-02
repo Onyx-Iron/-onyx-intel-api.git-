@@ -2,11 +2,11 @@
  * Scope Gap Verification Agent
  * -------------------------------
  * Reads vision-extracted items for a page and compares them against the
- * project's current `project_estimates` ledger. Anything that appears in
+ * project's authoritative `estimate_items` ledger. Anything that appears in
  * the drawing notes but has no matching cost book line becomes a flagged
  * audit trail entry the human can approve into a real estimate line.
  *
- * Invariant: this file NEVER writes to `project_estimates` directly. It
+ * Invariant: this file NEVER writes to `estimate_items` directly. It
  * only produces `ai_agent_audit_trails` rows with `status =
  * 'pending_human_review'` and structured `recommendations` the approval
  * route consumes.
@@ -62,17 +62,19 @@ export async function runScopeGapAgent({ db, tenantId, projectId, pageId, docume
   const eligible = visionItems.filter((v) => v.confidence >= 0.6 && v.quantity > 0 && v.description.trim().length > 3);
   if (eligible.length === 0) return { inserted: 0 };
 
-  // Pull existing estimate lines' descriptions + cost codes for match testing.
+  // Pull existing estimate lines' descriptions + cost codes for match testing
+  // from the authoritative estimate_items table (project_estimates is deprecated).
   const { data: existing } = await db
-    .from("project_estimates")
-    .select("description, cost_code")
+    .from("estimate_items")
+    .select("description, cost_code, csi_code")
     .eq("tenant_id", tenantId)
     .eq("project_id", projectId);
 
   const seenCodes = new Set<string>();
   const seenDescs: string[] = [];
-  for (const r of (existing ?? []) as Array<{ description: string | null; cost_code: string | null }>) {
+  for (const r of (existing ?? []) as Array<{ description: string | null; cost_code: string | null; csi_code: string | null }>) {
     if (r.cost_code) seenCodes.add(r.cost_code);
+    if (r.csi_code) seenCodes.add(r.csi_code);
     if (r.description) seenDescs.push(r.description.toLowerCase());
   }
 

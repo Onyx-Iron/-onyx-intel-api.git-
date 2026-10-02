@@ -23,13 +23,7 @@ from typing import Any, AsyncGenerator
 import ijson                            # pip install ijson
 
 from takeoff_validator import (
-    AuditStatus,
-    DataIntegrityBreachException,
-    DeterministicOnyxParser,
-    IntegrityAuditReport,
     PipelineGuard,
-    SecureTakeoffRow,
-    ValidationErrorRecord,
     validate_rows_from_list,
 )
 
@@ -114,20 +108,19 @@ class CSITakeoffStreamProcessor:
             chunk = validated_rows[chunk_start : chunk_start + self.chunk_size]
             processed_count += len(chunk)
 
-            # Per-chunk mini-audit: validate just this chunk independently
-            # so the frontend can show progressive integrity status per batch.
-            chunk_valid, chunk_errors = self._audit_chunk(chunk)
-
+            # Rows were already validated at file level (Stage 2). Re-running
+            # SecureTakeoffRow per chunk doubled CPU for no signal in the
+            # normal path — emit the trusted chunk directly.
             yield self._ndjson({
                 "event":           "CHUNK_PROCESSED",
-                "rows":            chunk_valid,
+                "rows":            chunk,
                 "processed_count": processed_count,
                 "total_rows":      len(validated_rows),
                 "progress_pct":    round(processed_count / len(validated_rows) * 100, 1),
                 "chunk_index":     chunk_start // self.chunk_size,
                 "chunk_audit": {
-                    "valid":  len(chunk_valid),
-                    "errors": len(chunk_errors),
+                    "valid":  len(chunk),
+                    "errors": 0,
                 },
             })
 
@@ -167,37 +160,9 @@ class CSITakeoffStreamProcessor:
                 rows.append(item)
         return rows
 
-    def _audit_chunk(
-        self,
-        chunk: list[dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], list[ValidationErrorRecord]]:
-        """
-        Re-validate a chunk of already-validated rows through SecureTakeoffRow
-        to produce per-chunk error metadata for the frontend status bar.
-        In normal operation this always passes (rows were already validated at
-        file level); errors here indicate a memory corruption or code bug.
-        """
-        valid:  list[dict[str, Any]]    = []
-        errors: list[ValidationErrorRecord] = []
-        for i, row in enumerate(chunk):
-            try:
-                clean = SecureTakeoffRow(**row)
-                valid.append(clean.model_dump(mode="json"))
-            except Exception as exc:
-                errors.append(ValidationErrorRecord(
-                    row_index=i,
-                    provided_id=str(row.get("id", "UNKNOWN")),
-                    provided_qty=float(row.get("total_qty", 0) or 0),
-                    raw_row=row,
-                    validation_error=str(exc),
-                    breach_category="CHUNK_RE_VALIDATION_FAIL",
-                ))
-        return valid, errors
-
     @staticmethod
     def _ndjson(payload: dict[str, Any]) -> bytes:
         return (json.dumps(payload, default=str, ensure_ascii=False) + "\n").encode("utf-8")
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Utility

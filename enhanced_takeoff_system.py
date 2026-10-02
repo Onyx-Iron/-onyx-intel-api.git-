@@ -165,14 +165,21 @@ class EnhancedDeterministicParser:
         equipment_total = 0.0
         rows_missing_cost: list[dict[str, str]] = []
 
+        # One batch portal lookup for distinct CSI codes instead of N HTTP GETs.
+        cost_by_code = self._cost_db.bulk_lookup(
+            [
+                {
+                    "trade": row.trade,
+                    "cost_code": row.cost_code,
+                    "description": row.description,
+                }
+                for row in self._validated
+            ],
+            region=region,
+        )
+
         for row in self._validated:
-            # Look up historical cost
-            cost_record = self._cost_db.lookup(
-                trade=row.trade,
-                cost_code=row.cost_code,
-                description=row.description,
-                region=region,
-            )
+            cost_record = cost_by_code.get(row.cost_code)
 
             if cost_record:
                 # Calculate line total
@@ -340,6 +347,54 @@ class CostDatabase:
         # Sample cache always built — used as fallback if Supabase returns nothing
         self._sample_cache: dict[str, CostDatabaseReference] = self._build_sample_costs()
 
+    def _ref_from_supabase_result(
+        self,
+        result: dict,
+        trade: str,
+        cost_code: str,
+        description: str,
+        region: str,
+    ) -> CostDatabaseReference:
+        ref = CostDatabaseReference(
+            trade=result.get("trade") or trade,
+            cost_code=result.get("csi_code") or cost_code,
+            description=result.get("description") or description,
+            region=result.get("region") or region,
+            base_unit_cost=float(result["base_unit_cost"]),
+            labor_cost=float(result.get("labor_cost") or 0.0),
+            material_cost=float(result.get("material_cost") or 0.0),
+            equipment_cost=float(result.get("equipment_cost") or 0.0),
+            supplier_id=result.get("supplier_id"),
+            last_updated=result.get("last_updated") or datetime.now(timezone.utc).isoformat(),
+        )
+        try:
+            object.__setattr__(ref, "_meta", {
+                "confidence": result.get("confidence", 0.8),
+                "source_database": result.get("source_database", "supabase"),
+            })
+        except Exception:
+            pass
+        return ref
+
+    def _sample_lookup(
+        self,
+        trade: str,
+        cost_code: str,
+        description: str,
+        region: str,
+    ) -> CostDatabaseReference | None:
+        del description  # unused — sample key is cost_code + region
+        key = f"{cost_code}_{region}".lower()
+        if key in self._sample_cache:
+            return self._sample_cache[key]
+        if region != "US_EAST":
+            base_key = f"{cost_code}_US_EAST".lower()
+            if base_key in self._sample_cache:
+                return self._sample_cache[base_key]
+
+        logger.warning("No cost data for %s (%s) in %s", cost_code, trade, region)
+        return None
+
     def lookup(
         self,
         trade: str,
@@ -372,41 +427,70 @@ class CostDatabase:
                 result = None
 
             if result:
-                ref = CostDatabaseReference(
-                    trade=result.get("trade") or trade,
-                    cost_code=result.get("csi_code") or cost_code,
-                    description=result.get("description") or description,
-                    region=result.get("region") or region,
-                    base_unit_cost=float(result["base_unit_cost"]),
-                    labor_cost=float(result.get("labor_cost") or 0.0),
-                    material_cost=float(result.get("material_cost") or 0.0),
-                    equipment_cost=float(result.get("equipment_cost") or 0.0),
-                    supplier_id=result.get("supplier_id"),
-                    last_updated=result.get("last_updated") or datetime.now(timezone.utc).isoformat(),
+                return self._ref_from_supabase_result(result, trade, cost_code, description, region)
+
+        return self._sample_lookup(trade, cost_code, description, region)
+
+    def bulk_lookup(
+        self,
+        rows: list[dict[str, str]],
+        region: str = "US_EAST",
+        tenant_id: str | None = None,
+        state_code: str | None = None,
+        zip_code: str | None = None,
+    ) -> dict[str, CostDatabaseReference]:
+        """Resolve many CSI codes in one portal round-trip (supabase mode).
+
+        Returns a map of cost_code -> CostDatabaseReference for codes that
+        resolved. Missing codes are omitted (callers treat that as no match).
+        """
+        effective_tenant = tenant_id or self.tenant_id
+        effective_state = state_code or self.state_code
+        effective_zip = zip_code or self.zip_code
+
+        # Preserve first-seen trade/description per code for ref construction.
+        meta_by_code: dict[str, dict[str, str]] = {}
+        for row in rows:
+            code = (row.get("cost_code") or "").strip()
+            if not code or code in meta_by_code:
+                continue
+            meta_by_code[code] = {
+                "trade": row.get("trade") or "",
+                "description": row.get("description") or "",
+            }
+
+        out: dict[str, CostDatabaseReference] = {}
+        if not meta_by_code:
+            return out
+
+        if self.mode == "supabase":
+            try:
+                from cost_supabase import bulk_resolve
+                resolved = bulk_resolve(
+                    list(meta_by_code.keys()),
+                    effective_tenant,
+                    zip_code=effective_zip,
+                    state_code=effective_state,
                 )
-                # Attach confidence + source as attributes (outside pydantic model_config="ignore")
-                try:
-                    object.__setattr__(ref, "_meta", {
-                        "confidence": result.get("confidence", 0.8),
-                        "source_database": result.get("source_database", "supabase"),
-                    })
-                except Exception:
-                    pass
-                return ref
-            # fall through to sample fallback when Supabase has no entry
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Supabase bulk cost lookup failed: %s", exc)
+                resolved = {}
 
-        # "sample" mode (or supabase miss)
-        key = f"{cost_code}_{region}".lower()
-        if key in self._sample_cache:
-            return self._sample_cache[key]
-        if region != "US_EAST":
-            base_key = f"{cost_code}_US_EAST".lower()
-            if base_key in self._sample_cache:
-                return self._sample_cache[base_key]
+            for code, result in resolved.items():
+                meta = meta_by_code[code]
+                out[code] = self._ref_from_supabase_result(
+                    result, meta["trade"], code, meta["description"], region,
+                )
 
-        logger.warning("No cost data for %s (%s) in %s", cost_code, trade, region)
-        return None
-    
+        for code, meta in meta_by_code.items():
+            if code in out:
+                continue
+            sample = self._sample_lookup(meta["trade"], code, meta["description"], region)
+            if sample is not None:
+                out[code] = sample
+
+        return out
+
     def _build_sample_costs(self) -> dict[str, CostDatabaseReference]:
         """Sample cost database — fallback when Supabase is unreachable / unset."""
         

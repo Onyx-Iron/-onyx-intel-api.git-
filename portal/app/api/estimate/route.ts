@@ -27,7 +27,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     let query = db
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .from("estimate_items" as any)
-      .select("*", { count: "exact" })
+      .select(
+        "id,tenant_id,project_id,estimate_version_id,description,csi_code,cost_code,trade,item_type,quantity,uom,unit_cost,labor_cost,material_cost,equipment_cost,total_direct_cost,contingency,overhead,profit,total_price,unit_price,pricing_status,notes,source_takeoff_id,source_fingerprint,quantity_basis,drawing_ref,location_tag,sort_order,created_at,updated_at",
+        { count: "exact" },
+      )
       .eq("tenant_id", tenantId)
       .order("sort_order", { ascending: true })
       .order("created_at", { ascending: true });

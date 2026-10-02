@@ -41,12 +41,16 @@ export async function syncTakeoffToEstimate(
 
   const { estimateId, versionId } = await getOrCreateDraftVersion(anyDb, tenantId, projectId, "system_autosync");
 
-  const [takeoff, versionIds, catalog, project, versionRow] = await Promise.all([
+  // Filter non-approved rows in SQL — buildEstimateImportRows would drop
+  // them anyway, but pulling every suggested/reviewed/rejected AI row on
+  // large projects is wasted IO and cost-resolution work.
+  const [takeoff, versionIds, catalog, project, versionRow, pendingReviewCount] = await Promise.all([
     anyDb
       .from("takeoff_items")
       .select("id,label,csi_code,division,quantity,unit,type,meta,review_status")
       .eq("tenant_id", tenantId)
       .eq("project_id", projectId)
+      .or("review_status.is.null,review_status.eq.approved")
       .order("created_at", { ascending: true }),
     anyDb
       .from("estimate_versions")
@@ -67,6 +71,12 @@ export async function syncTakeoffToEstimate(
       .select("contingency_pct, overhead_pct, profit_pct")
       .eq("id", versionId)
       .single(),
+    anyDb
+      .from("takeoff_items")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", tenantId)
+      .eq("project_id", projectId)
+      .in("review_status", ["suggested", "reviewed", "rejected"]),
   ]);
 
   if (takeoff.error || catalog.error) {
@@ -132,7 +142,9 @@ export async function syncTakeoffToEstimate(
   const priced = result.rows.filter((row) => row.pricing_status === "priced").length;
   const unpriced = result.rows.filter((row) => row.pricing_status === "unpriced").length;
   const review = result.rows.filter((row) => row.pricing_status === "review").length;
-  const pendingReview = result.blockedByReview;
+  // Prefer the SQL count (covers rows we never fetched); fall back to the
+  // in-memory gate count if the head query failed.
+  const pendingReview = pendingReviewCount.count ?? result.blockedByReview;
 
   if (result.rows.length === 0) {
     return { imported: 0, skipped: result.skipped, priced, unpriced, review, pendingReview, estimateId, versionId };
