@@ -12,27 +12,27 @@ interface Step {
 
 const STEPS: Step[] = [
   {
-    title: "Welcome to OnyxIntel",
-    body: "Your AI command center for construction and real estate. Plans, daily logs, estimates, and reports — unified in one place built for builders.",
+    title: "Welcome to Onyx & Iron",
+    body: "Your AI command center for construction. Plans, takeoffs, estimates, field logs, and reports — unified around each project.",
+  },
+  {
+    title: "Pick an active project",
+    body: "Use Active project in the sidebar. Takeoff, Estimating, Reports, and AI all stay scoped to that project until you change it.",
+    targetId: "active-project-picker",
   },
   {
     title: "Create your first project",
-    body: "Spin up a project to anchor every plan, budget, and report. Click the New Project button to get started.",
+    body: "Spin up a project to anchor every plan, budget, and report. Open Projects and click New to get started.",
     targetId: "new-project-button",
   },
   {
     title: "Upload plans",
-    body: "Drop PDFs or images into Upload Plans. We extract scope, takeoffs, and key details automatically.",
+    body: "Inside a project, use Upload Plans. We extract scope, takeoffs, and key details automatically into shared project memory.",
     targetId: "upload-plans-pill",
   },
   {
-    title: "Generate AI reports",
-    body: "Use the Generate Document dropdown to produce daily logs, RFIs, change orders, and field reports in seconds.",
-    targetId: "generate-document-dropdown",
-  },
-  {
-    title: "All in one workspace",
-    body: "Switch between the five phases — Preconstruction, Construction, Closeout, Operations, and Intelligence — without ever leaving your project.",
+    title: "Work the project workspace",
+    body: "Jump between Overview, Documents, Takeoff, Estimate, Field, and Closeout. Tabs deep-link, and project memory carries facts between them.",
     targetId: "phase-tabs",
   },
 ];
