@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   buildEstimateImportRows,
   prepareTakeoffRowsForSave,
+  scaledDirectCosts,
   takeoffFingerprint,
 } from "./takeoff-import.ts";
 
@@ -333,5 +334,117 @@ describe("takeoff to estimate import quality", () => {
 
     assert.equal(result.rows.length, 1);
     assert.equal(result.blockedByReview, 0);
+  });
+
+  it("updates the draft line when the takeoff quantity changes and leaves other versions alone", () => {
+    const result = buildEstimateImportRows({
+      takeoffItems: [
+        {
+          id: "takeoff-1",
+          label: "4 inch sanitary pipe",
+          csi_code: "22-11-00",
+          quantity: 140,
+          unit: "LF",
+          meta: { drawing_ref: "P2.1", location_tag: "Building A" },
+        },
+      ],
+      existingEstimateItems: [
+        {
+          id: "estimate-approved",
+          estimate_version_id: "version-approved",
+          source_takeoff_id: "takeoff-1",
+          source_fingerprint: "4 inch sanitary pipe|22-11-00|125|lf|p2.1|building a",
+          quantity: 125,
+          unit_cost: 40,
+          labor_cost: 1000,
+          material_cost: 4000,
+          equipment_cost: 0,
+        },
+        {
+          id: "estimate-draft",
+          estimate_version_id: "version-draft",
+          source_takeoff_id: "takeoff-1",
+          source_fingerprint: "4 inch sanitary pipe|22-11-00|125|lf|p2.1|building a",
+          quantity: 125,
+          unit_cost: 40,
+          labor_cost: 1000,
+          material_cost: 4000,
+          equipment_cost: 0,
+        },
+      ],
+      costCatalog: [{ csi_code: "22-11-00", uom: "LF", unit_cost: 99 }],
+      projectId: "project-1",
+      targetVersionId: "version-draft",
+    });
+
+    assert.equal(result.rows.length, 0);
+    assert.equal(result.updates.length, 1);
+    assert.equal(result.updates[0].estimateItemId, "estimate-draft");
+    assert.equal(result.updates[0].row.quantity, 140);
+    assert.deepEqual(scaledDirectCosts(result.updates[0].existing, 140), {
+      unitCost: 40,
+      laborCost: 1120,
+      materialCost: 4480,
+      equipmentCost: 0,
+    });
+  });
+
+  it("inserts a draft line when quantity changed and the draft has no copy of an approved line", () => {
+    const result = buildEstimateImportRows({
+      takeoffItems: [
+        {
+          id: "takeoff-1",
+          label: "4 inch sanitary pipe",
+          csi_code: "22-11-00",
+          quantity: 140,
+          unit: "LF",
+        },
+      ],
+      existingEstimateItems: [
+        {
+          id: "estimate-approved",
+          estimate_version_id: "version-approved",
+          source_takeoff_id: "takeoff-1",
+          source_fingerprint: "4 inch sanitary pipe|22-11-00|125|lf||",
+          quantity: 125,
+        },
+      ],
+      costCatalog: [],
+      projectId: "project-1",
+      targetVersionId: "version-draft",
+    });
+
+    assert.equal(result.updates.length, 0);
+    assert.equal(result.rows.length, 1);
+    assert.equal(result.rows[0].quantity, 140);
+    assert.equal(result.rows[0].source_takeoff_id, "takeoff-1");
+  });
+
+  it("does not rewrite an approved line when no draft version is targeted", () => {
+    const result = buildEstimateImportRows({
+      takeoffItems: [
+        {
+          id: "takeoff-1",
+          label: "4 inch sanitary pipe",
+          csi_code: "22-11-00",
+          quantity: 140,
+          unit: "LF",
+        },
+      ],
+      existingEstimateItems: [
+        {
+          id: "estimate-approved",
+          estimate_version_id: "version-approved",
+          source_takeoff_id: "takeoff-1",
+          source_fingerprint: "4 inch sanitary pipe|22-11-00|125|lf||",
+        },
+      ],
+      costCatalog: [],
+      projectId: "project-1",
+    });
+
+    assert.equal(result.rows.length, 0);
+    assert.equal(result.updates.length, 0);
+    assert.equal(result.skipped, 1);
   });
 });
