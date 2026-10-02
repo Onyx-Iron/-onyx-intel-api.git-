@@ -17,7 +17,10 @@
 
 ## Invocation (no new queue system — STEP 14's explicit instruction)
 1. **Opportunistic, in-process**: `app/api/takeoff/canvas/manual/route.ts`'s POST/DELETE/PATCH each call `processOutboxBatch` right after their own atomic write commits — this is what makes retry actually happen today, without any external scheduler.
-2. **Server-to-server trigger**: `GET|POST /api/internal/outbox/process` — accepts `Authorization: Bearer $CRON_SECRET` (Vercel Cron every 5 minutes via `portal/vercel.json`) or `x-worker-secret: $INTERNAL_WORKER_SECRET` (optional pg_cron + pg_net). Set `CRON_SECRET` in Vercel env for the scheduled path to authorize.
+2. **Server-to-server trigger**: `GET|POST /api/internal/outbox/process` — accepts `Authorization: Bearer $CRON_SECRET` or `x-worker-secret: $INTERNAL_WORKER_SECRET`.
+   - **Vercel Cron** (`portal/vercel.json`): once daily at 06:00 UTC — Hobby-compatible safety net.
+   - **GitHub Actions** (`.github/workflows/outbox-redrive.yml`): every 15 minutes when repo secrets `OUTBOX_APP_URL` + `CRON_SECRET` are set.
+   - Optional pg_cron + pg_net for self-hosted setups.
 3. **User-facing manual retry**: `POST /api/internal/outbox/retry { id }` (Clerk-authenticated, tenant-scoped) for a `dead_letter` event — STEP 15's "retry failed sync where authorized."
 
 ## Known limitation

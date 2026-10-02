@@ -1,6 +1,6 @@
 # Remaining Risks
 
-1. **~~No scheduled outbox re-driver.~~ Mitigated.** Vercel Cron hits `GET/POST /api/internal/outbox/process` every 5 minutes (`portal/vercel.json`), authenticated via `CRON_SECRET` (or `INTERNAL_WORKER_SECRET` for pg_net callers). Ensure `CRON_SECRET` is set in the Vercel project env. Optional pg_cron + pg_net remains documented in `OUTBOX_WORKER.md` for self-hosted setups.
+1. **~~No scheduled outbox re-driver.~~ Mitigated.** Daily Vercel Cron (`portal/vercel.json`, Hobby-safe) plus optional GitHub Actions every 15 minutes (`.github/workflows/outbox-redrive.yml` when `OUTBOX_APP_URL` + `CRON_SECRET` secrets exist). Opportunistic inline processing after manual-takeoff writes remains the primary path.
 
 2. **~~No restore RPC.~~ Mitigated.** `restore_manual_takeoff_tx` (migration `20261002_restore_manual_takeoff_and_outbox_notes.sql`) clears `deleted_at`, recreates the takeoff_items mirror, writes a `restored` history action, and enqueues an `upsert` outbox event. Wired via `PUT /api/takeoff/canvas/manual` with `{ id }`.
 
