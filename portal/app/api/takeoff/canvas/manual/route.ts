@@ -230,24 +230,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     meta: { count: items.length, used_verified_calibration: anyVerifiedCalibrationUsed },
   });
 
-  // Opportunistic outbox processing (STEP 14): the business write already
-  // committed atomically via the RPC above; this claims and processes
-  // whatever's actually pending right now (this request's own events, plus
-  // any earlier ones still waiting) through the SAME claim/complete/fail
-  // worker path a scheduled cron would use — see
-  // lib/estimating/outbox-worker.ts and OUTBOX_WORKER.md. A failure here
-  // leaves the event `pending` with a backoff delay (or `dead_letter` after
-  // repeated failures) rather than being silently dropped or retried
-  // instantly in a hot loop.
+  // Opportunistic outbox processing (STEP 14): fire-and-forget so the HTTP
+  // response is not blocked on claim/complete. Failures leave events
+  // `pending` with backoff (or `dead_letter`) for the cron path — see
+  // lib/estimating/outbox-worker.ts and OUTBOX_WORKER.md.
   void projectIdsNeedingSync;
-  let workerResult: Awaited<ReturnType<typeof processOutboxBatch>> | null = null;
-  try {
-    workerResult = await processOutboxBatch(anyDb, `inline-post-${Date.now()}`, 20);
-  } catch (err) {
+  void processOutboxBatch(anyDb, `inline-post-${Date.now()}`, 20).catch((err) => {
     console.error("[canvas/manual] inline outbox processing failed", err);
-  }
+  });
 
-  return NextResponse.json({ ok: true, items: results, outbox_processed: workerResult });
+  return NextResponse.json({ ok: true, items: results, outbox_processed: "async" });
 }
 
 export async function DELETE(req: NextRequest): Promise<NextResponse> {
@@ -274,15 +266,11 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
 
   const row = data as { already_deleted: boolean; manual_takeoff: { id: string; project_id: string } };
 
-  // Opportunistic outbox processing (STEP 14) — same worker path POST uses.
-  let workerResult: Awaited<ReturnType<typeof processOutboxBatch>> | null = null;
-  try {
-    workerResult = await processOutboxBatch(anyDb, `inline-delete-${Date.now()}`, 20);
-  } catch (err) {
+  void processOutboxBatch(anyDb, `inline-delete-${Date.now()}`, 20).catch((err) => {
     console.error("[canvas/manual] delete outbox processing failed", err);
-  }
+  });
 
-  return NextResponse.json({ ok: true, already_deleted: row.already_deleted, outbox_processed: workerResult });
+  return NextResponse.json({ ok: true, already_deleted: row.already_deleted, outbox_processed: "async" });
 }
 
 /**
@@ -317,19 +305,16 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     mirror_takeoff_item_id: string | null;
   };
 
-  let workerResult: Awaited<ReturnType<typeof processOutboxBatch>> | null = null;
-  try {
-    workerResult = await processOutboxBatch(anyDb, `inline-restore-${Date.now()}`, 20);
-  } catch (err) {
+  void processOutboxBatch(anyDb, `inline-restore-${Date.now()}`, 20).catch((err) => {
     console.error("[canvas/manual] restore outbox processing failed", err);
-  }
+  });
 
   return NextResponse.json({
     ok: true,
     already_active: row.already_active,
     item: row.manual_takeoff,
     mirror_takeoff_item_id: row.mirror_takeoff_item_id,
-    outbox_processed: workerResult,
+    outbox_processed: "async",
   });
 }
 
@@ -417,16 +402,13 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ conflict: true, server_state: row.manual_takeoff }, { status: 409 });
   }
 
-  let workerResult: Awaited<ReturnType<typeof processOutboxBatch>> | null = null;
-  try {
-    workerResult = await processOutboxBatch(anyDb, `inline-patch-${Date.now()}`, 20);
-  } catch (err) {
+  void processOutboxBatch(anyDb, `inline-patch-${Date.now()}`, 20).catch((err) => {
     console.error("[canvas/manual] patch outbox processing failed", err);
-  }
+  });
 
   return NextResponse.json({
     ok: true, conflict: false, manual_takeoff: row.manual_takeoff,
     quantity, calculation_formula_version: calculationFormulaVersion, discrepancy_warning: discrepancyWarning,
-    outbox_processed: workerResult,
+    outbox_processed: "async",
   });
 }

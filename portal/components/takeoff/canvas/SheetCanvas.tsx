@@ -16,8 +16,31 @@ import {
   DEFAULT_SNAP_THRESHOLD_PX,
   type VectorPoint,
 } from "@/lib/takeoff/canvas/vector-snap";
-import { takeoffQueryKeys, useSheetCalibration } from "@/lib/takeoff/queries";
+import { boxFromXY, cullByView, type Box } from "@/lib/takeoff/canvas/visible-shapes";
+import { takeoffQueryKeys, useSheetCalibration, type CadVectorRecord } from "@/lib/takeoff/queries";
 import type { SnapResult } from "@/lib/takeoff/canvas/snap-algorithm";
+
+const OVERLAY_VIEW_PAD_PX = 48;
+
+const CAD_VECTORS_STALE_MS = Infinity;
+
+function snapTargetsEqual(
+  a: { point: VectorPoint; distance: number } | null,
+  b: { point: VectorPoint; distance: number } | null,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.point.x === b.point.x && a.point.y === b.point.y && a.distance === b.distance;
+}
+
+function snapPointsEqual(a: VectorPoint[], b: VectorPoint[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].x !== b[i].x || a[i].y !== b[i].y) return false;
+  }
+  return true;
+}
 
 // Coordinate-space tag carried alongside each committed item (professional-
 // manual-takeoff milestone, PERMANENT RULE 1/2). 'page_space' points are
@@ -180,7 +203,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const { data: calibration = null } = useSheetCalibration(pageId);
   const wrapRef   = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlaySvgRef = useRef<SVGSVGElement>(null);
   const priorCanvasRef = useRef<HTMLCanvasElement>(null);
+  const [overlayView, setOverlayView] = useState<Box | null>(null);
   const [priorUrl, setPriorUrl] = useState<string | null>(null);
   const [priorLabel, setPriorLabel] = useState<string | null>(null);
   const [showPrior, setShowPrior] = useState(false);
@@ -244,13 +269,33 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       const { id, result } = event.data;
       if (id !== snapRequestIdRef.current) return;
       latestSnapRef.current = result;
-      setSnapTarget(result.snapped ? { point: result.point, distance: result.distance } : null);
+      const next = result.snapped ? { point: result.point, distance: result.distance } : null;
+      // Skip setState when the crosshair hasn't moved to a new vertex —
+      // otherwise every mousemove re-renders the whole SheetCanvas tree.
+      setSnapTarget((prev) => (snapTargetsEqual(prev, next) ? prev : next));
     };
     snapWorkerRef.current = worker;
     return () => {
       worker.terminate();
       snapWorkerRef.current = null;
     };
+  }, []);
+
+  const fetchCadVectors = useCallback(async (): Promise<CadVectorRecord[]> => {
+    return queryClient.fetchQuery({
+      queryKey: takeoffQueryKeys.cadVectors(pageId),
+      queryFn: async (): Promise<CadVectorRecord[]> => {
+        const res = await fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`);
+        if (!res.ok) throw new Error(`vectors ${res.status}`);
+        const data = (await res.json()) as { vectors?: CadVectorRecord[] };
+        return Array.isArray(data.vectors) ? data.vectors : [];
+      },
+      staleTime: CAD_VECTORS_STALE_MS,
+    });
+  }, [pageId, queryClient]);
+
+  const onSnapPointsChange = useCallback((points: VectorPoint[]) => {
+    setSnapPoints((prev) => (snapPointsEqual(prev, points) ? prev : points));
   }, []);
 
   useEffect(() => {
@@ -502,9 +547,14 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     let finished = false;
     (async () => {
       try {
-        const check = await fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
-        const existing = check.ok ? (await check.json() as { vectors?: unknown[] }) : { vectors: [] };
-        if ((existing.vectors ?? []).length > 0 || cancelled) {
+        // Share the React Query cache with CADVectorLayer — no duplicate GET.
+        let existing: CadVectorRecord[] = [];
+        try {
+          existing = await fetchCadVectors();
+        } catch {
+          existing = [];
+        }
+        if (existing.length > 0 || cancelled) {
           finished = true;
           return;
         }
@@ -523,6 +573,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ page_id: pageId, vectors }),
           });
+          queryClient.setQueryData(takeoffQueryKeys.cadVectors(pageId), vectors);
           window.setTimeout(() => window.dispatchEvent(new CustomEvent("onyx:cad-vectors-refresh", { detail: { pageId } })), 300);
         }
         finished = true;
@@ -535,7 +586,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       cancelled = true;
       if (!finished) vectorExtractKey.current = null;
     };
-  }, [pdfUrl, pageId, tool]);
+  }, [pdfUrl, pageId, tool, fetchCadVectors, queryClient]);
 
   // ── Coordinate conversion (SVG uses canvas pixel space directly) ──────────
   const toLocal = useCallback((clientX: number, clientY: number, svgEl: SVGSVGElement): Pt => {
@@ -560,7 +611,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
   const onCanvasMouseMove: React.MouseEventHandler<SVGSVGElement> = useCallback((e) => {
     if (!SNAP_TOOLS.has(tool) || snapPoints.length === 0) {
-      setSnapTarget(null);
+      setSnapTarget((prev) => (prev == null ? prev : null));
       latestSnapRef.current = null;
       return;
     }
@@ -593,6 +644,90 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
     return calibration?.scale_ratio ?? 1;
   }, [calibration, renderScale]);
+
+  // Track the SVG portion intersecting the window so measurement overlays can
+  // skip off-screen DOM nodes (same approach as CADVectorLayer).
+  useEffect(() => {
+    if (!renderSize) return;
+    const update = () => {
+      const el = overlaySvgRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const sx = renderSize.w / rect.width;
+      const sy = renderSize.h / rect.height;
+      const left = Math.max(0, -rect.left);
+      const top = Math.max(0, -rect.top);
+      const right = Math.min(rect.width, window.innerWidth - rect.left);
+      const bottom = Math.min(rect.height, window.innerHeight - rect.top);
+      setOverlayView({
+        minX: left * sx,
+        minY: top * sy,
+        maxX: Math.max(left, right) * sx,
+        maxY: Math.max(top, bottom) * sy,
+      });
+    };
+    update();
+    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+    };
+  }, [renderSize]);
+
+  const overlayKeepKeys = useMemo(() => {
+    const keys = new Set<string>();
+    if (selectedKey) keys.add(selectedKey);
+    if (dragState?.key) keys.add(dragState.key);
+    for (const s of shapes) if (!s.saved) keys.add(s.key);
+    for (const u of utilityRuns) if (!u.saved) keys.add(u.key);
+    for (const w of wallRuns) if (!w.saved) keys.add(w.key);
+    for (const n of topoNodes) if (!n.saved) keys.add(n.key);
+    for (const a of areaBounds) if (!a.saved) keys.add(a.key);
+    return keys;
+  }, [selectedKey, dragState, shapes, utilityRuns, wallRuns, topoNodes, areaBounds]);
+
+  const visibleShapes = useMemo(() => {
+    const annotated = shapes.map((s) => ({
+      ...s,
+      bbox: boxFromXY(toDisplayPoints(s.points, s.coordinateSpace)),
+    }));
+    return cullByView(annotated, overlayView, { pad: OVERLAY_VIEW_PAD_PX, keepKeys: overlayKeepKeys });
+  }, [shapes, overlayView, overlayKeepKeys, toDisplayPoints]);
+
+  const visibleUtilityRuns = useMemo(() => {
+    const annotated = utilityRuns.map((u) => ({
+      ...u,
+      bbox: boxFromXY(toDisplayPoints(u.points, u.coordinateSpace)),
+    }));
+    return cullByView(annotated, overlayView, { pad: OVERLAY_VIEW_PAD_PX, keepKeys: overlayKeepKeys });
+  }, [utilityRuns, overlayView, overlayKeepKeys, toDisplayPoints]);
+
+  const visibleWallRuns = useMemo(() => {
+    const annotated = wallRuns.map((w) => ({
+      ...w,
+      bbox: boxFromXY(toDisplayPoints(w.points, w.coordinateSpace)),
+    }));
+    return cullByView(annotated, overlayView, { pad: OVERLAY_VIEW_PAD_PX, keepKeys: overlayKeepKeys });
+  }, [wallRuns, overlayView, overlayKeepKeys, toDisplayPoints]);
+
+  const visibleTopoNodes = useMemo(() => {
+    const annotated = topoNodes.map((n) => ({
+      ...n,
+      bbox: boxFromXY(toDisplayPoints(n.points, n.coordinateSpace)),
+    }));
+    return cullByView(annotated, overlayView, { pad: OVERLAY_VIEW_PAD_PX, keepKeys: overlayKeepKeys });
+  }, [topoNodes, overlayView, overlayKeepKeys, toDisplayPoints]);
+
+  const visibleAreaBounds = useMemo(() => {
+    const annotated = areaBounds.map((a) => ({
+      ...a,
+      bbox: boxFromXY(toDisplayPoints(a.points, a.coordinateSpace)),
+    }));
+    return cullByView(annotated, overlayView, { pad: OVERLAY_VIEW_PAD_PX, keepKeys: overlayKeepKeys });
+  }, [areaBounds, overlayView, overlayKeepKeys, toDisplayPoints]);
+
   const pixelDistance = (a: Pt, b: Pt) => Math.hypot(b.x - a.x, b.y - a.y);
   const totalLen = (pts: Pt[]) => {
     let s = 0;
@@ -618,7 +753,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     return 0;
   }, [draftPoints, tool, scale]);
 
-  const onCanvasMouseLeave = () => setSnapTarget(null);
+  const onCanvasMouseLeave = () => setSnapTarget((prev) => (prev == null ? prev : null));
 
   // ── Click handling ────────────────────────────────────────────────────────
   const onCanvasClick: React.MouseEventHandler<SVGSVGElement> = (e) => {
@@ -945,10 +1080,13 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   async function runAutoTopoMatch() {
     setAutoTopoStatus("Scanning CAD layers…");
     try {
-      const res = await fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
-      if (!res.ok) { setAutoTopoStatus("Could not load vectors."); return; }
-      const data = await res.json() as { vectors?: Array<{ layer: string; type: string; points: Array<[number, number]>; text_tag?: string }> };
-      const vectors = data.vectors ?? [];
+      let vectors: CadVectorRecord[] = [];
+      try {
+        vectors = await fetchCadVectors();
+      } catch {
+        setAutoTopoStatus("Could not load vectors.");
+        return;
+      }
       const matches = vectors.filter((v) => TOPO_LAYER_RE.test(v.layer));
       let matched = 0;
       const nodes: TopoNode[] = [];
@@ -1490,6 +1628,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           />
           {renderSize && (
             <svg
+              ref={overlaySvgRef}
               width={renderSize.w}
               height={renderSize.h}
               viewBox={`0 0 ${renderSize.w} ${renderSize.h}`}
@@ -1499,8 +1638,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               onMouseLeave={onCanvasMouseLeave}
               onDoubleClick={finishDraft}
             >
-              {/* Committed shapes */}
-              {shapes.map((s) => {
+              {/* Committed shapes (viewport-culled) */}
+              {visibleShapes.map((s) => {
                 const isSel = s.key === selectedKey;
                 const color = s.tool === "count" ? "#CCFF00" : s.tool === "length" ? "#00D2FF" : "#f97316";
                 const sPts = toDisplayPoints(s.points, s.coordinateSpace);
@@ -1530,8 +1669,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 );
               })}
 
-              {/* Committed utility pipe runs */}
-              {utilityRuns.map((u) => {
+              {/* Committed utility pipe runs (viewport-culled) */}
+              {visibleUtilityRuns.map((u) => {
                 const uPts = toDisplayPoints(u.points, u.coordinateSpace);
                 const d = uPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
                 return (
@@ -1544,7 +1683,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 );
               })}
 
-              {wallRuns.map((w) => {
+              {visibleWallRuns.map((w) => {
                 const wPts = toDisplayPoints(w.points, w.coordinateSpace);
                 const d = wPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
                 return (
@@ -1573,8 +1712,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 </g>
               )}
 
-              {/* Committed topo nodes (contours + spot elevations) */}
-              {topoNodes.map((n) => {
+              {/* Committed topo nodes (contours + spot elevations, viewport-culled) */}
+              {visibleTopoNodes.map((n) => {
                 const nPts = toDisplayPoints(n.points, n.coordinateSpace);
                 if (n.node_type === "spot_elevation") {
                   const p = nPts[0];
@@ -1610,8 +1749,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 </g>
               )}
 
-              {/* Committed area bounds polygons */}
-              {areaBounds.map((a) => {
+              {/* Committed area bounds polygons (viewport-culled) */}
+              {visibleAreaBounds.map((a) => {
                 const d = toDisplayPoints(a.points, a.coordinateSpace).map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z";
                 return (
                   <g key={a.key}>
@@ -1709,7 +1848,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             canvasSize={renderSize}
             scaleRatio={scale}
             onVectorsLoaded={setVectorDescriptions}
-            onSnapPointsChange={setSnapPoints}
+            onSnapPointsChange={onSnapPointsChange}
             onCommitted={(m) => {
               // Mirror an approved CAD vector into the local shapes dock so
               // estimators see it immediately without needing to reload.

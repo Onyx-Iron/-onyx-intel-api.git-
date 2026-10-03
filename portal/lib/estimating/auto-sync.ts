@@ -161,7 +161,10 @@ export async function syncTakeoffToEstimate(
   const payload = result.rows.map((row) => linePayload(tenantId, versionId, row, null, categoryBreakdownByCsi, pct));
 
   let updated = 0;
-  const UPDATE_BATCH = 8;
+  // Parallel PATCH fan-out — PostgREST has no multi-row heterogeneous update,
+  // so concurrency is the lever. 16 keeps under typical connection budgets
+  // while cutting wall-clock vs serial / smaller batches on large resyncs.
+  const UPDATE_BATCH = 16;
   for (let i = 0; i < result.updates.length; i += UPDATE_BATCH) {
     const batch = result.updates.slice(i, i + UPDATE_BATCH);
     const counts = await Promise.all(batch.map(async (change) => {
@@ -186,12 +189,17 @@ export async function syncTakeoffToEstimate(
 
   let imported = 0;
   if (payload.length > 0) {
-    const { data, error } = await anyDb.from("estimate_items").insert(payload).select("id");
-    if (error) {
-      console.error("[syncTakeoffToEstimate] insert failed", error);
-      return { imported: 0, updated, skipped: result.skipped, priced: 0, unpriced: 0, review: 0, pendingReview, estimateId, versionId };
+    // Chunk inserts so a large first-import does not blow request body limits.
+    const INSERT_BATCH = 100;
+    for (let i = 0; i < payload.length; i += INSERT_BATCH) {
+      const chunk = payload.slice(i, i + INSERT_BATCH);
+      const { data, error } = await anyDb.from("estimate_items").insert(chunk).select("id");
+      if (error) {
+        console.error("[syncTakeoffToEstimate] insert failed", error);
+        return { imported, updated, skipped: result.skipped, priced: 0, unpriced: 0, review: 0, pendingReview, estimateId, versionId };
+      }
+      imported += data?.length ?? 0;
     }
-    imported = data?.length ?? 0;
   }
 
   return { imported, updated, skipped: result.skipped, priced, unpriced, review, pendingReview, estimateId, versionId };
