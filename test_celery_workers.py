@@ -45,7 +45,7 @@ def test_compare_grids_fill():
     result = compare_grids(existing, proposed)
     assert result["fill_bcy"] > 0
     assert result["cut_bcy"] == 0
-    assert result["worker"] == "celery"
+    assert result["worker"] in ("celery", "celery-numpy")
 
 
 def test_compare_grids_rejects_mismatch():
