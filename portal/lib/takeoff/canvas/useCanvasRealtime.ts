@@ -38,6 +38,8 @@ export function useCanvasRealtime({
   const [connectionStatus, setConnectionStatus] = useState<
     Exclude<CanvasRealtimeStatus, "off">
   >("connecting");
+  // Bumped on channel CLOSE/ERROR so the effect tears down and resubscribes.
+  const [reconnectNonce, setReconnectNonce] = useState(0);
   const channelRef = useRef<RealtimeChannel | null>(null);
   const onRemoteRef = useRef(onRemoteEvent);
   // Stable per-mount presence key — lazy useState avoids impure useMemo/refs-during-render.
@@ -93,6 +95,7 @@ export function useCanvasRealtime({
 
     let cancelled = false;
     let channel: RealtimeChannel | null = null;
+    let reconnectTimer: number | null = null;
 
     try {
       const supabase = createBrowserSupabaseClient();
@@ -132,7 +135,15 @@ export function useCanvasRealtime({
             subStatus === "TIMED_OUT" ||
             subStatus === "CLOSED"
           ) {
+            // Drop the dead channel so broadcast/trackCursor no-op instead of
+            // silently sending into a closed socket; reconnect after a short backoff.
+            channelRef.current = null;
             setConnectionStatus("error");
+            if (reconnectTimer != null) window.clearTimeout(reconnectTimer);
+            reconnectTimer = window.setTimeout(() => {
+              if (cancelled) return;
+              setReconnectNonce((n) => n + 1);
+            }, 2000) as unknown as number;
           }
         });
     } catch {
@@ -141,6 +152,7 @@ export function useCanvasRealtime({
 
     return () => {
       cancelled = true;
+      if (reconnectTimer != null) window.clearTimeout(reconnectTimer);
       channelRef.current = null;
       if (channel) {
         void createBrowserSupabaseClient().removeChannel(channel);
@@ -148,7 +160,7 @@ export function useCanvasRealtime({
       setPeers([]);
       setConnectionStatus("connecting");
     };
-  }, [active, color, displayName, pageId, projectId, senderId]);
+  }, [active, color, displayName, pageId, projectId, reconnectNonce, senderId]);
 
   return { peers, status, senderId, color, broadcast, trackCursor };
 }

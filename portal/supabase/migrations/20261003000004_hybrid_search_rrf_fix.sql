@@ -42,18 +42,27 @@ BEGIN
     ),
     keyword_ranked AS (
       SELECT
-        dc.id,
-        dc.content,
-        dc.document_id,
-        dc.page_number,
-        ROW_NUMBER() OVER (
-          ORDER BY ts_rank_cd(dc.fts, websearch_to_tsquery('english', query_text)) DESC
-        ) AS kw_rank
-      FROM document_chunks dc
-      INNER JOIN documents d ON d.id = dc.document_id
-      WHERE dc.tenant_id = match_tenant_id
-        AND d.project_id = match_project_id
-        AND dc.fts @@ websearch_to_tsquery('english', query_text)
+        ranked.id,
+        ranked.content,
+        ranked.document_id,
+        ranked.page_number,
+        ranked.kw_rank
+      FROM (
+        SELECT
+          dc.id,
+          dc.content,
+          dc.document_id,
+          dc.page_number,
+          ROW_NUMBER() OVER (
+            ORDER BY ts_rank_cd(dc.fts, websearch_to_tsquery('english', query_text)) DESC
+          ) AS kw_rank
+        FROM document_chunks dc
+        INNER JOIN documents d ON d.id = dc.document_id
+        WHERE dc.tenant_id = match_tenant_id
+          AND d.project_id = match_project_id
+          AND dc.fts @@ websearch_to_tsquery('english', query_text)
+      ) ranked
+      ORDER BY ranked.kw_rank
       LIMIT match_count * 4
     )
     SELECT
@@ -152,16 +161,26 @@ BEGIN
     ),
     keyword_ranked AS (
       SELECT
-        keyword_corpus.id,
-        keyword_corpus.src,
-        keyword_corpus.content,
-        keyword_corpus.document_id,
-        keyword_corpus.page_number,
-        ROW_NUMBER() OVER (
-          ORDER BY ts_rank_cd(keyword_corpus.fts, websearch_to_tsquery('english', query_text)) DESC
-        ) AS kw_rank
-      FROM keyword_corpus
-      WHERE keyword_corpus.fts @@ websearch_to_tsquery('english', query_text)
+        ranked.id,
+        ranked.src,
+        ranked.content,
+        ranked.document_id,
+        ranked.page_number,
+        ranked.kw_rank
+      FROM (
+        SELECT
+          keyword_corpus.id,
+          keyword_corpus.src,
+          keyword_corpus.content,
+          keyword_corpus.document_id,
+          keyword_corpus.page_number,
+          ROW_NUMBER() OVER (
+            ORDER BY ts_rank_cd(keyword_corpus.fts, websearch_to_tsquery('english', query_text)) DESC
+          ) AS kw_rank
+        FROM keyword_corpus
+        WHERE keyword_corpus.fts @@ websearch_to_tsquery('english', query_text)
+      ) ranked
+      ORDER BY ranked.kw_rank
       LIMIT match_count * 4
     )
     SELECT
@@ -223,23 +242,37 @@ SELECT cron.schedule(
   'estimate-sync-outbox-minutely',
   '* * * * *',
   $cron$
+  -- Prefer cron_secret (Bearer, matches Vercel Cron). Fall back to legacy
+  -- internal_worker_secret (x-worker-secret). No secret → no HTTP call.
   SELECT net.http_post(
     url := 'https://app.onyx-iron.com/api/internal/outbox/process',
-    headers := jsonb_build_object(
-      'Content-Type', 'application/json',
-      'Authorization', 'Bearer ' || secret
-    ),
+    headers := CASE
+      WHEN auth_mode = 'bearer' THEN jsonb_build_object(
+        'Content-Type', 'application/json',
+        'Authorization', 'Bearer ' || secret
+      )
+      ELSE jsonb_build_object(
+        'Content-Type', 'application/json',
+        'x-worker-secret', secret
+      )
+    END,
     body := '{"batch_size":20}'::jsonb
   ) AS request_id
   FROM (
-    SELECT decrypted_secret AS secret
+    SELECT decrypted_secret AS secret, 'bearer'::text AS auth_mode, 1 AS pref
     FROM vault.decrypted_secrets
     WHERE name = 'cron_secret'
       AND decrypted_secret IS NOT NULL
       AND length(trim(decrypted_secret)) > 0
+    UNION ALL
+    SELECT decrypted_secret AS secret, 'worker'::text AS auth_mode, 2 AS pref
+    FROM vault.decrypted_secrets
+    WHERE name = 'internal_worker_secret'
+      AND decrypted_secret IS NOT NULL
+      AND length(trim(decrypted_secret)) > 0
+    ORDER BY pref
     LIMIT 1
   ) vault_secret;
-  -- No row → no HTTP call. Avoids Clerk HTML 307/200 spam when Vault is empty.
   $cron$
 );
 

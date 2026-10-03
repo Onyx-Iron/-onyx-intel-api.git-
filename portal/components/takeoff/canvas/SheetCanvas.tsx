@@ -891,11 +891,16 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
     setShapes((prev) => {
       for (let i = prev.length - 1; i >= 0; i -= 1) {
-        if (!prev[i].saved) return [...prev.slice(0, i), ...prev.slice(i + 1)];
+        if (!prev[i].saved) {
+          const removed = prev[i];
+          // Broadcast after state update scheduling so peers drop the draft too.
+          queueMicrotask(() => broadcast("shape_remove", { key: removed.key }));
+          return [...prev.slice(0, i), ...prev.slice(i + 1)];
+        }
       }
       return prev;
     });
-  }, [draftPoints.length, utilityDraftPts.length, contourDraftPts.length, areaDraftPts.length, calibPts.length]);
+  }, [broadcast, draftPoints.length, utilityDraftPts.length, contourDraftPts.length, areaDraftPts.length, calibPts.length]);
 
   // Professional hotkeys: L/A/C tools, Space-hold pan, Z undo, Esc cancel, Enter finish.
   useEffect(() => {
@@ -1013,10 +1018,16 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
   const commitShapeDrag = useCallback(async (drag: { key: string; originalPoints: Pt[]; originalRowVersion: number }) => {
     const s = shapes.find((x) => x.key === drag.key);
-    if (!s || !s.id) return;
+    if (!s) return;
     // No actual movement (e.g. a click that never crossed drag threshold) —
     // nothing to persist.
     if (JSON.stringify(s.points) === JSON.stringify(drag.originalPoints)) return;
+
+    // Unsaved drafts have no server id — sync peers without PATCH.
+    if (!s.id) {
+      broadcast("shape_upsert", s);
+      return;
+    }
 
     const res = await fetch("/api/takeoff/canvas/manual", {
       method: "PATCH",
@@ -1040,9 +1051,14 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       );
       if (reload && body.server_state) {
         const serverState = body.server_state as { points?: Pt[]; quantity: number; row_version: number };
-        setShapes((prev) => prev.map((x) => (x.key === drag.key
-          ? { ...x, points: serverState.points ?? drag.originalPoints, quantity: serverState.quantity, row_version: serverState.row_version }
-          : x)));
+        const restored = {
+          ...s,
+          points: serverState.points ?? drag.originalPoints,
+          quantity: serverState.quantity,
+          row_version: serverState.row_version,
+        };
+        setShapes((prev) => prev.map((x) => (x.key === drag.key ? restored : x)));
+        broadcast("shape_upsert", restored);
       }
       // else: keep the local drag position as-is (still tagged saved:true
       // but with an unpersisted position) — the user's next drag or edit on
@@ -1060,8 +1076,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
 
     const body = await res.json() as { manual_takeoff: { row_version: number }; quantity: number };
-    setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, row_version: body.manual_takeoff.row_version, quantity: body.quantity } : x)));
-  }, [shapes]);
+    const updated = { ...s, row_version: body.manual_takeoff.row_version, quantity: body.quantity };
+    setShapes((prev) => prev.map((x) => (x.key === drag.key ? updated : x)));
+    broadcast("shape_upsert", updated);
+  }, [broadcast, shapes]);
 
   useEffect(() => {
     if (!dragState) return;
