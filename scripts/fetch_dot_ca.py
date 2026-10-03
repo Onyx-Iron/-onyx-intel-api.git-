@@ -32,12 +32,33 @@ from typing import Any
 
 import requests
 
-CALTRANS_ITEM_TO_CSI = {
-    "19": "31-23-16",  # Roadway Excavation
-    "26": "31-23-23",  # Aggregate Base
-    "39": "32-12-16",  # Hot Mix Asphalt
-    "51": "03-31-00",  # Structural Concrete
-}
+def _load_item_to_csi(state: str) -> dict[str, str]:
+    """Load scripts/dot_item_to_csi.csv for state, falling back to built-ins."""
+    fallback = {
+        "19": "31-23-16",
+        "26": "31-23-23",
+        "39": "32-12-16",
+        "51": "03-31-00",
+    }
+    csv_path = Path(__file__).resolve().parent / "dot_item_to_csi.csv"
+    if not csv_path.is_file():
+        return fallback
+    mapping = dict(fallback)
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            if (row.get("state") or "").strip().upper() != state:
+                continue
+            prefix = (row.get("item_prefix") or "").strip()
+            csi = (row.get("csi_code") or "").strip()
+            if prefix and csi:
+                # Prefer short Caltrans division prefixes when CSV has long codes.
+                key = prefix[:2] if len(prefix) > 3 and prefix[:2] in fallback else prefix
+                mapping[key] = csi
+                mapping[prefix] = csi
+    return mapping
+
+
+CALTRANS_ITEM_TO_CSI = _load_item_to_csi("CA")
 
 SAMPLE_BID_SUMMARY = {
     "source": "caltrans_bidsummary",

@@ -5,6 +5,7 @@ import { Activity, CircleDollarSign, ClipboardCheck, FileQuestion, Pencil, Plus,
 import UniversalImportButton from "@/components/common/UniversalImportButton";
 import { useBulkImport, toStr, toNum } from "@/components/common/useBulkImport";
 import EmptyState from "@/components/common/EmptyState";
+import ProjectContactsInline from "@/components/preconstruction/ProjectContactsInline";
 
 function pickCtrl(row: Record<string, string | number | null>, keys: string[]): string | null {
   for (const k of keys) {
@@ -611,13 +612,18 @@ export default function ProjectControlsTab({ projectId }: { projectId: string })
         </div>
 
         {activeKind === "rfi" && (
-          <RfiTable
-            items={rfis}
-            loading={loading}
-            onEdit={(item) => openEdit("rfi", item)}
-            onDelete={(id) => deleteItem("rfi", id)}
-            onCycle={(item) => cycleStatus("rfi", item)}
-          />
+          <>
+            <div className="px-4 pt-3">
+              <ProjectContactsInline projectId={projectId} />
+            </div>
+            <RfiTable
+              items={rfis}
+              loading={loading}
+              onEdit={(item) => openEdit("rfi", item)}
+              onDelete={(id) => deleteItem("rfi", id)}
+              onCycle={(item) => cycleStatus("rfi", item)}
+            />
+          </>
         )}
         {activeKind === "submittal" && (
           <SubmittalTable
