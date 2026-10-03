@@ -5,6 +5,7 @@ import {
   CANONICAL_FAILURE,
   CANONICAL_SUCCESS,
   finalizeAsyncDocumentStatus,
+  bothPipelinesSettled,
   isInFlightStatus,
   isRetryable,
   isTerminalFailure,
@@ -34,6 +35,24 @@ describe("document status helpers", () => {
     assert.equal(needsSplitStatusPoll({ status: "split" }), true);
     assert.equal(needsSplitStatusPoll({ status: "complete" }), false);
     assert.equal(needsSplitStatusPoll({ status: "processing", split_status: "pending" }), true);
+  });
+
+  it("does not treat takeoff settlement as parent-terminal while OCR is still running", () => {
+    assert.equal(
+      bothPipelinesSettled([
+        { status: "processing", takeoff_status: "done" },
+        { status: "pending", takeoff_status: "error" },
+      ]),
+      false,
+    );
+    assert.equal(
+      bothPipelinesSettled([
+        { status: "done", takeoff_status: "done" },
+        { status: "error", takeoff_status: "done" },
+      ]),
+      true,
+    );
+    assert.equal(bothPipelinesSettled([]), false);
   });
 
   it("treats failed and partial documents as retryable", () => {

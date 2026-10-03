@@ -25,6 +25,24 @@ export function finalizeAsyncDocumentStatus(args: {
   return CANONICAL_SUCCESS;
 }
 
+const TERMINAL_PAGE_OCR = new Set(["done", "error"]);
+const TERMINAL_PAGE_TAKEOFF = new Set(["done", "error", "skipped"]);
+
+/**
+ * Parent `documents.status` may go terminal only after every page has finished
+ * both OCR (`status`) and takeoff (`takeoff_status`). Takeoff often settles
+ * first; marking the parent complete at that moment hides a later OCR failure
+ * and removes Retry (`isRetryable` is false for "complete").
+ */
+export function bothPipelinesSettled(
+  pages: Array<{ status?: string | null; takeoff_status?: string | null }>,
+): boolean {
+  if (pages.length === 0) return false;
+  return pages.every(
+    (p) => TERMINAL_PAGE_OCR.has(p.status ?? "") && TERMINAL_PAGE_TAKEOFF.has(p.takeoff_status ?? ""),
+  );
+}
+
 /** Statuses that should keep UI polling active. */
 export const IN_FLIGHT = new Set(["pending", "processing", "split", "queued"]);
 
