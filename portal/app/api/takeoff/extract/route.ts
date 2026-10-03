@@ -4,6 +4,8 @@ import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { headerSafe } from "@/lib/http";
 import { pythonApiHeaders } from "@/lib/python-api";
 import { checkAiRateLimit } from "@/lib/ai/rate-limit";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 
 const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
 
@@ -29,13 +31,26 @@ export const maxDuration = 300; // CAD/IFC parsing + AI vision can both take tim
  */
 export async function POST(req: NextRequest): Promise<Response> {
   try {
-    const { userId, orgId } = await auth();
+    const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const tenantKey  = orgId ?? `user_${userId}`;
     const projectId  = req.nextUrl.searchParams.get("project_id") ?? "";
     const aiFallback = req.nextUrl.searchParams.get("ai_fallback") === "true";
     const streaming  = req.nextUrl.searchParams.get("stream") === "true";
+
+    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    if (projectId) {
+      try {
+        await assertProjectBelongsToTenant(projectId, tenantId);
+      } catch (err) {
+        const owned = ownershipDenied(err);
+        if (owned) return owned;
+        throw err;
+      }
+    }
 
     const user = await currentUser();
     const email = user?.emailAddresses?.[0]?.emailAddress ?? null;

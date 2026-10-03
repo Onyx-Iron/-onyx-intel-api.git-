@@ -2,7 +2,9 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { generateText, NoProviderError, availableProviders } from "@/lib/ai/providers";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { auditInsert } from "@/lib/audit";
 import { getDocTypeByKey } from "@/lib/ai/generatedDocTypes";
 import { createGoogleDocInProjectFolder } from "@/lib/google/projectFolder";
 
@@ -106,6 +108,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    try {
+      await assertProjectBelongsToTenant(body.project_id, tenantId);
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
+    }
     const db = await createServiceClient();
     const title = body.title?.trim() || `${docType.toUpperCase()} — ${new Date().toLocaleDateString("en-US")}`;
 
@@ -118,6 +129,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       })
       .select().single();
     if (error) return NextResponse.json({ error: `[POST /api/generated-docs] ${error.message}` }, { status: 422 });
+
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "generated_documents",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      record_id: (data as any).id,
+      new_values: { project_id: body.project_id, doc_type: docType, title },
+    });
 
     // Best-effort: autosave to the project's Drive folder so the user has a
     // Google Doc copy in their plans hierarchy. Failures don't affect the DB save.

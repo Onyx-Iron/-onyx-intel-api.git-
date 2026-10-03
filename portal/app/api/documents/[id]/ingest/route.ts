@@ -1,7 +1,8 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { getAccessToken } from "@/lib/google/oauth";
 import { logEvent } from "@/lib/activity";
 import { requireEnv } from "@/lib/env";
@@ -205,7 +206,24 @@ export async function POST(
     // Narrowed const, since `tenantId` is captured by the markError() closure above,
     // which blocks TS's normal control-flow narrowing of the `let` for the rest of this function.
     const resolvedTenantId: string = tenantId;
+    const denied = await requirePermission(resolvedTenantId, userId, "field", "write");
+    if (denied) return denied;
     const db = await createServiceClient();
+
+    const { data: ownershipDoc } = await db
+      .from("documents")
+      .select("project_id")
+      .eq("id", docId)
+      .eq("tenant_id", resolvedTenantId)
+      .maybeSingle();
+    if (!ownershipDoc?.project_id) return NextResponse.json({ error: "Document not found" }, { status: 404 });
+    try {
+      await assertProjectBelongsToTenant(ownershipDoc.project_id, resolvedTenantId);
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
+    }
 
     // Claim the work unit so a concurrent retry / sweeper can see progress.
     await db.from("documents").update({

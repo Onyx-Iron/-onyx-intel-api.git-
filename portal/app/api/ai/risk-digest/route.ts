@@ -1,9 +1,11 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { headerSafe } from "@/lib/http";
 import { logEvent } from "@/lib/activity";
+import { auditInsert } from "@/lib/audit";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -180,12 +182,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!project_id) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    try {
+      await assertProjectBelongsToTenant(project_id, tenantId);
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
+    }
     const db = await createServiceClient();
-
-    // Verify project ownership
-    const { data: project } = await db
-      .from("projects").select("id").eq("id", project_id).eq("tenant_id", tenantId).single();
-    if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
 
     const snapshot = await buildSnapshot(db, project_id, tenantId);
     if (!snapshot) return NextResponse.json({ error: "Could not build project snapshot" }, { status: 500 });
@@ -217,6 +223,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     if (saveErr) return NextResponse.json({ error: saveErr.message }, { status: 500 });
 
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "project_risk_digests",
+      record_id: (saved as { id: string }).id,
+      new_values: saved as unknown as Record<string, unknown>,
+    });
+
     void logEvent({
       projectId: project_id,
       tenantId,
@@ -230,6 +244,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json({ digest: saved });
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }

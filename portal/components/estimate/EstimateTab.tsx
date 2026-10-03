@@ -148,6 +148,10 @@ export default function EstimateTab({ projectId }: { projectId: string }) {
     try {
       setErrorMsg(null);
       const r = await fetch("/api/cost-catalog");
+      if (!r.ok) {
+        toast({ title: String(`Could not load Price Book (${r.status})`), kind: "error" });
+        return;
+      }
       const d = await r.json() as { items?: Array<{ csi_code: string | null; unit_cost: number }> };
       const byCsi = new Map<string, number>();
       for (const c of d.items ?? []) if (c.csi_code && c.unit_cost > 0 && !byCsi.has(c.csi_code)) byCsi.set(c.csi_code, c.unit_cost);
@@ -176,6 +180,10 @@ export default function EstimateTab({ projectId }: { projectId: string }) {
     setPriceBusy("save");
     try {
       const r = await fetch("/api/cost-catalog");
+      if (!r.ok) {
+        toast({ title: String(`Could not load Price Book (${r.status})`), kind: "error" });
+        return;
+      }
       const d = await r.json() as { items?: Array<{ csi_code: string | null; description: string }> };
       const existing = new Set((d.items ?? []).map((c) => `${c.csi_code ?? ""}|${c.description.toLowerCase()}`));
       let saved = 0;
@@ -193,7 +201,14 @@ export default function EstimateTab({ projectId }: { projectId: string }) {
           }
         }
       }
-      toast({ title: String(saved > 0 ? `Saved ${saved} item${saved !== 1 ? "s" : ""} to your Price Book — reuse them on any project.${failed > 0 ? ` (${failed} failed)` : ""}` : "All priced items are already in your Price Book."), kind: "error" });
+      toast({
+        title: String(
+          saved > 0
+            ? `Saved ${saved} item${saved !== 1 ? "s" : ""} to your Price Book — reuse them on any project.${failed > 0 ? ` (${failed} failed)` : ""}`
+            : "All priced items are already in your Price Book.",
+        ),
+        kind: failed > 0 && saved === 0 ? "error" : saved > 0 ? "success" : "info",
+      });
     } catch {
       setErrorMsg("Network error — could not save to price book.");
     } finally { setPriceBusy(null); }

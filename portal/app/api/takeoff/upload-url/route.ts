@@ -2,7 +2,9 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { buildDocumentRevisionMeta } from "@/lib/documents/revisions";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { auditInsert } from "@/lib/audit";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
@@ -43,6 +45,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
 
     const body = await req.json().catch(() => ({})) as {
       project_id?: string;
@@ -64,12 +68,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ error: "File exceeds the 1GB limit. Split the drawing set and retry." }, { status: 413 });
     }
 
-    const db = await createServiceClient();
+    try {
+      await assertProjectBelongsToTenant(project_id, tenantId);
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
+    }
 
-    // Verify project belongs to this tenant.
-    const { data: project, error: projErr } = await db
-      .from("projects").select("id").eq("id", project_id).eq("tenant_id", tenantId).single();
-    if (projErr || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    const db = await createServiceClient();
 
     // Same `originals/{document_id}.pdf` convention page-split-worker already
     // uses for Drive imports, so both paths are truly unified — the worker
@@ -110,6 +117,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (insertErr || !doc) {
       return NextResponse.json({ error: `[insert] ${insertErr?.message}` }, { status: 500 });
     }
+
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "documents",
+      record_id: doc.id,
+      new_values: insertRow as unknown as Record<string, unknown>,
+    });
 
     return NextResponse.json({
       document_id: doc.id,
