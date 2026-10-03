@@ -194,17 +194,29 @@ Deno.serve(async (req) => {
       });
     }
 
-    if (pageRows.length > 0) {
+    if (pageRows.length === 0) {
+      throw new Error(
+        pageCount === 0
+          ? "PDF has zero pages"
+          : `All ${pageCount} page upload(s) failed — nothing to process`,
+      );
+    }
+
+    // Retry / rekick can re-run split for the same document — clear prior
+    // page rows so UNIQUE(document_id, page_number) doesn't fail the job.
+    {
+      const { error: delErr } = await db.from("document_pages")
+        .delete()
+        .eq("document_id", body.document_id)
+        .eq("tenant_id", body.tenant_id);
+      if (delErr) throw new Error(`clear document_pages: ${delErr.message}`);
       const { error: insErr } = await db.from("document_pages").insert(pageRows);
       if (insErr) throw new Error(`insert document_pages: ${insErr.message}`);
     }
 
     // ── 6. Fan out page jobs WITHOUT awaiting completion ───────────────────
-    // Previously we awaited every page-processor / page-takeoff-worker HTTP
-    // response inside this Edge Function, which burned the ~150s wall clock
-    // on OCR/takeoff and caused the portal invoke to time out / mark docs
-    // failed even after pages were already inserted. Kick the requests and
-    // return immediately — split-status + reclaimStuck finalize progress.
+    // Kick OCR/takeoff and return immediately — list finalize + split-status
+    // + reclaimStuck advance progress without holding this Edge Function.
     const base = SUPABASE_URL.replace(/\/$/, "");
     const processorUrl = `${base}/functions/v1/page-processor`;
     const takeoffWorkerUrl = `${base}/functions/v1/page-takeoff-worker`;
@@ -255,6 +267,7 @@ Deno.serve(async (req) => {
     await db.from("documents")
       .update({
         status: "split",
+        split_status: "done",
         page_count: pageCount,
         meta: {
           ...prevMeta,
@@ -271,7 +284,10 @@ Deno.serve(async (req) => {
               last_error: `${failedUploads} of ${pageCount} pages failed to upload`,
               last_error_step: "split",
             }
-          : {}),
+          : {
+              last_error: null,
+              last_error_step: null,
+            }),
       })
       .eq("id", body.document_id)
       .eq("tenant_id", body.tenant_id);

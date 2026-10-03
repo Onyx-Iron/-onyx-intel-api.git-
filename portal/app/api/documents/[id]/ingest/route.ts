@@ -288,10 +288,11 @@ export async function POST(
         }
         return NextResponse.json({
           ok: true,
-          queued: true,
+          queued: queued.queued,
           reason: "large_plan_set_drive",
           document_id: queued.documentId,
-        }, { status: 202 });
+          status: queued.status,
+        }, { status: queued.queued ? 202 : 200 });
       }
       if (storagePath) {
         await queueLocalDocumentForPageSplit({

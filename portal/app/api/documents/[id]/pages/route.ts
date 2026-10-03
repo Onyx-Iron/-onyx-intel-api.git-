@@ -30,7 +30,9 @@ export async function GET(
       return NextResponse.json({ error: "Document not found" }, { status: 404 });
     }
 
-    const { data: pages, error: pagesErr } = await db
+    // Sync Gemini ingest writes `pages`; async page-split writes `document_pages`.
+    // Prefer sync rows when present, otherwise surface OCR text from the async path.
+    const { data: syncPages, error: pagesErr } = await db
       .from("pages")
       .select("page_number, extracted_text")
       .eq("document_id", documentId)
@@ -38,6 +40,47 @@ export async function GET(
       .order("page_number", { ascending: true });
     if (pagesErr) {
       return NextResponse.json({ error: pagesErr.message }, { status: 500 });
+    }
+
+    let insightPages: Array<{ page_number: number; summary: string; key_terms: string[] }> = [];
+
+    if ((syncPages ?? []).length > 0) {
+      insightPages = (syncPages ?? []).map((p) => {
+        const text = p.extracted_text ?? "";
+        const [summary, keyTermsLine] = text.split("\n");
+        const key_terms = keyTermsLine
+          ? keyTermsLine.replace(/^Key terms:\s*/i, "").split(",").map((t) => t.trim()).filter(Boolean)
+          : [];
+        return {
+          page_number: p.page_number,
+          summary: summary ?? "",
+          key_terms,
+        };
+      });
+    } else {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data: asyncPages, error: asyncErr } = await (db as any)
+        .from("document_pages")
+        .select("page_number, ocr_text, status")
+        .eq("document_id", documentId)
+        .eq("tenant_id", tenantId)
+        .order("page_number", { ascending: true });
+      if (asyncErr) {
+        return NextResponse.json({ error: asyncErr.message }, { status: 500 });
+      }
+      insightPages = ((asyncPages ?? []) as Array<{ page_number: number; ocr_text: string | null; status: string | null }>)
+        .filter((p) => p.status === "done" || (p.ocr_text && p.ocr_text.trim().length > 0))
+        .map((p) => {
+          const text = (p.ocr_text ?? "").trim();
+          const summary = text
+            ? (text.length > 400 ? `${text.slice(0, 400)}…` : text)
+            : "";
+          return {
+            page_number: p.page_number,
+            summary,
+            key_terms: [] as string[],
+          };
+        });
     }
 
     const meta = (doc.meta ?? {}) as Record<string, unknown>;
@@ -51,7 +94,6 @@ export async function GET(
           }))
       : [];
 
-    // Surface human-readable classification meta saved by other ingest pipelines
     const classification: Record<string, string> = {};
     const META_KEYS_OF_INTEREST: Record<string, string> = {
       title: "Title",
@@ -70,18 +112,7 @@ export async function GET(
 
     return NextResponse.json({
       document: doc,
-      pages: (pages ?? []).map((p) => {
-        const text = p.extracted_text ?? "";
-        const [summary, keyTermsLine] = text.split("\n");
-        const keyTerms = keyTermsLine
-          ? keyTermsLine.replace(/^Key terms:\s*/i, "").split(",").map((t) => t.trim()).filter(Boolean)
-          : [];
-        return {
-          page_number: p.page_number,
-          summary: summary ?? "",
-          key_terms: keyTerms,
-        };
-      }),
+      pages: insightPages,
       questions,
       classification,
     });

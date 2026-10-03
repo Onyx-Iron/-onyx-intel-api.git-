@@ -77,8 +77,17 @@ export async function queueDriveDocumentForPageSplit(args: QueueDriveArgs): Prom
     .maybeSingle();
 
   if (existing?.id) {
-    const stuck = ["error", "failed", "queued", "pending"].includes(String(existing.status));
-    if (rekickIfStuck && stuck) {
+    // Terminal success — don't re-split a healthy doc on re-import.
+    const terminalOk = ["complete", "ready", "done", "complete_with_errors"].includes(
+      String(existing.status),
+    );
+    // Retry / re-import must re-kick stuck OR in-flight orphaned states
+    // (processing/split) — previously only error/queued were rekicked, so
+    // Retry after poll-timeout was a no-op.
+    const needsRekick = !terminalOk && [
+      "error", "failed", "queued", "pending", "processing", "split",
+    ].includes(String(existing.status));
+    if (rekickIfStuck && needsRekick) {
       await kickPageSplit({
         db: anyDb,
         documentId: existing.id,
@@ -123,6 +132,41 @@ export async function queueDriveDocumentForPageSplit(args: QueueDriveArgs): Prom
 
   const { error: insertErr } = await db.from("documents").insert(insertRow);
   if (insertErr) {
+    // Concurrent double-submit can race the unique (tenant, project, drive_file_id)
+    // index — recover by re-selecting and optionally rekicking.
+    const { data: raced } = await anyDb
+      .from("documents")
+      .select("id, status")
+      .eq("tenant_id", tenantId)
+      .eq("project_id", projectId)
+      .eq("drive_file_id", driveFileId)
+      .maybeSingle();
+    if (raced?.id) {
+      const terminalOk = ["complete", "ready", "done", "complete_with_errors"].includes(
+        String(raced.status),
+      );
+      if (rekickIfStuck && !terminalOk) {
+        await kickPageSplit({
+          db: anyDb,
+          documentId: raced.id,
+          tenantId,
+          projectId,
+          userId,
+          accessToken,
+          driveFileId,
+          originalPath: `originals/${raced.id}.pdf`,
+          source: "portal:queue-drive-race-rekick",
+        });
+        return { ok: true, documentId: raced.id, status: "queued", deduped: true, queued: true };
+      }
+      return {
+        ok: true,
+        documentId: raced.id,
+        status: String(raced.status ?? "processing"),
+        deduped: true,
+        queued: false,
+      };
+    }
     return { ok: false, error: `[insert] ${insertErr.message}`, status: 500 };
   }
 

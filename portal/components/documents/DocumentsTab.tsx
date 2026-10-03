@@ -27,6 +27,8 @@ type DocStatus =
   | "split"
   | "ready"
   | "complete"
+  | "done"
+  | "complete_with_errors"
   | "error"
   | "failed";
 
@@ -47,6 +49,8 @@ interface Document {
 
 /** Statuses that mean work is still in flight — keep polling. */
 const IN_FLIGHT = new Set(["pending", "queued", "processing", "split"]);
+const READY = new Set(["ready", "complete", "done", "complete_with_errors"]);
+const ERROR = new Set(["error", "failed"]);
 
 const STATUS_STYLES: Record<string, string> = {
   pending:    "bg-white/5 text-gray-500 border-white/10",
@@ -55,6 +59,8 @@ const STATUS_STYLES: Record<string, string> = {
   split:      "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
   ready:      "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
   complete:   "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
+  done:       "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
+  complete_with_errors: "bg-[#F5A623]/10 text-[#F5A623] border-[#F5A623]/20",
   error:      "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
   failed:     "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
 };
@@ -63,9 +69,11 @@ const STATUS_LABELS: Record<string, string> = {
   pending: "Pending",
   queued: "Queued",
   processing: "Processing",
-  split: "Splitting",
+  split: "Pages processing",
   ready: "Ready",
   complete: "Complete",
+  done: "Complete",
+  complete_with_errors: "Partial",
   error: "Error",
   failed: "Failed",
 };
@@ -74,8 +82,12 @@ function isInFlight(status: string): boolean {
   return IN_FLIGHT.has(status);
 }
 
+function isReadyStatus(status: string): boolean {
+  return READY.has(status);
+}
+
 function isErrorStatus(status: string): boolean {
-  return status === "error" || status === "failed";
+  return ERROR.has(status);
 }
 
 const DOC_TYPE_STYLES: Record<string, string> = {
@@ -539,7 +551,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                 documents.flatMap((doc) => {
                   const statusKey = doc.status in STATUS_STYLES ? doc.status : "pending";
                   const inFlight = isInFlight(String(doc.status));
-                  const isReady = doc.status === "ready" || doc.status === "complete";
+                  const isReady = isReadyStatus(String(doc.status));
                   const isExpanded = expandedDocId === doc.id;
                   const insights = pagesByDoc[doc.id];
                   const statusLabel = STATUS_LABELS[statusKey] ?? String(doc.status);

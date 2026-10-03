@@ -14,7 +14,7 @@ export const maxDuration = 120;
 
 const GEMINI_API_KEY = headerSafe(process.env.GEMINI_API_KEY);
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-pro";
-const BUCKET = "project-documents";
+const DEFAULT_BUCKET = "plans-bucket";
 
 const SYSTEM =
   "You are a construction document assistant. Answer the user's question using ONLY the attached " +
@@ -85,8 +85,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       if (!doc.file_name.toLowerCase().endsWith(".pdf")) {
         return NextResponse.json({ error: "Document Q&A currently supports PDF files only." }, { status: 422 });
       }
-      const { data: fileData, error: dlErr } = await db.storage.from(BUCKET).download(storagePath);
-      if (dlErr || !fileData) return NextResponse.json({ error: `Could not load file: ${dlErr?.message}` }, { status: 502 });
+      // Prefer the bucket recorded on the row; fall back to plans-bucket
+      // (async page-split path) then legacy project-documents.
+      const metaBucket = typeof meta.storage === "string" && meta.storage !== "drive" && meta.storage !== "supabase"
+        ? meta.storage
+        : DEFAULT_BUCKET;
+      const bucketsToTry = metaBucket === "project-documents"
+        ? [metaBucket, DEFAULT_BUCKET]
+        : [metaBucket, "project-documents"];
+      let fileData: Blob | null = null;
+      let dlErr: { message?: string } | null = null;
+      for (const bucket of bucketsToTry) {
+        const dl = await db.storage.from(bucket).download(storagePath);
+        if (!dl.error && dl.data) {
+          fileData = dl.data;
+          dlErr = null;
+          break;
+        }
+        dlErr = dl.error;
+      }
+      if (!fileData) return NextResponse.json({ error: `Could not load file: ${dlErr?.message ?? "not found"}` }, { status: 502 });
       bytes = Buffer.from(await fileData.arrayBuffer());
       contentType = "application/pdf";
     } else if (driveFileId) {

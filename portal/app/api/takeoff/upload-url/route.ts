@@ -106,7 +106,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       uploaded_at: new Date().toISOString(),
       meta: buildDocumentRevisionMeta(file_name, {
         source: "local_upload",
-        storage: "supabase",
+        storage: BUCKET,
         storage_path: storagePath,
         size: body.size ?? null,
         content_type,

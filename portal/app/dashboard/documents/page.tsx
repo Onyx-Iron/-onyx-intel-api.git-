@@ -7,7 +7,17 @@ import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
 import { useProjectContext } from "@/components/project/ProjectContext";
 
-type DocStatus = "pending" | "queued" | "processing" | "split" | "ready" | "complete" | "error" | "failed";
+type DocStatus =
+  | "pending"
+  | "queued"
+  | "processing"
+  | "split"
+  | "ready"
+  | "complete"
+  | "done"
+  | "complete_with_errors"
+  | "error"
+  | "failed";
 type PipelineStatus = "pending" | "processing" | "done" | "error" | "partially_completed" | "skipped";
 
 interface ProcessingSummary {
@@ -42,6 +52,8 @@ const STATUS_STYLES: Record<string, string> = {
   split:      "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
   ready:      "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
   complete:   "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
+  done:       "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
+  complete_with_errors: "bg-[#F5A623]/10 text-[#F5A623] border-[#F5A623]/20",
   error:      "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
   failed:     "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
 };
