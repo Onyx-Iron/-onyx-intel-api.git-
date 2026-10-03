@@ -4,6 +4,8 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 import { getOrCreateDraftVersion, getServiceDb } from "@/lib/estimating/versioning";
 import { calculateItem } from "@/lib/estimating/calculations";
+import { resolveCostsBatch } from "@/lib/cost/resolver";
+import { legacyHeuristicUnitCost, seedLineCosts } from "@/lib/estimating/seed-pricing";
 
 export const runtime = "nodejs";
 
@@ -21,7 +23,10 @@ export const runtime = "nodejs";
  * draft if the current one is locked) and dedups by source_takeoff_id.
  *
  * Idempotent: skips items whose source_takeoff_id already exists anywhere
- * in the estimate. Returns { added, skipped }.
+ * in the estimate. Draft lines that still use the retired 40/45/15 split
+ * are repriced in place from the catalog. Approved versions are never
+ * updated — a locked current version is copied into a new draft first.
+ * Returns { added, skipped, repriced }.
  */
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
@@ -56,13 +61,124 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const toInsert: Record<string, unknown>[] = [];
 
-  const { data: takeoffs } = await db
-    .from("takeoff_items")
-    .select("id, cost_code:csi_code, description:label, total_qty:quantity, uom:unit, estimated_unit_cost:rate, review_status")
-    .eq("tenant_id", tenantId).eq("project_id", body.project_id)
-    .or("review_status.is.null,review_status.eq.approved");
+  interface DraftLine {
+    id: string;
+    source_takeoff_id: string | null;
+    cost_code: string | null;
+    csi_code: string | null;
+    quantity: number | null;
+    labor_cost: number | null;
+    material_cost: number | null;
+    equipment_cost: number | null;
+  }
+  interface SeedTakeoff {
+    id: string;
+    cost_code: string | null;
+    description: string | null;
+    total_qty: number | null;
+    uom: string | null;
+    estimated_unit_cost: number | null;
+    review_status: string | null;
+  }
+  const [{ data: takeoffRows }, { data: project }, { data: draftRows }] = await Promise.all([
+    db
+      .from("takeoff_items")
+      .select("id, cost_code:csi_code, description:label, total_qty:quantity, uom:unit, estimated_unit_cost:rate, review_status")
+      .eq("tenant_id", tenantId).eq("project_id", body.project_id)
+      .or("review_status.is.null,review_status.eq.approved"),
+    db
+      .from("projects")
+      .select("state")
+      .eq("id", body.project_id)
+      .eq("tenant_id", tenantId)
+      .maybeSingle(),
+    db
+      .from("estimate_items")
+      .select("id, source_takeoff_id, cost_code, csi_code, quantity, labor_cost, material_cost, equipment_cost")
+      .eq("tenant_id", tenantId)
+      .eq("estimate_version_id", versionId),
+  ]);
+  const takeoffs = (takeoffRows ?? []) as SeedTakeoff[];
+  const draftLines = (draftRows ?? []) as DraftLine[];
+  const legacyLines = draftLines.filter((row) => legacyHeuristicUnitCost(
+    Number(row.labor_cost ?? 0),
+    Number(row.material_cost ?? 0),
+    Number(row.equipment_cost ?? 0),
+    Number(row.quantity ?? 0),
+  ) != null);
+  const codes = [...new Set(
+    [
+      ...takeoffs.map((t) => t.cost_code),
+      ...legacyLines.map((row) => row.cost_code || row.csi_code),
+    ].filter((code): code is string => typeof code === "string" && code.length > 0),
+  )];
+  const resolved = codes.length > 0
+    ? await resolveCostsBatch(codes.map((cost_code) => ({
+        cost_code,
+        tenant_id: tenantId,
+        region: { state: project?.state ?? undefined },
+      })))
+    : [];
+  const resolvedByCode = new Map(resolved.map((row) => [row.cost_code, row]));
+  const takeoffById = new Map(takeoffs.map((t) => [t.id, t]));
+  let repriced = 0;
+  const repriceUpdates: Array<{ id: string; patch: Record<string, unknown> }> = [];
+  for (const row of legacyLines) {
+    const quantity = Number(row.quantity ?? 0);
+    const implied = legacyHeuristicUnitCost(
+      Number(row.labor_cost ?? 0),
+      Number(row.material_cost ?? 0),
+      Number(row.equipment_cost ?? 0),
+      quantity,
+    );
+    const takeoff = row.source_takeoff_id ? takeoffById.get(row.source_takeoff_id) : undefined;
+    const takeoffUnit = takeoff?.estimated_unit_cost != null && Number(takeoff.estimated_unit_cost) > 0
+      ? Number(takeoff.estimated_unit_cost)
+      : implied;
+    const code = row.cost_code || row.csi_code;
+    const costs = seedLineCosts(
+      quantity,
+      takeoffUnit,
+      code ? resolvedByCode.get(code) ?? null : null,
+    );
+    const calc = calculateItem({
+      laborCost: costs.labor_cost,
+      materialCost: costs.material_cost,
+      equipmentCost: costs.equipment_cost,
+      quantity,
+    });
+    repriceUpdates.push({
+      id: row.id,
+      patch: {
+        unit_cost: costs.unit_cost,
+        labor_cost: costs.labor_cost,
+        material_cost: costs.material_cost,
+        equipment_cost: costs.equipment_cost,
+        total_direct_cost: calc.totalDirectCost,
+        total_price: calc.totalPrice,
+        unit_price: calc.unitPrice,
+        pricing_status: costs.pricing_status,
+        updated_by: userId,
+      },
+    });
+  }
+  const REPRICE_BATCH = 8;
+  for (let i = 0; i < repriceUpdates.length; i += REPRICE_BATCH) {
+    const batch = repriceUpdates.slice(i, i + REPRICE_BATCH);
+    const results = await Promise.all(batch.map(async (update) => {
+      const { error } = await db
+        .from("estimate_items")
+        .update(update.patch)
+        .eq("id", update.id)
+        .eq("estimate_version_id", versionId)
+        .eq("tenant_id", tenantId);
+      return error ? 0 : 1;
+    }));
+    repriced += results.reduce<number>((sum, n) => sum + n, 0);
+  }
+
   let blockedByReview = 0;
-  for (const t of takeoffs ?? []) {
+  for (const t of takeoffs) {
     if (seen.has(t.id)) continue;
     // Belt-and-suspenders: SQL filter above is authoritative; keep the
     // in-memory check so a PostgREST quirk cannot smuggle unapproved rows.
@@ -70,22 +186,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       blockedByReview++;
       continue;
     }
-    const unitCost = Number(t.estimated_unit_cost ?? 0);
     const quantity = Number(t.total_qty ?? 0);
-    // No cost-category breakdown available from a raw takeoff row — split
-    // by the same 40/45/15 labor/material/equipment heuristic the legacy
-    // seed route used, documented here rather than silently invented anew.
-    const laborCost = unitCost * 0.40 * quantity;
-    const materialCost = unitCost * 0.45 * quantity;
-    const equipmentCost = unitCost * 0.15 * quantity;
-    const calc = calculateItem({ laborCost, materialCost, equipmentCost, quantity });
+    const costs = seedLineCosts(
+      quantity,
+      t.estimated_unit_cost == null ? null : Number(t.estimated_unit_cost),
+      t.cost_code ? resolvedByCode.get(t.cost_code) ?? null : null,
+    );
+    const calc = calculateItem({
+      laborCost: costs.labor_cost,
+      materialCost: costs.material_cost,
+      equipmentCost: costs.equipment_cost,
+      quantity,
+    });
     toInsert.push({
       tenant_id: tenantId, project_id: body.project_id, estimate_version_id: versionId,
       source_takeoff_id: t.id, cost_code: t.cost_code, csi_code: t.cost_code,
       description: t.description, quantity, uom: t.uom ?? null,
-      labor_cost: laborCost, material_cost: materialCost, equipment_cost: equipmentCost,
+      unit_cost: costs.unit_cost,
+      labor_cost: costs.labor_cost, material_cost: costs.material_cost, equipment_cost: costs.equipment_cost,
       total_direct_cost: calc.totalDirectCost, total_price: calc.totalPrice, unit_price: calc.unitPrice,
-      pricing_status: "manual", created_by: userId, updated_by: userId,
+      pricing_status: costs.pricing_status, created_by: userId, updated_by: userId,
     });
   }
 
@@ -102,7 +222,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       description: `Manual ${m.takeoff_type}`, quantity: Number(m.quantity ?? 0), uom: m.unit,
       labor_cost: 0, material_cost: 0, equipment_cost: 0,
       total_direct_cost: calc.totalDirectCost, total_price: calc.totalPrice, unit_price: calc.unitPrice,
-      pricing_status: "manual", created_by: userId, updated_by: userId,
+      pricing_status: "unpriced", created_by: userId, updated_by: userId,
     });
   }
 
@@ -113,5 +233,5 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     added = data?.length ?? toInsert.length;
   }
 
-  return NextResponse.json({ added, skipped: seen.size, blocked_by_review: blockedByReview });
+  return NextResponse.json({ added, skipped: seen.size, blocked_by_review: blockedByReview, repriced });
 }

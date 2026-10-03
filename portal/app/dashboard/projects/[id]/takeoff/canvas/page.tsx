@@ -73,7 +73,7 @@ export default async function CanvasPage({ params, searchParams }: PageProps) {
       .from("documents")
       .select("id")
       .eq("tenant_id", tenantId).eq("project_id", projectId)
-      .in("status", ["split", "processing", "done"])
+      .in("status", ["split", "processing", "done", "complete", "ready"])
       .order("uploaded_at", { ascending: false }).limit(1);
     if (docs?.[0]?.id) {
       const { data } = await anyDb

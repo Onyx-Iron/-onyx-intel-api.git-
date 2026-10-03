@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { FolderOpen, FileText, X, RefreshCw, Sparkles, Send, Upload, ChevronDown, ChevronRight } from "lucide-react";
 import GoogleDrivePicker from "./GoogleDrivePicker";
 import GenerateDocDropdown from "@/components/common/GenerateDocDropdown";
@@ -13,6 +14,7 @@ import {
   needsSplitStatusPoll,
   statusLabel,
 } from "@/lib/documents/status";
+import { PipelineStage, type PipelineStatus } from "@/components/documents/PipelineStage";
 
 interface ParsedPage {
   page_number: number;
@@ -48,6 +50,11 @@ interface Document {
   file_name: string;
   status: DocStatus;
   split_status?: SplitStatus | null;
+  ocr_status?: PipelineStatus | null;
+  vector_status?: PipelineStatus | null;
+  takeoff_status?: PipelineStatus | null;
+  last_error?: string | null;
+  last_error_step?: string | null;
   doc_type: DocType;
   page_count: number | null;
   uploaded_at: string | null;
@@ -177,15 +184,30 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     );
   }, []);
 
-  const loadDocuments = useCallback(async (showLoading = true): Promise<Document[]> => {
-    if (showLoading) setLoading(true);
+  const [docsPage, setDocsPage] = useState(1);
+  const [docsHasMore, setDocsHasMore] = useState(false);
+
+  const loadDocuments = useCallback(async (showLoading = true, page = 1): Promise<Document[]> => {
+    if (showLoading && page === 1) setLoading(true);
     try {
-      const r = await fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}`);
-      const d = await r.json() as { documents?: Document[] };
-      const list = d.documents ?? [];
-      setDocuments(list);
+      const r = await fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}&page=${page}&limit=200`);
+      const d = await r.json() as { documents?: Document[]; pagination?: { hasMore?: boolean } };
+      const incoming = d.documents ?? [];
+      let next = incoming;
+      setDocuments((prev) => {
+        if (page === 1) {
+          const incomingIds = new Set(incoming.map((doc) => doc.id));
+          next = [...incoming, ...prev.filter((doc) => !incomingIds.has(doc.id))];
+          return next;
+        }
+        const seen = new Set(prev.map((doc) => doc.id));
+        next = [...prev, ...incoming.filter((doc) => !seen.has(doc.id))];
+        return next;
+      });
+      setDocsHasMore(Boolean(d.pagination?.hasMore));
+      setDocsPage(page);
       setLoading(false);
-      return list;
+      return next;
     } catch {
       setLoading(false);
       return [];
@@ -575,6 +597,18 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                           {isProcessing && <span className="w-1.5 h-1.5 rounded-full bg-[#00D2FF] animate-pulse" />}
                           {statusLabel(doc.status)}
                         </span>
+                        {(doc.split_status || doc.ocr_status || doc.takeoff_status) && (
+                          <div className="mt-1.5 flex flex-wrap gap-x-2 gap-y-1">
+                            <PipelineStage label="Split" status={doc.split_status ?? null} />
+                            <PipelineStage label="OCR" status={doc.ocr_status ?? null} />
+                            <PipelineStage label="Takeoff" status={doc.takeoff_status ?? null} />
+                          </div>
+                        )}
+                        {doc.last_error && (
+                          <p className="mt-1 max-w-[14rem] truncate text-[9px] text-[#E50914]" title={doc.last_error}>
+                            {doc.last_error_step ? `${doc.last_error_step}: ` : ""}{doc.last_error}
+                          </p>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-right text-gray-500 font-mono text-xs">
                         {doc.page_count != null ? doc.page_count : "—"}
@@ -582,6 +616,14 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                       <td className="px-4 py-3 text-gray-600 text-[11px]">{fmt(doc.uploaded_at)}</td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-3">
+                          {doc.file_name.toLowerCase().endsWith(".pdf") && (
+                            <Link
+                              href={`/dashboard/projects/${projectId}/takeoff/canvas?document_id=${encodeURIComponent(doc.id)}`}
+                              className="text-[10px] uppercase tracking-widest font-mono text-gray-600 hover:text-[#CCFF00] transition-colors"
+                            >
+                              Canvas
+                            </Link>
+                          )}
                           {documentHasAskableSource(doc) && (
                             <button
                               onClick={() => openAsk(doc)}
@@ -723,6 +765,17 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
               )}
             </tbody>
           </table>
+          {docsHasMore && (
+            <div className="flex justify-center border-t border-white/5 py-3">
+              <button
+                type="button"
+                onClick={() => { void loadDocuments(false, docsPage + 1); }}
+                className="text-[10px] uppercase tracking-widest font-mono text-gray-500 hover:text-[#CCFF00]"
+              >
+                Load more documents
+              </button>
+            </div>
+          )}
         </div>
       </div>
 

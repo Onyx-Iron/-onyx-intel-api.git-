@@ -58,6 +58,7 @@ interface Payload {
   page_id: string;
   document_id: string;
   tenant_id: string;
+  project_id?: string;
   page_number: number;
   storage_path: string;
 }
@@ -73,10 +74,20 @@ Deno.serve(async (req) => {
   const db = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+  let projectId = body.project_id ?? null;
+  if (!projectId) {
+    const { data: docRow } = await db.from("documents")
+      .select("project_id")
+      .eq("id", body.document_id)
+      .eq("tenant_id", body.tenant_id)
+      .maybeSingle();
+    projectId = (docRow?.project_id as string | null) ?? null;
+  }
+
   async function recordEvent(step: "ocr" | "embedding", status: "started" | "succeeded" | "failed" | "skipped", errorMessage?: string): Promise<void> {
     await db.from("document_processing_events").insert({
       tenant_id: body.tenant_id,
-      project_id: null,
+      project_id: projectId,
       document_id: body.document_id,
       document_page_id: body.page_id,
       step,

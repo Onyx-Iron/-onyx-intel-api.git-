@@ -69,6 +69,7 @@ interface Payload {
   original_path: string;
   access_token?: string;
   is_local_upload?: boolean;
+  source_bucket?: string;
   user_id: string;
 }
 
@@ -111,7 +112,7 @@ Deno.serve(async (req) => {
 
   // Mark the document as processing right away so the UI can reflect status.
   await db.from("documents")
-    .update({ status: "processing" })
+    .update({ status: "processing", split_status: "processing" })
     .eq("id", body.document_id)
     .eq("tenant_id", body.tenant_id);
   await recordEvent("started");
@@ -122,7 +123,10 @@ Deno.serve(async (req) => {
     if (fromStorage) {
       // Local direct-upload — the browser already PUT the original here.
       // Skip the Drive fetch step completely and just read it back.
-      const dl = await db.storage.from(PLANS_BUCKET).download(body.original_path);
+      const sourceBucket = body.source_bucket === "project-documents" || body.source_bucket === PLANS_BUCKET
+        ? body.source_bucket
+        : PLANS_BUCKET;
+      const dl = await db.storage.from(sourceBucket).download(body.original_path);
       if (dl.error || !dl.data) throw new Error(`storage download: ${dl.error?.message ?? "empty"}`);
       originalBytes = new Uint8Array(await dl.data.arrayBuffer());
     } else {
@@ -215,6 +219,7 @@ Deno.serve(async (req) => {
           page_id: p.id,
           document_id: p.document_id,
           tenant_id: p.tenant_id,
+          project_id: body.project_id,
           page_number: p.page_number,
           storage_path: p.storage_path,
         }),
@@ -263,6 +268,7 @@ Deno.serve(async (req) => {
     await db.from("documents")
       .update({
         status: "split",
+        split_status: "done",
         page_count: pageCount,
         meta: {
           ...prevMeta,

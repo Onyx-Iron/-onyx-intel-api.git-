@@ -141,11 +141,18 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
     });
   }, [raw, canvasSize]);
 
-  // Publish screen-space vertices so SheetCanvas can magnetically snap draws.
+  const visible = useMemo(() => {
+    const layered = rendered.filter((v) => !layerFilter.has(v.layer));
+    if (!view) return layered;
+    return shapesInView(layered, view, 80);
+  }, [rendered, layerFilter, view]);
+
+  // Snap targets follow the vectors on screen. The full sheet can hold tens of
+  // thousands of vertices; the worker only needs the ones near the viewport.
   useEffect(() => {
     if (!onSnapPointsChange) return;
-    onSnapPointsChange(collectSnapPoints(rendered.map((v) => ({ points: v.screenPoints }))));
-  }, [rendered, onSnapPointsChange]);
+    onSnapPointsChange(collectSnapPoints(visible.map((v) => ({ points: v.screenPoints }))));
+  }, [visible, onSnapPointsChange]);
 
   // ── Layer legend ──────────────────────────────────────────────────────────
   const layers = useMemo(() => {
@@ -189,11 +196,6 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
     };
   }, [canvasSize, enabled]);
 
-  const visible = useMemo(() => {
-    const layered = rendered.filter((v) => !layerFilter.has(v.layer));
-    if (!view) return layered;
-    return shapesInView(layered, view, 80);
-  }, [rendered, layerFilter, view]);
   const hover = useMemo(() => visible.find((v) => v.key === hoverKey) ?? null, [visible, hoverKey]);
 
   // ── Approve → persist as manual_takeoff ───────────────────────────────────

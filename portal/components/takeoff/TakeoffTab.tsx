@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { getGoogleToken } from "@/lib/google/clientAuth";
 
 import { useToast } from "@/components/common/Toast";
@@ -373,13 +374,28 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
 
   // ── Saved items from DB ──
   const [savedItems, setSavedItems] = useState<SavedItem[]>([]);
+  const [savedTotal, setSavedTotal] = useState(0);
+  const [savedPage, setSavedPage] = useState(1);
+  const [savedHasMore, setSavedHasMore] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  const loadSavedItems = useCallback(() => {
-    fetch(`/api/takeoff/items?project_id=${encodeURIComponent(projectId)}`)
+  const loadSavedItems = useCallback((page = 1) => {
+    fetch(`/api/takeoff/items?project_id=${encodeURIComponent(projectId)}&page=${page}&limit=200`)
       .then((r) => r.json())
-      .then((d: { items?: SavedItem[] }) => setSavedItems(d.items ?? []))
-      .catch(() => setSavedItems([]));
+      .then((d: { items?: SavedItem[]; pagination?: { total?: number; hasMore?: boolean } }) => {
+        const incoming = d.items ?? [];
+        setSavedItems((prev) => {
+          if (page === 1) return incoming;
+          const seen = new Set(prev.map((item) => item.id));
+          return [...prev, ...incoming.filter((item) => !seen.has(item.id))];
+        });
+        setSavedTotal(d.pagination?.total ?? incoming.length);
+        setSavedHasMore(Boolean(d.pagination?.hasMore));
+        setSavedPage(page);
+      })
+      .catch(() => {
+        if (page === 1) setSavedItems([]);
+      });
   }, [projectId]);
 
   const deleteSavedItem = useCallback(async (id: string) => {
@@ -605,14 +621,15 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
           setProgress(100);
           setAuditStatus(extracted.length > 0 ? "VERIFIED_SUCCESS" : "PARTIAL_WITH_ERRORS");
           const pageErrCount = data.page_errors?.length ?? errorCount;
+          const docFailed = data.document_status === "failed" || data.document_status === "error";
           setStatusMsg(
-            data.document_status === "failed"
+            docFailed
               ? `Background processing failed for ${docName}.`
               : pageErrCount > 0
                 ? `Complete with ${pageErrCount} page error(s) — ${extracted.length} line items from ${docName}`
                 : `Complete — ${extracted.length} line items from ${docName}`,
           );
-          setPhase(data.document_status === "failed" && extracted.length === 0 ? "error" : "done");
+          setPhase(docFailed && extracted.length === 0 ? "error" : "done");
           // Rows are already persisted by page-takeoff-worker directly —
           // just refresh the saved-items list, don't re-POST them.
           setSaveStatus("saved");
@@ -963,7 +980,15 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     return (
       <div className="max-w-2xl mx-auto py-4">
         <div className="mb-6">
-          <h2 className="text-xs font-bold text-white uppercase tracking-widest">Takeoff Extraction</h2>
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-xs font-bold text-white uppercase tracking-widest">Takeoff Extraction</h2>
+            <Link
+              href={`/dashboard/projects/${projectId}/takeoff/canvas`}
+              className="text-[10px] uppercase tracking-widest font-mono text-[#CCFF00] hover:underline"
+            >
+              Open sheet canvas
+            </Link>
+          </div>
           <p className="text-[11px] text-gray-600 mt-1">
             Upload a PDF schedule, DXF/DWG or IFC model, or XLSX. Quantities are extracted
             deterministically — exact geometry and table data, CSI-coded, at zero per-document cost.
@@ -1007,7 +1032,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
               <div className="flex items-center gap-2">
                 <span className="w-1.5 h-1.5 rounded-full bg-[#CCFF00]" />
                 <span className="text-[11px] uppercase tracking-widest text-gray-400">Saved Takeoff Items</span>
-                <span className="text-[10px] text-gray-600 font-mono">({savedItems.length})</span>
+                <span className="text-[10px] text-gray-600 font-mono">({savedTotal || savedItems.length})</span>
               </div>
             </div>
             <div className="overflow-x-auto">
@@ -1053,6 +1078,17 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
                 </tbody>
               </table>
             </div>
+            {savedHasMore && (
+              <div className="flex justify-center border-t border-white/5 py-3">
+                <button
+                  type="button"
+                  onClick={() => loadSavedItems(savedPage + 1)}
+                  className="text-[10px] uppercase tracking-widest font-mono text-gray-500 hover:text-[#CCFF00]"
+                >
+                  Load more items
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

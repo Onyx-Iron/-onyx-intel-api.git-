@@ -7,7 +7,9 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { pythonApiHeaders } from "@/lib/python-api";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
+import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
+import { CANONICAL_FAILURE, CANONICAL_SUCCESS } from "@/lib/documents/status";
 import { fetchDriveFileSize } from "@/lib/google/driveFile";
 
 const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
@@ -98,8 +100,16 @@ export async function POST(req: NextRequest): Promise<Response> {
       if (driveFileId) {
         const gToken = await getAccessToken(tenantId, userId);
         if (!gToken) {
+          const message = "This plan is in Google Drive, but Google is not connected for this workspace yet. Connect Google or reopen the file from Drive.";
+          await db.from("documents")
+            .update({
+              status: CANONICAL_FAILURE,
+              last_error: message,
+              last_error_step: "drive_auth",
+            } as never)
+            .eq("id", document_id).eq("tenant_id", tenantId);
           return NextResponse.json({
-            error: "This plan is in Google Drive, but Google is not connected for this workspace yet. Connect Google or reopen the file from Drive.",
+            error: message,
             code: "NEED_GOOGLE",
           }, { status: 412 });
         }
@@ -125,7 +135,7 @@ export async function POST(req: NextRequest): Promise<Response> {
           const detail = err instanceof Error ? err.message : String(err);
           await db.from("documents")
             .update({
-              status: "failed",
+              status: CANONICAL_FAILURE,
               last_error: detail.slice(0, 1000),
               last_error_step: "page_split_worker_invoke",
             } as never)
@@ -148,6 +158,7 @@ export async function POST(req: NextRequest): Promise<Response> {
           project_id,
           original_path: storagePath!,
           is_local_upload: true,
+          source_bucket: resolveDocumentStorageBucket(meta),
           user_id: userId,
         }).then(async () => {
           await logDocumentProcessingEvent({
@@ -163,7 +174,7 @@ export async function POST(req: NextRequest): Promise<Response> {
           const detail = err instanceof Error ? err.message : String(err);
           await db.from("documents")
             .update({
-              status: "failed",
+              status: CANONICAL_FAILURE,
               last_error: detail.slice(0, 1000),
               last_error_step: "page_split_worker_invoke",
             } as never)
@@ -258,14 +269,14 @@ export async function POST(req: NextRequest): Promise<Response> {
       if (settled) return;
       settled = true;
       await db.from("documents")
-        .update({ status: "done", processed_at: new Date().toISOString() } as never)
+        .update({ status: CANONICAL_SUCCESS, processed_at: new Date().toISOString() } as never)
         .eq("id", document_id).eq("tenant_id", tenantId);
     };
     const markFailed = async () => {
       if (settled) return;
       settled = true;
       await db.from("documents")
-        .update({ status: "failed" } as never)
+        .update({ status: CANONICAL_FAILURE } as never)
         .eq("id", document_id).eq("tenant_id", tenantId);
     };
 

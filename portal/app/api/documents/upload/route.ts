@@ -1,5 +1,8 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
+import { shouldMarkIngestStartError } from "@/lib/documents/ingest-start";
+import { ASYNC_SPLIT_BYTES, looksLikePdf } from "@/lib/documents/sheet-pages";
+import { PLANS_BUCKET } from "@/lib/documents/storage";
 import { buildDocumentRevisionMeta } from "@/lib/documents/revisions";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
@@ -69,18 +72,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
 
       const safeName = file.name.replace(/[^\w.\-]+/g, "_");
-      const storagePath = `${tenantId}/${project_id}/${Date.now()}-${safeName}`;
-      const bytes = Buffer.from(await file.arrayBuffer());
+      const docId = crypto.randomUUID();
+      // Size is known on the File before any extra copy. Large plan PDFs go
+      // straight to plans-bucket so page-split-worker can read them without
+      // this request buffering a second copy via arrayBuffer().
+      const fileSize = file.size;
+      const largePdf = looksLikePdf(file.name, file.type) && fileSize >= ASYNC_SPLIT_BYTES;
+      const bucket = largePdf ? PLANS_BUCKET : BUCKET;
+      const storagePath = largePdf
+        ? `originals/${docId}.pdf`
+        : `${tenantId}/${project_id}/${Date.now()}-${safeName}`;
 
       const { error: uploadErr } = await db.storage
-        .from(BUCKET)
-        .upload(storagePath, bytes, { contentType: file.type || "application/octet-stream", upsert: false });
+        .from(bucket)
+        .upload(storagePath, file, { contentType: file.type || "application/octet-stream", upsert: false });
       if (uploadErr) {
         return NextResponse.json({ error: `Storage upload failed: ${uploadErr.message}` }, { status: 500 });
       }
 
       const insertRow: TablesInsert<"documents"> = {
-        id: crypto.randomUUID(),
+        id: docId,
         tenant_id: tenantId,
         project_id,
         file_name: file.name,
@@ -88,9 +99,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         uploaded_at: new Date().toISOString(),
         meta: buildDocumentRevisionMeta(file.name, {
           source: "local_upload",
-          storage: "supabase",
+          storage: largePdf ? PLANS_BUCKET : "supabase",
           storage_path: storagePath,
-          size: bytes.length,
+          size: fileSize,
           content_type: file.type || "application/octet-stream",
         }),
       };
@@ -115,7 +126,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         entityId: doc.id,
         action: "uploaded",
         title: `Document uploaded: ${file.name}`,
-        meta: { size: bytes.length, content_type: file.type || "application/octet-stream" },
+        meta: { size: fileSize, content_type: file.type || "application/octet-stream" },
       });
 
       return NextResponse.json({
@@ -294,7 +305,7 @@ function fireIngest(req: NextRequest, docId: string): void {
     },
     body: JSON.stringify({}),
   }).then(async (res) => {
-    if (res.ok) return;
+    if (!shouldMarkIngestStartError(res.status)) return;
     const detail = (await res.text().catch(() => "")).slice(0, 500);
     try {
       const { createServiceClient } = await import("@/lib/supabase/server");

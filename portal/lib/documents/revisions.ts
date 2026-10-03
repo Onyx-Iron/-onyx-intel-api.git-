@@ -76,6 +76,50 @@ export function buildDocumentRevisionSummaries(docs: RevisionDocumentLike[]): Do
   return summaries.sort((a, b) => b.latest_rank - a.latest_rank || a.inferred_title.localeCompare(b.inferred_title));
 }
 
+export interface RevisionCandidate {
+  id: string;
+  file_name: string;
+  uploaded_at: string | null;
+  meta: Record<string, unknown> | null;
+}
+
+export function revisionIdentity(doc: RevisionCandidate): { familyKey: string; rank: number | null } {
+  const meta = doc.meta ?? {};
+  const parsed = parseDocumentRevision(doc.file_name);
+  return {
+    familyKey: clean(meta.family_key) ?? parsed.familyKey,
+    rank: parseRank(meta.revision_rank) ?? parsed.revisionRank,
+  };
+}
+
+/**
+ * Immediate predecessor in the same family: highest revision_rank that is
+ * still lower than the current sheet. Missing ranks are not guessed.
+ */
+export function selectPriorRevision(
+  current: RevisionCandidate,
+  docs: RevisionCandidate[],
+): RevisionCandidate | null {
+  const cur = revisionIdentity(current);
+  if (cur.rank == null) return null;
+  const priors = docs.filter((doc) => {
+    if (doc.id === current.id) return false;
+    const identity = revisionIdentity(doc);
+    if (identity.familyKey !== cur.familyKey || identity.rank == null) return false;
+    return identity.rank < cur.rank!;
+  });
+  if (priors.length === 0) return null;
+  priors.sort((a, b) => {
+    const rankA = revisionIdentity(a).rank ?? 0;
+    const rankB = revisionIdentity(b).rank ?? 0;
+    if (rankA !== rankB) return rankB - rankA;
+    const timeA = a.uploaded_at ? new Date(a.uploaded_at).getTime() : 0;
+    const timeB = b.uploaded_at ? new Date(b.uploaded_at).getTime() : 0;
+    return timeB - timeA;
+  });
+  return priors[0];
+}
+
 export function parseDocumentRevision(fileName: string): {
   familyKey: string;
   title: string;

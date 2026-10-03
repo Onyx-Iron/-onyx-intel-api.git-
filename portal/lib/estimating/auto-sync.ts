@@ -161,22 +161,27 @@ export async function syncTakeoffToEstimate(
   const payload = result.rows.map((row) => linePayload(tenantId, versionId, row, null, categoryBreakdownByCsi, pct));
 
   let updated = 0;
-  for (const change of result.updates) {
-    const fields = linePayload(tenantId, versionId, change.row, change.existing, categoryBreakdownByCsi, pct);
-    const { created_by: createdBy, ...updateFields } = fields;
-    void createdBy;
-    const { data, error } = await anyDb
-      .from("estimate_items")
-      .update(updateFields)
-      .eq("id", change.estimateItemId)
-      .eq("estimate_version_id", versionId)
-      .eq("tenant_id", tenantId)
-      .select("id");
-    if (error) {
-      console.error("[syncTakeoffToEstimate] update failed", error);
-      continue;
-    }
-    updated += data?.length ?? 0;
+  const UPDATE_BATCH = 8;
+  for (let i = 0; i < result.updates.length; i += UPDATE_BATCH) {
+    const batch = result.updates.slice(i, i + UPDATE_BATCH);
+    const counts = await Promise.all(batch.map(async (change) => {
+      const fields = linePayload(tenantId, versionId, change.row, change.existing, categoryBreakdownByCsi, pct);
+      const { created_by: createdBy, ...updateFields } = fields;
+      void createdBy;
+      const { data, error } = await anyDb
+        .from("estimate_items")
+        .update(updateFields)
+        .eq("id", change.estimateItemId)
+        .eq("estimate_version_id", versionId)
+        .eq("tenant_id", tenantId)
+        .select("id");
+      if (error) {
+        console.error("[syncTakeoffToEstimate] update failed", error);
+        return 0;
+      }
+      return data?.length ?? 0;
+    }));
+    updated += counts.reduce((sum, count) => sum + count, 0);
   }
 
   let imported = 0;

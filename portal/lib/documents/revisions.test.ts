@@ -5,6 +5,8 @@ import {
   buildDocumentRevisionMeta,
   buildDocumentRevisionSummaries,
   parseDocumentRevision,
+  selectPriorRevision,
+  type RevisionCandidate,
 } from "./revisions.ts";
 
 describe("document revision metadata", () => {
@@ -50,5 +52,32 @@ describe("document revision metadata", () => {
     assert.equal(summaries[0].latest_document_id, "doc-2");
     assert.equal(summaries[0].latest_revision, "2");
     assert.equal(summaries[0].superseded_count, 1);
+  });
+
+  it("picks the next-lower revision in the same family and page set", () => {
+    const docs: RevisionCandidate[] = [
+      {
+        id: "rev-a",
+        file_name: "Utility Plan Rev A.pdf",
+        uploaded_at: "2026-06-01T00:00:00.000Z",
+        meta: buildDocumentRevisionMeta("Utility Plan Rev A.pdf", { source: "direct_upload" }),
+      },
+      {
+        id: "rev-c",
+        file_name: "Utility Plan Rev C.pdf",
+        uploaded_at: "2026-07-01T00:00:00.000Z",
+        meta: buildDocumentRevisionMeta("Utility Plan Rev C.pdf", { source: "direct_upload" }),
+      },
+      {
+        id: "other",
+        file_name: "Grading Plan Rev B.pdf",
+        uploaded_at: "2026-07-02T00:00:00.000Z",
+        meta: buildDocumentRevisionMeta("Grading Plan Rev B.pdf", { source: "direct_upload" }),
+      },
+    ];
+    const current = docs[1];
+    const prior = selectPriorRevision(current, docs);
+    assert.equal(prior?.id, "rev-a");
+    assert.equal(selectPriorRevision(docs[0], docs), null);
   });
 });

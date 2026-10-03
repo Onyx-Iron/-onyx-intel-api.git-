@@ -1,0 +1,194 @@
+-- Unify vector search across sync ingest (`chunks`) and async page-split
+-- pipeline (`document_chunks`). Adds document-scoped search for Q&A.
+-- Hybrid RRF uses FULL OUTER JOIN + ordered keyword LIMIT (keyword-only hits
+-- must survive) and search_path public,extensions for vector ops.
+
+CREATE OR REPLACE FUNCTION public.match_chunks(
+  query_embedding vector,
+  match_tenant_id uuid,
+  match_project_id uuid,
+  match_count integer DEFAULT 5
+)
+RETURNS TABLE(content text, document_id text, page_number integer, similarity double precision)
+LANGUAGE plpgsql
+SET search_path TO 'public', 'extensions'
+AS $function$
+BEGIN
+  RETURN QUERY
+  SELECT
+    u.content,
+    u.document_id,
+    u.page_number,
+    (1 - (u.embedding <=> query_embedding))::double precision AS similarity
+  FROM (
+    SELECT c.content, c.document_id, c.page_number, c.embedding
+    FROM chunks c
+    WHERE c.tenant_id = match_tenant_id
+      AND c.project_id = match_project_id
+      AND c.embedding IS NOT NULL
+    UNION ALL
+    SELECT dc.content, dc.document_id, dc.page_number, dc.embedding
+    FROM document_chunks dc
+    JOIN documents d ON d.id = dc.document_id AND d.tenant_id = dc.tenant_id
+    WHERE dc.tenant_id = match_tenant_id
+      AND d.project_id = match_project_id
+      AND dc.embedding IS NOT NULL
+  ) u
+  ORDER BY u.embedding <=> query_embedding
+  LIMIT match_count;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.match_chunks(
+  query_embedding vector,
+  match_tenant_id uuid,
+  match_project_id uuid,
+  query_text text DEFAULT ''::text,
+  match_count integer DEFAULT 6,
+  rrf_k integer DEFAULT 60
+)
+RETURNS TABLE(content text, document_id text, page_number integer, similarity double precision, rrf_score double precision)
+LANGUAGE plpgsql
+SET search_path TO 'public', 'extensions'
+AS $function$
+DECLARE
+  use_hybrid boolean := query_text IS NOT NULL AND length(trim(query_text)) > 0;
+BEGIN
+  IF use_hybrid THEN
+    RETURN QUERY
+    WITH vector_corpus AS (
+      SELECT c.id, c.content, c.document_id, c.page_number, c.embedding, 'chunks'::text AS src
+      FROM chunks c
+      WHERE c.tenant_id = match_tenant_id
+        AND c.project_id = match_project_id
+        AND c.embedding IS NOT NULL
+      UNION ALL
+      SELECT dc.id, dc.content, dc.document_id, dc.page_number, dc.embedding, 'document_chunks'::text AS src
+      FROM document_chunks dc
+      JOIN documents d ON d.id = dc.document_id AND d.tenant_id = dc.tenant_id
+      WHERE dc.tenant_id = match_tenant_id
+        AND d.project_id = match_project_id
+        AND dc.embedding IS NOT NULL
+    ),
+    keyword_corpus AS (
+      SELECT c.id, c.content, c.document_id, c.page_number, c.fts, 'chunks'::text AS src
+      FROM chunks c
+      WHERE c.tenant_id = match_tenant_id
+        AND c.project_id = match_project_id
+      UNION ALL
+      SELECT
+        dc.id,
+        dc.content,
+        dc.document_id,
+        dc.page_number,
+        COALESCE(dc.fts, to_tsvector('english', COALESCE(dc.content, ''))) AS fts,
+        'document_chunks'::text AS src
+      FROM document_chunks dc
+      JOIN documents d ON d.id = dc.document_id AND d.tenant_id = dc.tenant_id
+      WHERE dc.tenant_id = match_tenant_id
+        AND d.project_id = match_project_id
+    ),
+    vector_ranked AS (
+      SELECT
+        vector_corpus.id,
+        vector_corpus.src,
+        vector_corpus.content,
+        vector_corpus.document_id,
+        vector_corpus.page_number,
+        (1 - (vector_corpus.embedding <=> query_embedding))::double precision AS sim,
+        ROW_NUMBER() OVER (ORDER BY vector_corpus.embedding <=> query_embedding) AS vec_rank
+      FROM vector_corpus
+      ORDER BY vector_corpus.embedding <=> query_embedding
+      LIMIT match_count * 4
+    ),
+    keyword_ranked AS (
+      SELECT
+        ranked.id,
+        ranked.src,
+        ranked.content,
+        ranked.document_id,
+        ranked.page_number,
+        ranked.kw_rank
+      FROM (
+        SELECT
+          keyword_corpus.id,
+          keyword_corpus.src,
+          keyword_corpus.content,
+          keyword_corpus.document_id,
+          keyword_corpus.page_number,
+          ROW_NUMBER() OVER (
+            ORDER BY ts_rank_cd(keyword_corpus.fts, websearch_to_tsquery('english', query_text)) DESC
+          ) AS kw_rank
+        FROM keyword_corpus
+        WHERE keyword_corpus.fts @@ websearch_to_tsquery('english', query_text)
+      ) ranked
+      ORDER BY ranked.kw_rank
+      LIMIT match_count * 4
+    )
+    SELECT
+      COALESCE(vr.content, kr.content) AS content,
+      COALESCE(vr.document_id, kr.document_id) AS document_id,
+      COALESCE(vr.page_number, kr.page_number) AS page_number,
+      COALESCE(vr.sim, 0)::double precision AS similarity,
+      (
+        COALESCE(1.0 / (rrf_k + vr.vec_rank), 0) +
+        COALESCE(1.0 / (rrf_k + kr.kw_rank), 0)
+      )::double precision AS rrf_score
+    FROM vector_ranked vr
+    FULL OUTER JOIN keyword_ranked kr ON kr.id = vr.id AND kr.src = vr.src
+    ORDER BY rrf_score DESC
+    LIMIT match_count;
+  ELSE
+    RETURN QUERY
+    SELECT
+      mc.content,
+      mc.document_id,
+      mc.page_number,
+      mc.similarity,
+      (1.0 / (rrf_k + ROW_NUMBER() OVER (ORDER BY mc.similarity DESC)))::double precision AS rrf_score
+    FROM public.match_chunks(query_embedding, match_tenant_id, match_project_id, match_count) mc;
+  END IF;
+END;
+$function$;
+
+-- Document-scoped search for Q&A (distinct overload from project hybrid RRF).
+CREATE OR REPLACE FUNCTION public.match_document_chunks(
+  query_embedding vector,
+  match_tenant_id uuid,
+  match_document_id text,
+  match_count integer DEFAULT 8
+)
+RETURNS TABLE(content text, page_number integer, similarity double precision)
+LANGUAGE plpgsql
+SET search_path TO 'public', 'extensions'
+AS $function$
+BEGIN
+  RETURN QUERY
+  SELECT
+    u.content,
+    u.page_number,
+    (1 - (u.embedding <=> query_embedding))::double precision AS similarity
+  FROM (
+    SELECT c.content, c.page_number, c.embedding
+    FROM chunks c
+    WHERE c.tenant_id = match_tenant_id
+      AND c.document_id = match_document_id
+      AND c.embedding IS NOT NULL
+    UNION ALL
+    SELECT dc.content, dc.page_number, dc.embedding
+    FROM document_chunks dc
+    WHERE dc.tenant_id = match_tenant_id
+      AND dc.document_id = match_document_id
+      AND dc.embedding IS NOT NULL
+  ) u
+  ORDER BY u.embedding <=> query_embedding
+  LIMIT match_count;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.match_document_chunks(vector, uuid, text, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.match_document_chunks(vector, uuid, text, integer) TO service_role;
+
+ALTER FUNCTION public.match_chunks(vector, uuid, uuid, integer) SET search_path = public, extensions;
+ALTER FUNCTION public.match_chunks(vector, uuid, uuid, text, integer, integer) SET search_path = public, extensions;
+ALTER FUNCTION public.match_document_chunks(vector, uuid, text, integer) SET search_path = public, extensions;

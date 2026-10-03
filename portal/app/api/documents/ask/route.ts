@@ -8,6 +8,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditUpdate } from "@/lib/audit";
 import { checkAiRateLimit } from "@/lib/ai/rate-limit";
+import { embedQueryText } from "@/lib/ai/embeddings";
 import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
 
 export const runtime = "nodejs";
@@ -79,22 +80,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const storagePath = meta.storage_path as string | undefined;
     const driveFileId = meta.drive_file_id as string | undefined;
 
-    // Async split pipeline stores OCR per page — prefer that over re-uploading
-    // the full PDF when available (large Drive plans live in plans-bucket).
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data: asyncPages } = await (db as any)
-      .from("document_pages")
-      .select("page_number, ocr_text, status")
-      .eq("document_id", document_id)
-      .eq("tenant_id", tenantId)
-      .eq("status", "done")
-      .not("ocr_text", "is", null)
-      .order("page_number", { ascending: true });
-    const ocrPages = (asyncPages ?? []) as Array<{ page_number: number; ocr_text: string }>;
-    if (ocrPages.length > 0) {
-      const context = ocrPages
-        .map((p) => `=== Page ${p.page_number} ===\n${p.ocr_text}`)
-        .join("\n\n");
+    const persistAnswer = async (answer: string, source: string) => {
+      const newQ = {
+        id: `q_${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
+        question: question.trim(),
+        answer,
+        asked_at: new Date().toISOString(),
+        asked_by: userId,
+      };
+      const updatedMeta = { ...meta, questions: [...existingQsForCache, newQ] };
+      await db.from("documents").update({ meta: updatedMeta } as never).eq("id", doc.id).eq("tenant_id", tenantId);
+      auditUpdate({
+        tenant_id: tenantId,
+        user_id: userId,
+        table_name: "documents",
+        record_id: doc.id,
+        old_values: { meta } as unknown as Record<string, unknown>,
+        new_values: { meta: updatedMeta } as unknown as Record<string, unknown>,
+      });
+      return NextResponse.json({ answer, document: doc.file_name, question_id: newQ.id, source });
+    };
+
+    const answerFromTextContext = async (context: string, sourceLabel: string, source: string) => {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
         {
@@ -105,7 +112,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               parts: [{
                 text: buildGroundedSystemPrompt(SYSTEM, {
                   requireCitations: true,
-                  sourceLabel: "document OCR excerpts",
+                  sourceLabel,
                 }),
               }],
             },
@@ -123,21 +130,48 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
       const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
       const answer = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "(no answer)";
-      const newQ = {
-        id: `q_${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
-        question: question.trim(),
-        answer,
-        asked_at: new Date().toISOString(),
-        asked_by: userId,
-      };
-      const updatedMeta = { ...meta, questions: [...existingQsForCache, newQ] };
-      await db.from("documents").update({ meta: updatedMeta } as never).eq("id", doc.id).eq("tenant_id", tenantId);
-      return NextResponse.json({
-        answer,
-        document: doc.file_name,
-        question_id: newQ.id,
-        source: "document_pages_ocr",
-      });
+      return persistAnswer(answer, source);
+    };
+
+    // Indexed chunks (sync ingest or async page-processor) — no full PDF upload.
+    try {
+      const embedding = await embedQueryText(question.trim());
+      const vectorStr = `[${embedding.join(",")}]`;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data: matchedChunks } = await (db.rpc as any)("match_document_chunks", {
+        query_embedding: vectorStr,
+        match_tenant_id: tenantId,
+        match_document_id: document_id,
+        match_count: 8,
+      }) as { data: Array<{ content: string; page_number: number; similarity: number }> | null };
+      const relevant = (matchedChunks ?? []).filter((c) => c.similarity > 0.55);
+      if (relevant.length > 0) {
+        const context = relevant
+          .map((c, i) => `[${i + 1}] (page ${c.page_number})\n${c.content}`)
+          .join("\n\n");
+        return await answerFromTextContext(context, "document excerpts", "document_chunks");
+      }
+    } catch {
+      /* fall through to OCR / PDF paths */
+    }
+
+    // Async split pipeline stores OCR per page — prefer that over re-uploading
+    // the full PDF when available (large Drive plans live in plans-bucket).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: asyncPages } = await (db as any)
+      .from("document_pages")
+      .select("page_number, ocr_text, status")
+      .eq("document_id", document_id)
+      .eq("tenant_id", tenantId)
+      .eq("status", "done")
+      .not("ocr_text", "is", null)
+      .order("page_number", { ascending: true });
+    const ocrPages = (asyncPages ?? []) as Array<{ page_number: number; ocr_text: string }>;
+    if (ocrPages.length > 0) {
+      const context = ocrPages
+        .map((p) => `=== Page ${p.page_number} ===\n${p.ocr_text}`)
+        .join("\n\n");
+      return await answerFromTextContext(context, "document OCR excerpts", "document_pages_ocr");
     }
 
     let bytes: Buffer;
@@ -204,30 +238,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const answer = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "(no answer)";
 
     // Persist Q&A to documents.meta.questions so it survives panel close + reload
-    const newQ = {
-      id: `q_${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
-      question: question.trim(),
-      answer,
-      asked_at: new Date().toISOString(),
-      asked_by: userId,
-    };
-    const updatedMeta = { ...meta, questions: [...existingQsForCache, newQ] };
-    await db
-      .from("documents")
-      .update({ meta: updatedMeta } as never)
-      .eq("id", doc.id)
-      .eq("tenant_id", tenantId);
-
-    auditUpdate({
-      tenant_id: tenantId,
-      user_id: userId,
-      table_name: "documents",
-      record_id: doc.id,
-      old_values: { meta } as unknown as Record<string, unknown>,
-      new_values: { meta: updatedMeta } as unknown as Record<string, unknown>,
-    });
-
-    return NextResponse.json({ answer, document: doc.file_name, question_id: newQ.id });
+    return persistAnswer(answer, "pdf_inline");
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[POST /api/documents/ask] ${msg}` }, { status: 502 });
