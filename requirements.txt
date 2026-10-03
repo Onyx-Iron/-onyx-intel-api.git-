@@ -17,9 +17,6 @@ google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.1
 celery[redis]==5.4.0
 redis==5.2.1
-<<<<<<< HEAD
 brotli==1.1.0
-=======
 numpy==2.2.6
 shapely==2.1.1
->>>>>>> origin/main
