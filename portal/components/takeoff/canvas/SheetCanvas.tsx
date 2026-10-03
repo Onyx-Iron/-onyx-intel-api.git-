@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import CADVectorLayer from "./CADVectorLayer";
 import VisionExtractionsPanel from "./VisionExtractionsPanel";
@@ -18,6 +19,8 @@ import {
 } from "@/lib/takeoff/canvas/vector-snap";
 import { takeoffQueryKeys, useSheetCalibration } from "@/lib/takeoff/queries";
 import type { SnapResult } from "@/lib/takeoff/canvas/snap-algorithm";
+import { projectToCanvas, vectorCanvasFrame } from "@/lib/takeoff/canvas/snap";
+import { diffRevisionVectors, polylinesFromUnknown, type Polyline } from "@/lib/takeoff/canvas/revision-diff";
 
 // Coordinate-space tag carried alongside each committed item (professional-
 // manual-takeoff milestone, PERMANENT RULE 1/2). 'page_space' points are
@@ -177,13 +180,17 @@ type SnapWorkerResponse = { type: "snap-result"; id: number; result: SnapResult 
 
 export default function SheetCanvas({ projectId, projectName, pageId, pageNumber, documentId }: Props) {
   const queryClient = useQueryClient();
+  const router = useRouter();
   const { data: calibration = null } = useSheetCalibration(pageId);
   const wrapRef   = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const priorCanvasRef = useRef<HTMLCanvasElement>(null);
   const [priorUrl, setPriorUrl] = useState<string | null>(null);
+  const [priorPageId, setPriorPageId] = useState<string | null>(null);
   const [priorLabel, setPriorLabel] = useState<string | null>(null);
   const [showPrior, setShowPrior] = useState(false);
+  const [sheets, setSheets] = useState<Array<{ id: string; page_number: number; status: string }>>([]);
+  const [revisionDiff, setRevisionDiff] = useState<{ added: Polyline[]; removed: Polyline[] } | null>(null);
   const snapWorkerRef = useRef<Worker | null>(null);
   const snapRequestIdRef = useRef(0);
   const latestSnapRef = useRef<SnapResult | null>(null);
@@ -443,9 +450,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           { cache: "no-store" },
         );
         if (!res.ok) return;
-        const data = await res.json() as { url?: string | null; revision_token?: string | null; file_name?: string | null };
+        const data = await res.json() as { url?: string | null; page_id?: string | null; revision_token?: string | null; file_name?: string | null };
         if (cancelled || !data.url) return;
         setPriorUrl(data.url);
+        setPriorPageId(data.page_id ?? null);
         setPriorLabel(data.revision_token ? `Rev ${data.revision_token}` : (data.file_name ?? "Prior"));
       } catch {
         /* overlay is optional */
@@ -453,6 +461,58 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     })();
     return () => { cancelled = true; };
   }, [documentId, pageNumber]);
+
+  useEffect(() => {
+    if (!documentId) return;
+    let cancelled = false;
+    (async () => {
+      const res = await fetch(`/api/takeoff/canvas/sheets?document_id=${encodeURIComponent(documentId)}`, { cache: "no-store" });
+      if (!res.ok || cancelled) return;
+      const data = await res.json() as { pages?: Array<{ id: string; page_number: number; status: string }> };
+      if (!cancelled) setSheets(data.pages ?? []);
+    })().catch(() => { /* sheet list is optional */ });
+    return () => { cancelled = true; };
+  }, [documentId]);
+
+  useEffect(() => {
+    if (!showPrior || !priorPageId) {
+      setRevisionDiff(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const [currentRes, priorRes] = await Promise.all([
+        fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
+        fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(priorPageId)}`, { cache: "no-store" }),
+      ]);
+      if (cancelled) return;
+      const current = currentRes.ok ? await currentRes.json() as { vectors?: unknown } : { vectors: [] };
+      const prior = priorRes.ok ? await priorRes.json() as { vectors?: unknown } : { vectors: [] };
+      setRevisionDiff(diffRevisionVectors(
+        polylinesFromUnknown(current.vectors),
+        polylinesFromUnknown(prior.vectors),
+      ));
+    })().catch(() => { if (!cancelled) setRevisionDiff(null); });
+    return () => { cancelled = true; };
+  }, [showPrior, priorPageId, pageId]);
+
+  const revisionPaths = useMemo(() => {
+    if (!showPrior || !revisionDiff || !renderSize) return null;
+    const all = [...revisionDiff.added, ...revisionDiff.removed];
+    if (all.length === 0) return null;
+    const frame = vectorCanvasFrame(all.map((line) => ({
+      points: line.points.map((point) => [point.x, point.y] as [number, number]),
+    })), renderSize);
+    if (!frame) return null;
+    const toPath = (line: Polyline) => line.points.map((point, index) => {
+      const projected = projectToCanvas(point.x, point.y, frame);
+      return `${index === 0 ? "M" : "L"}${projected.x},${projected.y}`;
+    }).join(" ");
+    return {
+      added: revisionDiff.added.map(toPath),
+      removed: revisionDiff.removed.map(toPath),
+    };
+  }, [showPrior, revisionDiff, renderSize]);
 
   useEffect(() => {
     if (!showPrior || !priorUrl || renderScale <= 0) return;
@@ -1373,6 +1433,24 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           </div>
 
           <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono text-white/40">
+            {sheets.length > 1 && (
+              <label className="flex items-center gap-1 normal-case tracking-normal text-white/50">
+                Sheet
+                <select
+                  value={pageId}
+                  onChange={(event) => {
+                    router.push(`/dashboard/projects/${projectId}/takeoff/canvas?page_id=${encodeURIComponent(event.target.value)}`);
+                  }}
+                  className="rounded border border-white/15 bg-black/40 px-2 py-0.5 text-[11px] text-white"
+                >
+                  {sheets.map((sheet) => (
+                    <option key={sheet.id} value={sheet.id}>
+                      {sheet.page_number}{sheet.status === "error" ? " · error" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             {priorUrl && (
               <button
                 type="button"
@@ -1485,8 +1563,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           <canvas
             ref={priorCanvasRef}
             aria-hidden={!showPrior}
-            className={`pointer-events-none absolute left-0 top-0 rounded-md mix-blend-multiply ${showPrior ? "opacity-55" : "hidden"}`}
-            style={showPrior ? { filter: "sepia(1) saturate(8) hue-rotate(-30deg)" } : undefined}
+            className={`pointer-events-none absolute left-0 top-0 rounded-md mix-blend-multiply ${showPrior && !revisionPaths ? "opacity-55" : "hidden"}`}
+            style={showPrior && !revisionPaths ? { filter: "sepia(1) saturate(8) hue-rotate(-30deg)" } : undefined}
           />
           {renderSize && (
             <svg
@@ -1499,6 +1577,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               onMouseLeave={onCanvasMouseLeave}
               onDoubleClick={finishDraft}
             >
+              {revisionPaths?.removed.map((d, index) => (
+                <path key={`removed-${index}`} d={d} stroke="#f87171" strokeWidth={2.5} fill="none" strokeLinecap="round" />
+              ))}
+              {revisionPaths?.added.map((d, index) => (
+                <path key={`added-${index}`} d={d} stroke="#4ade80" strokeWidth={2.5} fill="none" strokeLinecap="round" />
+              ))}
               {/* Committed shapes */}
               {shapes.map((s) => {
                 const isSel = s.key === selectedKey;

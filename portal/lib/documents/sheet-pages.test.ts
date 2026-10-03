@@ -41,7 +41,9 @@ describe("sheet pages", () => {
       documentId: "doc-1",
       pdfBytes: bytes,
     });
-    assert.equal(created, 2);
+    assert.equal(created.pageCount, 2);
+    assert.equal(created.created.length, 2);
+    assert.equal(created.created[0].page_number, 1);
     assert.deepEqual(uploaded, ["pages/doc-1/page-1.pdf", "pages/doc-1/page-2.pdf"]);
 
     uploaded.length = 0;
@@ -50,7 +52,8 @@ describe("sheet pages", () => {
       documentId: "doc-1",
       pdfBytes: bytes,
     });
-    assert.equal(again, 2);
+    assert.equal(again.pageCount, 2);
+    assert.equal(again.created.length, 0);
     assert.equal(uploaded.length, 0);
   });
 });
