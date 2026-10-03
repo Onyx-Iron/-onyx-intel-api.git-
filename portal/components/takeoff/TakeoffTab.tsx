@@ -605,14 +605,15 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
           setProgress(100);
           setAuditStatus(extracted.length > 0 ? "VERIFIED_SUCCESS" : "PARTIAL_WITH_ERRORS");
           const pageErrCount = data.page_errors?.length ?? errorCount;
+          const docFailed = data.document_status === "failed" || data.document_status === "error";
           setStatusMsg(
-            data.document_status === "failed"
+            docFailed
               ? `Background processing failed for ${docName}.`
               : pageErrCount > 0
                 ? `Complete with ${pageErrCount} page error(s) — ${extracted.length} line items from ${docName}`
                 : `Complete — ${extracted.length} line items from ${docName}`,
           );
-          setPhase(data.document_status === "failed" && extracted.length === 0 ? "error" : "done");
+          setPhase(docFailed && extracted.length === 0 ? "error" : "done");
           // Rows are already persisted by page-takeoff-worker directly —
           // just refresh the saved-items list, don't re-POST them.
           setSaveStatus("saved");
