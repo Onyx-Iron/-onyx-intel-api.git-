@@ -686,7 +686,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     for (const n of topoNodes) if (!n.saved) keys.add(n.key);
     for (const a of areaBounds) if (!a.saved) keys.add(a.key);
     return keys;
-  }, [selectedKey, dragState?.key, shapes, utilityRuns, wallRuns, topoNodes, areaBounds]);
+  }, [selectedKey, dragState, shapes, utilityRuns, wallRuns, topoNodes, areaBounds]);
 
   const visibleShapes = useMemo(() => {
     const annotated = shapes.map((s) => ({
