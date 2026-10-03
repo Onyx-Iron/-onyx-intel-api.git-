@@ -13,6 +13,8 @@ const ALLOWLIST = new Set([
   "cost-catalog/ingest/oce/route.ts",
   "public/procurement-request/[id]/route.ts",
   "internal/outbox/process/route.ts",
+  // Cron/worker: claims sheets via RPC that already scopes by tenant_id.
+  "internal/sheets/process/route.ts",
 ]);
 
 function walk(dir: string): string[] {
