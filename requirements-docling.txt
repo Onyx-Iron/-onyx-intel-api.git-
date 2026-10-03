@@ -1,6 +1,6 @@
 # Optional heavy deps for the Docling text-PDF spike (XD-01).
-# NOT installed by default CI / Railway web service — enable on a dedicated
-# worker or local spike with:
+# Install AFTER a CPU torch wheel (see Dockerfile) so pip does not pull CUDA.
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
 #   pip install -r requirements.txt -r requirements-docling.txt
 #   ENABLE_DOCLING=1
 docling>=2.15.0,<3
