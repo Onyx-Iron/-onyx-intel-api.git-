@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { BID_STAGES, BID_STAGE_LABELS, type BidStage } from "@/lib/preconstruction/stages";
 import { useToast } from "@/components/common/Toast";
+import SamImportPanel from "./SamImportPanel";
+import ProjectContactsInline from "./ProjectContactsInline";
 
 interface BidOpportunity {
   id: string;
@@ -44,6 +46,7 @@ export default function BidBoard() {
     }
   }, [toast]);
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load(); }, [load]);
 
   const byStage = useMemo(() => {
@@ -112,6 +115,7 @@ export default function BidBoard() {
 
   return (
     <div className="space-y-6">
+      <SamImportPanel onImported={() => void load()} />
       <form onSubmit={(e) => void create(e)} className="flex flex-wrap items-end gap-2 rounded-xl border border-white/10 bg-white/[0.02] p-4">
         <label className="flex min-w-[10rem] flex-1 flex-col gap-1 text-[10px] uppercase tracking-wide text-white/40">
           Opportunity
@@ -175,6 +179,7 @@ export default function BidBoard() {
                         Due {new Date(card.due_at).toLocaleDateString()}
                       </p>
                     )}
+                    {card.project_id && <ProjectContactsInline projectId={card.project_id} />}
                     <div className="mt-2 flex flex-wrap gap-1">
                       <select
                         value={card.stage}

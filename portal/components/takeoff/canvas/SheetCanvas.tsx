@@ -15,6 +15,7 @@ import { CANVAS_HOTKEY_HINT, resolveCanvasHotkey, type CanvasTool } from "@/lib/
 import { buildQuantitySummary } from "@/lib/takeoff/canvas/quantity-summary";
 import { CommandStack } from "@/lib/takeoff/canvas/command-stack";
 import TakeoffLayersPanel from "./TakeoffLayersPanel";
+import PlaceAssemblyPanel from "./PlaceAssemblyPanel";
 import {
   DEFAULT_SNAP_THRESHOLD_PX,
   type VectorPoint,
@@ -218,6 +219,14 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [activeLayerId, setActiveLayerId] = useState<string | null>(null);
   const [hiddenLayerIds, setHiddenLayerIds] = useState<Set<string>>(new Set());
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const [markupMode, setMarkupMode] = useState(false);
+  const [markups, setMarkups] = useState<Array<{
+    id: string;
+    markup_type: string;
+    geometry: { points?: Pt[]; text?: string };
+    label: string | null;
+    color: string;
+  }>>([]);
   const commandStackRef = useRef(new CommandStack());
   const [, setCommandTick] = useState(0);
   // Whole-object drag state for an already-SAVED Shape (count/length/area) —
@@ -272,13 +281,14 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     let cancelled = false;
     (async () => {
       try {
-        const [urlRes, mtRes, utRes, topoRes, areaRes, wallRes] = await Promise.all([
+        const [urlRes, mtRes, utRes, topoRes, areaRes, wallRes, markupRes] = await Promise.all([
           fetch(`/api/takeoff/canvas/page-url?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/manual?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/utility?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/topo?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/area-bounds?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/wall?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
+          fetch(`/api/takeoff/markups?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
         ]);
         if (!urlRes.ok) throw new Error(`page-url ${urlRes.status}`);
         const urlData = await urlRes.json() as { url: string };
@@ -396,6 +406,18 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               saved: true,
             })));
           }
+        }
+        if (markupRes.ok) {
+          const mk = await markupRes.json() as {
+            markups?: Array<{
+              id: string;
+              markup_type: string;
+              geometry: { points?: Pt[]; text?: string };
+              label: string | null;
+              color: string;
+            }>;
+          };
+          if (!cancelled) setMarkups(mk.markups ?? []);
         }
       } catch (e) {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
@@ -635,6 +657,38 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (!renderSize) return;
     const raw = toLocal(e.clientX, e.clientY, e.currentTarget);
     const p = resolveSnapPoint(raw);
+
+    // Non-quantity markups (excluded from estimate sync).
+    if (markupMode) {
+      const label = window.prompt("Markup text (not counted in quantities):", "");
+      if (label == null || !label.trim()) return;
+      void (async () => {
+        const res = await fetch("/api/takeoff/markups", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            project_id: projectId,
+            page_id: pageId,
+            markup_type: "text",
+            label: label.trim(),
+            color: "#F5A623",
+            geometry: { points: [p], text: label.trim(), coordinate_space: "legacy_pixel" },
+          }),
+        });
+        if (!res.ok) return;
+        const data = await res.json() as {
+          markup: {
+            id: string;
+            markup_type: string;
+            geometry: { points?: Pt[]; text?: string };
+            label: string | null;
+            color: string;
+          };
+        };
+        setMarkups((prev) => [...prev, data.markup]);
+      })();
+      return;
+    }
 
     if (tool === "calibrate") {
       const next = [...calibPts, p];
@@ -1671,6 +1725,20 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   pointerEvents="none"
                 />
               )}
+              {/* Non-quantity markups */}
+              {markups.map((m) => {
+                const pts = m.geometry?.points ?? [];
+                const p0 = pts[0];
+                if (!p0) return null;
+                return (
+                  <g key={m.id} pointerEvents="none">
+                    <circle cx={p0.x} cy={p0.y} r={5} fill={m.color} opacity={0.85} />
+                    <text x={p0.x + 8} y={p0.y + 4} fill={m.color} fontSize={11} fontFamily="monospace">
+                      {m.label ?? m.geometry?.text ?? "note"}
+                    </text>
+                  </g>
+                );
+              })}
 
               {/* Committed utility pipe runs */}
               {utilityRuns.map((u) => {
@@ -1957,6 +2025,36 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               setHiddenLayerIds(new Set(layers.filter((l) => !l.visible).map((l) => l.id)));
             }}
           />
+          <PlaceAssemblyPanel
+            onPlace={(rows) => {
+              setShapes((prev) => [
+                ...prev,
+                ...rows.map((r, i) => ({
+                  key: `asm-${r.meta.assembly_group}-${i}`,
+                  tool: (r.unit === "LF" ? "length" : r.unit === "SF" ? "area" : "count") as Shape["tool"],
+                  points: [{ x: 40 + i * 14, y: 40 + i * 14 }],
+                  coordinateSpace: "legacy_pixel" as const,
+                  quantity: r.quantity,
+                  unit: r.unit,
+                  cost_code: r.cost_code,
+                  layer_id: activeLayerId,
+                  saved: false,
+                })),
+              ]);
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => setMarkupMode((v) => !v)}
+            className={`w-full rounded-lg border px-2 py-1.5 text-[10px] font-semibold uppercase tracking-widest ${
+              markupMode
+                ? "border-amber-400/60 bg-amber-500/20 text-amber-200"
+                : "border-white/10 text-white/50 hover:text-white"
+            }`}
+            title="Text markups never sync to estimates"
+          >
+            {markupMode ? "Markup on — click sheet" : "Markup (non-qty)"}
+          </button>
           <div className="flex items-center justify-between gap-2">
             <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Measurements</div>
             <a
