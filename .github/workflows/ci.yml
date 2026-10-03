@@ -184,8 +184,24 @@ jobs:
           cache: npm
           cache-dependency-path: portal/package-lock.json
       - run: npm ci
+      - name: Require isolated test Supabase secrets
+        env:
+          TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -z "$TEST_SUPABASE_URL" ] || [ -z "$TEST_SUPABASE_SERVICE_ROLE_KEY" ]; then
+            echo "::warning::TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY are unset."
+            echo "Integration tests will self-skip and this job will stay green without a real gate."
+            echo "Add both Actions secrets pointing at an ISOLATED Supabase project (never production)."
+            echo "missing=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "missing=0" >> "$GITHUB_OUTPUT"
+          fi
+        id: secrets
       - run: npm run test:integration
         env:
           ALLOW_INTEGRATION_TESTS: "true"
           TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
           TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+
+# Retrigger marker

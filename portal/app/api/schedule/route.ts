@@ -1,9 +1,11 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
+import { auditInsert } from "@/lib/audit";
 import { scheduleTaskCreateSchema, parseBody } from "@/lib/validation";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
@@ -60,6 +62,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const { project_id, name, status, start_date, end_date, duration, critical } = parsed.data;
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    await assertProjectBelongsToTenant(project_id, tenantId);
 
     const db = await createServiceClient();
     const { data, error } = await db
@@ -81,6 +86,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ error: `[POST /api/schedule] ${error.message}` }, { status: 422 });
     }
 
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "schedule_tasks",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      record_id: (data as any).id,
+      new_values: data as Record<string, unknown>,
+    });
+
     void logEvent({
       projectId: project_id,
       tenantId,
@@ -94,6 +108,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json({ task: data }, { status: 201 });
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[POST /api/schedule] ${msg}` }, { status: 500 });
   }

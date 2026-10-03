@@ -39,13 +39,15 @@ describe("estimate sync contract", () => {
     assert.equal(blocksEstimateImport("approved"), false);
   });
 
-  it("is the module the page takeoff worker imports", () => {
+  it("queues portal estimate sync instead of inserting estimate lines", () => {
     const workerPath = join(
       dirname(fileURLToPath(import.meta.url)),
       "../../supabase/functions/page-takeoff-worker/index.ts",
     );
     const source = readFileSync(workerPath, "utf8");
-    assert.match(source, /from "\.\.\/_shared\/estimate-sync-contract\.ts"/);
+    assert.match(source, /enqueue_project_estimate_sync/);
+    assert.doesNotMatch(source, /from\("estimate_items"\)/);
+    assert.doesNotMatch(source, /allocateDirectCosts/);
     assert.doesNotMatch(source, /function fingerprint\(/);
   });
 });

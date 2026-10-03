@@ -1,7 +1,8 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { auditUpdate, auditDelete } from "@/lib/audit";
 
 export const runtime = "nodejs";
@@ -19,6 +20,9 @@ export async function PUT(req: NextRequest, ctx: RouteContext): Promise<NextResp
 
     const body = await req.json() as Record<string, unknown>;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "financial", "write");
+    if (denied) return denied;
+    await assertProjectBelongsToTenant(project_id, tenantId);
     const db = await createServiceClient();
 
     const allowed = [
@@ -63,6 +67,8 @@ export async function PUT(req: NextRequest, ctx: RouteContext): Promise<NextResp
 
     return NextResponse.json({ item: data });
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }
@@ -77,6 +83,9 @@ export async function DELETE(req: NextRequest, ctx: RouteContext): Promise<NextR
     if (!project_id) return NextResponse.json({ error: "project_id is required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "financial", "write");
+    if (denied) return denied;
+    await assertProjectBelongsToTenant(project_id, tenantId);
     const db = await createServiceClient();
 
      
@@ -100,6 +109,8 @@ export async function DELETE(req: NextRequest, ctx: RouteContext): Promise<NextR
 
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }

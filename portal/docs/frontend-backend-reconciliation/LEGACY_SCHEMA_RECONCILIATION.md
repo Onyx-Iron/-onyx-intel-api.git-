@@ -32,9 +32,5 @@ All nine files are now fully superseded by the committed migration baseline
 (`20260627000000_schema_baseline.sql` +
 `20260812000000_baseline_foreign_keys_functions_and_triggers.sql` +
 the drift corrections). None of them are needed for any future `supabase db
-push`/reset workflow going forward. Recommend moving them to a
-`docs/legacy-schema-history/` folder (or deleting them) in a follow-up,
-separate commit — not done here, since this reconciliation's scope was
-capturing what production actually has, not repo housekeeping, and deleting
-files is a more reversible-but-still-visible change worth its own explicit
-review pass rather than bundling into this effort.
+push`/reset workflow going forward. They have been moved to
+`docs/legacy-schema-history/` for archaeology only — do not run them.

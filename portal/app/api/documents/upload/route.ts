@@ -2,9 +2,11 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { buildDocumentRevisionMeta } from "@/lib/documents/revisions";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { getAccessTokenWithReason } from "@/lib/google/oauth";
 import { logEvent } from "@/lib/activity";
+import { auditInsert } from "@/lib/audit";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
@@ -36,6 +38,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
     const db = await createServiceClient();
 
     const contentType = req.headers.get("content-type") ?? "";
@@ -56,9 +60,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       if (!(file instanceof File)) return NextResponse.json({ error: "No file provided" }, { status: 400 });
       if (!project_id) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
-      const { data: project, error: projErr } = await db
-        .from("projects").select("id").eq("id", project_id).eq("tenant_id", tenantId).single();
-      if (projErr || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
+      try {
+        await assertProjectBelongsToTenant(project_id, tenantId);
+      } catch (err) {
+        const owned = ownershipDenied(err);
+        if (owned) return owned;
+        throw err;
+      }
 
       const safeName = file.name.replace(/[^\w.\-]+/g, "_");
       const storagePath = `${tenantId}/${project_id}/${Date.now()}-${safeName}`;
@@ -89,6 +97,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const { data: doc, error } = await db
         .from("documents").insert(insertRow).select("id, file_name, status").single();
       if (error || !doc) return NextResponse.json({ error: `[insert] ${error?.message}` }, { status: 500 });
+
+      auditInsert({
+        tenant_id: tenantId,
+        user_id: userId,
+        table_name: "documents",
+        record_id: doc.id,
+        new_values: insertRow as unknown as Record<string, unknown>,
+      });
 
       fireIngest(req, doc.id);
       void logEvent({
@@ -131,14 +147,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ error: "project_id and file_name required" }, { status: 400 });
     }
 
-    const { data: project, error: projErr } = await db
-      .from("projects").select("id").eq("id", project_id).eq("tenant_id", tenantId).single();
-    if (projErr || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    try {
+      await assertProjectBelongsToTenant(project_id, tenantId);
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
+    }
 
     // Case A: caller already finished a Drive upload → just register the row.
     if (drive_file_id) {
       const inserted = await insertDriveRow({
-        db, tenantId, projectId: project_id, fileName: file_name,
+        db, tenantId, userId, projectId: project_id, fileName: file_name,
         driveFileId: drive_file_id, mimeType: content_type, size: body.size ?? null,
       });
       if ("error" in inserted) return NextResponse.json(inserted, { status: inserted.status });
@@ -205,13 +225,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 async function insertDriveRow(args: {
   db: Awaited<ReturnType<typeof createServiceClient>>;
   tenantId: string;
+  userId: string;
   projectId: string;
   fileName: string;
   driveFileId: string;
   mimeType: string;
   size: number | null;
 }): Promise<{ id: string; deduped: boolean } | { error: string; status: number }> {
-  const { db, tenantId, projectId, fileName, driveFileId, mimeType, size } = args;
+  const { db, tenantId, userId, projectId, fileName, driveFileId, mimeType, size } = args;
 
   // Explicit check-then-insert dedupe (the race-proof partial unique index
   // isn't applied to the DB yet). Idempotent across browser retries on the
@@ -225,8 +246,10 @@ async function insertDriveRow(args: {
     .maybeSingle();
   if (existing) return { id: existing.id, deduped: true };
 
+  const documentId = crypto.randomUUID();
+  const originalPath = `originals/${documentId}.pdf`;
   const insertRow: TablesInsert<"documents"> = {
-    id: crypto.randomUUID(),
+    id: documentId,
     tenant_id: tenantId,
     project_id: projectId,
     file_name: fileName,
@@ -237,18 +260,28 @@ async function insertDriveRow(args: {
       source: "google_drive",
       drive_file_id: driveFileId,
       size: size ?? null,
-      storage: "drive",
+      storage: "plans-bucket",
+      storage_path: originalPath,
       content_type: mimeType,
     }),
   };
   const { data: doc, error } = await db
     .from("documents").insert(insertRow).select("id").single();
   if (error || !doc) return { error: `[insert] ${error?.message}`, status: 500 };
+  auditInsert({
+    tenant_id: tenantId,
+    user_id: userId,
+    table_name: "documents",
+    record_id: doc.id,
+    new_values: insertRow as unknown as Record<string, unknown>,
+  });
   return { id: doc.id, deduped: false };
 }
 
 function fireIngest(req: NextRequest, docId: string): void {
   // Fire-and-forget: do NOT await, so the upload response stays fast.
+  // If the ingest request never starts (network/platform failure), mark the
+  // document errored so it cannot sit in "processing" forever with no worker.
   void fetch(new URL(`/api/documents/${docId}/ingest`, req.url).toString(), {
     method: "POST",
     headers: {
@@ -256,5 +289,32 @@ function fireIngest(req: NextRequest, docId: string): void {
       "Cookie": req.headers.get("cookie") ?? "",
     },
     body: JSON.stringify({}),
-  }).catch(() => {});
+  }).then(async (res) => {
+    if (res.ok) return;
+    const detail = (await res.text().catch(() => "")).slice(0, 500);
+    try {
+      const { createServiceClient } = await import("@/lib/supabase/server");
+      const db = await createServiceClient();
+      await db.from("documents").update({
+        status: "error",
+        last_error: `Ingest failed to start (${res.status}): ${detail}`.slice(0, 2000),
+        last_error_step: "ingest_start",
+      }).eq("id", docId).in("status", ["processing", "pending"]);
+    } catch (err) {
+      console.error("[fireIngest] failed to mark document error", err);
+    }
+  }).catch(async (err) => {
+    console.error("[fireIngest] fetch failed", err);
+    try {
+      const { createServiceClient } = await import("@/lib/supabase/server");
+      const db = await createServiceClient();
+      await db.from("documents").update({
+        status: "error",
+        last_error: `Ingest request failed to start: ${err instanceof Error ? err.message : String(err)}`.slice(0, 2000),
+        last_error_step: "ingest_start",
+      }).eq("id", docId).in("status", ["processing", "pending"]);
+    } catch (markErr) {
+      console.error("[fireIngest] failed to mark document error", markErr);
+    }
+  });
 }

@@ -3,7 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { headerSafe } from "@/lib/http";
 import { getAccessToken } from "@/lib/google/oauth";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { pythonApiHeaders } from "@/lib/python-api";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
@@ -45,12 +46,21 @@ export async function POST(req: NextRequest): Promise<Response> {
 
     const tenantOrgId = authTenantKey(userId, orgId);
     const tenantId = await getOrCreateTenant(tenantOrgId, authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    try {
+      await assertProjectBelongsToTenant(project_id, tenantId);
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
+    }
     const db = await createServiceClient();
 
     const { data: doc, error } = await db
       .from("documents")
       .select("id, file_name, meta")
-      .eq("id", document_id).eq("tenant_id", tenantId).single();
+      .eq("id", document_id).eq("tenant_id", tenantId).eq("project_id", project_id).single();
     if (error || !doc) return NextResponse.json({ error: "Document not found" }, { status: 404 });
 
     const meta = (doc.meta as Record<string, unknown> | null) ?? {};

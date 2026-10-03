@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
 
 export const runtime = "nodejs";
 
@@ -55,14 +56,23 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 const DEPRECATED_MESSAGE =
   "project_estimates (Pricing Matrix) is deprecated and read-only. Use /api/estimate/versions to write to the authoritative estimate_items/estimate_versions system instead.";
 
-export async function POST(): Promise<NextResponse> {
+async function gateDeprecatedWrite(): Promise<NextResponse> {
+  const { userId, orgId, orgSlug } = await auth();
+  if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "financial", "write");
+  if (denied) return denied;
   return NextResponse.json({ error: DEPRECATED_MESSAGE }, { status: 410 });
+}
+
+export async function POST(): Promise<NextResponse> {
+  return gateDeprecatedWrite();
 }
 
 export async function PATCH(): Promise<NextResponse> {
-  return NextResponse.json({ error: DEPRECATED_MESSAGE }, { status: 410 });
+  return gateDeprecatedWrite();
 }
 
 export async function DELETE(): Promise<NextResponse> {
-  return NextResponse.json({ error: DEPRECATED_MESSAGE }, { status: 410 });
+  return gateDeprecatedWrite();
 }

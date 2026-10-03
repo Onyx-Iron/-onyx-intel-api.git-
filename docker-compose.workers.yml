@@ -1,0 +1,45 @@
+# Local heavy-compute stack mirroring Railway web + Redis + Celery worker.
+# Usage:
+#   docker compose -f docker-compose.workers.yml up --build
+#   curl -X POST http://localhost:5050/api/health
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  web:
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      PORT: "5050"
+      ALLOWED_ORIGINS: "http://localhost:3000"
+    command: >
+      bash -lc "pip install -q -r requirements.txt &&
+      uvicorn takeoff_api:app --host 0.0.0.0 --port 5050 --workers 1"
+    ports:
+      - "5050:5050"
+    depends_on:
+      - redis
+
+  worker:
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      CELERY_CONCURRENCY: "4"
+    command: >
+      bash -lc "pip install -q -r requirements.txt &&
+      celery -A celery_app.celery worker --loglevel=INFO --concurrency=4 -Q onyx.compute"
+    depends_on:
+      - redis

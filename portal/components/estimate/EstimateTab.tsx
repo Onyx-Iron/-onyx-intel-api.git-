@@ -108,6 +108,11 @@ function ActionIcon({ d, onClick, hoverClass, label }: { d: string; onClick: () 
   );
 }
 
+/**
+ * @deprecated Prefer `EstimateMatrix` — the project Estimate tab and
+ * `/dashboard/projects/[id]/estimate` both render the versioned matrix now.
+ * Kept temporarily for any deep links or storybook mounts.
+ */
 export default function EstimateTab({ projectId }: { projectId: string }) {
   const { toast } = useToast();
   const { confirm } = useConfirm();
@@ -143,6 +148,10 @@ export default function EstimateTab({ projectId }: { projectId: string }) {
     try {
       setErrorMsg(null);
       const r = await fetch("/api/cost-catalog");
+      if (!r.ok) {
+        toast({ title: String(`Could not load Price Book (${r.status})`), kind: "error" });
+        return;
+      }
       const d = await r.json() as { items?: Array<{ csi_code: string | null; unit_cost: number }> };
       const byCsi = new Map<string, number>();
       for (const c of d.items ?? []) if (c.csi_code && c.unit_cost > 0 && !byCsi.has(c.csi_code)) byCsi.set(c.csi_code, c.unit_cost);
@@ -171,6 +180,10 @@ export default function EstimateTab({ projectId }: { projectId: string }) {
     setPriceBusy("save");
     try {
       const r = await fetch("/api/cost-catalog");
+      if (!r.ok) {
+        toast({ title: String(`Could not load Price Book (${r.status})`), kind: "error" });
+        return;
+      }
       const d = await r.json() as { items?: Array<{ csi_code: string | null; description: string }> };
       const existing = new Set((d.items ?? []).map((c) => `${c.csi_code ?? ""}|${c.description.toLowerCase()}`));
       let saved = 0;
@@ -188,7 +201,14 @@ export default function EstimateTab({ projectId }: { projectId: string }) {
           }
         }
       }
-      toast({ title: String(saved > 0 ? `Saved ${saved} item${saved !== 1 ? "s" : ""} to your Price Book — reuse them on any project.${failed > 0 ? ` (${failed} failed)` : ""}` : "All priced items are already in your Price Book."), kind: "error" });
+      toast({
+        title: String(
+          saved > 0
+            ? `Saved ${saved} item${saved !== 1 ? "s" : ""} to your Price Book — reuse them on any project.${failed > 0 ? ` (${failed} failed)` : ""}`
+            : "All priced items are already in your Price Book.",
+        ),
+        kind: failed > 0 && saved === 0 ? "error" : saved > 0 ? "success" : "info",
+      });
     } catch {
       setErrorMsg("Network error — could not save to price book.");
     } finally { setPriceBusy(null); }
@@ -301,15 +321,21 @@ export default function EstimateTab({ projectId }: { projectId: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ project_id: projectId }),
       });
-      const d = await r.json() as { imported?: number; skipped?: number; priced?: number; unpriced?: number; review?: number; error?: string };
+      const d = await r.json() as { imported?: number; updated?: number; skipped?: number; priced?: number; unpriced?: number; review?: number; error?: string };
       if (!r.ok) {
         toast({ title: String(d.error ?? `Import failed (${r.status})`), kind: "error" });
         return;
       }
-      if ((d.imported ?? 0) === 0) {
+      const imported = d.imported ?? 0;
+      const updated = d.updated ?? 0;
+      if (imported === 0 && updated === 0) {
         toast({ title: String((d.skipped ?? 0) > 0 ? "All takeoff items are already in this estimate." : "No takeoff items found for this project."), kind: "info" });
       } else {
-        toast({ title: String(`Imported ${d.imported} takeoff item${d.imported === 1 ? "" : "s"} (${d.priced ?? 0} priced, ${d.unpriced ?? 0} need pricing, ${d.review ?? 0} need review).`), kind: "success" });
+        const parts = [
+          imported > 0 ? `Imported ${imported} takeoff item${imported === 1 ? "" : "s"} (${d.priced ?? 0} priced, ${d.unpriced ?? 0} need pricing, ${d.review ?? 0} need review).` : null,
+          updated > 0 ? `Updated ${updated} draft line${updated === 1 ? "" : "s"} from takeoff.` : null,
+        ].filter(Boolean);
+        toast({ title: String(parts.join(" ")), kind: "success" });
       }
       load();
     } finally {

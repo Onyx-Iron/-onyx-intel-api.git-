@@ -1,7 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { classifyLayer, type LayerClassification } from "@/lib/cad/layer-classify";
+import { projectToCanvas, vectorCanvasFrame } from "@/lib/takeoff/canvas/snap";
+import { shapesInView, type Box } from "@/lib/takeoff/canvas/visible-shapes";
+import { collectSnapPoints } from "@/lib/takeoff/canvas/vector-snap";
+import { takeoffQueryKeys, useCadVectorMetadata } from "@/lib/takeoff/queries";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -36,13 +41,17 @@ interface Props {
   }) => void;
   /** Called whenever the CAD vector set is (re)loaded — used by cross-verify. */
   onVectorsLoaded?: (descriptions: string[]) => void;
+  /** Screen-space vertices for magnetic snap while drawing on SheetCanvas. */
+  onSnapPointsChange?: (points: Array<{ x: number; y: number }>) => void;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
-export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRatio, onCommitted, onVectorsLoaded }: Props) {
-  const [raw, setRaw] = useState<RawVector[]>([]);
+export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRatio, onCommitted, onVectorsLoaded, onSnapPointsChange }: Props) {
+  const queryClient = useQueryClient();
+  const { data: fetchedVectors = [] } = useCadVectorMetadata(pageId);
+  const [omittedKeys, setOmittedKeys] = useState<Set<string>>(new Set());
   const [enabled, setEnabled] = useState(true);
   const [hoverKey, setHoverKey] = useState<string | null>(null);
   const [approving, setApproving] = useState(false);
@@ -50,34 +59,30 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
   const [editingPoints, setEditingPoints] = useState<Array<[number, number]> | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [layerFilter, setLayerFilter] = useState<Set<string>>(new Set());
+  const [view, setView] = useState<Box | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
 
-  // ── Load vectors (initial + on refresh signal from PDF extractor) ─────────
+  const raw = useMemo(
+    () => fetchedVectors.filter((v, i) => !omittedKeys.has(`${v.layer}-${i}`)),
+    [fetchedVectors, omittedKeys],
+  );
+
   useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const res = await fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
-        if (!res.ok) return;
-        const data = await res.json() as { vectors: RawVector[] };
-        if (!cancelled && Array.isArray(data.vectors)) {
-          setRaw(data.vectors);
-          const descriptions = Array.from(new Set(data.vectors.map((v) => classifyLayer(v.layer).description)));
-          onVectorsLoaded?.(descriptions);
-        }
-      } catch { /* silent */ }
-    };
-    void load();
+    if (fetchedVectors.length === 0) return;
+    const descriptions = Array.from(new Set(fetchedVectors.map((v) => classifyLayer(v.layer).description)));
+    onVectorsLoaded?.(descriptions);
+  }, [fetchedVectors, onVectorsLoaded]);
 
+  useEffect(() => {
     const onRefresh = (ev: Event) => {
       const detail = (ev as CustomEvent<{ pageId?: string }>).detail;
-      if (!detail?.pageId || detail.pageId === pageId) void load();
+      if (!detail?.pageId || detail.pageId === pageId) {
+        void queryClient.invalidateQueries({ queryKey: takeoffQueryKeys.cadVectors(pageId) });
+      }
     };
     window.addEventListener("onyx:cad-vectors-refresh", onRefresh as EventListener);
-    return () => {
-      cancelled = true;
-      window.removeEventListener("onyx:cad-vectors-refresh", onRefresh as EventListener);
-    };
-  }, [pageId]);
+    return () => window.removeEventListener("onyx:cad-vectors-refresh", onRefresh as EventListener);
+  }, [pageId, queryClient]);
 
   // ── World→screen projection ───────────────────────────────────────────────
   // Fit-to-canvas: compute overall bbox in world units and scale to fit the
@@ -85,25 +90,13 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
   // is far from the PDF's.
   const rendered: RenderedVector[] = useMemo(() => {
     if (!canvasSize || raw.length === 0) return [];
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const v of raw) {
-      for (const [x, y] of v.points) {
-        if (x < minX) minX = x; if (y < minY) minY = y;
-        if (x > maxX) maxX = x; if (y > maxY) maxY = y;
-      }
-    }
-    if (!Number.isFinite(minX)) return [];
-    const wSpan = Math.max(1e-6, maxX - minX);
-    const hSpan = Math.max(1e-6, maxY - minY);
-    const pad = 20;
-    const sx = (canvasSize.w - pad * 2) / wSpan;
-    const sy = (canvasSize.h - pad * 2) / hSpan;
-    const s  = Math.min(sx, sy);
+    const frame = vectorCanvasFrame(raw, canvasSize);
+    if (!frame) return [];
 
-    const project = (x: number, y: number): [number, number] => [
-      pad + (x - minX) * s,
-      canvasSize.h - pad - (y - minY) * s, // flip Y
-    ];
+    const project = (x: number, y: number): [number, number] => {
+      const projected = projectToCanvas(x, y, frame);
+      return [projected.x, projected.y];
+    };
 
     return raw.map((v, i) => {
       const cls = classifyLayer(v.layer);
@@ -148,6 +141,12 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
     });
   }, [raw, canvasSize]);
 
+  // Publish screen-space vertices so SheetCanvas can magnetically snap draws.
+  useEffect(() => {
+    if (!onSnapPointsChange) return;
+    onSnapPointsChange(collectSnapPoints(rendered.map((v) => ({ points: v.screenPoints }))));
+  }, [rendered, onSnapPointsChange]);
+
   // ── Layer legend ──────────────────────────────────────────────────────────
   const layers = useMemo(() => {
     const map = new Map<string, { color: string; count: number; measure: number; unit: string }>();
@@ -161,7 +160,40 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
     return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
   }, [rendered]);
 
-  const visible = useMemo(() => rendered.filter((v) => !layerFilter.has(v.layer)), [rendered, layerFilter]);
+  useEffect(() => {
+    if (!canvasSize) return;
+    const update = () => {
+      const el = svgRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const sx = canvasSize.w / rect.width;
+      const sy = canvasSize.h / rect.height;
+      const left = Math.max(0, -rect.left);
+      const top = Math.max(0, -rect.top);
+      const right = Math.min(rect.width, window.innerWidth - rect.left);
+      const bottom = Math.min(rect.height, window.innerHeight - rect.top);
+      setView({
+        minX: left * sx,
+        minY: top * sy,
+        maxX: Math.max(left, right) * sx,
+        maxY: Math.max(top, bottom) * sy,
+      });
+    };
+    update();
+    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+    };
+  }, [canvasSize, enabled]);
+
+  const visible = useMemo(() => {
+    const layered = rendered.filter((v) => !layerFilter.has(v.layer));
+    if (!view) return layered;
+    return shapesInView(layered, view, 80);
+  }, [rendered, layerFilter, view]);
   const hover = useMemo(() => visible.find((v) => v.key === hoverKey) ?? null, [visible, hoverKey]);
 
   // ── Approve → persist as manual_takeoff ───────────────────────────────────
@@ -223,7 +255,7 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
       });
       // Hide the approved vector so the user sees progress.
       setLayerFilter((prev) => new Set(prev).add(`__approved:${v.key}`));
-      setRaw((prev) => prev.filter((_, i) => `${_.layer}-${i}` !== v.key));
+      setOmittedKeys((prev) => new Set(prev).add(v.key));
       setHoverKey(null);
       setEditingKey(null);
       setEditingPoints(null);
@@ -237,7 +269,7 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
   }
 
   function reject(v: RenderedVector) {
-    setRaw((prev) => prev.filter((_, i) => `${_.layer}-${i}` !== v.key));
+    setOmittedKeys((prev) => new Set(prev).add(v.key));
     setHoverKey(null);
     setEditingKey(null);
     setEditingPoints(null);
@@ -256,6 +288,7 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
       {/* Vector SVG overlay */}
       {enabled && (
         <svg
+          ref={svgRef}
           width={canvasSize.w}
           height={canvasSize.h}
           viewBox={`0 0 ${canvasSize.w} ${canvasSize.h}`}

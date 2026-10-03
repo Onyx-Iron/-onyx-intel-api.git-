@@ -14,13 +14,11 @@ export const runtime = "nodejs";
  * existing rows in takeoff_items and manual_takeoffs — the manual "Load
  * from Takeoffs" button in the pricing-matrix UI. Writes to estimate_items,
  * NOT the deprecated project_estimates table (estimating-core-consolidation
- * milestone) — this is a manual/best-effort seed action distinct from the
- * automatic review-status-gated import (syncTakeoffToEstimate), so it does
- * NOT filter by takeoff review_status; it's meant for quickly loading raw
- * quantities into a draft for manual pricing, not enforcing the AI-review
- * gate. It still never writes to a locked version (getOrCreateDraftVersion
- * opens a new draft if the current one is locked) and dedups by
- * source_takeoff_id.
+ * milestone). Enforces the same AI-review gate as syncTakeoffToEstimate:
+ * takeoff_items with review_status suggested|reviewed|rejected are skipped
+ * so unverified AI quantities cannot reach draft totals via this path.
+ * Never writes to a locked version (getOrCreateDraftVersion opens a new
+ * draft if the current one is locked) and dedups by source_takeoff_id.
  *
  * Idempotent: skips items whose source_takeoff_id already exists anywhere
  * in the estimate. Returns { added, skipped }.
@@ -60,10 +58,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const { data: takeoffs } = await db
     .from("takeoff_items")
-    .select("id, cost_code:csi_code, description:label, total_qty:quantity, uom:unit, estimated_unit_cost:rate")
-    .eq("tenant_id", tenantId).eq("project_id", body.project_id);
+    .select("id, cost_code:csi_code, description:label, total_qty:quantity, uom:unit, estimated_unit_cost:rate, review_status")
+    .eq("tenant_id", tenantId).eq("project_id", body.project_id)
+    .or("review_status.is.null,review_status.eq.approved");
+  let blockedByReview = 0;
   for (const t of takeoffs ?? []) {
     if (seen.has(t.id)) continue;
+    // Belt-and-suspenders: SQL filter above is authoritative; keep the
+    // in-memory check so a PostgREST quirk cannot smuggle unapproved rows.
+    if (t.review_status === "suggested" || t.review_status === "reviewed" || t.review_status === "rejected") {
+      blockedByReview++;
+      continue;
+    }
     const unitCost = Number(t.estimated_unit_cost ?? 0);
     const quantity = Number(t.total_qty ?? 0);
     // No cost-category breakdown available from a raw takeoff row — split
@@ -107,5 +113,5 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     added = data?.length ?? toInsert.length;
   }
 
-  return NextResponse.json({ added, skipped: seen.size });
+  return NextResponse.json({ added, skipped: seen.size, blocked_by_review: blockedByReview });
 }

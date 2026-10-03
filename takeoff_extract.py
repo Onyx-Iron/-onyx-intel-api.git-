@@ -295,11 +295,21 @@ def iter_pdf_pages(path: str):
 
 
 def extract_from_pdf(path: str) -> dict:
-    import pdfplumber
+    """
+    Deterministic PDF schedule extract.
 
-    rows: list[dict] = []
-    ai_candidate_pages: list[int] = []
-    pages_with_tables = 0
+    Multi-page plansets use ProcessPoolExecutor (spawn) across CPU cores via
+    services.parallel_pdf — Celery still fans jobs out on Railway; this fans
+    *pages within one upload* so a 100-page PDF does not serialize on one core.
+    """
+    import sys
+    from pathlib import Path
+
+    engine_dir = Path(__file__).resolve().parent / "python-engine"
+    if engine_dir.is_dir() and str(engine_dir) not in sys.path:
+        sys.path.insert(0, str(engine_dir))
+
+    from services.parallel_pdf import extract_pdf_parallel
 
     # Drawing pages are dense with vector lines; pdfplumber's table finder can
     # explode (time + memory) on them and OOM the worker. Skip table detection on
@@ -307,193 +317,57 @@ def extract_from_pdf(path: str) -> dict:
     MAX_TABLE_PAGES = 30           # only run deterministic table-detection on the first N pages
     LINE_COMPLEXITY_LIMIT = 1200   # above this many vector objects, treat page as a drawing
 
-    def _release(pg, pdf=None) -> None:
-        # Free the DOCUMENT-level object cache (not just the page's) — that's
-        # where pdfplumber accumulates memory across a large planset.
-        if pdf is not None and hasattr(pdf, "flush_cache"):
-            try: pdf.flush_cache()
-            except Exception: pass
-        if hasattr(pg, "close"):
-            try: pg.close()
-            except Exception: pass
-
-    with pdfplumber.open(path) as pdf:
-        page_count = len(pdf.pages)
-        for idx in range(1, page_count + 1):
-            # Beyond the cap, don't even parse the page — route straight to AI vision.
-            if idx > MAX_TABLE_PAGES:
-                ai_candidate_pages.append(idx)
-                continue
-
-            page = pdf.pages[idx - 1]
-            try:
-                complexity = len(page.lines) + len(page.curves) + len(page.rects)
-            except Exception:
-                # Corrupted / unparseable page → route to AI vision, never treat
-                # as a simple schedule.
-                complexity = 9999
-
-            if complexity > LINE_COMPLEXITY_LIMIT:
-                ai_candidate_pages.append(idx)  # drawing page → AI vision can read it
-                _release(page, pdf)
-                continue
-
-            try:
-                tables = page.extract_tables() or []
-            except Exception:
-                tables = []
-            page_made_rows = False
-
-            for table in tables:
-                if not table or len(table) < 2:
-                    continue
-                header = [(c or "").strip() for c in table[0]]
-                # Locate description / qty / unit columns by header synonyms.
-                desc_col = next((i for i, h in enumerate(header) if DESC_HEADERS.search(h)), 0)
-                qty_col  = next((i for i, h in enumerate(header) if QTY_HEADERS.search(h)), None)
-                unit_col = next((i for i, h in enumerate(header) if UNIT_HEADERS.search(h)), None)
-
-                for raw in table[1:]:
-                    if not raw or all((c is None or str(c).strip() == "") for c in raw):
-                        continue
-                    desc = (raw[desc_col] if desc_col < len(raw) else None) or ""
-                    desc = str(desc).replace("\n", " ").strip()
-                    if not desc or len(desc) < 2:
-                        continue
-
-                    qty = _to_float(raw[qty_col]) if (qty_col is not None and qty_col < len(raw)) else None
-                    # A schedule line with no count still represents 1 of that item.
-                    if qty is None:
-                        qty = 1.0
-                        basis = f"Schedule row, p.{idx} (count defaulted to 1 — no qty column)"
-                    else:
-                        basis = f"Schedule table, p.{idx}, col '{header[qty_col] or 'qty'}'"
-
-                    unit = raw[unit_col] if (unit_col is not None and unit_col < len(raw)) else None
-                    rows.append(_row(desc, qty, basis, uom=str(unit) if unit else None,
-                                     drawing_ref=f"PDF p.{idx}"))
-                    page_made_rows = True
-
-            if page_made_rows:
-                pages_with_tables += 1
-            else:
-                # No machine-readable table — this page is a drawing; AI vision can read it.
-                ai_candidate_pages.append(idx)
-
-            _release(page, pdf)
-
-    return {
-        "source_type": "pdf",
-        "rows": rows,
-        "coverage": {
-            "page_count": page_count,
-            "pages_with_tables": pages_with_tables,
-            "rows_extracted": len(rows),
-        },
-        "ai_candidate_pages": ai_candidate_pages,
-    }
+    return extract_pdf_parallel(
+        path,
+        max_table_pages=MAX_TABLE_PAGES,
+        complexity_limit=LINE_COMPLEXITY_LIMIT,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DXF / DWG — real geometry (ezdxf)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def extract_from_dxf(path: str) -> dict:
-    import ezdxf
-    from ezdxf.math import Vec3
+def _geos():
+    """Lazy Shapely/GEOS helpers (optional dep — falls back to shoelace)."""
+    import sys
+    from pathlib import Path
 
+    engine_dir = Path(__file__).resolve().parent / "python-engine"
+    if engine_dir.is_dir() and str(engine_dir) not in sys.path:
+        sys.path.insert(0, str(engine_dir))
     try:
-        doc = ezdxf.readfile(path)
-    except (ezdxf.DXFStructureError, IOError) as e:
-        # Binary DWG is not DXF — ezdxf can't read it without conversion.
-        raise ValueError(
-            f"Could not read as DXF ({e}). For binary .dwg, export to DXF "
-            f"from your CAD tool (Save As → AutoCAD DXF) and re-upload."
-        )
+        from services import geos_geometry as geo
+        return geo
+    except ImportError:
+        return None
 
-    msp = doc.modelspace()
 
-    # Aggregate by layer: total polyline/line length, hatch area, block-insert counts.
-    layer_len: dict[str, float] = {}
-    layer_area: dict[str, float] = {}
-    block_counts: dict[tuple[str, str], int] = {}  # (layer, block_name) -> count
+def extract_from_dxf(path: str) -> dict:
+    """
+    DXF / DXF-encoded DWG geometry extract.
 
-    def _polyline_length(points: list) -> float:
-        total = 0.0
-        for a, b in zip(points, points[1:]):
-            total += (Vec3(b) - Vec3(a)).magnitude
-        return total
+    Large modelspaces fan entity index ranges across ProcessPoolExecutor
+    (spawn) via services.parallel_dxf. Closed-polygon areas are GEOS-unioned
+    in the parent so overlaps across chunk boundaries stay correct.
+    """
+    import sys
+    from pathlib import Path
 
-    for e in msp:
-        layer = getattr(e.dxf, "layer", "0")
-        etype = e.dxftype()
-        try:
-            if etype == "LINE":
-                layer_len[layer] = layer_len.get(layer, 0.0) + (Vec3(e.dxf.end) - Vec3(e.dxf.start)).magnitude
-            elif etype in ("LWPOLYLINE", "POLYLINE"):
-                pts = [p[:3] if len(p) >= 3 else (p[0], p[1], 0.0) for p in e.get_points()] \
-                    if etype == "LWPOLYLINE" else [v.dxf.location for v in e.vertices]
-                layer_len[layer] = layer_len.get(layer, 0.0) + _polyline_length(pts)
-                if getattr(e, "closed", False) or getattr(e.dxf, "flags", 0) & 1:
-                    layer_area[layer] = layer_area.get(layer, 0.0) + _polygon_area(pts)
-            elif etype == "CIRCLE":
-                import math
-                layer_area[layer] = layer_area.get(layer, 0.0) + math.pi * e.dxf.radius ** 2
-            elif etype == "HATCH":
-                layer_area[layer] = layer_area.get(layer, 0.0) + abs(getattr(e, "area", 0.0) or 0.0)
-            elif etype == "INSERT":
-                key = (layer, e.dxf.name)
-                block_counts[key] = block_counts.get(key, 0) + 1
-        except Exception:
-            continue  # never let one malformed entity kill the takeoff
+    engine_dir = Path(__file__).resolve().parent / "python-engine"
+    if engine_dir.is_dir() and str(engine_dir) not in sys.path:
+        sys.path.insert(0, str(engine_dir))
 
-    units = _dxf_units(doc)
-    to_feet = _dxf_unit_to_feet_factor(doc)
-    rows: list[dict] = []
+    from services.parallel_dxf import extract_dxf_parallel
 
-    for layer, length in sorted(layer_len.items()):
-        length_ft = length * to_feet
-        if length_ft <= 0:
-            continue
-        rows.append(_row(
-            description=f"{layer} — linear run",
-            qty=length_ft,
-            basis=f"Sum of LINE/POLYLINE geometry on layer '{layer}' ({units}, converted to LF)",
-            uom="LF", location_tag=layer,
-        ))
-    for layer, area in sorted(layer_area.items()):
-        area_sf = area * (to_feet ** 2)
-        if area_sf <= 0:
-            continue
-        rows.append(_row(
-            description=f"{layer} — area",
-            qty=area_sf,
-            basis=f"Sum of closed-polygon/hatch area on layer '{layer}' ({units}², converted to SF)",
-            uom="SF", location_tag=layer,
-        ))
-    for (layer, block_name), count in sorted(block_counts.items()):
-        rows.append(_row(
-            description=f"{block_name} ({layer})",
-            qty=count, basis=f"Count of '{block_name}' block inserts on layer '{layer}'",
-            uom="EA", location_tag=layer,
-        ))
-
-    return {
-        "source_type": "dxf",
-        "rows": rows,
-        "coverage": {
-            "layers_with_length": len(layer_len),
-            "layers_with_area": len(layer_area),
-            "block_types": len(block_counts),
-            "rows_extracted": len(rows),
-            "drawing_units": units,
-        },
-        "ai_candidate_pages": [],
-    }
+    return extract_dxf_parallel(path)
 
 
 def _polygon_area(points: list) -> float:
-    """Shoelace area of a closed polygon (ignores Z)."""
+    """Closed-polygon area (ignores Z). Prefers Shapely/GEOS; shoelace fallback."""
+    geo = _geos()
+    if geo is not None:
+        return geo.polygon_area(points)
     if len(points) < 3:
         return 0.0
     area = 0.0

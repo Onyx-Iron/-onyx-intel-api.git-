@@ -4,6 +4,7 @@ import { prepareTakeoffRowsForSave } from "@/lib/estimating/takeoff-import";
 import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { takeoffItemsSchema, parseBody } from "@/lib/validation";
@@ -63,6 +64,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const { project_id, rows } = validation.data;
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
 
     // project_id is client-supplied — never trust it without verifying it
     // actually belongs to the caller's own tenant before using it to scope
@@ -70,8 +73,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // the browser without verification").
     try {
       await assertProjectBelongsToTenant(project_id, tenantId);
-    } catch {
-      return NextResponse.json({ error: "project_id does not belong to this tenant" }, { status: 403 });
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
     }
 
     const db = await createServiceClient();
@@ -189,6 +194,15 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     if (!project_id) return NextResponse.json({ error: "project_id is required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    try {
+      await assertProjectBelongsToTenant(project_id, tenantId);
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
+    }
     const db = await createServiceClient();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const anyDb = db as any;

@@ -5,6 +5,7 @@ import {
   authTenantKey,
   authTenantName,
 } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
 import { getTenantBilling } from "@/lib/billing/tenantBilling";
 
 export const runtime = "nodejs";
@@ -49,6 +50,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       authTenantKey(userId, orgId),
       authTenantName(userId, orgSlug),
     );
+    const denied = await requirePermission(tenantId, userId, "admin", "write");
+    if (denied) return denied;
 
     const billing = await getTenantBilling(tenantId);
     const seatLimit = billing?.seat_limit ?? 1;
