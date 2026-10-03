@@ -1,8 +1,11 @@
 # OSS Peer Optimization Research
 
 **Date:** 2026-10-03  
-**Scope:** Compare Onyx Intel modules against open-source construction-estimating peers and extract **legal, re-implementable** patterns (not wholesale code copies).  
+**Scope:** Compare Onyx Intel modules against open-source peers and extract **legal, re-implementable** patterns (not wholesale code copies).  
 **Aligned with:** `docs/architecture-audit/RECOVERY_ROADMAP.md`
+
+> **Start here for non-construction domains** (document parsing, pricing data, CAD/BIM, RLS, RAG, CI, observability): see [`CROSS_DOMAIN.md`](./CROSS_DOMAIN.md).  
+> This file focuses on **construction takeoff / estimating product peers**. The two docs together are the full playbook.
 
 > This document is research + a prioritized backlog. No peer code was copied into the product. Where a peer is AGPL, only **ideas and architecture** are cited.
 
@@ -222,16 +225,24 @@ Minimum schema fields on canvas / takeoff items:
 
 ## 8. Suggested next Agent session
 
-Pick **one** P1 item and ship with tests:
+Pick **one** item and ship with tests — either construction UX or cross-domain infra:
 
+**Construction (this file):**
 1. **OSS-01 version-diff upgrade** (pure TS + unit tests, no schema) — safest first PR.
 2. Or **OSS-03 calibration check verdict** if UX is the priority.
 3. Or **OSS-04/05 provenance + approval** if AI auto-commit risk is the priority (ties to D-03).
+
+**Cross-domain (`CROSS_DOMAIN.md`) — often higher ROI:**
+1. **XD-25** CI gate (`tsc` + unit + Python tests).
+2. **XD-01** Docling spike for text-PDF → RAG chunks.
+3. **XD-06** Finish TxDOT/Caltrans bid-tab parsers (open pricing data).
+4. **XD-14** pgTAP / cross-tenant isolation tests.
 
 ---
 
 ## 9. Sources consulted
 
-- Local: `docs/architecture-audit/*`, `portal/lib/estimating/*`, `portal/lib/takeoff/*`, `portal/lib/math/earthwork.ts`
-- GitHub (read-only): Kentucky-ai/opentakeoff, braedonsaunders/bidwright, buildvisionai/construction-calculators, DynMEP/YOLOplan
-- Topic search: `topic:construction-estimating`
+- Local: `docs/architecture-audit/*`, `portal/lib/estimating/*`, `portal/lib/takeoff/*`, `portal/lib/math/earthwork.ts`, `portal/lib/cost/`, `portal/lib/parse/`, `portal/lib/documents/`, `scripts/README.md`
+- GitHub (read-only): Kentucky-ai/opentakeoff, braedonsaunders/bidwright, buildvisionai/construction-calculators, DynMEP/YOLOplan, docling-project/docling, Unstructured-IO/unstructured, datadrivenconstruction/OpenConstructionEstimate-DDC-CWICR, ThatOpen/engine_web-ifc, IfcOpenShell/IfcOpenShell, pymupdf/pymupdf4llm
+- Topic / web search: construction-estimating, document parsing benchmarks, open cost data, Supabase RLS starters
+- See also: [`CROSS_DOMAIN.md`](./CROSS_DOMAIN.md)
