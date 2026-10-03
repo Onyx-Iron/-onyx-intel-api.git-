@@ -10,6 +10,7 @@ import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import { fetchDriveFileSize } from "@/lib/google/driveFile";
+import { PLANS_BUCKET, resolveDocumentStorageBucket } from "@/lib/documents/storage";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
@@ -17,7 +18,6 @@ export const maxDuration = 300;
 
 const EMBED_MODEL = "text-embedding-004";
 const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
-const PLANS_BUCKET = "plans-bucket";
 const ASYNC_SPLIT_BYTES = 3.5 * 1024 * 1024;
 /** Leave headroom under Vercel maxDuration=300 so we can write error status before kill. */
 const INGEST_BUDGET_MS = 270_000;
@@ -280,12 +280,7 @@ export async function POST(
     let fileSizeHint = typeof meta.size === "number" ? meta.size : null;
     const projectIdForSplit = doc.project_id as string | null;
     const originalPath = storagePath ?? `originals/${docId}.pdf`;
-    const storageBucket =
-      meta.storage === "supabase"
-        ? "project-documents"
-        : typeof meta.storage === "string" && meta.storage !== "drive"
-          ? meta.storage
-          : PLANS_BUCKET;
+    const storageBucket = resolveDocumentStorageBucket(meta);
 
     if (!driveFileId && !storagePath) {
       return NextResponse.json({ error: "Document has no source (no drive_file_id or storage_path)" }, { status: 400 });

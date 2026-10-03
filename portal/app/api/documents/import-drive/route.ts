@@ -17,6 +17,10 @@ export const runtime = "nodejs";
 /**
  * POST /api/documents/import-drive
  *
+ * @deprecated Prefer POST /api/documents/upload (storage_type=drive), which
+ * registers the row and auto-fires ingest or page-split for large PDFs.
+ * This route remains for API/back-compat callers only — the UI uses upload.
+ *
  * Body: { project_id, file_id, file_name?, mime_type?, size?, access_token? }
  *
  * Fast-return orchestrator. Does NOT read the Drive file here — Vercel is

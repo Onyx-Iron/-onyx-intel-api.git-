@@ -25,7 +25,7 @@ export async function reclaimStuckProcessingDocuments(
       last_error_step: "stuck_processing_reclaim",
     })
     .eq("tenant_id", tenantId)
-    .eq("status", "processing")
+    .in("status", ["processing", "split", "queued"])
     .or(`processing_started_at.lt.${cutoff},and(processing_started_at.is.null,uploaded_at.lt.${cutoff})`)
     .select("id");
   if (error) {
