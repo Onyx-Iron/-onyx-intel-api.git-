@@ -1,9 +1,11 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
+import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
 
 export const runtime = "nodejs";
@@ -58,15 +60,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const projectId = projectIdResult.data;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    await assertProjectBelongsToTenant(projectId, tenantId);
     const db = await createServiceClient();
 
-    // Auto-assign item_number
-    const { count } = await db
+    // Prefer max(item_number)+1 over count+1 so deletes don't collide numbers.
+    const { data: maxRow } = await db
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .from("punch_list_items" as any)
-      .select("*", { count: "exact", head: true })
+      .select("item_number")
       .eq("tenant_id", tenantId)
-      .eq("project_id", projectId);
+      .eq("project_id", projectId)
+      .order("item_number", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const nextNumber = (Number((maxRow as any)?.item_number) || 0) + 1;
 
     const { data, error } = await db
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -74,7 +84,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .insert({
         tenant_id:   tenantId,
         project_id:  projectId,
-        item_number: (count ?? 0) + 1,
+        item_number: nextNumber,
         description: body.description,
         location:    body.location ?? null,
         trade:       body.trade ?? null,
@@ -90,6 +100,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     if (error) return NextResponse.json({ error: `[POST /api/punch-list] ${error.message}` }, { status: 422 });
 
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "punch_list_items",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      record_id: (data as any).id,
+      new_values: data as Record<string, unknown>,
+    });
+
     void logEvent({
       projectId,
       tenantId,
@@ -103,6 +122,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }

@@ -2,7 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
-import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { requirePermission, isUniqueViolation } from "@/lib/project-controls/route-guards";
 import { requireGoogleToken } from "@/lib/google/api";
 import { logEvent } from "@/lib/activity";
 import { auditInsert, auditUpdate } from "@/lib/audit";
@@ -23,6 +23,10 @@ function buildRaw(to: string, subject: string, body: string): string {
  * on the same request as declined, and best-effort emails the winning
  * vendor. A missing/unconnected Google account does NOT fail the approval —
  * the PO is the authoritative record; the email is a courtesy notification.
+ *
+ * Concurrency: UNIQUE(vendor_bid_id) + conditional status updates
+ * (bid still pending, request still open) turn double-submit / raced
+ * sibling awards into 409 instead of duplicate POs.
  */
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }): Promise<NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
@@ -32,12 +36,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const body = await req.json().catch(() => ({})) as { terms?: string };
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
-  try {
-    await assertPermission(tenantId, userId, "financial", "write");
-  } catch (e) {
-    if (e instanceof PermissionError) return NextResponse.json({ error: e.message }, { status: e.status });
-    throw e;
-  }
+  const denied = await requirePermission(tenantId, userId, "financial", "write");
+  if (denied) return denied;
 
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -51,6 +51,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   if (bidErr) return NextResponse.json({ error: bidErr.message }, { status: 500 });
   if (!bid) return NextResponse.json({ error: "Bid not found" }, { status: 404 });
   if (bid.status === "awarded") return NextResponse.json({ error: "This bid has already been awarded." }, { status: 409 });
+  if (bid.status === "declined") return NextResponse.json({ error: "This bid was already declined." }, { status: 409 });
 
   const { data: request, error: reqErr } = await anyDb
     .from("marketplace_requests")
@@ -71,7 +72,41 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     status: "issued",
     created_by: userId,
   }).select("*").single();
-  if (poErr) return NextResponse.json({ error: poErr.message }, { status: 500 });
+  if (poErr) {
+    if (isUniqueViolation(poErr)) {
+      return NextResponse.json({ error: "A purchase order already exists for this bid." }, { status: 409 });
+    }
+    return NextResponse.json({ error: poErr.message }, { status: 500 });
+  }
+
+  // Conditional award: only flip status if still pending/open so a raced
+  // sibling approve cannot overwrite an already-awarded request.
+  const [{ data: awardedBid, error: awardErr }, { data: awardedReq, error: reqAwardErr }] = await Promise.all([
+    anyDb.from("vendor_bids")
+      .update({ status: "awarded" })
+      .eq("id", bid.id)
+      .eq("status", "pending")
+      .select("id"),
+    anyDb.from("marketplace_requests")
+      .update({ status: "awarded", updated_at: new Date().toISOString() })
+      .eq("id", request.id)
+      .neq("status", "awarded")
+      .select("id"),
+  ]);
+
+  if (awardErr || reqAwardErr) {
+    return NextResponse.json({ error: (awardErr ?? reqAwardErr).message }, { status: 500 });
+  }
+  if (!awardedBid?.length || !awardedReq?.length) {
+    // PO row exists (unique) but status race lost — treat as conflict.
+    return NextResponse.json({ error: "This request was awarded concurrently. Refresh and retry." }, { status: 409 });
+  }
+
+  await anyDb.from("vendor_bids")
+    .update({ status: "declined" })
+    .eq("request_id", bid.request_id)
+    .neq("id", bid.id)
+    .eq("status", "pending");
 
   auditInsert({
     tenant_id: tenantId,
@@ -88,12 +123,6 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     old_values: { status: bid.status },
     new_values: { status: "awarded" },
   });
-
-  await Promise.all([
-    anyDb.from("vendor_bids").update({ status: "awarded" }).eq("id", bid.id),
-    anyDb.from("vendor_bids").update({ status: "declined" }).eq("request_id", bid.request_id).neq("id", bid.id),
-    anyDb.from("marketplace_requests").update({ status: "awarded", updated_at: new Date().toISOString() }).eq("id", request.id),
-  ]);
 
   // Best-effort vendor notification — never blocks the approval itself.
   let emailStatus: "sent" | "skipped" | "failed" = "skipped";
