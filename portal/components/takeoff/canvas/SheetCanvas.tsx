@@ -8,6 +8,12 @@ import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
+import {
+  removeByKey,
+  upsertByKey,
+  type CanvasCollabEvent,
+} from "@/lib/takeoff/canvas/canvas-realtime";
+import { useCanvasRealtime } from "@/lib/takeoff/canvas/useCanvasRealtime";
 
 // Coordinate-space tag carried alongside each committed item (professional-
 // manual-takeoff milestone, PERMANENT RULE 1/2). 'page_space' points are
@@ -179,6 +185,47 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [areaDraftPts, setAreaDraftPts] = useState<Pt[]>([]);
   const [areaBoundaryKind, setAreaBoundaryKind] = useState<BoundaryKind>("topsoil_stripping");
   const [areaDepthIn, setAreaDepthIn] = useState(6);
+
+  // ── Multi-estimator Realtime (broadcast + presence) ───────────────────────
+  const lastCursorTrackRef = useRef(0);
+  const onRemoteCanvasEvent = useCallback((event: CanvasCollabEvent) => {
+    const keyPayload = event.payload as { key?: string };
+    switch (event.kind) {
+      case "shape_upsert":
+        setShapes((prev) => upsertByKey(prev, event.payload as Shape));
+        break;
+      case "shape_remove":
+        if (keyPayload.key) setShapes((prev) => removeByKey(prev, keyPayload.key!));
+        break;
+      case "utility_upsert":
+        setUtilityRuns((prev) => upsertByKey(prev, event.payload as UtilityRun));
+        break;
+      case "utility_remove":
+        if (keyPayload.key) setUtilityRuns((prev) => removeByKey(prev, keyPayload.key!));
+        break;
+      case "topo_upsert":
+        setTopoNodes((prev) => upsertByKey(prev, event.payload as TopoNode));
+        break;
+      case "topo_remove":
+        if (keyPayload.key) setTopoNodes((prev) => removeByKey(prev, keyPayload.key!));
+        break;
+      case "area_upsert":
+        setAreaBounds((prev) => upsertByKey(prev, event.payload as AreaBound));
+        break;
+      case "area_remove":
+        if (keyPayload.key) setAreaBounds((prev) => removeByKey(prev, keyPayload.key!));
+        break;
+      default:
+        break;
+    }
+  }, []);
+
+  const { peers, status: collabStatus, broadcast, trackCursor } = useCanvasRealtime({
+    projectId,
+    pageId,
+    displayName: "Estimator",
+    onRemoteEvent: onRemoteCanvasEvent,
+  });
 
   // ── Load signed URL + existing calibration + saved takeoffs ────────────────
   useEffect(() => {
@@ -479,6 +526,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         unit: "EA",
       };
       setShapes((prev) => [...prev, shape]);
+      broadcast("shape_upsert", shape);
       return;
     }
 
@@ -495,14 +543,16 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       if (raw != null) {
         const elevation = Number(raw);
         if (Number.isFinite(elevation)) {
-          setTopoNodes((prev) => [...prev, {
+          const node: TopoNode = {
             key: `spot-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             node_type: "spot_elevation",
             points: [p],
             coordinateSpace: "legacy_pixel",
             elevation,
             layer_assignment: "manual",
-          }]);
+          };
+          setTopoNodes((prev) => [...prev, node]);
+          broadcast("topo_upsert", node);
         }
       }
       return;
@@ -549,9 +599,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       },
     };
     setUtilityRuns((prev) => [...prev, run]);
+    broadcast("utility_upsert", run);
     setUtilityModalPts(null);
     setUtilityDraftPts([]);
-  }, [utilityModalPts, scale]);
+  }, [utilityModalPts, scale, broadcast]);
 
   const finishContourDraft = useCallback(() => {
     if (contourDraftPts.length < 2) { setContourDraftPts([]); return; }
@@ -559,18 +610,20 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (raw != null) {
       const elevation = Number(raw);
       if (Number.isFinite(elevation)) {
-        setTopoNodes((prev) => [...prev, {
+        const node: TopoNode = {
           key: `contour-${Date.now()}`,
           node_type: "contour_line",
           points: contourDraftPts,
           coordinateSpace: "legacy_pixel",
           elevation,
           layer_assignment: "manual",
-        }]);
+        };
+        setTopoNodes((prev) => [...prev, node]);
+        broadcast("topo_upsert", node);
       }
     }
     setContourDraftPts([]);
-  }, [contourDraftPts]);
+  }, [contourDraftPts, broadcast]);
 
   // Live SF (shoelace × scale²) and, for stripping/pad kinds, CY preview while drawing.
   const areaDraftPreview = useMemo(() => {
@@ -584,7 +637,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (areaDraftPts.length < 3) { setAreaDraftPts([]); return; }
     const sf = polygonArea(areaDraftPts) * scale * scale;
     const cy = DEPTH_APPLICABLE_KINDS.has(areaBoundaryKind) ? (sf * (areaDepthIn / 12)) / 27 : undefined;
-    setAreaBounds((prev) => [...prev, {
+    const bound: AreaBound = {
       key: `area-${Date.now()}`,
       points: areaDraftPts,
       coordinateSpace: "legacy_pixel",
@@ -592,9 +645,11 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       area_sf: sf,
       depth_in: DEPTH_APPLICABLE_KINDS.has(areaBoundaryKind) ? areaDepthIn : undefined,
       volume_cy: cy,
-    }]);
+    };
+    setAreaBounds((prev) => [...prev, bound]);
+    broadcast("area_upsert", bound);
     setAreaDraftPts([]);
-  }, [areaDraftPts, scale, areaBoundaryKind, areaDepthIn]);
+  }, [areaDraftPts, scale, areaBoundaryKind, areaDepthIn, broadcast]);
 
   const finishDraft = useCallback(() => {
     if (tool === "utility_pipe") { finishUtilityDraft(); return; }
@@ -603,27 +658,31 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (draftPoints.length < 2) { setDraftPoints([]); return; }
     if (tool === "length") {
       const quantity = totalLen(draftPoints) * scale;
-      setShapes((prev) => [...prev, {
+      const shape: Shape = {
         key: `l-${Date.now()}`,
         tool: "length",
         points: draftPoints,
         coordinateSpace: "legacy_pixel",
         quantity,
         unit: "LF",
-      }]);
+      };
+      setShapes((prev) => [...prev, shape]);
+      broadcast("shape_upsert", shape);
     } else if (tool === "area" && draftPoints.length >= 3) {
       const quantity = polygonArea(draftPoints) * scale * scale;
-      setShapes((prev) => [...prev, {
+      const shape: Shape = {
         key: `a-${Date.now()}`,
         tool: "area",
         points: draftPoints,
         coordinateSpace: "legacy_pixel",
         quantity,
         unit: "SF",
-      }]);
+      };
+      setShapes((prev) => [...prev, shape]);
+      broadcast("shape_upsert", shape);
     }
     setDraftPoints([]);
-  }, [draftPoints, tool, scale, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft]);
+  }, [draftPoints, tool, scale, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft, broadcast]);
 
   // Escape/Enter shortcuts for finishing a polygon/line.
   useEffect(() => {
@@ -913,25 +972,44 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }
 
   function updateCostCode(key: string, code: string) {
-    setShapes((prev) => prev.map((s) => (s.key === key ? { ...s, cost_code: code, saved: false } : s)));
+    setShapes((prev) => {
+      const next = prev.map((s) => (s.key === key ? { ...s, cost_code: code, saved: false } : s));
+      const updated = next.find((s) => s.key === key);
+      if (updated) broadcast("shape_upsert", updated);
+      return next;
+    });
   }
   function removeShape(key: string) {
     setShapes((prev) => prev.filter((s) => s.key !== key));
+    broadcast("shape_remove", { key });
   }
   function updateUtilityCostCode(key: string, code: string) {
-    setUtilityRuns((prev) => prev.map((r) => (r.key === key ? { ...r, cost_code: code, saved: false } : r)));
+    setUtilityRuns((prev) => {
+      const next = prev.map((r) => (r.key === key ? { ...r, cost_code: code, saved: false } : r));
+      const updated = next.find((r) => r.key === key);
+      if (updated) broadcast("utility_upsert", updated);
+      return next;
+    });
   }
   function removeUtilityRun(key: string) {
     setUtilityRuns((prev) => prev.filter((r) => r.key !== key));
+    broadcast("utility_remove", { key });
   }
   function removeTopoNode(key: string) {
     setTopoNodes((prev) => prev.filter((n) => n.key !== key));
+    broadcast("topo_remove", { key });
   }
   function removeAreaBound(key: string) {
     setAreaBounds((prev) => prev.filter((a) => a.key !== key));
+    broadcast("area_remove", { key });
   }
   function updateAreaCostCode(key: string, code: string) {
-    setAreaBounds((prev) => prev.map((a) => (a.key === key ? { ...a, target_cost_code: code, saved: false } : a)));
+    setAreaBounds((prev) => {
+      const next = prev.map((a) => (a.key === key ? { ...a, target_cost_code: code, saved: false } : a));
+      const updated = next.find((a) => a.key === key);
+      if (updated) broadcast("area_upsert", updated);
+      return next;
+    });
   }
 
   // ── "Compile to civil_surfaces" — push all topo nodes into the site
@@ -1063,7 +1141,48 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             ))}
           </div>
 
-          <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono text-white/40">
+          <div className="flex items-center gap-3 text-[10px] uppercase tracking-widest font-mono text-white/40">
+            <div
+              className="flex items-center gap-1.5"
+              title={
+                collabStatus === "live"
+                  ? "Live canvas collaboration connected"
+                  : collabStatus === "connecting"
+                    ? "Connecting to live collaboration…"
+                    : collabStatus === "error"
+                      ? "Live collaboration unavailable"
+                      : "Live collaboration off"
+              }
+            >
+              <span
+                className={`inline-block h-1.5 w-1.5 rounded-full ${
+                  collabStatus === "live"
+                    ? "bg-[#CCFF00]"
+                    : collabStatus === "connecting"
+                      ? "bg-amber-400 animate-pulse"
+                      : "bg-white/20"
+                }`}
+              />
+              <span className="normal-case tracking-normal text-white/50">
+                {collabStatus === "live"
+                  ? peers.length > 0
+                    ? `${peers.length + 1} live`
+                    : "Live"
+                  : collabStatus === "connecting"
+                    ? "Connecting"
+                    : "Solo"}
+              </span>
+              {peers.slice(0, 4).map((peer) => (
+                <span
+                  key={peer.key}
+                  className="inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[9px] font-semibold text-black"
+                  style={{ backgroundColor: peer.color }}
+                  title={peer.name}
+                >
+                  {peer.name.slice(0, 1).toUpperCase()}
+                </span>
+              ))}
+            </div>
             {calibration ? (
               <>
                 {calibration.status === "verified" ? (
@@ -1153,6 +1272,13 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               className={`absolute inset-0 select-none ${tool === "pan" ? "cursor-grab" : "cursor-crosshair"}`}
               onClick={onCanvasClick}
               onDoubleClick={finishDraft}
+              onMouseMove={(e) => {
+                const now = Date.now();
+                if (now - lastCursorTrackRef.current < 80) return;
+                lastCursorTrackRef.current = now;
+                const rect = e.currentTarget.getBoundingClientRect();
+                trackCursor(e.clientX - rect.left, e.clientY - rect.top);
+              }}
             >
               {/* Committed shapes */}
               {shapes.map((s) => {
@@ -1299,6 +1425,24 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   ))}
                 </g>
               )}
+
+              {/* Remote estimator cursors (presence) */}
+              {peers.map((peer) => (
+                peer.x != null && peer.y != null ? (
+                  <g key={`cursor-${peer.key}`} pointerEvents="none">
+                    <circle cx={peer.x} cy={peer.y} r={4} fill={peer.color} stroke="#000" strokeWidth={1} />
+                    <text
+                      x={peer.x + 8}
+                      y={peer.y - 8}
+                      fontSize={10}
+                      fill={peer.color}
+                      fontFamily="monospace"
+                    >
+                      {peer.name}
+                    </text>
+                  </g>
+                ) : null
+              ))}
             </svg>
           )}
 
