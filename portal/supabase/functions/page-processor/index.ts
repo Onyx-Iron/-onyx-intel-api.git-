@@ -6,17 +6,19 @@
 //
 // Pipeline:
 //   1. Download single-page PDF bytes from storage.
-//   2. Send to Gemini via `generateContent` with inlineData
-//      (base64-encoded PDF). NOTE: payload deliberately omits any
-//      `display_name` field — Gemini's REST schema doesn't accept it and
-//      rejects the whole request if present.
+//   2. Read the sheet. OpenAI gpt-4.1 (Responses API, detail high) when
+//      `openai_api_key` is on the body or OPENAI_API_KEY is set. Otherwise
+//      Gemini generateContent with inline PDF bytes.
 //   3. Chunk the extracted text (~1200 chars, 200-char overlap).
-//   4. Embed each chunk with gemini-embedding-2 at 768 dimensions.
+//   4. Embed each chunk at 768 dimensions (text-embedding-3-large, or
+//      gemini-embedding-2 when only Gemini is configured).
 //   5. Insert into `document_chunks` with page_id + page_number.
 //   6. Update `document_pages.status="done"` and stash `ocr_text`.
 //
 // Env vars:
-//   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GEMINI_API_KEY,
+//   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
+//   OPENAI_API_KEY (preferred; the portal also forwards it per request),
+//   GEMINI_API_KEY (fallback),
 //   PLANS_BUCKET (default "plans-bucket"),
 //   GEMINI_TEXT_MODEL  (default "gemini-2.5-pro"),
 //   GEMINI_EMBED_MODEL (default "gemini-embedding-2"; text-embedding-004 is ignored).
@@ -64,6 +66,7 @@ interface Payload {
   tenant_id: string;
   page_number: number;
   storage_path: string;
+  openai_api_key?: string;
 }
 
 Deno.serve(async (req) => {
@@ -97,6 +100,42 @@ Deno.serve(async (req) => {
     if (error) console.warn("[page-processor] summary refresh failed", error.message);
   }
 
+  // The documents UI and project chat read `pages` / `chunks`. The splitter
+  // writes `document_pages` / `document_chunks`. Copy each finished sheet
+  // into both so one pipeline feeds insights and search.
+  async function mirrorSearchCopies(text: string, parts: string[], vectors: Array<number[] | null>): Promise<void> {
+    const { error: pageErr } = await db.from("pages").upsert({
+      document_id: body.document_id,
+      tenant_id: body.tenant_id,
+      page_number: body.page_number,
+      extracted_text: text || null,
+    }, { onConflict: "document_id,page_number" });
+    if (pageErr) throw new Error(`mirror pages: ${pageErr.message}`);
+    await db.from("chunks").delete()
+      .eq("document_id", body.document_id)
+      .eq("tenant_id", body.tenant_id)
+      .eq("page_number", body.page_number);
+    if (parts.length === 0) return;
+    const { data: docRow, error: docErr } = await db.from("documents")
+      .select("project_id")
+      .eq("id", body.document_id)
+      .eq("tenant_id", body.tenant_id)
+      .maybeSingle();
+    if (docErr) throw new Error(`mirror project: ${docErr.message}`);
+    if (!docRow?.project_id) return;
+    const mirrored = parts.map((content, i) => ({
+      id: crypto.randomUUID(),
+      tenant_id: body.tenant_id,
+      document_id: body.document_id,
+      project_id: docRow.project_id,
+      page_number: body.page_number,
+      content,
+      embedding: vectors[i] ? `[${vectors[i]!.join(",")}]` : null,
+    }));
+    const { error: chunkErr } = await db.from("chunks").insert(mirrored);
+    if (chunkErr) throw new Error(`mirror chunks: ${chunkErr.message}`);
+  }
+
   await db.from("document_pages")
     .update({ status: "processing" })
     .eq("id", body.page_id)
@@ -109,43 +148,49 @@ Deno.serve(async (req) => {
     if (dl.error || !dl.data) throw new Error(`storage download: ${dl.error?.message ?? "empty"}`);
     const arrayBuf = await dl.data.arrayBuffer();
     const b64 = base64Encode(new Uint8Array(arrayBuf));
+    const openaiKey = body.openai_api_key?.trim() || Deno.env.get("OPENAI_API_KEY")?.trim() || "";
+    const sheetPrompt = "Extract all readable text from this construction plan sheet. Preserve line breaks and tabular structure. Return raw text only.";
 
-    // ── 2. Extract text via Gemini ───────────────────────────────────────────
-    // Payload strictly omits `display_name` — the v1beta REST endpoint rejects
-    // it (it exists only in the Files API, not inlineData parts).
-    const genBody = {
-      contents: [{
-        role: "user",
-        parts: [
-          { text: "Extract all readable text from this construction plan sheet. Preserve line breaks and tabular structure. Return raw text only." },
-          { inlineData: { mimeType: "application/pdf", data: b64 } },
-        ],
-      }],
-      generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
-    };
-
-    const genRes = await fetchWithRetry(
-      `${GEMINI_BASE}/models/${TEXT_MODEL}:generateContent`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-goog-api-key": GEMINI_API_KEY },
-        body: JSON.stringify(genBody),
-      },
-    );
-    if (!genRes.ok) {
-      const errText = (await genRes.text().catch(() => "")).slice(0, 500);
-      throw new Error(`gemini generate ${genRes.status}: ${errText}`);
+    // OpenAI reads the sheet at high detail. Gemini is only used when that key is absent.
+    let text: string;
+    if (openaiKey) {
+      text = await extractPageWithOpenAI(openaiKey, b64, sheetPrompt);
+    } else {
+      const genBody = {
+        contents: [{
+          role: "user",
+          parts: [
+            { text: sheetPrompt },
+            { inlineData: { mimeType: "application/pdf", data: b64 } },
+          ],
+        }],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
+      };
+      const genRes = await fetchWithRetry(
+        `${GEMINI_BASE}/models/${TEXT_MODEL}:generateContent`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-goog-api-key": GEMINI_API_KEY },
+          body: JSON.stringify(genBody),
+        },
+      );
+      if (!genRes.ok) {
+        const errText = (await genRes.text().catch(() => "")).slice(0, 500);
+        throw new Error(`gemini generate ${genRes.status}: ${errText}`);
+      }
+      const genJson = await genRes.json();
+      text = (genJson.candidates?.[0]?.content?.parts ?? [])
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .filter((p: any) => p?.thought !== true)
+        .map((p: any) => p.text ?? "")
+        .join("")
+        .trim();
     }
-    const genJson = await genRes.json();
-    const text: string = (genJson.candidates?.[0]?.content?.parts ?? [])
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .map((p: any) => p.text ?? "")
-      .join("")
-      .trim();
 
     // ── 3. Chunk ────────────────────────────────────────────────────────────
     const chunks = chunkText(text, 1200, 200);
     if (chunks.length === 0) {
+      await mirrorSearchCopies(text, [], []);
       await db.from("document_pages")
         .update({ status: "done", ocr_text: text || null, updated_at: new Date().toISOString() })
         .eq("id", body.page_id);
@@ -157,9 +202,10 @@ Deno.serve(async (req) => {
 
     // ── 4. Embed (batched — gemini-embedding-2 supports batch mode) ─────────
     await recordEvent("embedding", "started");
-    const embeddings = await embedBatch(chunks);
+    const embeddings = openaiKey ? await embedBatchOpenAI(openaiKey, chunks) : await embedBatch(chunks);
 
-    // ── 5. Insert chunks ────────────────────────────────────────────────────
+    // ── 5. Insert chunks, replacing any earlier attempt for this page ────────
+    await db.from("document_chunks").delete().eq("page_id", body.page_id).eq("tenant_id", body.tenant_id);
     const rows = chunks.map((content, i) => ({
       id: crypto.randomUUID(),
       tenant_id: body.tenant_id,
@@ -172,6 +218,7 @@ Deno.serve(async (req) => {
     }));
     const { error: insErr } = await db.from("document_chunks").insert(rows);
     if (insErr) throw new Error(`insert chunks: ${insErr.message}`);
+    await mirrorSearchCopies(text, chunks, embeddings);
 
     // ── 6. Done ─────────────────────────────────────────────────────────────
     await db.from("document_pages")
@@ -223,6 +270,65 @@ function base64Encode(bytes: Uint8Array): string {
     bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
   }
   return btoa(bin);
+}
+
+async function extractPageWithOpenAI(apiKey: string, b64: string, prompt: string): Promise<string> {
+  const res = await fetchWithRetry("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model: "gpt-4.1",
+      input: [{
+        role: "user",
+        content: [
+          {
+            type: "input_file",
+            filename: "sheet.pdf",
+            file_data: `data:application/pdf;base64,${b64}`,
+            detail: "high",
+          },
+          { type: "input_text", text: prompt },
+        ],
+      }],
+    }),
+  });
+  if (!res.ok) {
+    const errText = (await res.text().catch(() => "")).slice(0, 500);
+    throw new Error(`openai read ${res.status}: ${errText}`);
+  }
+  const json = await res.json();
+  if (typeof json.output_text === "string" && json.output_text.trim()) return json.output_text.trim();
+  return (json.output ?? [])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .flatMap((item: any) => item.content ?? [])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .map((part: any) => part.text ?? "")
+    .join("")
+    .trim();
+}
+
+async function embedBatchOpenAI(apiKey: string, inputs: string[]): Promise<number[][]> {
+  const res = await fetchWithRetry("https://api.openai.com/v1/embeddings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model: "text-embedding-3-large",
+      input: inputs,
+      dimensions: 768,
+    }),
+  });
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => "")).slice(0, 200);
+    throw new Error(`openai embed ${res.status}: ${detail}`);
+  }
+  const json = await res.json();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rows = [...(json.data ?? [])].sort((a: any, b: any) => (a.index ?? 0) - (b.index ?? 0));
+  if (rows.length !== inputs.length || rows.some((row) => !Array.isArray(row.embedding) || row.embedding.length !== 768)) {
+    throw new Error("OpenAI embeddings did not return 768-dimension vectors");
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return rows.map((row: any) => row.embedding as number[]);
 }
 
 async function embedBatch(inputs: string[]): Promise<Array<number[] | null>> {

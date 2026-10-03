@@ -7,7 +7,8 @@ import { headerSafe } from "@/lib/http";
 import { logEvent } from "@/lib/activity";
 import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { generateText, availableProviders, NoProviderError, type Provider } from "@/lib/ai/providers";
-import { DOCUMENT_EMBED_MODEL, DOCUMENT_EXTRACT_MODEL, EMBEDDING_DIMENSIONS, liveModel } from "@/lib/ai/live-model";
+import { DOCUMENT_EMBED_MODEL, EMBEDDING_DIMENSIONS, liveModel } from "@/lib/ai/live-model";
+import { chatCompletionDelta, configuredDocumentProvider, embedWithOpenAI, openaiToolDefinitions, resolveOpenAIChatModel } from "@/lib/ai/document-ai";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -22,7 +23,6 @@ export const maxDuration = 120;
 const GEMINI_API_KEY = headerSafe(process.env.GEMINI_API_KEY);
 const EMBED_MODEL = liveModel(process.env.GEMINI_EMBED_MODEL, DOCUMENT_EMBED_MODEL);
 const CHAT_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-pro";
-const SUMMARY_MODEL = liveModel(process.env.GEMINI_DIGEST_MODEL, DOCUMENT_EXTRACT_MODEL);
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 const HISTORY_WINDOW = 12;
@@ -144,6 +144,7 @@ function buildProjectBrief(p: ProjectRow, today: string): string {
 }
 
 async function embedText(text: string): Promise<number[]> {
+  if (configuredDocumentProvider() === "openai") return embedWithOpenAI(text);
   const res = await fetch(
     `${GEMINI_BASE}/models/${EMBED_MODEL}:embedContent?key=${GEMINI_API_KEY}`,
     {
@@ -184,7 +185,7 @@ async function enrichCitations(db: any, tenantId: string, citations: CitationMet
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function summarizeConversation(convId: string, tenantId: string, db: any, totalCount: number): Promise<void> {
-  if (!GEMINI_API_KEY) return;
+  if (!configuredDocumentProvider() && !process.env.ANTHROPIC_API_KEY?.trim()) return;
   try {
     const { data: oldMessages } = await db
       .from("messages")
@@ -200,26 +201,12 @@ async function summarizeConversation(convId: string, tenantId: string, db: any, 
       .map((m: { role: string; content: string }) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
       .join("\n\n");
 
-    const res = await fetch(
-      `${GEMINI_BASE}/models/${SUMMARY_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            role: "user",
-            parts: [{
-              text: `Summarize this construction project conversation concisely. Focus on: decisions made, issues identified, information confirmed, and any open questions. Keep it under 200 words.\n\n${transcript}`,
-            }],
-          }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 300 },
-        }),
-      },
-    );
-
-    if (!res.ok) return;
-    const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-    const summary = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
+    const result = await generateText({
+      prompt: `Summarize this construction project conversation concisely. Focus on: decisions made, issues identified, information confirmed, and any open questions. Keep it under 200 words.\n\n${transcript}`,
+      maxTokens: 300,
+      temperature: 0.2,
+    });
+    const summary = result.text.trim();
     if (!summary) return;
 
     await db
@@ -568,22 +555,43 @@ async function handleRag(
     { role: "user" as const, parts: [{ text: contextBlock + message.trim() }] },
   ];
 
-  const geminiRes = await fetch(
-    `${GEMINI_BASE}/models/${CHAT_MODEL}:streamGenerateContent?alt=sse&key=${GEMINI_API_KEY}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: SYSTEM }] },
-        contents,
-        generationConfig: { temperature: 0.3, maxOutputTokens: 2048 },
-      }),
-    },
-  );
+  const useOpenAI = configuredDocumentProvider() === "openai";
+  const geminiRes = useOpenAI
+    ? await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY?.trim()}`,
+        },
+        body: JSON.stringify({
+          model: resolveOpenAIChatModel(),
+          temperature: 0.3,
+          max_tokens: 2048,
+          stream: true,
+          messages: [
+            { role: "system", content: SYSTEM },
+            ...priorMessages.slice(0, -1).map((m) => ({ role: m.role, content: m.content })),
+            { role: "user", content: contextBlock + message.trim() },
+          ],
+        }),
+      })
+    : await fetch(
+        `${GEMINI_BASE}/models/${CHAT_MODEL}:streamGenerateContent?alt=sse&key=${GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            system_instruction: { parts: [{ text: SYSTEM }] },
+            contents,
+            generationConfig: { temperature: 0.3, maxOutputTokens: 2048 },
+          }),
+        },
+      );
 
   if (!geminiRes.ok || !geminiRes.body) {
     const detail = await geminiRes.text().catch(() => geminiRes.statusText);
-    return NextResponse.json({ error: `[gemini ${geminiRes.status}] ${detail.slice(0, 300)}` }, { status: 502 });
+    const providerName = useOpenAI ? "openai" : "gemini";
+    return NextResponse.json({ error: `[${providerName} ${geminiRes.status}] ${detail.slice(0, 300)}` }, { status: 502 });
   }
 
   const encoder = new TextEncoder();
@@ -609,8 +617,11 @@ async function handleRag(
           try {
             const parsed = JSON.parse(json) as {
               candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+              choices?: Array<{ delta?: { content?: string | null } }>;
             };
-            const text = parsed.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
+            const text = useOpenAI
+              ? chatCompletionDelta(parsed)
+              : parsed.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
             if (text) {
               fullText += text;
               await writer.write(encoder.encode(text));
@@ -669,6 +680,92 @@ async function handleRag(
   });
 }
 
+interface OpenAIToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+interface OpenAIChatMessage {
+  role: string;
+  content: string | null;
+  tool_calls?: OpenAIToolCall[];
+  tool_call_id?: string;
+}
+
+async function runOpenAIAgent(input: {
+  system: string;
+  history: Array<{ role: string; content: string }>;
+  message: string;
+  execute: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+}): Promise<{ text: string; tools: string[] }> {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) throw new Error("[openai] OPENAI_API_KEY is not configured");
+  const messages: OpenAIChatMessage[] = [
+    { role: "system", content: input.system },
+    ...input.history.map((m) => ({
+      role: m.role === "assistant" ? "assistant" : "user",
+      content: m.content,
+    })),
+    { role: "user", content: input.message },
+  ];
+  const tools = openaiToolDefinitions(TOOL_DECLARATIONS);
+  const toolLog: string[] = [];
+  let finalText = "";
+
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: resolveOpenAIChatModel(),
+        messages,
+        tools,
+        temperature: 0.3,
+        max_tokens: 4096,
+      }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => res.statusText);
+      throw new Error(`[openai ${res.status}] ${detail.slice(0, 300)}`);
+    }
+    const data = await res.json() as { choices?: Array<{ message?: OpenAIChatMessage }> };
+    const msg = data.choices?.[0]?.message;
+    if (!msg) break;
+    const calls = msg.tool_calls ?? [];
+    if (calls.length === 0) {
+      finalText = msg.content ?? "";
+      break;
+    }
+    messages.push({ role: "assistant", content: msg.content ?? "", tool_calls: calls });
+    for (const call of calls) {
+      toolLog.push(call.function.name);
+      let args: Record<string, unknown> = {};
+      try {
+        args = JSON.parse(call.function.arguments || "{}") as Record<string, unknown>;
+      } catch {
+        args = {};
+      }
+      let result: unknown;
+      try {
+        result = await input.execute(call.function.name, args);
+      } catch (e) {
+        result = { error: String(e) };
+      }
+      messages.push({
+        role: "tool",
+        tool_call_id: call.id,
+        content: typeof result === "string" ? result : JSON.stringify(result),
+      });
+    }
+  }
+
+  return { text: finalText || "(No response generated after tool loop)", tools: toolLog };
+}
+
 async function handleAgentic(
   tenantId: string,
   project_id: string,
@@ -715,75 +812,92 @@ async function handleAgentic(
     .limit(20);
 
   const priorHistory = (history ?? []).slice(0, -1);
-  const contents: GeminiContent[] = [
-    ...priorHistory.map((m: { role: string; content: string }) => ({
-      role: (m.role === "user" ? "user" : "model") as "user" | "model",
-      parts: [{ text: m.content }],
-    })),
-    { role: "user" as const, parts: [{ text: message.trim() }] },
-  ];
-
   const toolCallLog: string[] = [];
   const agenticCitations: Array<{ document_id: string; page_number: number; similarity: number }> = [];
-  let round = 0;
   let finalText = "";
 
-  while (round < MAX_TOOL_ROUNDS) {
-    round++;
-    const geminiRes = await fetch(
-      `${GEMINI_BASE}/models/${CHAT_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          system_instruction: { parts: [{ text: systemInstruction }] },
-          contents,
-          tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
-          toolConfig: { functionCallingConfig: { mode: "AUTO" } },
-          generationConfig: { temperature: 0.3, maxOutputTokens: 4096 },
-        }),
-      },
-    );
-    if (!geminiRes.ok) {
-      const detail = await geminiRes.text().catch(() => geminiRes.statusText);
-      return NextResponse.json({ error: `[gemini ${geminiRes.status}] ${detail.slice(0, 300)}` }, { status: 502 });
-    }
-    const geminiData = await geminiRes.json() as {
-      candidates?: Array<{ content?: { role?: string; parts?: GeminiPart[] }; finishReason?: string }>;
-    };
-    const candidate = geminiData.candidates?.[0];
-    const parts = candidate?.content?.parts ?? [];
-    const modelRole = (candidate?.content?.role ?? "model") as "user" | "model";
-
-    const functionCalls = parts.filter((p) => p.functionCall);
-    const textParts = parts.filter((p) => p.text);
-
-    if (functionCalls.length === 0) {
-      finalText = textParts.map((p) => p.text ?? "").join("");
-      break;
-    }
-
-    contents.push({ role: modelRole, parts });
-
-    const responseParts: GeminiPart[] = [];
-    for (const part of functionCalls) {
-      if (!part.functionCall) continue;
-      const { name, args } = part.functionCall;
-      toolCallLog.push(name);
-      let result: unknown;
-      try {
-        result = await executeTool(name, args, db, tenantId, project_id, agenticCitations);
-      } catch (e) {
-        result = { error: String(e) };
-      }
-      responseParts.push({
-        functionResponse: {
-          name,
-          response: { content: typeof result === "string" ? result : JSON.stringify(result) },
-        },
+  if (configuredDocumentProvider() === "openai") {
+    try {
+      const outcome = await runOpenAIAgent({
+        system: systemInstruction,
+        history: priorHistory,
+        message: message.trim(),
+        execute: (name, args) => executeTool(name, args, db, tenantId, project_id, agenticCitations),
       });
+      finalText = outcome.text;
+      toolCallLog.push(...outcome.tools);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return NextResponse.json({ error: msg.slice(0, 300) }, { status: 502 });
     }
-    contents.push({ role: "user" as const, parts: responseParts });
+  } else {
+    const contents: GeminiContent[] = [
+      ...priorHistory.map((m: { role: string; content: string }) => ({
+        role: (m.role === "user" ? "user" : "model") as "user" | "model",
+        parts: [{ text: m.content }],
+      })),
+      { role: "user" as const, parts: [{ text: message.trim() }] },
+    ];
+
+    let round = 0;
+
+    while (round < MAX_TOOL_ROUNDS) {
+      round++;
+      const geminiRes = await fetch(
+        `${GEMINI_BASE}/models/${CHAT_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            system_instruction: { parts: [{ text: systemInstruction }] },
+            contents,
+            tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
+            toolConfig: { functionCallingConfig: { mode: "AUTO" } },
+            generationConfig: { temperature: 0.3, maxOutputTokens: 4096 },
+          }),
+        },
+      );
+      if (!geminiRes.ok) {
+        const detail = await geminiRes.text().catch(() => geminiRes.statusText);
+        return NextResponse.json({ error: `[gemini ${geminiRes.status}] ${detail.slice(0, 300)}` }, { status: 502 });
+      }
+      const geminiData = await geminiRes.json() as {
+        candidates?: Array<{ content?: { role?: string; parts?: GeminiPart[] }; finishReason?: string }>;
+      };
+      const candidate = geminiData.candidates?.[0];
+      const parts = candidate?.content?.parts ?? [];
+      const modelRole = (candidate?.content?.role ?? "model") as "user" | "model";
+
+      const functionCalls = parts.filter((p) => p.functionCall);
+      const textParts = parts.filter((p) => p.text);
+
+      if (functionCalls.length === 0) {
+        finalText = textParts.map((p) => p.text ?? "").join("");
+        break;
+      }
+
+      contents.push({ role: modelRole, parts });
+
+      const responseParts: GeminiPart[] = [];
+      for (const part of functionCalls) {
+        if (!part.functionCall) continue;
+        const { name, args } = part.functionCall;
+        toolCallLog.push(name);
+        let result: unknown;
+        try {
+          result = await executeTool(name, args, db, tenantId, project_id, agenticCitations);
+        } catch (e) {
+          result = { error: String(e) };
+        }
+        responseParts.push({
+          functionResponse: {
+            name,
+            response: { content: typeof result === "string" ? result : JSON.stringify(result) },
+          },
+        });
+      }
+      contents.push({ role: "user" as const, parts: responseParts });
+    }
   }
 
   if (!finalText) finalText = "(No response generated after tool loop)";
@@ -874,9 +988,10 @@ export async function POST(req: NextRequest): Promise<Response> {
       });
     }
 
-    // rag and agentic both need Gemini + project + message
-    if (!GEMINI_API_KEY) {
-      return NextResponse.json({ error: "AI not configured (GEMINI_API_KEY missing).", code: "NO_PROVIDER" }, { status: 503 });
+    // Document chat follows the same provider as indexing. OpenAI is preferred
+    // when that key is set; Gemini remains the fallback.
+    if (configuredDocumentProvider() !== "openai" && !GEMINI_API_KEY) {
+      return NextResponse.json({ error: "No document chat provider configured. Set OPENAI_API_KEY or GEMINI_API_KEY.", code: "NO_PROVIDER" }, { status: 503 });
     }
     if (!body.project_id || !body.message?.trim()) {
       return NextResponse.json({ error: "project_id and message are required" }, { status: 400 });

@@ -29,13 +29,14 @@ function getWorkerConfig(): { url: string; serviceKey: string } {
 
 export async function invokePageSplitWorker(payload: PageSplitPayload): Promise<void> {
   const { url, serviceKey } = getWorkerConfig();
+  const openaiKey = process.env.OPENAI_API_KEY?.trim();
   const res = await fetch(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${serviceKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(openaiKey ? { ...payload, openai_api_key: openaiKey } : payload),
   });
 
   if (res.ok) return;

@@ -7,10 +7,11 @@ import { logEvent } from "@/lib/activity";
 import { requireEnv } from "@/lib/env";
 import { fetchGemini, geminiAnswerText, readGeminiError } from "@/lib/ai/gemini";
 import { DOCUMENT_EMBED_MODEL, DOCUMENT_EXTRACT_MODEL, EMBEDDING_DIMENSIONS, liveModel } from "@/lib/ai/live-model";
+import { configuredDocumentProvider, embedWithOpenAI, readWithOpenAI } from "@/lib/ai/document-ai";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import { pagesStillNeedingChunks } from "@/lib/documents/ingest-resume";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
-import { documentStorageBuckets, mimeTypeForFile, PAGE_SPLIT_BYTES, PLANS_BUCKET, shouldQueuePageSplit } from "@/lib/documents/upload-plan";
+import { chooseIngestRoute, documentStorageBuckets, mimeTypeForFile } from "@/lib/documents/upload-plan";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
@@ -130,6 +131,7 @@ async function deleteGeminiFile(geminiName: string): Promise<void> {
 }
 
 async function embedText(text: string): Promise<number[]> {
+  if (configuredDocumentProvider() === "openai") return embedWithOpenAI(text);
   const res = await fetchGemini(
     `https://generativelanguage.googleapis.com/v1beta/models/${EMBED_MODEL}:embedContent?key=${geminiApiKey()}`,
     {
@@ -150,17 +152,6 @@ async function embedText(text: string): Promise<number[]> {
     throw new Error(`Embedding model ${EMBED_MODEL} returned ${values.length} dimensions; expected ${EMBEDDING_DIMENSIONS}`);
   }
   return values;
-}
-
-async function driveFileSize(driveFileId: string, token: string): Promise<number | null> {
-  const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveFileId)}?fields=size`,
-    { headers: { Authorization: `Bearer ${token}` } },
-  );
-  if (!res.ok) return null;
-  const data = (await res.json()) as { size?: string };
-  const size = data.size ? Number(data.size) : NaN;
-  return Number.isFinite(size) ? size : null;
 }
 
 async function downloadStoredFile(
@@ -210,11 +201,11 @@ export async function POST(
   try {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    try {
-      geminiApiKey();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return NextResponse.json({ error: msg }, { status: 503 });
+    if (!configuredDocumentProvider()) {
+      return NextResponse.json({
+        error: "No document AI provider configured. Set OPENAI_API_KEY or GEMINI_API_KEY.",
+        code: "NO_PROVIDER",
+      }, { status: 503 });
     }
     const startedAt = Date.now();
 
@@ -273,71 +264,73 @@ export async function POST(
       return NextResponse.json({ ok: true, resumed: true, already_complete: true });
     }
 
-    let pagesToEmbed: GeminiPage[] = resumePages;
-    let docType = "other";
-    let pageCount = storedGeminiPages.length;
-    if (resumePages.length === 0) {
-    const projectIdForSplit = doc.project_id as string | null;
-    const metaSize = typeof meta.size === "number" ? meta.size : null;
-    const driveTokenForSize = driveFileId ? (accessToken ?? await getAccessToken(tenantId, userId)) : null;
-    const sizeBytes = metaSize ?? (driveFileId && driveTokenForSize ? await driveFileSize(driveFileId, driveTokenForSize) : null);
-    const storedInPlans = meta.storage === PLANS_BUCKET || (typeof storagePath === "string" && storagePath.startsWith("originals/"));
-    const isPdf = doc.file_name.toLowerCase().endsWith(".pdf");
-    const queueSplit = projectIdForSplit && (
-      shouldQueuePageSplit({
-        fileName: doc.file_name,
-        sizeBytes,
-        hasSource: Boolean(driveFileId || (storagePath && storedInPlans)),
-      })
-      || (isPdf && Boolean(driveFileId) && sizeBytes == null)
-    );
-    if (queueSplit) {
-      await db.from("documents").update({
-        status: "processing",
-        split_status: "pending",
-        processing_started_at: new Date().toISOString(),
-        last_error: null,
-        last_error_step: null,
-      }).eq("id", docId).eq("tenant_id", tenantId);
-      if (driveFileId) {
-        if (!driveTokenForSize) {
+    const ingestRoute = chooseIngestRoute({
+      fileName: doc.file_name,
+      sizeBytes: typeof meta.size === "number" ? meta.size : null,
+      driveFileId,
+      storagePath,
+      storage: typeof meta.storage === "string" ? meta.storage : null,
+    });
+    if (ingestRoute === "reupload") {
+      const message = "This plan set is not stored where the page splitter can read it. Upload it again.";
+      await markError(message, "split");
+      return NextResponse.json({ error: message }, { status: 409 });
+    }
+    if (ingestRoute === "split-drive" || ingestRoute === "split-storage") {
+      const projectIdForSplit = doc.project_id as string | null;
+      if (!projectIdForSplit) {
+        return NextResponse.json({ error: "Document is not attached to a project" }, { status: 400 });
+      }
+      let splitPayload: Parameters<typeof invokePageSplitWorker>[0];
+      if (ingestRoute === "split-drive") {
+        const driveToken = accessToken ?? await getAccessToken(resolvedTenantId, userId);
+        if (!driveToken || !driveFileId) {
           return NextResponse.json({
             error: "Google Drive is not connected. Connect Google in Settings.",
             code: "NEED_GOOGLE",
           }, { status: 412 });
         }
-        await invokePageSplitWorker({
+        splitPayload = {
           document_id: docId,
           tenant_id: resolvedTenantId,
           project_id: projectIdForSplit,
           original_path: `originals/${docId}.pdf`,
           drive_file_id: driveFileId,
-          access_token: driveTokenForSize,
+          access_token: driveToken,
           user_id: userId,
-        });
+        };
       } else {
-        await invokePageSplitWorker({
+        splitPayload = {
           document_id: docId,
           tenant_id: resolvedTenantId,
           project_id: projectIdForSplit,
           original_path: storagePath!,
           user_id: userId,
           is_local_upload: true,
-        });
+        };
       }
-      return NextResponse.json({
-        ok: true,
-        queued: true,
-        reason: "large_plan_set",
-        bytes: sizeBytes,
-      }, { status: 202 });
+      await db.from("documents").update({
+        status: "queued",
+        split_status: "pending",
+        last_error: null,
+        last_error_step: null,
+      }).eq("id", docId).eq("tenant_id", tenantId);
+      void invokePageSplitWorker(splitPayload).catch(async (err) => {
+        const detail = err instanceof Error ? err.message : String(err);
+        await markError(detail, "page_split_worker_invoke");
+      });
+      return NextResponse.json({ ok: true, queued: true, route: ingestRoute }, { status: 202 });
     }
 
-    // 1. Download the file from Drive or Supabase Storage
+    let pagesToEmbed: GeminiPage[] = resumePages;
+    let docType = "other";
+    let pageCount = storedGeminiPages.length;
+    if (resumePages.length === 0) {
+    // Images and small legacy files. PDFs in Drive or plans-bucket already returned above.
     let pdfBytes: Buffer;
 
     if (driveFileId) {
-      const driveToken = driveTokenForSize ?? accessToken ?? await getAccessToken(tenantId, userId);
+      const driveToken = accessToken ?? await getAccessToken(resolvedTenantId, userId);
       if (!driveToken) {
         return NextResponse.json({
           error: "Google Drive is not connected. Connect Google in Settings.",
@@ -362,109 +355,63 @@ export async function POST(
       pdfBytes = downloaded.bytes;
     }
 
-    const downloadedTooLarge = doc.file_name.toLowerCase().endsWith(".pdf") && pdfBytes.length >= PAGE_SPLIT_BYTES;
-    if (downloadedTooLarge && projectIdForSplit && driveFileId && driveTokenForSize) {
-      await db.from("documents").update({
-        status: "processing",
-        split_status: "pending",
-        processing_started_at: new Date().toISOString(),
-        last_error: null,
-        last_error_step: null,
-      }).eq("id", docId).eq("tenant_id", tenantId);
-      await invokePageSplitWorker({
-        document_id: docId,
-        tenant_id: resolvedTenantId,
-        project_id: projectIdForSplit,
-        original_path: `originals/${docId}.pdf`,
-        drive_file_id: driveFileId,
-        access_token: driveTokenForSize,
-        user_id: userId,
-      });
-      return NextResponse.json({
-        ok: true,
-        queued: true,
-        reason: "large_plan_set",
-        bytes: pdfBytes.length,
-      }, { status: 202 });
-    }
-    if (shouldQueuePageSplit({ fileName: doc.file_name, sizeBytes: pdfBytes.length, hasSource: Boolean(projectIdForSplit && storagePath && storedInPlans) })) {
-      await db.from("documents").update({
-        status: "processing",
-        split_status: "pending",
-        processing_started_at: new Date().toISOString(),
-        last_error: null,
-        last_error_step: null,
-      }).eq("id", docId).eq("tenant_id", tenantId);
-      await invokePageSplitWorker({
-        document_id: docId,
-        tenant_id: resolvedTenantId,
-        project_id: projectIdForSplit!,
-        original_path: storagePath!,
-        user_id: userId,
-        is_local_upload: true,
-      });
-      return NextResponse.json({
-        ok: true,
-        queued: true,
-        reason: "large_plan_set",
-        bytes: pdfBytes.length,
-      }, { status: 202 });
-    }
-    if (downloadedTooLarge && !storedInPlans) {
-      const message = "This plan set is stored outside plans-bucket, so it cannot be split in the background. Upload it again.";
-      await markError(message, "split");
-      return NextResponse.json({ error: message }, { status: 409 });
-    }
-
     await db.from("documents").update({
       status: "processing",
       processing_started_at: new Date().toISOString(),
     }).eq("id", docId).eq("tenant_id", tenantId);
 
-    // 2. Upload to Gemini Files API
     const sourceMime = mimeTypeForFile(
       doc.file_name,
       typeof meta.content_type === "string" ? meta.content_type : null,
     );
-    const { uri: fileUri, name: gName } = await uploadToGeminiFiles(pdfBytes, doc.file_name, sourceMime);
-    geminiName = gName;
-
-    // 3. Wait for ACTIVE
-    await waitForActive(geminiName);
-
-    // 4. Extract text + classify
-    const extractRes = await fetchGemini(
-      `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${geminiApiKey()}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { fileData: { mimeType: sourceMime, fileUri: fileUri } },
-              { text: EXTRACTION_PROMPT },
-            ],
-          }],
-          generationConfig: {
-            responseMimeType: "application/json",
-            thinkingConfig: { thinkingLevel: "MINIMAL" },
-          },
-        }),
-      },
-      { label: "Gemini document extraction", timeoutMs: 60_000 },
-    );
-    if (!extractRes.ok) {
-      await readGeminiError(extractRes, "Gemini document extraction");
+    let rawJson: string;
+    let fileUri: string | null = null;
+    if (configuredDocumentProvider() === "openai") {
+      rawJson = await readWithOpenAI({
+        bytes: pdfBytes,
+        fileName: doc.file_name,
+        mimeType: sourceMime,
+        prompt: EXTRACTION_PROMPT,
+        json: true,
+      });
+    } else {
+      const uploaded = await uploadToGeminiFiles(pdfBytes, doc.file_name, sourceMime);
+      fileUri = uploaded.uri;
+      geminiName = uploaded.name;
+      await waitForActive(geminiName);
+      const extractRes = await fetchGemini(
+        `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${geminiApiKey()}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { fileData: { mimeType: sourceMime, fileUri } },
+                { text: EXTRACTION_PROMPT },
+              ],
+            }],
+            generationConfig: {
+              responseMimeType: "application/json",
+              thinkingConfig: { thinkingLevel: "MINIMAL" },
+            },
+          }),
+        },
+        { label: "Gemini document extraction", timeoutMs: 60_000 },
+      );
+      if (!extractRes.ok) {
+        await readGeminiError(extractRes, "Gemini document extraction");
+      }
+      const extractData = (await extractRes.json()) as {
+        candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
+      };
+      rawJson = geminiAnswerText(extractData.candidates?.[0]?.content?.parts) || "{}";
     }
-    const extractData = (await extractRes.json()) as {
-      candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
-    };
-    const rawJson = geminiAnswerText(extractData.candidates?.[0]?.content?.parts) || "{}";
     let extraction: ExtractionResult;
     try {
       extraction = JSON.parse(rawJson) as ExtractionResult;
     } catch {
-      throw new Error(`Gemini returned non-JSON extraction payload: ${rawJson.slice(0, 200)}`);
+      throw new Error(`Document extraction returned non-JSON: ${rawJson.slice(0, 200)}`);
     }
 
     const VALID_TYPES = ["drawing", "spec", "rfi", "submittal", "other"] as const;
@@ -478,7 +425,7 @@ export async function POST(
     await db.from("documents").update({
       doc_type: docType,
       page_count: pageCount,
-      meta: { ...meta, title: extraction.title ?? null, gemini_file_uri: fileUri },
+      meta: { ...meta, title: extraction.title ?? null, ...(fileUri ? { gemini_file_uri: fileUri } : {}) },
     }).eq("id", docId).eq("tenant_id", tenantId);
 
     // 6. Insert pages

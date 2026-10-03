@@ -6,7 +6,8 @@ import { getAccessToken } from "@/lib/google/oauth";
 import { headerSafe } from "@/lib/http";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { checkAiRateLimit } from "@/lib/ai/rate-limit";
-import { documentStorageBuckets } from "@/lib/documents/upload-plan";
+import { configuredDocumentProvider, readWithOpenAI } from "@/lib/ai/document-ai";
+import { documentStorageBuckets, mimeTypeForFile } from "@/lib/documents/upload-plan";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -29,8 +30,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     const email = (await currentUser())?.primaryEmailAddress?.emailAddress;
 
-    if (!GEMINI_API_KEY) {
-      return NextResponse.json({ error: "AI is not configured (GEMINI_API_KEY missing).", code: "NO_PROVIDER" }, { status: 503 });
+    if (!configuredDocumentProvider()) {
+      return NextResponse.json({ error: "No document AI provider configured. Set OPENAI_API_KEY or GEMINI_API_KEY.", code: "NO_PROVIDER" }, { status: 503 });
     }
 
     const { document_id, question } = await req.json() as { document_id?: string; question?: string };
@@ -116,6 +117,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     if (bytes.byteLength > 32 * 1024 * 1024) {
       return NextResponse.json({ error: "PDF exceeds 32 MB — too large for Q&A." }, { status: 413 });
+    }
+    if (configuredDocumentProvider() === "openai") {
+      const sourceMime = mimeTypeForFile(doc.file_name, contentType);
+      const answer = await readWithOpenAI({
+        bytes,
+        fileName: doc.file_name,
+        mimeType: sourceMime,
+        prompt: `${buildGroundedSystemPrompt(SYSTEM, { requireCitations: true, sourceLabel: "attached document" })}\n\nQuestion: ${question}`,
+      });
+      const newQ = {
+        id: `q_${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
+        question: question.trim(),
+        answer,
+        asked_at: new Date().toISOString(),
+        asked_by: userId,
+      };
+      const updatedMeta = { ...meta, questions: [...existingQsForCache, newQ] };
+      await db.from("documents").update({ meta: updatedMeta } as never).eq("id", doc.id).eq("tenant_id", tenantId);
+      return NextResponse.json({ answer, document: doc.file_name, question_id: newQ.id });
+    }
+
+    if (!GEMINI_API_KEY) {
+      return NextResponse.json({ error: "AI is not configured (GEMINI_API_KEY missing).", code: "NO_PROVIDER" }, { status: 503 });
     }
     const base64 = bytes.toString("base64");
 

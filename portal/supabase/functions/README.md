@@ -5,7 +5,7 @@ Two functions power the Drive → page-split → per-page RAG pipeline:
 | Function             | Trigger                                            | Purpose                                                        |
 | -------------------- | -------------------------------------------------- | -------------------------------------------------------------- |
 | `page-split-worker`  | `POST /api/documents/import-drive` (portal)        | Stream Drive → Storage → pdf-lib split → insert `document_pages` |
-| `page-processor`     | Fan-out from `page-split-worker` (one per page)    | Gemini 1.5 Flash extract → chunk → embed → `document_chunks`     |
+| `page-processor`     | Fan-out from `page-split-worker` (one per page)    | gpt-4.1 (or Gemini) extract → chunk → 768-d embed → `document_chunks` |
 
 ## Prerequisites
 
@@ -21,7 +21,8 @@ Two functions power the Drive → page-split → per-page RAG pipeline:
      GEMINI_API_KEY="AQ...your-billing-key" \
      PLANS_BUCKET="plans-bucket" \
      GEMINI_TEXT_MODEL="gemini-2.5-pro" \
-     GEMINI_EMBED_MODEL="gemini-embedding-2"
+     GEMINI_EMBED_MODEL="gemini-embedding-2" \
+     OPENAI_API_KEY="sk-...optional, preferred for sheet reading"
    ```
 
    `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are auto-injected by the
