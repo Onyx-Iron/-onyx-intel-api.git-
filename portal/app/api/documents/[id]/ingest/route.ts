@@ -12,6 +12,7 @@ import { fetchDriveFileSize } from "@/lib/google/driveFile";
 import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
 import { looksLikePdf, publishSheetPages } from "@/lib/documents/sheet-pages";
 import { missingPageNumbers, normalizeDocumentClass, pdfDeclaresEncryption } from "@/lib/documents/processing-display";
+import { extractionFromPageText, mergeExtractions, parseModelJson, readPdfPageText } from "@/lib/documents/extraction-fallback";
 import { unlockPdf } from "@/lib/documents/pdf-unlock";
 import {
   PLANS_BUCKET,
@@ -504,61 +505,91 @@ export async function POST(
       });
     }
 
-    // 2. Upload to Gemini Files API
-    await assertWithinBudget("gemini_upload");
-    const { uri: fileUri, name: gName } = await uploadToGeminiFiles(pdfBytes, doc.file_name);
-    geminiName = gName;
-
-    // 3. Wait for ACTIVE
-    await assertWithinBudget("gemini_active");
-    await waitForActive(geminiName);
-
-    // 4. Extract text + classify
-    await assertWithinBudget("extraction");
-    const extractRes = await fetchGemini(
-      `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${geminiApiKey()}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { fileData: { mimeType: "application/pdf", fileUri: fileUri } },
-              { text: EXTRACTION_PROMPT },
-            ],
-          }],
-          generationConfig: { responseMimeType: "application/json" },
-        }),
-      },
-      { label: "Gemini document extraction", timeoutMs: 60_000 },
-    );
-    if (!extractRes.ok) {
-      await readGeminiError(extractRes, "Gemini document extraction");
-    }
-    const extractData = (await extractRes.json()) as {
-      candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
-    };
-    const rawJson = extractData.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-    let extraction: ExtractionResult;
+    // 2–4. Model extraction. A failed upload, timeout, or unreadable JSON
+    // continues into embedded page text, then page split.
+    let fileUri = "";
+    let modelExtraction: ExtractionResult | null = null;
     try {
-      extraction = JSON.parse(rawJson) as ExtractionResult;
+      await assertWithinBudget("gemini_upload");
+      const uploaded = await uploadToGeminiFiles(pdfBytes, doc.file_name);
+      fileUri = uploaded.uri;
+      geminiName = uploaded.name;
+      await assertWithinBudget("gemini_active");
+      await waitForActive(geminiName);
+      await assertWithinBudget("extraction");
+      const extractRes = await fetchGemini(
+        `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${geminiApiKey()}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { fileData: { mimeType: "application/pdf", fileUri } },
+                { text: EXTRACTION_PROMPT },
+              ],
+            }],
+            generationConfig: { responseMimeType: "application/json" },
+          }),
+        },
+        { label: "Gemini document extraction", timeoutMs: 60_000 },
+      );
+      if (extractRes.ok) {
+        const extractData = (await extractRes.json()) as {
+          candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
+        };
+        const rawJson = extractData.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+        modelExtraction = parseModelJson(rawJson) as ExtractionResult | null;
+      } else {
+        await readGeminiError(extractRes, "Gemini document extraction").catch(() => undefined);
+      }
     } catch {
-      throw new Error(`Gemini returned non-JSON extraction payload: ${rawJson.slice(0, 200)}`);
+      modelExtraction = null;
     }
 
-    const docType = normalizeDocumentClass(extraction.doc_type);
-    const summaryCount = extraction.page_count ?? extraction.pages?.length ?? 0;
-    const pages = extraction.pages ?? [];
-    let pdfPageCount = summaryCount;
+    let pdfPageCount = 0;
     try {
       const { PDFDocument } = await import("pdf-lib");
       const parsedPdf = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
       pdfPageCount = parsedPdf.getPageCount();
     } catch {
-      pdfPageCount = summaryCount;
+      pdfPageCount = modelExtraction?.page_count ?? modelExtraction?.pages?.length ?? 0;
     }
+    const modelPages = modelExtraction?.pages ?? [];
+    const modelMissing = missingPageNumbers(pdfPageCount, modelPages.filter((page) => page.summary?.trim()).map((page) => page.page_number));
+    let localExtraction: ExtractionResult | null = null;
+    if (!modelExtraction || modelMissing.length > 0) {
+      try {
+        const localPages = await readPdfPageText(pdfBytes);
+        localExtraction = extractionFromPageText(localPages, pdfPageCount) as ExtractionResult;
+      } catch {
+        localExtraction = null;
+      }
+    }
+    const merged = mergeExtractions(modelExtraction, localExtraction, pdfPageCount);
+    const extraction = merged.extraction as ExtractionResult;
+    if (extraction.pages.length === 0 && storagePath && projectIdForSplit) {
+      await queueLocalDocumentForPageSplit({
+        tenantId: resolvedTenantId,
+        userId,
+        projectId: projectIdForSplit,
+        documentId: docId,
+        originalPath: storagePath,
+      });
+      return NextResponse.json({
+        ok: true,
+        queued: true,
+        reason: "extraction_fallback_page_split",
+      }, { status: 202 });
+    }
+    if (extraction.pages.length === 0) {
+      throw new Error("Neither the model nor the embedded page text produced a readable page.");
+    }
+
+    const docType = normalizeDocumentClass(extraction.doc_type);
+    const pages = extraction.pages ?? [];
     const missingPages = missingPageNumbers(pdfPageCount, pages.map((page) => page.page_number));
-    const pageCount = pdfPageCount > 0 ? pdfPageCount : summaryCount;
+    const pageCount = pdfPageCount > 0 ? pdfPageCount : pages.length;
 
     // 5. Update doc with classification
     await db.from("documents").update({
@@ -572,6 +603,7 @@ export async function POST(
           pages_total: pageCount,
           pages_summarized: pages.length,
           missing_page_numbers: missingPages,
+          alternate_text_pages: merged.alternatePages,
         },
       },
     }).eq("id", docId).eq("tenant_id", resolvedTenantId);
@@ -671,7 +703,7 @@ export async function POST(
     }).eq("id", docId).eq("tenant_id", resolvedTenantId);
 
     // 9. Cleanup Gemini file (best effort)
-    await deleteGeminiFile(geminiName);
+    if (geminiName) await deleteGeminiFile(geminiName);
     geminiName = null;
     await logDocumentProcessingEvent({
       tenantId: resolvedTenantId,

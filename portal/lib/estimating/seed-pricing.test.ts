@@ -4,8 +4,8 @@ import { describe, it } from "node:test";
 import { isLegacyHeuristicSplit, legacyHeuristicUnitCost, seedLineCosts } from "./seed-pricing.ts";
 
 describe("seedLineCosts", () => {
-  it("books a flat catalog price entirely as material", () => {
-    const costs = seedLineCosts(10, null, { unit_cost: 48, source: "national_price" });
+  it("books a regional catalog price entirely as material", () => {
+    const costs = seedLineCosts(10, null, { unit_cost: 48, source: "regional_price", price_scope: "regional" });
     assert.equal(costs.pricing_status, "priced");
     assert.equal(costs.labor_cost, 0);
     assert.equal(costs.material_cost, 480);
@@ -31,6 +31,12 @@ describe("seedLineCosts", () => {
     assert.equal(costs.material_cost, 50);
     assert.equal(costs.labor_cost, 0);
     assert.equal(costs.pricing_status, "priced");
+  });
+
+  it("keeps a national average visible but out of the sell price", () => {
+    const costs = seedLineCosts(10, null, { unit_cost: 48, source: "national_price", price_scope: "national" });
+    assert.equal(costs.unit_cost, 48);
+    assert.equal(costs.pricing_status, "review");
   });
 
   it("leaves a line unpriced when neither source has a unit cost", () => {
