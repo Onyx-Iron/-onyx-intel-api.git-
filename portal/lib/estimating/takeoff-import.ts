@@ -36,9 +36,16 @@ export interface TakeoffRowForSave extends TakeoffFingerprintInput {
 }
 
 export interface ExistingEstimateForImport {
+  id?: string | null;
+  estimate_version_id?: string | null;
   source_takeoff_id?: string | null;
   source_fingerprint?: string | null;
   notes?: string | null;
+  quantity?: number | null;
+  unit_cost?: number | null;
+  labor_cost?: number | null;
+  material_cost?: number | null;
+  equipment_cost?: number | null;
 }
 
 export interface CostCatalogForImport {
@@ -70,16 +77,64 @@ export interface BuildEstimateImportInput {
   existingEstimateItems: ExistingEstimateForImport[];
   costCatalog: CostCatalogForImport[];
   projectId: string;
+  // When set, a takeoff quantity (or other fingerprint) change updates the
+  // matching line on this version only. Lines on any other version are left
+  // untouched, so an approved snapshot cannot be rewritten.
+  targetVersionId?: string | null;
+}
+
+export interface EstimateImportUpdate {
+  estimateItemId: string;
+  existing: ExistingEstimateForImport;
+  row: EstimateImportRow;
 }
 
 export interface BuildEstimateImportResult {
   rows: EstimateImportRow[];
+  updates: EstimateImportUpdate[];
   skipped: number;
   // Count of takeoff items that exist but were excluded specifically
   // because they aren't approved yet (pending_review or rejected) —
   // distinct from `skipped` (already-imported duplicates), so callers can
   // tell "nothing new" apart from "new items exist but need review".
   blockedByReview: number;
+}
+
+export interface ScaledDirectCosts {
+  unitCost: number;
+  laborCost: number;
+  materialCost: number;
+  equipmentCost: number;
+}
+
+/**
+ * Keeps an estimator's unit price and labor/material/equipment split, and
+ * scales the extended costs to the new quantity. Returns null when there is
+ * no unit price to preserve, so the caller can price from the catalog instead.
+ */
+export function scaledDirectCosts(
+  existing: ExistingEstimateForImport,
+  newQuantity: number | null,
+): ScaledDirectCosts | null {
+  const unitCost = existing.unit_cost;
+  const oldQuantity = existing.quantity;
+  if (
+    unitCost == null ||
+    oldQuantity == null ||
+    !Number.isFinite(oldQuantity) ||
+    oldQuantity === 0 ||
+    newQuantity == null ||
+    !Number.isFinite(newQuantity)
+  ) {
+    return null;
+  }
+  const factor = newQuantity / oldQuantity;
+  return {
+    unitCost,
+    laborCost: (existing.labor_cost ?? 0) * factor,
+    materialCost: (existing.material_cost ?? 0) * factor,
+    equipmentCost: (existing.equipment_cost ?? 0) * factor,
+  };
 }
 
 export function takeoffFingerprint(item: TakeoffFingerprintInput): string {
@@ -129,26 +184,22 @@ export function prepareTakeoffRowsForSave(
 }
 
 export function buildEstimateImportRows(input: BuildEstimateImportInput): BuildEstimateImportResult {
-  const existingKeys = new Set<string>();
+  const fingerprintKeys = new Set<string>();
+  const idKeys = new Set<string>();
   for (const item of input.existingEstimateItems) {
-    if (item.source_takeoff_id) existingKeys.add(`id:${item.source_takeoff_id}`);
-    if (item.source_fingerprint) existingKeys.add(`fp:${item.source_fingerprint}`);
-    const fingerprint = fingerprintFromNotes(item.notes);
-    if (fingerprint) existingKeys.add(`fp:${fingerprint}`);
+    if (item.source_takeoff_id) idKeys.add(item.source_takeoff_id);
+    const fingerprint = existingFingerprint(item);
+    if (fingerprint) fingerprintKeys.add(fingerprint);
   }
 
   const costLookup = buildCostLookup(input.costCatalog);
   const rows: EstimateImportRow[] = [];
+  const updates: EstimateImportUpdate[] = [];
   let skipped = 0;
   let blockedByReview = 0;
 
   for (const takeoff of input.takeoffItems) {
     const fingerprint = takeoffFingerprint(takeoff);
-    if (existingKeys.has(`id:${takeoff.id}`) || existingKeys.has(`fp:${fingerprint}`)) {
-      skipped++;
-      continue;
-    }
-
     // Hard gate: only 'approved' items may reach the estimate. 'suggested'
     // and 'reviewed' are both still unapproved — a human having looked at
     // an item (reviewed) is not the same as having approved it — and
@@ -161,36 +212,86 @@ export function buildEstimateImportRows(input: BuildEstimateImportInput): BuildE
       continue;
     }
 
-    const description = cleanText(takeoff.label) ?? "Takeoff item";
-    const csi = cleanText(takeoff.csi_code);
-    const uom = cleanText(takeoff.unit)?.toUpperCase() ?? null;
-    const unitCost = findUnitCost(costLookup, csi, uom);
-    const quantityBasis = cleanText(takeoff.meta?.quantity_basis);
-    const drawingRef = cleanText(takeoff.meta?.drawing_ref);
-    const locationTag = cleanText(takeoff.meta?.location_tag);
-    const aiVision = takeoff.meta?.extraction_method === "ai_vision";
-    const notes = buildSourceNotes({ drawingRef, locationTag, quantityBasis, aiVision });
+    const draftItem = input.targetVersionId
+      ? input.existingEstimateItems.find((item) =>
+          Boolean(item.id) &&
+          item.estimate_version_id === input.targetVersionId &&
+          item.source_takeoff_id === takeoff.id)
+      : undefined;
 
-    rows.push({
-      project_id: input.projectId,
-      description,
-      csi_code: csi,
-      trade: cleanText(takeoff.meta?.trade),
-      item_type: "material",
-      quantity: takeoff.quantity ?? null,
-      uom,
-      unit_cost: unitCost,
-      source_takeoff_id: takeoff.id,
-      source_fingerprint: fingerprint,
-      quantity_basis: quantityBasis,
-      drawing_ref: drawingRef,
-      location_tag: locationTag,
-      pricing_status: aiVision ? "review" : unitCost != null ? "priced" : "unpriced",
-      notes,
-    });
+    if (draftItem?.id) {
+      if (existingFingerprint(draftItem) === fingerprint) {
+        skipped++;
+        continue;
+      }
+      updates.push({
+        estimateItemId: draftItem.id,
+        existing: draftItem,
+        row: toImportRow(input.projectId, takeoff, fingerprint, costLookup),
+      });
+      fingerprintKeys.add(fingerprint);
+      continue;
+    }
+
+    if (fingerprintKeys.has(fingerprint) || (!input.targetVersionId && idKeys.has(takeoff.id))) {
+      skipped++;
+      continue;
+    }
+
+    if (input.targetVersionId && idKeys.has(takeoff.id)) {
+      const unchangedOnAnotherVersion = input.existingEstimateItems.some((item) =>
+        item.source_takeoff_id === takeoff.id && existingFingerprint(item) === fingerprint);
+      if (unchangedOnAnotherVersion) {
+        skipped++;
+        continue;
+      }
+    }
+
+    rows.push(toImportRow(input.projectId, takeoff, fingerprint, costLookup));
+    fingerprintKeys.add(fingerprint);
+    idKeys.add(takeoff.id);
   }
 
-  return { rows, skipped, blockedByReview };
+  return { rows, updates, skipped, blockedByReview };
+}
+
+function existingFingerprint(item: ExistingEstimateForImport): string | null {
+  return item.source_fingerprint || fingerprintFromNotes(item.notes);
+}
+
+function toImportRow(
+  projectId: string,
+  takeoff: TakeoffItemForEstimate,
+  fingerprint: string,
+  costLookup: Map<string, number>,
+): EstimateImportRow {
+  const description = cleanText(takeoff.label) ?? "Takeoff item";
+  const csi = cleanText(takeoff.csi_code);
+  const uom = cleanText(takeoff.unit)?.toUpperCase() ?? null;
+  const unitCost = findUnitCost(costLookup, csi, uom);
+  const quantityBasis = cleanText(takeoff.meta?.quantity_basis);
+  const drawingRef = cleanText(takeoff.meta?.drawing_ref);
+  const locationTag = cleanText(takeoff.meta?.location_tag);
+  const aiVision = takeoff.meta?.extraction_method === "ai_vision";
+  const notes = buildSourceNotes({ drawingRef, locationTag, quantityBasis, aiVision });
+
+  return {
+    project_id: projectId,
+    description,
+    csi_code: csi,
+    trade: cleanText(takeoff.meta?.trade),
+    item_type: "material",
+    quantity: takeoff.quantity ?? null,
+    uom,
+    unit_cost: unitCost,
+    source_takeoff_id: takeoff.id,
+    source_fingerprint: fingerprint,
+    quantity_basis: quantityBasis,
+    drawing_ref: drawingRef,
+    location_tag: locationTag,
+    pricing_status: aiVision ? "review" : unitCost != null ? "priced" : "unpriced",
+    notes,
+  };
 }
 
 function buildCostLookup(catalog: CostCatalogForImport[]): Map<string, number> {
