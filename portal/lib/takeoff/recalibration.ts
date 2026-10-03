@@ -55,3 +55,49 @@ export function previewRecalibration(
 export function recalibrationNeedsConfirm(lines: RecalibrationPreviewLine[]): boolean {
   return lines.some((line) => line.recomputed && Math.abs(line.after - line.before) > 1e-6);
 }
+
+export interface RecalibrationWriteFailure {
+  id: string;
+  reason: string;
+}
+
+export interface CommitRecalibratedDraftsResult {
+  updated: number;
+  failures: RecalibrationWriteFailure[];
+  /** Set when at least one quantity changed and the draft estimate sync threw. */
+  estimateError: string | null;
+}
+
+/**
+ * Writes each recomputed draft quantity, then syncs the draft estimate in
+ * the same request. The outbox row written by the quantity update is only
+ * drained by the daily cron unless this sync runs now.
+ */
+export async function commitRecalibratedDrafts(args: {
+  lines: RecalibrationPreviewLine[];
+  write: (line: RecalibrationPreviewLine) => Promise<{ ok: true } | { ok: false; reason: string }>;
+  syncEstimate: () => Promise<void>;
+}): Promise<CommitRecalibratedDraftsResult> {
+  const failures: RecalibrationWriteFailure[] = [];
+  let updated = 0;
+  for (const line of args.lines) {
+    if (!line.recomputed) continue;
+    try {
+      const result = await args.write(line);
+      if (result.ok) updated++;
+      else failures.push({ id: line.id, reason: result.reason });
+    } catch (err) {
+      failures.push({ id: line.id, reason: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  let estimateError: string | null = null;
+  if (updated > 0) {
+    try {
+      await args.syncEstimate();
+    } catch (err) {
+      estimateError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  return { updated, failures, estimateError };
+}

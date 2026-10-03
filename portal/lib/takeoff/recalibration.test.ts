@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { previewRecalibration, recalibrationNeedsConfirm } from "./recalibration.ts";
+import { commitRecalibratedDrafts, previewRecalibration, recalibrationNeedsConfirm } from "./recalibration.ts";
 
 describe("recalibration preview", () => {
   it("scales length and perimeter linearly, area by the square, and leaves counts", () => {
@@ -32,5 +32,61 @@ describe("recalibration preview", () => {
     assert.equal(lines[0].after, 10);
     assert.equal(lines[0].recomputed, false);
     assert.equal(recalibrationNeedsConfirm(lines), false);
+  });
+});
+
+describe("commit recalibrated drafts", () => {
+  it("syncs the draft estimate after a quantity write", async () => {
+    const written: string[] = [];
+    let synced = 0;
+    const result = await commitRecalibratedDrafts({
+      lines: previewRecalibration(
+        [
+          { id: "wall", takeoff_type: "length", quantity: 100 },
+          { id: "doors", takeoff_type: "count", quantity: 4 },
+        ],
+        1,
+        2,
+      ),
+      write: async (line) => {
+        written.push(line.id);
+        return { ok: true };
+      },
+      syncEstimate: async () => {
+        synced++;
+      },
+    });
+    assert.deepEqual(written, ["wall"]);
+    assert.equal(synced, 1);
+    assert.equal(result.updated, 1);
+    assert.equal(result.failures.length, 0);
+    assert.equal(result.estimateError, null);
+  });
+
+  it("does not sync when every quantity write fails", async () => {
+    let synced = 0;
+    const result = await commitRecalibratedDrafts({
+      lines: previewRecalibration([{ id: "wall", takeoff_type: "length", quantity: 100 }], 1, 2),
+      write: async () => ({ ok: false, reason: "conflict" }),
+      syncEstimate: async () => {
+        synced++;
+      },
+    });
+    assert.equal(synced, 0);
+    assert.equal(result.updated, 0);
+    assert.equal(result.failures[0]?.reason, "conflict");
+    assert.equal(result.estimateError, null);
+  });
+
+  it("reports an estimate sync failure after the quantities were saved", async () => {
+    const result = await commitRecalibratedDrafts({
+      lines: previewRecalibration([{ id: "slab", takeoff_type: "area", quantity: 100 }], 1, 2),
+      write: async () => ({ ok: true }),
+      syncEstimate: async () => {
+        throw new Error("estimate down");
+      },
+    });
+    assert.equal(result.updated, 1);
+    assert.equal(result.estimateError, "estimate down");
   });
 });
