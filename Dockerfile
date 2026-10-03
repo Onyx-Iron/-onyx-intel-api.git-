@@ -12,11 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt requirements-docling.txt ./
-# Install core deps, then CPU-only torch BEFORE Docling so pip does not
-# pull multi-GB CUDA wheels onto the Railway image.
+# Matching CPU torch+torchvision BEFORE Docling so pip does not pull CUDA,
+# and AutoImageProcessor can load Docling layout models.
 RUN pip install --no-cache-dir -r requirements.txt \
- && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
- && pip install --no-cache-dir -r requirements-docling.txt && pip install --no-cache-dir "transformers>=4.42.0,<5"
+ && pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu \
+ && pip install --no-cache-dir -r requirements-docling.txt \
+ && pip install --no-cache-dir "transformers>=4.42.0,<5"
 
 COPY . .
 
