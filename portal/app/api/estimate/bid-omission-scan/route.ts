@@ -41,9 +41,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const anyDb = db as any;
 
-    let findings: PlanFinding[] = Array.isArray(body.findings) ? body.findings : [];
+    const baseFindings: PlanFinding[] = Array.isArray(body.findings) ? [...body.findings] : [];
+    const findings: PlanFinding[] = [...baseFindings];
 
-    if (body.from_vision || findings.length === 0) {
+    if (body.from_vision || baseFindings.length === 0) {
       let q = anyDb
         .from("document_pages")
         .select("id, page_number, vision_extractions, document_id")

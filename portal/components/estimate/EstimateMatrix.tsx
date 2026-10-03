@@ -830,7 +830,6 @@ function Total({ label, value, tone, big }: { label: string; value: number; tone
 function fmt(v: number): string {
   return new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v);
 }
-function round(v: number): number { return Math.round(v * 100) / 100; }
 function numericOr(v: unknown, d: number): number {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : d;
