@@ -196,6 +196,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
     const row = data as { manual_takeoff: { id: string; row_version: number }; mirror_takeoff_item_id: string; was_update: boolean };
+
+    // Additive layer assignment (Company Hub M3) — do not alter save_manual_takeoff_tx.
+    if (it.layer_id) {
+      await anyDb
+        .from("manual_takeoffs")
+        .update({ layer_id: it.layer_id })
+        .eq("id", row.manual_takeoff.id)
+        .eq("tenant_id", tenantId);
+    }
+
     results.push({
       id: row.manual_takeoff.id, client_key: clientKey, was_update: row.was_update,
       quantity, unit: it.unit ?? (it.takeoff_type === "count" ? "EA" : it.takeoff_type === "length" ? "LF" : "SF"),

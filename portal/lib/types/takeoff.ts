@@ -44,6 +44,7 @@ export interface ManualTakeoffItem {
   unit?: "EA" | "LF" | "SF" | string | null;
   geometry: TakeoffGeometry;
   client_key?: string | null;
+  layer_id?: string | null;
 }
 
 export interface ManualTakeoffUpdateBody {

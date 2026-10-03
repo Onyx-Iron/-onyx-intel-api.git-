@@ -35,6 +35,7 @@ interface NavItem {
 const PRIMARY_NAV: NavItem[] = [
   { href: "/dashboard", label: "Home", icon: <LayoutDashboard size={15} />, exact: true },
   { href: "/dashboard/projects", label: "Projects", icon: <FolderKanban size={15} /> },
+  { href: "/dashboard/preconstruction", label: "Bid Board", icon: <ClipboardList size={15} /> },
   { href: "/dashboard/reports", label: "Reports", icon: <ClipboardList size={15} /> },
   { href: "/dashboard/agents/pending", label: "AI Workforce", icon: <Bot size={15} /> },
 ];
@@ -57,6 +58,7 @@ const MORE_TOOLS: NavItem[] = [
 ];
 
 const SETTINGS_NAV: NavItem[] = [
+  { href: "/dashboard/settings/connections", label: "Connections", icon: <Megaphone size={13} /> },
   { href: "/dashboard/settings/team", label: "Team", icon: <Users size={13} /> },
   { href: "/dashboard/settings/billing", label: "Billing", icon: <Calculator size={13} /> },
   { href: "/dashboard/settings/cost-overrides", label: "Cost Overrides", icon: <BookOpen size={13} /> },
