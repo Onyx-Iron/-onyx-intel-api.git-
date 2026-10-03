@@ -66,6 +66,15 @@ export async function processOutboxBatch(
 
   const result: OutboxProcessResult = { claimed: 0, completed: 0, failed: 0, deadLettered: 0, errors: [] };
 
+  // Promote UNLOGGED staging rows into the durable outbox before claiming.
+  // Staging absorbs high-frequency canvas edits without WAL; this moves them
+  // onto the crash-safe path the claim/complete RPCs already understand.
+  try {
+    await db.rpc("promote_outbox_staging", { p_limit: Math.max(batchSize * 5, 100) });
+  } catch {
+    // Staging table/RPC may not exist until migration applied — ignore.
+  }
+
   const { data: claimed, error: claimErr } = await db.rpc("claim_outbox_events", {
     p_limit: batchSize, p_worker_id: workerId, p_visibility_timeout_seconds: 120,
   });

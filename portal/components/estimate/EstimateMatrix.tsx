@@ -444,62 +444,90 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   const exportProposal = useCallback(async () => {
     const XLSX = await import("xlsx");
     const wb = XLSX.utils.book_new();
+    const overheadPct = settings.overhead_pct / 100;
+    const profitPct = settings.profit_pct / 100;
+    const contingencyPct = settings.contingency_pct / 100;
 
-    // Sheet 1: Client Proposal (grouped by cost code prefix)
-    const grouped: Record<string, { desc: string; quantity: number; unit: string; direct: number }[]> = {};
-    for (const r of rows) {
-      const key = r.cost_code || "UNCODED";
-      const bucket = grouped[key] ?? (grouped[key] = []);
-      bucket.push({ desc: r.description || key, quantity: r.quantity, unit: r.unit, direct: rowDirect(r) });
-    }
-
+    // Sheet 1: Client Proposal with live formulas referencing SOV totals
     const proposalRows: (string | number)[][] = [
       [`Proposal · ${projectName}`],
       [new Date().toLocaleDateString()],
       [],
-      ["Cost Code", "Description", "Qty", "Unit", "Direct Cost"],
+      ["Metric", "Value"],
+      ["Direct Cost Total", 0],
+      [`Contingency (${settings.contingency_pct}%)`, 0],
+      ["Subtotal", 0],
+      [`Overhead (${settings.overhead_pct}%)`, 0],
+      [`Profit (${settings.profit_pct}%)`, 0],
+      ["FINAL BID", 0],
     ];
-    for (const [code, items] of Object.entries(grouped)) {
-      const sub = items.reduce((s, i) => s + i.direct, 0);
-      for (const it of items) proposalRows.push([code, it.desc, it.quantity, it.unit, round(it.direct)]);
-      proposalRows.push(["", `— subtotal ${code} —`, "", "", round(sub)]);
-    }
-    proposalRows.push([], ["Direct Cost Total", "", "", "", round(totals.direct)]);
-    proposalRows.push([`Contingency (${settings.contingency_pct}%)`, "", "", "", round(totals.contingency)]);
-    proposalRows.push(["Subtotal", "", "", "", round(totals.subtotal)]);
-    proposalRows.push([`Overhead (${settings.overhead_pct}%)`, "", "", "", round(totals.withOverhead - totals.subtotal)]);
-    proposalRows.push([`Profit (${settings.profit_pct}%)`, "", "", "", round(totals.finalBid - totals.withOverhead)]);
-    proposalRows.push(["FINAL BID", "", "", "", round(totals.finalBid)]);
-
     const wsProposal = XLSX.utils.aoa_to_sheet(proposalRows);
-    wsProposal["!cols"] = [{ wch: 14 }, { wch: 40 }, { wch: 10 }, { wch: 8 }, { wch: 14 }];
+    // Live formulas (Excel recalculates) — values above are placeholders.
+    wsProposal["B5"] = { t: "n", f: "'Schedule of Values'!L" + String(5 + rows.length + 1) };
+    wsProposal["B6"] = { t: "n", f: `B5*${contingencyPct}` };
+    wsProposal["B7"] = { t: "n", f: "B5+B6" };
+    wsProposal["B8"] = { t: "n", f: `B7*${overheadPct}` };
+    wsProposal["B9"] = { t: "n", f: `(B7+B8)*${profitPct}` };
+    wsProposal["B10"] = { t: "n", f: "B7+B8+B9" };
+    wsProposal["!cols"] = [{ wch: 28 }, { wch: 16 }];
     XLSX.utils.book_append_sheet(wb, wsProposal, "Proposal");
 
-    // Sheet 2: Schedule of Values
-    const sovRows: (string | number)[][] = [
-      [`Schedule of Values · ${projectName}`], [new Date().toLocaleDateString()], [],
-      ["Item #", "Cost Code", "Description", "Qty", "Unit", "Labor", "Material", "Equipment", "Sub", "Trucking", "Disposal", "Direct", "Overhead", "Profit", "SOV Value"],
+    // Sheet 2: Schedule of Values — unit rates as values, extensions as formulas
+    const sovHeader = [
+      "Item #", "Cost Code", "Description", "Qty", "Unit",
+      "Labor Unit", "Material Unit", "Equipment Unit", "Sub Unit", "Trucking Unit", "Disposal Unit",
+      "Direct", "Overhead", "Profit", "SOV Value",
+    ];
+    const sovAoa: (string | number)[][] = [
+      [`Schedule of Values · ${projectName}`],
+      [new Date().toLocaleDateString()],
+      [],
+      sovHeader,
     ];
     rows.forEach((r, i) => {
-      const direct = rowDirect(r);
-      const ovh = direct * (settings.overhead_pct / 100);
-      const pft = (direct + ovh) * (settings.profit_pct / 100);
-      sovRows.push([
-        i + 1, r.cost_code || "", r.description || "", r.quantity, r.unit,
-        round(r.quantity * r.labor_unit), round(r.quantity * r.material_unit),
-        round(r.quantity * r.equipment_unit), round(r.quantity * r.subcontractor_unit),
-        round(r.quantity * r.trucking_unit), round(r.quantity * r.disposal_unit),
-        round(direct), round(ovh), round(pft), round(direct + ovh + pft),
+      sovAoa.push([
+        i + 1,
+        r.cost_code || "",
+        r.description || "",
+        r.quantity,
+        r.unit,
+        r.labor_unit,
+        r.material_unit,
+        r.equipment_unit,
+        r.subcontractor_unit,
+        r.trucking_unit,
+        r.disposal_unit,
+        0, 0, 0, 0, // filled with formulas below
       ]);
     });
-    sovRows.push([]);
-    sovRows.push(["", "", "TOTAL", "", "", "", "", "", "", "", "", round(totals.direct), round(totals.withOverhead - totals.subtotal), round(totals.finalBid - totals.withOverhead), round(totals.finalBid)]);
-    const wsSov = XLSX.utils.aoa_to_sheet(sovRows);
+    const totalExcelRow = 5 + rows.length; // 1-based; header is row 4, data starts row 5
+    sovAoa.push([]);
+    sovAoa.push(["", "", "TOTAL", "", "", "", "", "", "", "", "", 0, 0, 0, 0]);
+
+    const wsSov = XLSX.utils.aoa_to_sheet(sovAoa);
+    rows.forEach((_, i) => {
+      const er = 5 + i; // Excel row
+      // Direct = Qty * sum of unit rates
+      wsSov[`L${er}`] = { t: "n", f: `D${er}*(F${er}+G${er}+H${er}+I${er}+J${er}+K${er})` };
+      wsSov[`M${er}`] = { t: "n", f: `L${er}*${overheadPct}` };
+      wsSov[`N${er}`] = { t: "n", f: `(L${er}+M${er})*${profitPct}` };
+      wsSov[`O${er}`] = { t: "n", f: `L${er}+M${er}+N${er}` };
+    });
+    if (rows.length > 0) {
+      const first = 5;
+      const last = 4 + rows.length;
+      wsSov[`L${totalExcelRow}`] = { t: "n", f: `SUM(L${first}:L${last})` };
+      wsSov[`M${totalExcelRow}`] = { t: "n", f: `SUM(M${first}:M${last})` };
+      wsSov[`N${totalExcelRow}`] = { t: "n", f: `SUM(N${first}:N${last})` };
+      wsSov[`O${totalExcelRow}`] = { t: "n", f: `SUM(O${first}:O${last})` };
+      // Point proposal direct total at this SUM cell
+      wsProposal["B5"] = { t: "n", f: `'Schedule of Values'!L${totalExcelRow}` };
+    }
     wsSov["!cols"] = [{ wch: 6 }, { wch: 12 }, { wch: 36 }, ...Array(12).fill({ wch: 12 })];
     XLSX.utils.book_append_sheet(wb, wsSov, "Schedule of Values");
 
     XLSX.writeFile(wb, `${projectName.replace(/[^\w-]+/g, "_")}_estimate_${Date.now()}.xlsx`);
-  }, [projectName, rows, settings, totals, rowDirect]);
+  }, [projectName, rows, settings]);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
