@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { classifyLayer, type LayerClassification } from "@/lib/cad/layer-classify";
+import { projectToCanvas, vectorCanvasFrame } from "@/lib/takeoff/canvas/snap";
 import { shapesInView, type Box } from "@/lib/takeoff/canvas/visible-shapes";
 import { collectSnapPoints } from "@/lib/takeoff/canvas/vector-snap";
 import { takeoffQueryKeys, useCadVectorMetadata } from "@/lib/takeoff/queries";
@@ -89,25 +90,13 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
   // is far from the PDF's.
   const rendered: RenderedVector[] = useMemo(() => {
     if (!canvasSize || raw.length === 0) return [];
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const v of raw) {
-      for (const [x, y] of v.points) {
-        if (x < minX) minX = x; if (y < minY) minY = y;
-        if (x > maxX) maxX = x; if (y > maxY) maxY = y;
-      }
-    }
-    if (!Number.isFinite(minX)) return [];
-    const wSpan = Math.max(1e-6, maxX - minX);
-    const hSpan = Math.max(1e-6, maxY - minY);
-    const pad = 20;
-    const sx = (canvasSize.w - pad * 2) / wSpan;
-    const sy = (canvasSize.h - pad * 2) / hSpan;
-    const s  = Math.min(sx, sy);
+    const frame = vectorCanvasFrame(raw, canvasSize);
+    if (!frame) return [];
 
-    const project = (x: number, y: number): [number, number] => [
-      pad + (x - minX) * s,
-      canvasSize.h - pad - (y - minY) * s, // flip Y
-    ];
+    const project = (x: number, y: number): [number, number] => {
+      const projected = projectToCanvas(x, y, frame);
+      return [projected.x, projected.y];
+    };
 
     return raw.map((v, i) => {
       const cls = classifyLayer(v.layer);
