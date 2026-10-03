@@ -178,6 +178,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   }, []);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollStartedAtRef = useRef<number | null>(null);
+  const pollTickRef = useRef(0);
   const [pollTimedOut, setPollTimedOut] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -185,6 +186,10 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   // a stuck "processing" usually means the fire-and-forget ingest crashed
   // before it could update the row to "error".
   const POLL_TIMEOUT_MS = 5 * 60 * 1000;
+  /** Slightly slower than before — list GET now scopes reclaim/finalize per project. */
+  const POLL_INTERVAL_MS = 6_000;
+  /** Run reclaim/finalize every N ticks; other ticks are cheap list refresh only. */
+  const MAINTAIN_EVERY_N_TICKS = 3;
 
   const toggleInsights = useCallback(async (docId: string) => {
     if (expandedDocId === docId) {
@@ -217,10 +222,17 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   const [docsPage, setDocsPage] = useState(1);
   const [docsHasMore, setDocsHasMore] = useState(false);
 
-  const loadDocuments = useCallback(async (showLoading = true, page = 1): Promise<Document[]> => {
+  const loadDocuments = useCallback(async (
+    showLoading = true,
+    page = 1,
+    opts?: { maintain?: boolean },
+  ): Promise<Document[]> => {
     if (showLoading && page === 1) setLoading(true);
     try {
-      const r = await fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}&page=${page}&limit=200`);
+      const maintain = opts?.maintain !== false;
+      const r = await fetch(
+        `/api/documents?project_id=${encodeURIComponent(projectId)}&page=${page}&limit=200&maintain=${maintain ? "1" : "0"}`,
+      );
       const d = await r.json() as { documents?: Document[]; pagination?: { hasMore?: boolean } };
       const incoming = d.documents ?? [];
       let next = incoming;
@@ -268,11 +280,16 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
               setPollTimedOut(true);
               return;
             }
-            const list = await loadDocuments(false);
+            // Maintain (reclaim/finalize) every N ticks; always refresh after
+            // split-status so the UI picks up page rollups without double scans.
+            pollTickRef.current += 1;
+            const doMaintain = pollTickRef.current === 1
+              || pollTickRef.current % MAINTAIN_EVERY_N_TICKS === 0;
+            const list = await loadDocuments(false, 1, { maintain: doMaintain });
             await pollSplitStatus(list);
-            await loadDocuments(false);
+            await loadDocuments(false, 1, { maintain: false });
           })();
-        }, 4000);
+        }, POLL_INTERVAL_MS);
       }
     } else {
       if (pollRef.current) {
@@ -280,6 +297,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
         pollRef.current = null;
       }
       pollStartedAtRef.current = null;
+      pollTickRef.current = 0;
       if (!hasInFlight && pollTimedOut) setPollTimedOut(false);
     }
     return () => {
@@ -289,7 +307,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
       }
       pollStartedAtRef.current = null;
     };
-  }, [documents, loadDocuments, pollSplitStatus, pollTimedOut, POLL_TIMEOUT_MS]);
+  }, [documents, loadDocuments, pollSplitStatus, pollTimedOut, POLL_TIMEOUT_MS, POLL_INTERVAL_MS, MAINTAIN_EVERY_N_TICKS]);
 
   const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];

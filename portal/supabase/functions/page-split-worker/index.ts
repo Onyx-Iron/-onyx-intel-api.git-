@@ -18,15 +18,16 @@
 // Pipeline:
 //   1. Get the original PDF bytes — either streamed from Google Drive (and
 //      copied into `plans-bucket/{original_path}`), or read directly from
-//      `plans-bucket/{original_path}` if it's already there (local uploads).
+//      `plans-bucket/{original_path}` if it's already there (local uploads /
+//      continuation batches).
 //   2. Load the PDF via pdf-lib.
 //   3. Update `documents.page_count`.
-//   4. Burst each page into a standalone 1-page PDF at
-//      `plans-bucket/pages/{document_id}/page-{n}.pdf`.
-//   5. Insert `document_pages` rows (status="pending").
-//   6. Enqueue each page for BOTH `page-processor` (OCR + embeddings, for
-//      document Q&A/search) and `page-takeoff-worker` (real CSI takeoff rows,
-//      for the estimate grid) — fire-and-forget, per page.
+//   4. Burst a PAGE_BATCH of pages (concurrent uploads) into standalone
+//      1-page PDFs at `plans-bucket/pages/{document_id}/page-{n}.pdf`.
+//   5. Insert `document_pages` rows (status="pending") for this batch.
+//   6. Enqueue each page for BOTH `page-processor` and `page-takeoff-worker`
+//      (pooled fan-out). If more pages remain, self-invoke with `page_from`
+//      so 500+ decks finish under the Edge wall-clock.
 //
 // This function must be deployed with `supabase functions deploy page-split-worker`
 // and needs env vars:
@@ -39,6 +40,32 @@ import { PDFDocument } from "https://esm.sh/pdf-lib@1.17.1";
 const SUPABASE_URL       = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY   = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const PLANS_BUCKET       = Deno.env.get("PLANS_BUCKET") ?? "plans-bucket";
+/** Parallel page PDF uploads — keeps large decks under the Edge wall-clock. */
+const UPLOAD_CONCURRENCY = Math.max(1, Number(Deno.env.get("SPLIT_UPLOAD_CONCURRENCY") ?? "8") || 8);
+/** Max page-worker fan-out fetches in flight at once (OCR + takeoff each count). */
+const FANOUT_CONCURRENCY = Math.max(2, Number(Deno.env.get("SPLIT_FANOUT_CONCURRENCY") ?? "40") || 40);
+/** Pages per Edge invocation before self-chaining (500+ page decks). */
+const PAGE_BATCH = Math.max(10, Number(Deno.env.get("SPLIT_PAGE_BATCH") ?? "75") || 75);
+const INSERT_CHUNK = 100;
+
+async function mapPool<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  const results = new Array<R>(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: limit }, () => worker()));
+  return results;
+}
 
 // Google Drive occasionally 429/5xx's under load; retry with exponential
 // backoff rather than failing the whole document on a transient blip.
@@ -71,6 +98,10 @@ interface Payload {
   is_local_upload?: boolean;
   source_bucket?: string;
   user_id: string;
+  /** 1-based inclusive start page for this batch (continuation). */
+  page_from?: number;
+  /** When false, keep existing document_pages (continuation batches). */
+  clear_pages?: boolean;
 }
 
 Deno.serve(async (req) => {
@@ -82,15 +113,18 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({ error: "invalid JSON" }), { status: 400 });
   }
 
-  // No drive_file_id means this is a local direct-upload: the browser already
-  // PUT the original PDF into plans-bucket/{original_path} itself.
-  const fromStorage = !body.drive_file_id;
+  const pageFrom = Math.max(1, Math.floor(Number(body.page_from) || 1));
+  const isContinuation = pageFrom > 1;
+  // Continuation batches always read the original from Storage (first batch
+  // already copied Drive bytes into plans-bucket).
+  const fromStorage = !body.drive_file_id || isContinuation;
   if (!fromStorage && !body.access_token) {
     return new Response(JSON.stringify({ error: "access_token is required when drive_file_id is set" }), { status: 400 });
   }
   if (!body.original_path) {
     return new Response(JSON.stringify({ error: "original_path is required" }), { status: 400 });
   }
+  const clearPages = body.clear_pages ?? !isContinuation;
 
   const db = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -115,7 +149,7 @@ Deno.serve(async (req) => {
     .update({ status: "processing", split_status: "processing" })
     .eq("id", body.document_id)
     .eq("tenant_id", body.tenant_id);
-  await recordEvent("started");
+  await recordEvent("started", isContinuation ? `continuation from page ${pageFrom}` : undefined);
 
   try {
     // ── 1. Get original PDF bytes ────────────────────────────────────────────
@@ -158,25 +192,34 @@ Deno.serve(async (req) => {
       .eq("id", body.document_id)
       .eq("tenant_id", body.tenant_id);
 
-    // ── 4-5. Burst + insert document_pages ───────────────────────────────────
-    const pageRows: Array<{
+    // ── 4-5. Burst + insert document_pages (batched for 500+ decks) ──────────
+    // Concurrent uploads (default 8) + page batches with self-continuation
+    // keep wall-clock under the Edge duration ceiling.
+    if (pageCount === 0) throw new Error("PDF has zero pages");
+    if (pageFrom > pageCount) {
+      throw new Error(`page_from ${pageFrom} exceeds page_count ${pageCount}`);
+    }
+
+    type PageRow = {
       id: string; tenant_id: string; document_id: string; page_number: number;
       storage_path: string; status: string;
-    }> = [];
+    };
 
-    // pdf-lib doesn't stream; iterate sequentially. For huge decks (500+ pages)
-    // we may want to batch these uploads later, but for typical 20-200 page
-    // plansets this is well within the 150s Edge Function ceiling.
-    let failedUploads = 0;
-    for (let i = 0; i < pageCount; i++) {
+    // Bound this invocation to PAGE_BATCH pages; remaining pages chain via
+    // a self-invoke so 500+ decks stay under the Edge wall-clock.
+    const hardEnd = Math.min(pageCount, pageFrom + PAGE_BATCH - 1);
+    const pageIndexes = Array.from(
+      { length: hardEnd - pageFrom + 1 },
+      (_, k) => pageFrom - 1 + k,
+    );
+
+    const uploadResults = await mapPool(pageIndexes, UPLOAD_CONCURRENCY, async (i) => {
       const single = await PDFDocument.create();
       const [copied] = await single.copyPages(pdf, [i]);
       single.addPage(copied);
       const pageBytes = await single.save();
-
       const pageNumber = i + 1;
       const storagePath = `pages/${body.document_id}/page-${pageNumber}.pdf`;
-
       const upPage = await db.storage.from(PLANS_BUCKET)
         .upload(storagePath, pageBytes, {
           contentType: "application/pdf",
@@ -184,37 +227,50 @@ Deno.serve(async (req) => {
         });
       if (upPage.error) {
         console.warn(`[page-split] upload page ${pageNumber} failed: ${upPage.error.message}`);
-        failedUploads += 1;
-        continue;
+        return null;
       }
-
-      pageRows.push({
+      const row: PageRow = {
         id: crypto.randomUUID(),
         tenant_id: body.tenant_id,
         document_id: body.document_id,
         page_number: pageNumber,
         storage_path: storagePath,
         status: "pending",
-      });
-    }
+      };
+      return row;
+    });
+    const pageRows = uploadResults.filter((r): r is PageRow => r != null);
+    const batchFailed = pageIndexes.length - pageRows.length;
+    const pageTo = pageIndexes.length > 0
+      ? pageIndexes[pageIndexes.length - 1]! + 1
+      : pageFrom - 1;
+    const hasMore = pageTo < pageCount;
 
     if (pageRows.length === 0) {
-      throw new Error(
-        pageCount === 0
-          ? "PDF has zero pages"
-          : `All ${pageCount} page upload(s) failed — nothing to process`,
-      );
+      throw new Error(`All ${pageIndexes.length} page upload(s) in batch failed — nothing to process`);
     }
 
-    // Retry / rekick can re-run split for the same document — clear prior
-    // page rows so UNIQUE(document_id, page_number) doesn't fail the job.
-    {
+    // First batch (or rekick): clear prior rows. Continuations append.
+    if (clearPages) {
       const { error: delErr } = await db.from("document_pages")
         .delete()
         .eq("document_id", body.document_id)
         .eq("tenant_id", body.tenant_id);
       if (delErr) throw new Error(`clear document_pages: ${delErr.message}`);
-      const { error: insErr } = await db.from("document_pages").insert(pageRows);
+    } else if (pageRows.length > 0) {
+      // Drop any stale rows for this page range so UNIQUE doesn't fail on retry.
+      const nums = pageRows.map((p) => p.page_number);
+      const { error: delRangeErr } = await db.from("document_pages")
+        .delete()
+        .eq("document_id", body.document_id)
+        .eq("tenant_id", body.tenant_id)
+        .in("page_number", nums);
+      if (delRangeErr) throw new Error(`clear page range: ${delRangeErr.message}`);
+    }
+
+    for (let i = 0; i < pageRows.length; i += INSERT_CHUNK) {
+      const chunk = pageRows.slice(i, i + INSERT_CHUNK);
+      const { error: insErr } = await db.from("document_pages").insert(chunk);
       if (insErr) throw new Error(`insert document_pages: ${insErr.message}`);
     }
 
@@ -222,55 +278,82 @@ Deno.serve(async (req) => {
     // Returning before the fetches leave the isolate can drop OCR/takeoff
     // enqueues on cold Edge isolates. waitUntil keeps them alive without
     // blocking the portal's HTTP response on OCR completion.
+    // Fan-out is concurrency-limited so a 500-page deck doesn't open 1000
+    // simultaneous outbound fetches from one isolate.
     const base = SUPABASE_URL.replace(/\/$/, "");
     const processorUrl = `${base}/functions/v1/page-processor`;
     const takeoffWorkerUrl = `${base}/functions/v1/page-takeoff-worker`;
+    const selfUrl = `${base}/functions/v1/page-split-worker`;
     const fanoutJobs = pageRows.length * 2;
-    const fanout = Promise.allSettled(pageRows.flatMap((p) => [
-      fetch(processorUrl, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          page_id: p.id,
-          document_id: p.document_id,
-          tenant_id: p.tenant_id,
-          project_id: body.project_id,
-          page_number: p.page_number,
-          storage_path: p.storage_path,
-        }),
-      }).catch((err) => console.warn(`[page-split] processor enqueue failed page ${p.page_number}`, err)),
-      fetch(takeoffWorkerUrl, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          page_id: p.id,
-          document_id: p.document_id,
-          tenant_id: p.tenant_id,
-          project_id: body.project_id,
-          page_number: p.page_number,
-          storage_path: p.storage_path,
-        }),
-      }).catch((err) => console.warn(`[page-split] takeoff enqueue failed page ${p.page_number}`, err)),
-    ]));
+    const fanoutTargets = pageRows.flatMap((p) => [
+      { kind: "processor" as const, page: p },
+      { kind: "takeoff" as const, page: p },
+    ]);
+    const fanout = mapPool(fanoutTargets, FANOUT_CONCURRENCY, async (job) => {
+      const url = job.kind === "processor" ? processorUrl : takeoffWorkerUrl;
+      try {
+        await fetch(url, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            page_id: job.page.id,
+            document_id: job.page.document_id,
+            tenant_id: job.page.tenant_id,
+            project_id: body.project_id,
+            page_number: job.page.page_number,
+            storage_path: job.page.storage_path,
+          }),
+        });
+      } catch (err) {
+        console.warn(`[page-split] ${job.kind} enqueue failed page ${job.page.page_number}`, err);
+      }
+    });
+
+    const nextPageFrom = pageTo + 1;
+    const continueSplit = hasMore
+      ? fetch(selfUrl, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            document_id: body.document_id,
+            tenant_id: body.tenant_id,
+            project_id: body.project_id,
+            original_path: body.original_path,
+            source_bucket: body.source_bucket,
+            user_id: body.user_id,
+            is_local_upload: true,
+            page_from: nextPageFrom,
+            clear_pages: false,
+          }),
+        }).then(async (res) => {
+          if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            console.warn(`[page-split] continuation kick failed: ${res.status} ${text.slice(0, 200)}`);
+          }
+        }).catch((err) => {
+          console.warn("[page-split] continuation kick error", err);
+        })
+      : Promise.resolve();
+
     // EdgeRuntime is injected by the Supabase Edge runtime.
     // deno-lint-ignore no-explicit-any
     const edgeWaitUntil = (globalThis as any).EdgeRuntime?.waitUntil as
       | ((p: Promise<unknown>) => void)
       | undefined;
+    const background = Promise.all([fanout, continueSplit]);
     if (typeof edgeWaitUntil === "function") {
-      edgeWaitUntil(fanout);
+      edgeWaitUntil(background);
     } else {
       // Local/dev fallback — don't block the response path in production.
-      void fanout;
+      void background;
     }
 
-    // Mark documents.status="split" — pages are now the unit of work.
     const { data: docMetaRow } = await db
       .from("documents")
       .select("meta")
@@ -280,6 +363,61 @@ Deno.serve(async (req) => {
     const prevMeta = (docMetaRow?.meta && typeof docMetaRow.meta === "object")
       ? docMetaRow.meta as Record<string, unknown>
       : {};
+    const prevSummary = (typeof prevMeta.processing_summary === "object" && prevMeta.processing_summary)
+      ? prevMeta.processing_summary as Record<string, unknown>
+      : {};
+    const prevEnqueued = typeof prevSummary.pages_enqueued === "number" ? prevSummary.pages_enqueued : 0;
+    const prevFailed = typeof prevSummary.failed_uploads === "number" ? prevSummary.failed_uploads : 0;
+    const pagesEnqueuedTotal = (isContinuation ? prevEnqueued : 0) + pageRows.length;
+    const failedUploadsTotal = (isContinuation ? prevFailed : 0) + batchFailed;
+
+    if (hasMore) {
+      // Mid-split: stay in processing; UI polls until continuation finishes.
+      // Refresh processing_started_at so multi-batch 500+ decks aren't
+      // reclaimed mid-chain by the stuck-processing timeout.
+      await db.from("documents")
+        .update({
+          status: "processing",
+          split_status: "processing",
+          page_count: pageCount,
+          processing_started_at: new Date().toISOString(),
+          meta: {
+            ...prevMeta,
+            processing_summary: {
+              ...prevSummary,
+              pages_enqueued: pagesEnqueuedTotal,
+              pages_split_through: pageTo,
+              pages_total: pageCount,
+              fanout_jobs: fanoutJobs,
+              fanout_mode: "pooled_fire_and_forget",
+              upload_concurrency: UPLOAD_CONCURRENCY,
+              fanout_concurrency: FANOUT_CONCURRENCY,
+              page_batch: PAGE_BATCH,
+              failed_uploads: failedUploadsTotal,
+              continued: true,
+              next_page_from: nextPageFrom,
+              updated_at: new Date().toISOString(),
+            },
+          },
+        })
+        .eq("id", body.document_id)
+        .eq("tenant_id", body.tenant_id);
+      await recordEvent("succeeded", `batch ok; pages ${pageFrom}-${pageTo}/${pageCount}; continuing`);
+      return new Response(JSON.stringify({
+        ok: true,
+        continued: true,
+        document_id: body.document_id,
+        page_count: pageCount,
+        page_from: pageFrom,
+        page_to: pageTo,
+        pages_enqueued: pageRows.length,
+        next_page_from: nextPageFrom,
+        fanout_jobs: fanoutJobs,
+        elapsed_ms: Date.now() - started,
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+
+    // Final batch — pages are now the unit of work.
     await db.from("documents")
       .update({
         status: "split",
@@ -288,16 +426,23 @@ Deno.serve(async (req) => {
         meta: {
           ...prevMeta,
           processing_summary: {
-            pages_enqueued: pageRows.length,
+            ...prevSummary,
+            pages_enqueued: pagesEnqueuedTotal,
+            pages_split_through: pageCount,
+            pages_total: pageCount,
             fanout_jobs: fanoutJobs,
-            fanout_mode: "fire_and_forget",
-            failed_uploads: failedUploads,
+            fanout_mode: "pooled_fire_and_forget",
+            upload_concurrency: UPLOAD_CONCURRENCY,
+            fanout_concurrency: FANOUT_CONCURRENCY,
+            page_batch: PAGE_BATCH,
+            failed_uploads: failedUploadsTotal,
+            continued: isContinuation,
             updated_at: new Date().toISOString(),
           },
         },
-        ...(failedUploads > 0
+        ...(failedUploadsTotal > 0
           ? {
-              last_error: `${failedUploads} of ${pageCount} pages failed to upload`,
+              last_error: `${failedUploadsTotal} of ${pageCount} pages failed to upload`,
               last_error_step: "split",
             }
           : {
@@ -311,13 +456,17 @@ Deno.serve(async (req) => {
       p_document_id: body.document_id,
     });
     if (summaryErr) console.warn("[page-split] summary refresh failed", summaryErr.message);
-    await recordEvent("succeeded", `split ok; ${pageRows.length} pages enqueued`);
+    await recordEvent("succeeded", `split ok; ${pagesEnqueuedTotal} pages enqueued`);
 
     return new Response(JSON.stringify({
       ok: true,
+      continued: false,
       document_id: body.document_id,
       page_count: pageCount,
+      page_from: pageFrom,
+      page_to: pageTo,
       pages_enqueued: pageRows.length,
+      pages_enqueued_total: pagesEnqueuedTotal,
       fanout_jobs: fanoutJobs,
       elapsed_ms: Date.now() - started,
     }), { status: 200, headers: { "Content-Type": "application/json" } });
