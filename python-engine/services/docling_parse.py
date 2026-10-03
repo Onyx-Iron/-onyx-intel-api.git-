@@ -85,14 +85,6 @@ def parse_pdf_with_docling(path: str | Path, *, max_preview_chars: int = 3000) -
         pass
 
     preview = markdown[:max_preview_chars] if markdown else None
-    # Surface Markdown ATX headings as coarse heading_path candidates for RAG.
-    headings: list[str] = []
-    for line in (markdown or "").splitlines():
-        s = line.strip()
-        if s.startswith("#"):
-            title = s.lstrip("#").strip()
-            if title:
-                headings.append(title)
     return DoclingParseResult(
         status="parsed" if markdown.strip() else "empty",
         page_count=page_count,
@@ -103,6 +95,5 @@ def parse_pdf_with_docling(path: str | Path, *, max_preview_chars: int = 3000) -
             "parser_id": "docling",
             "markdown_chars": len(markdown),
             "block_count": len(blocks),
-            "headings": headings[:40],
         },
     )
