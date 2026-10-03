@@ -1,3 +1,5 @@
+import { type EstimateLineType } from "./csi-catalog";
+
 export interface TakeoffFingerprintInput {
   id?: string | null;
   label?: string | null;
@@ -53,6 +55,10 @@ export interface CostCatalogForImport {
   csi_code?: string | null;
   uom?: string | null;
   unit_cost?: number | null;
+  labor_cost?: number | null;
+  material_cost?: number | null;
+  equipment_cost?: number | null;
+  confidence?: "high" | "medium" | "low" | null;
   /** section = this CSI code and unit. location_index = national price moved by a regional index. national = US average only. */
   basis?: "section" | "location_index" | "national" | null;
 }
@@ -62,7 +68,10 @@ export interface EstimateImportRow {
   description: string;
   csi_code: string | null;
   trade: string | null;
-  item_type: "material";
+  item_type: EstimateLineType;
+  labor_cost?: number | null;
+  material_cost?: number | null;
+  equipment_cost?: number | null;
   quantity: number | null;
   uom: string | null;
   unit_cost: number | null;
@@ -204,6 +213,11 @@ export function buildEstimateImportRows(input: BuildEstimateImportInput): BuildE
   for (const takeoff of input.takeoffItems) {
     const fingerprint = takeoffFingerprint(takeoff);
     const aiVision = takeoff.meta?.extraction_method === "ai_vision" || takeoff.source_method === "ai_vision";
+    const manual = takeoff.source_method === "manual" || takeoff.meta?.extraction_method === "manual";
+    if (takeoff.review_status == null && !manual) {
+      blockedByReview++;
+      continue;
+    }
     if (aiVision && takeoff.review_status !== "approved") {
       blockedByReview++;
       continue;
@@ -285,7 +299,7 @@ function toImportRow(
   const notes = buildSourceNotes({ drawingRef, locationTag, quantityBasis, aiVision, rateNote: matched?.note ?? null });
   const pricingStatus = unitCost == null
     ? "unpriced"
-    : aiVision || matched?.basis === "national"
+    : aiVision || matched?.basis === "national" || matched?.confidence === "low"
       ? "review"
       : "priced";
 
@@ -294,7 +308,10 @@ function toImportRow(
     description,
     csi_code: csi,
     trade: cleanText(takeoff.meta?.trade),
-    item_type: "material",
+    item_type: lineTypeFromSplit(matched?.laborCost, matched?.materialCost, matched?.equipmentCost),
+    labor_cost: matched?.laborCost ?? null,
+    material_cost: matched?.materialCost ?? null,
+    equipment_cost: matched?.equipmentCost ?? null,
     quantity: takeoff.quantity ?? null,
     uom,
     unit_cost: unitCost,
@@ -323,6 +340,20 @@ interface CatalogRate {
   unitCost: number;
   basis: "section" | "location_index" | "national";
   unit: string | null;
+  laborCost: number | null;
+  materialCost: number | null;
+  equipmentCost: number | null;
+  confidence: "high" | "medium" | "low" | null;
+}
+
+function lineTypeFromSplit(labor?: number | null, material?: number | null, equipment?: number | null): EstimateLineType {
+  const parts: Array<{ type: EstimateLineType; value: number }> = [
+    { type: "labour", value: labor ?? 0 },
+    { type: "material", value: material ?? 0 },
+    { type: "equipment", value: equipment ?? 0 },
+  ];
+  const best = parts.reduce((current, next) => next.value > current.value ? next : current);
+  return best.value > 0 ? best.type : "material";
 }
 
 function csiDigits(code: string): string {
@@ -358,7 +389,15 @@ function buildCostLookup(catalog: CostCatalogForImport[]): Map<string, CatalogRa
     const family = unitFamily(cleanText(item.uom));
     const key = `${csiDigits(csi)}|${family ?? ""}`;
     const current = lookup.get(key);
-    const next = { unitCost: cost, basis, unit: family };
+    const next: CatalogRate = {
+      unitCost: cost,
+      basis,
+      unit: family,
+      laborCost: item.labor_cost ?? null,
+      materialCost: item.material_cost ?? null,
+      equipmentCost: item.equipment_cost ?? null,
+      confidence: item.confidence ?? null,
+    };
     if (!current || basisRank(next.basis) > basisRank(current.basis)) lookup.set(key, next);
   }
   return lookup;
@@ -368,7 +407,7 @@ function findUnitCost(
   lookup: Map<string, CatalogRate>,
   csi: string | null,
   uom: string | null,
-): { unitCost: number | null; basis: CatalogRate["basis"] | null; note: string | null } | null {
+): { unitCost: number | null; basis: CatalogRate["basis"] | null; note: string | null; laborCost: number | null; materialCost: number | null; equipmentCost: number | null; confidence: CatalogRate["confidence"] } | null {
   if (!csi) return null;
   const digits = csiDigits(csi);
   if (!digits) return null;
@@ -378,6 +417,10 @@ function findUnitCost(
     return {
       unitCost: exact.unitCost,
       basis: exact.basis,
+      laborCost: exact.laborCost,
+      materialCost: exact.materialCost,
+      equipmentCost: exact.equipmentCost,
+      confidence: exact.confidence,
       note: exact.basis === "national"
         ? "National average only. Confirm a local rate before this line enters the sell price."
         : exact.basis === "location_index"
@@ -395,6 +438,10 @@ function findUnitCost(
     return {
       unitCost: null,
       basis: null,
+      laborCost: null,
+      materialCost: null,
+      equipmentCost: null,
+      confidence: null,
       note: `A rate is on file for ${otherUnits.join(", ")}, not ${family}. The other unit was not applied.`,
     };
   }

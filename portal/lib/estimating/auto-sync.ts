@@ -130,6 +130,10 @@ export async function syncTakeoffToEstimate(
       csi_code: r.cost_code,
       uom: r.uom ?? null,
       unit_cost: r.unit_cost,
+      labor_cost: r.labor_cost ?? null,
+      material_cost: r.material_cost ?? null,
+      equipment_cost: r.equipment_cost ?? null,
+      confidence: r.confidence,
       basis: r.price_scope === "national"
         ? "national" as const
         : r.price_scope === "location_index"
@@ -216,7 +220,9 @@ function linePayload(
 ) {
   const quantity = row.quantity ?? 0;
   const preserved = existing ? scaledDirectCosts(existing, row.quantity) : null;
-  const breakdown = row.csi_code ? categoryBreakdownByCsi.get(row.csi_code) : undefined;
+  const breakdown = row.labor_cost != null || row.material_cost != null || row.equipment_cost != null
+    ? { labor: row.labor_cost ?? 0, material: row.material_cost ?? 0, equipment: row.equipment_cost ?? 0 }
+    : row.csi_code ? categoryBreakdownByCsi.get(row.csi_code) : undefined;
   // No breakdown available: the whole resolved unit_cost is booked as
   // material_cost. Do not fabricate a labor/equipment split that was not
   // resolved. An existing unit price is scaled instead of replaced.

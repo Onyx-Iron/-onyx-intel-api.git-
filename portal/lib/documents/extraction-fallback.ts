@@ -55,8 +55,16 @@ export function parseModelJson(raw: string): DocumentExtraction | null {
   }
 }
 
+const SCALE_TEXT = /(?:\d+\s*\/\s*\d+|\d+(?:\.\d+)?)\s*"?\s*=\s*\d+\s*'\s*(?:-\s*\d+\s*"?)?/;
+
+/** A title-block scale is readable even when the rest of the page text is short. */
+export function scaleStringFromText(text: string): string | null {
+  const match = text.match(SCALE_TEXT);
+  return match ? match[0].replace(/\s+/g, " ").trim() : null;
+}
+
 export function extractionFromPageText(pages: LocalPageText[], pdfPageCount: number): DocumentExtraction {
-  const usable = pages.filter((page) => page.text.trim().length >= 40);
+  const usable = pages.filter((page) => page.text.trim().length >= 40 || scaleStringFromText(page.text));
   const joined = usable.map((page) => page.text).join(" ").slice(0, 4000);
   return {
     doc_type: classifyLocalText(joined),
@@ -65,7 +73,7 @@ export function extractionFromPageText(pages: LocalPageText[], pdfPageCount: num
     pages: usable.map((page) => ({
       page_number: page.pageNumber,
       summary: page.text.replace(/\s+/g, " ").trim().slice(0, 500),
-      key_terms: keyTerms(page.text),
+      key_terms: [...new Set([scaleStringFromText(page.text), ...keyTerms(page.text)].filter((term): term is string => Boolean(term)))],
     })),
   };
 }

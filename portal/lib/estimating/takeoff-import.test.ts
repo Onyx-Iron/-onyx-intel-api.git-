@@ -47,6 +47,7 @@ describe("takeoff to estimate import quality", () => {
           csi_code: "22-11-00",
           quantity: 125,
           unit: "LF",
+          review_status: "approved",
           meta: {
             trade: "Plumbing",
             quantity_basis: "Measured polyline on P2.1",
@@ -60,6 +61,7 @@ describe("takeoff to estimate import quality", () => {
           csi_code: "26-24-00",
           quantity: 2,
           unit: "EA",
+          review_status: "approved",
           meta: {
             trade: "Electrical",
             quantity_basis: "Counted panel schedule rows",
@@ -91,6 +93,9 @@ describe("takeoff to estimate import quality", () => {
       csi_code: "22-11-00",
       trade: "Plumbing",
       item_type: "material",
+      labor_cost: null,
+      material_cost: null,
+      equipment_cost: null,
       quantity: 125,
       uom: "LF",
       unit_cost: 42.5,
@@ -175,6 +180,7 @@ describe("takeoff to estimate import quality", () => {
           csi_code: "22-11-00",
           quantity: 125,
           unit: "LF",
+          review_status: "approved",
           meta: {
             drawing_ref: "P2.1",
             location_tag: "Building A",
@@ -313,8 +319,8 @@ describe("takeoff to estimate import quality", () => {
     assert.equal(result.rows[0].unit_cost, 325);
   });
 
-  it("treats a missing review_status as approved (backward compatibility with pre-migration rows)", () => {
-    const result = buildEstimateImportRows({
+  it("blocks a missing review_status unless the row was entered by hand", () => {
+    const blocked = buildEstimateImportRows({
       takeoffItems: [
         {
           id: "legacy-takeoff",
@@ -329,9 +335,27 @@ describe("takeoff to estimate import quality", () => {
       costCatalog: [{ csi_code: "03-30-00", uom: "CY", unit_cost: 850 }],
       projectId: "project-1",
     });
+    assert.equal(blocked.rows.length, 0);
+    assert.equal(blocked.blockedByReview, 1);
 
-    assert.equal(result.rows.length, 1);
-    assert.equal(result.blockedByReview, 0);
+    const manual = buildEstimateImportRows({
+      takeoffItems: [
+        {
+          id: "legacy-takeoff",
+          label: "Pre-existing manual item",
+          csi_code: "03-30-00",
+          quantity: 10,
+          unit: "CY",
+          source_method: "manual",
+          meta: {},
+        },
+      ],
+      existingEstimateItems: [],
+      costCatalog: [{ csi_code: "03-30-00", uom: "CY", unit_cost: 850 }],
+      projectId: "project-1",
+    });
+    assert.equal(manual.rows.length, 1);
+    assert.equal(manual.blockedByReview, 0);
   });
 
   it("updates the draft line when the takeoff quantity changes and leaves other versions alone", () => {
@@ -343,6 +367,7 @@ describe("takeoff to estimate import quality", () => {
           csi_code: "22-11-00",
           quantity: 140,
           unit: "LF",
+          review_status: "approved",
           meta: { drawing_ref: "P2.1", location_tag: "Building A" },
         },
       ],
@@ -396,6 +421,7 @@ describe("takeoff to estimate import quality", () => {
           csi_code: "22-11-00",
           quantity: 140,
           unit: "LF",
+          review_status: "approved",
         },
       ],
       existingEstimateItems: [
@@ -427,6 +453,7 @@ describe("takeoff to estimate import quality", () => {
           csi_code: "22-11-00",
           quantity: 140,
           unit: "LF",
+          review_status: "approved",
         },
       ],
       existingEstimateItems: [
@@ -449,11 +476,21 @@ describe("takeoff to estimate import quality", () => {
   it("prices the matching unit, adjusts by a location index, and holds a national average for review", () => {
     const result = buildEstimateImportRows({
       takeoffItems: [
-        { id: "exact", label: "Slab", csi_code: "03-30-00", quantity: 12, unit: "CY" },
-        { id: "alias", label: "Curb", csi_code: "32-16-13", quantity: 40, unit: "FT" },
-        { id: "indexed", label: "Pipe", csi_code: "33-11-00", quantity: 100, unit: "LF" },
-        { id: "national", label: "Panel", csi_code: "26-24-16", quantity: 1, unit: "EA" },
-        { id: "wrong-unit", label: "Sidewalk", csi_code: "32-13-13", quantity: 500, unit: "SF" },
+        { id: "exact", label: "Slab", csi_code: "03-30-00", quantity: 12, unit: "CY" ,
+          review_status: "approved",
+        },
+        { id: "alias", label: "Curb", csi_code: "32-16-13", quantity: 40, unit: "FT" ,
+          review_status: "approved",
+        },
+        { id: "indexed", label: "Pipe", csi_code: "33-11-00", quantity: 100, unit: "LF" ,
+          review_status: "approved",
+        },
+        { id: "national", label: "Panel", csi_code: "26-24-16", quantity: 1, unit: "EA" ,
+          review_status: "approved",
+        },
+        { id: "wrong-unit", label: "Sidewalk", csi_code: "32-13-13", quantity: 500, unit: "SF" ,
+          review_status: "approved",
+        },
       ],
       existingEstimateItems: [],
       costCatalog: [
@@ -477,5 +514,35 @@ describe("takeoff to estimate import quality", () => {
     assert.equal(byId.get("wrong-unit")?.unit_cost, null);
     assert.equal(byId.get("wrong-unit")?.pricing_status, "unpriced");
     assert.match(byId.get("wrong-unit")?.notes ?? "", /not SF/);
+  });
+
+  it("blocks a null review status unless the measurement was entered by hand", () => {
+    const blocked = buildEstimateImportRows({
+      takeoffItems: [{ id: "open", label: "Pipe", csi_code: "22-11-00", quantity: 10, unit: "LF", review_status: null }],
+      existingEstimateItems: [],
+      costCatalog: [{ csi_code: "22-11-00", uom: "LF", unit_cost: 10 }],
+      projectId: "project-1",
+    });
+    assert.equal(blocked.rows.length, 0);
+    assert.equal(blocked.blockedByReview, 1);
+    const manual = buildEstimateImportRows({
+      takeoffItems: [{ id: "hand", label: "Pipe", csi_code: "22-11-00", quantity: 10, unit: "LF", review_status: null, source_method: "manual" }],
+      existingEstimateItems: [],
+      costCatalog: [{ csi_code: "22-11-00", uom: "LF", unit_cost: 10, labor_cost: 8, material_cost: 2, equipment_cost: 0 }],
+      projectId: "project-1",
+    });
+    assert.equal(manual.rows.length, 1);
+    assert.equal(manual.rows[0]?.item_type, "labour");
+  });
+
+  it("holds a low-confidence rate for review", () => {
+    const result = buildEstimateImportRows({
+      takeoffItems: [{ id: "soft", label: "Pipe", csi_code: "22-11-00", quantity: 10, unit: "LF", review_status: "approved" }],
+      existingEstimateItems: [],
+      costCatalog: [{ csi_code: "22-11-00", uom: "LF", unit_cost: 10, confidence: "low" }],
+      projectId: "project-1",
+    });
+    assert.equal(result.rows[0]?.pricing_status, "review");
+    assert.equal(result.rows[0]?.unit_cost, 10);
   });
 });

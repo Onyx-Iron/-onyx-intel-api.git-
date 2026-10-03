@@ -567,6 +567,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
             cost_code: r.cost_code || null,
             description: r.description,
             quantity: r.quantity,
+            source_takeoff_id: r.source_takeoff_id,
             uom: r.unit,
             item_type: normalizeLineType(r.item_type),
             csi_code: r.cost_code || null,
@@ -873,7 +874,14 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
                             <input value={r.description} onChange={(e) => updateRow(i, { description: e.target.value })} className="w-full bg-transparent px-1 py-1 text-xs focus:outline-none focus:bg-white/[0.05] rounded" />
                           </td>
                           <td className="border-b border-white/5 px-1 py-1">
-                            <input type="number" step="0.01" value={r.quantity} onChange={(e) => updateRow(i, { quantity: Number(e.target.value) })} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
+                            {r.source_takeoff_id ? (
+                              <div className="flex items-center justify-end gap-1">
+                                <span className="font-mono text-xs" title="Quantity comes from the linked measurement">{r.quantity}</span>
+                                <button type="button" className="text-[9px] uppercase tracking-widest text-white/40 hover:text-white" onClick={() => updateRow(i, { source_takeoff_id: null })}>Unlink</button>
+                              </div>
+                            ) : (
+                              <input type="number" step="0.01" value={r.quantity} onChange={(e) => updateRow(i, { quantity: Number(e.target.value) })} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
+                            )}
                           </td>
                           <td className="border-b border-white/5 px-1 py-1">
                             <input value={r.unit} onChange={(e) => updateRow(i, { unit: e.target.value })} className="w-full bg-transparent px-1 py-1 text-[11px] font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
