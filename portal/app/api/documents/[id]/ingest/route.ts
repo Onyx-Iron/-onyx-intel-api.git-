@@ -287,7 +287,7 @@ export async function POST(
     }
 
     const queueLargeDriveSplit = async (): Promise<NextResponse> => {
-      const driveToken = accessToken ?? await getAccessToken(tenantId, userId);
+      const driveToken = accessToken ?? await getAccessToken(resolvedTenantId, userId);
       if (!driveToken) {
         return NextResponse.json({
           error: "Google Drive is not connected. Connect Google in Settings.",
@@ -304,7 +304,7 @@ export async function POST(
         last_error: null,
         last_error_step: null,
         meta: { ...meta, storage_path: originalPath, storage: "plans-bucket" },
-      }).eq("id", docId).eq("tenant_id", tenantId);
+      }).eq("id", docId).eq("tenant_id", resolvedTenantId);
       try {
         await invokePageSplitWorker({
           document_id: docId,
@@ -340,7 +340,7 @@ export async function POST(
         processing_started_at: new Date().toISOString(),
         last_error: null,
         last_error_step: null,
-      }).eq("id", docId).eq("tenant_id", tenantId);
+      }).eq("id", docId).eq("tenant_id", resolvedTenantId);
       try {
         await invokePageSplitWorker({
           document_id: docId,
@@ -365,7 +365,7 @@ export async function POST(
 
     // Resolve Drive file size before downloading when meta.size is missing.
     if (driveFileId && fileSizeHint === null) {
-      const driveToken = accessToken ?? await getAccessToken(tenantId, userId);
+      const driveToken = accessToken ?? await getAccessToken(resolvedTenantId, userId);
       if (driveToken) {
         const resolvedSize = await fetchDriveFileSize(driveFileId, driveToken);
         if (resolvedSize != null) {
@@ -394,7 +394,7 @@ export async function POST(
     let pdfBytes: Buffer;
 
     if (driveFileId) {
-      const driveToken = accessToken ?? await getAccessToken(tenantId, userId);
+      const driveToken = accessToken ?? await getAccessToken(resolvedTenantId, userId);
       if (!driveToken) {
         return NextResponse.json({
           error: "Google Drive is not connected. Connect Google in Settings.",
