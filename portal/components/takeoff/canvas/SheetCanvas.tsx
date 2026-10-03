@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import CADVectorLayer from "./CADVectorLayer";
 import VisionExtractionsPanel from "./VisionExtractionsPanel";
@@ -11,9 +12,10 @@ import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
 import { CANVAS_HOTKEY_HINT, resolveCanvasHotkey, type CanvasTool } from "@/lib/takeoff/canvas/hotkeys";
 import {
   DEFAULT_SNAP_THRESHOLD_PX,
-  getNearestVectorPoint,
   type VectorPoint,
 } from "@/lib/takeoff/canvas/vector-snap";
+import { takeoffQueryKeys, useSheetCalibration } from "@/lib/takeoff/queries";
+import type { SnapResult } from "@/lib/takeoff/canvas/snap-algorithm";
 
 // Coordinate-space tag carried alongside each committed item (professional-
 // manual-takeoff milestone, PERMANENT RULE 1/2). 'page_space' points are
@@ -150,9 +152,16 @@ interface Props {
 // ─────────────────────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
+type SnapWorkerResponse = { type: "snap-result"; id: number; result: SnapResult };
+
 export default function SheetCanvas({ projectId, projectName, pageId, pageNumber }: Props) {
+  const queryClient = useQueryClient();
+  const { data: calibration = null } = useSheetCalibration(pageId);
   const wrapRef   = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const snapWorkerRef = useRef<Worker | null>(null);
+  const snapRequestIdRef = useRef(0);
+  const latestSnapRef = useRef<SnapResult | null>(null);
   const [pdfUrl, setPdfUrl]         = useState<string | null>(null);
   const [renderSize, setRenderSize] = useState<{ w: number; h: number } | null>(null);
   // The pdf.js viewport scale actually used for the CURRENT render — distinct
@@ -172,7 +181,6 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const toolBeforeSpacePan = useRef<Tool | null>(null);
   const [shapes, setShapes]         = useState<Shape[]>([]);
   const [draftPoints, setDraftPoints] = useState<Pt[]>([]);   // in-progress polygon/line points
-  const [calibration, setCalibration] = useState<Calibration | null>(null);
   const [calibPts, setCalibPts]     = useState<Pt[]>([]);     // during calibrate mode
   const [loadError, setLoadError]   = useState<string | null>(null);
   const [saving, setSaving]         = useState(false);
@@ -201,14 +209,33 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [areaBoundaryKind, setAreaBoundaryKind] = useState<BoundaryKind>("topsoil_stripping");
   const [areaDepthIn, setAreaDepthIn] = useState(6);
 
-  // ── Load signed URL + existing calibration + saved takeoffs ────────────────
+  // ── Snap worker: nearest-vertex search off the main thread ───────────────
+  useEffect(() => {
+    const worker = new Worker(new URL("../../../workers/snap.worker.ts", import.meta.url));
+    worker.onmessage = (event: MessageEvent<SnapWorkerResponse>) => {
+      const { id, result } = event.data;
+      if (id !== snapRequestIdRef.current) return;
+      latestSnapRef.current = result;
+      setSnapTarget(result.snapped ? { point: result.point, distance: result.distance } : null);
+    };
+    snapWorkerRef.current = worker;
+    return () => {
+      worker.terminate();
+      snapWorkerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    snapWorkerRef.current?.postMessage({ type: "set-points", vectorPoints: snapPoints });
+  }, [snapPoints]);
+
+  // ── Load signed URL + saved takeoffs (calibration via React Query) ───────
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [urlRes, calRes, mtRes, utRes, topoRes, areaRes] = await Promise.all([
+        const [urlRes, mtRes, utRes, topoRes, areaRes] = await Promise.all([
           fetch(`/api/takeoff/canvas/page-url?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
-          fetch(`/api/takeoff/canvas/calibration?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/manual?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/utility?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/topo?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
@@ -218,10 +245,6 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         const urlData = await urlRes.json() as { url: string };
         if (!cancelled) setPdfUrl(urlData.url);
 
-        if (calRes.ok) {
-          const calData = await calRes.json() as { calibration: Calibration | null };
-          if (!cancelled) setCalibration(calData.calibration);
-        }
         if (mtRes.ok) {
           const mtData = await mtRes.json() as { items: Array<{ id: string; takeoff_type: "count" | "length" | "area"; cost_code: string | null; quantity: number; unit: string | null; row_version?: number; geometry: { points?: Pt[]; coordinate_space?: string } }> };
           if (!cancelled) {
@@ -423,18 +446,28 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
   const resolveSnapPoint = useCallback((cursor: Pt): Pt => {
     if (!SNAP_TOOLS.has(tool) || snapPoints.length === 0) return cursor;
-    const result = getNearestVectorPoint(cursor, snapPoints, DEFAULT_SNAP_THRESHOLD_PX);
-    return result.snapped ? result.point : cursor;
+    const latest = latestSnapRef.current;
+    if (latest?.snapped) {
+      const dist = Math.hypot(latest.point.x - cursor.x, latest.point.y - cursor.y);
+      if (dist <= DEFAULT_SNAP_THRESHOLD_PX * 1.5) return latest.point;
+    }
+    return cursor;
   }, [tool, snapPoints]);
 
   const onCanvasMouseMove: React.MouseEventHandler<SVGSVGElement> = useCallback((e) => {
     if (!SNAP_TOOLS.has(tool) || snapPoints.length === 0) {
       setSnapTarget(null);
+      latestSnapRef.current = null;
       return;
     }
     const cursor = toLocal(e.clientX, e.clientY, e.currentTarget);
-    const result = getNearestVectorPoint(cursor, snapPoints, DEFAULT_SNAP_THRESHOLD_PX);
-    setSnapTarget(result.snapped ? { point: result.point, distance: result.distance } : null);
+    const id = ++snapRequestIdRef.current;
+    snapWorkerRef.current?.postMessage({
+      type: "snap",
+      id,
+      cursor,
+      thresholdPixels: DEFAULT_SNAP_THRESHOLD_PX,
+    });
   }, [tool, snapPoints, toLocal]);
 
   // ── Geometry helpers ──────────────────────────────────────────────────────
@@ -772,7 +805,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     });
     if (res.ok) {
       const data = await res.json() as { calibration: Calibration };
-      setCalibration(data.calibration);
+      queryClient.setQueryData(takeoffQueryKeys.calibration(pageId), data.calibration);
     } else {
       const err = await res.json().catch(() => ({}));
       alert(`Calibration failed: ${err.error ?? res.status}`);
