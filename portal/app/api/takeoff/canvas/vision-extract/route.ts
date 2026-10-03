@@ -346,6 +346,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   return NextResponse.json({ result, cached: false, takeoffItems, already_decided: alreadyDecided });
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function assertDrawingQuantities(anyDb: any, tenantId: string, documentId: string | null): Promise<NextResponse | null> {
   if (!documentId) return null;
   const { data: doc } = await anyDb
@@ -363,13 +364,8 @@ async function assertDrawingQuantities(anyDb: any, tenantId: string, documentId:
   return null;
 }
 
-async function countDecidedVisionItems(
-  anyDb: any,
-  tenantId: string,
-  documentId: string | null,
-  pageId: string,
-  items: Array<{ description?: string | null; quantity?: number | null; unit?: string | null }>,
-): Promise<number> {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function countDecidedVisionItems(anyDb: any, tenantId: string, documentId: string | null, pageId: string, items: Array<{ description?: string | null; quantity?: number | null; unit?: string | null }>): Promise<number> {
   const { data } = await anyDb
     .from("takeoff_items")
     .select("review_status, meta")

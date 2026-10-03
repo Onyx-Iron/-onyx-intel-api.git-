@@ -16,6 +16,7 @@ export default function EstimateReadinessCard({ projectId }: { projectId: string
   }, [projectId]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount fetch
     void load();
     const timer = window.setInterval(() => { void load(); }, 8000);
     window.addEventListener("onyx:documents-refresh", load);

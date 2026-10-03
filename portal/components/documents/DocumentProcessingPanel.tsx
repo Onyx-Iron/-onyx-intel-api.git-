@@ -61,6 +61,7 @@ export default function DocumentProcessingPanel({ projectId }: { projectId: stri
   }, [projectId]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount fetch
     void load();
     const onRefresh = () => {
       setOpen(true);
