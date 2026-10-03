@@ -439,6 +439,7 @@ export type Database = {
           embedding: string | null
           fts: unknown
           id: string
+          meta: Json
           page_number: number | null
           project_id: string
           tenant_id: string
@@ -450,6 +451,7 @@ export type Database = {
           embedding?: string | null
           fts?: unknown
           id?: string
+          meta?: Json
           page_number?: number | null
           project_id: string
           tenant_id: string
@@ -461,6 +463,7 @@ export type Database = {
           embedding?: string | null
           fts?: unknown
           id?: string
+          meta?: Json
           page_number?: number | null
           project_id?: string
           tenant_id?: string
@@ -1651,6 +1654,7 @@ export type Database = {
           document_id: string
           embedding: string | null
           id: string
+          meta: Json
           page_id: string | null
           page_number: number | null
           tenant_id: string
@@ -1662,6 +1666,7 @@ export type Database = {
           document_id: string
           embedding?: string | null
           id?: string
+          meta?: Json
           page_id?: string | null
           page_number?: number | null
           tenant_id: string
@@ -1673,6 +1678,7 @@ export type Database = {
           document_id?: string
           embedding?: string | null
           id?: string
+          meta?: Json
           page_id?: string | null
           page_number?: number | null
           tenant_id?: string

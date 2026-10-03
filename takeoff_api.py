@@ -461,6 +461,8 @@ async def parse_document(
     try:
         if ext == ".pdf":
             import pdfplumber
+            from services.text_density import DEFAULT_MIN_CHARS, score_pdf_text_density
+
             with pdfplumber.open(tmp_path) as pdf:
                 result["page_count"] = len(pdf.pages)
                 texts = []
@@ -470,8 +472,18 @@ async def parse_document(
                         texts.append(t)
                 full_text = "\n\n".join(texts)
                 result["text_preview"] = full_text[:3000] if full_text else None
+                dens = score_pdf_text_density(tmp_path, min_chars=DEFAULT_MIN_CHARS)
+                result["text_density"] = {
+                    "char_count": dens.char_count,
+                    "page_count": dens.page_count,
+                    "chars_per_page": dens.chars_per_page,
+                    "is_text_rich": dens.is_text_rich,
+                    "min_chars": DEFAULT_MIN_CHARS,
+                }
                 result["metadata"] = {
                     "pdf_info": {k: str(v) for k, v in (pdf.metadata or {}).items()},
+                    "parser_id": "pdfplumber",
+                    "is_text_rich": dens.is_text_rich,
                 }
 
         elif ext in (".tiff", ".tif", ".jpg", ".jpeg", ".png"):
