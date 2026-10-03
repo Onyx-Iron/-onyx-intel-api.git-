@@ -56,7 +56,7 @@ Upload
 
 | ID | Action | Why |
 |---|---|---|
-| XD-01 | Spike **Docling** (MIT) as optional Railway worker for specs/schedules | Better tables + reading order than naive pdfplumber wall-of-text |
+| XD-01 | Spike **Docling** (MIT) as optional Railway worker for specs/schedules | ✅ `POST /api/parse/docling` + `requirements-docling.txt` (ENABLE_DOCLING) |
 | XD-02 | Persist **chunk metadata**: page, heading path, bbox, parser_id, confidence | Peers treat provenance as first-class; your ask/RAG quality depends on it |
 | XD-03 | Dual embed task types consistently (document vs query) end-to-end | Aligns with Gemini embedding best practice; reduces retrieval miss |
 | XD-04 | Unify whole-document ingest vs page-split path failure visibility | Internal audit D-12/D-13; peers never silently swallow page failures |
@@ -127,7 +127,7 @@ Construction peers are weak here. Borrow from **SaaS starters**:
 
 | ID | Action |
 |---|---|
-| XD-14 | Add pgTAP (or equivalent) cross-tenant isolation suite |
+| XD-14 | ✅ pgTAP cross-tenant isolation (`supabase/tests/tenant_isolation.test.sql` + CI `supabase test db`) |
 | XD-15 | Lint/forbid bare `createServiceClient()` outside allowlisted workers |
 | XD-16 | Map Clerk org/user → `tenant_members.role` on every financial write (expand route-guards) |
 
