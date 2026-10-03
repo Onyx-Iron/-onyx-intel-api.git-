@@ -2,7 +2,13 @@
 nixPkgs = ["python312"]
 
 [phases.install]
-cmds = ["pip install -r requirements.txt"]
+# Docling is optional at runtime (ENABLE_DOCLING=1), but the package must be
+# present on the image for /api/parse/docling to work. Keep requirements.txt
+# first so core deps install even if Docling resolution is slow.
+cmds = [
+  "pip install -r requirements.txt",
+  "pip install -r requirements-docling.txt",
+]
 
 [start]
 cmd = "uvicorn takeoff_api:app --host 0.0.0.0 --port $PORT --workers 2"
