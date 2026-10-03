@@ -9,6 +9,7 @@ import { auditDelete } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
 import { reclaimStuckProcessingDocuments, reclaimStuckProcessingPages } from "@/lib/documents/reclaimStuck";
 import { finalizeDocumentsFromOcr } from "@/lib/documents/finalizeDocument";
+import { parseMaintainFlag } from "../../../supabase/functions/_shared/splitBatch";
 
 /** Columns the Documents UI needs — avoid select("*") on every poll. */
 const DOCUMENT_LIST_COLUMNS = [
@@ -39,10 +40,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const projectId = req.nextUrl.searchParams.get("project_id");
     // maintain=1 (default when project-scoped) runs reclaim + OCR finalize.
     // Pass maintain=0 for a cheap refresh after split-status already ran.
-    const maintainParam = req.nextUrl.searchParams.get("maintain");
-    const maintain = maintainParam == null
-      ? Boolean(projectId)
-      : maintainParam === "1" || maintainParam === "true";
+    const maintain = parseMaintainFlag(
+      req.nextUrl.searchParams.get("maintain"),
+      Boolean(projectId),
+    );
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const { page, limit, offset } = parsePagination(req.nextUrl.searchParams);
 

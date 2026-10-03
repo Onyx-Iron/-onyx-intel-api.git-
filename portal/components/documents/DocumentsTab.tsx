@@ -17,6 +17,10 @@ import {
 } from "@/lib/documents/status";
 import { PipelineStage, type PipelineStatus } from "@/components/documents/PipelineStage";
 import { ProcessingTimeline, type ProcessingEventRow } from "@/components/documents/ProcessingTimeline";
+import {
+  DEFAULT_MAINTAIN_EVERY_N_TICKS,
+  shouldMaintainOnTick,
+} from "../../supabase/functions/_shared/splitBatch";
 
 interface ParsedPage {
   page_number: number;
@@ -189,7 +193,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   /** Slightly slower than before — list GET now scopes reclaim/finalize per project. */
   const POLL_INTERVAL_MS = 6_000;
   /** Run reclaim/finalize every N ticks; other ticks are cheap list refresh only. */
-  const MAINTAIN_EVERY_N_TICKS = 3;
+  const MAINTAIN_EVERY_N_TICKS = DEFAULT_MAINTAIN_EVERY_N_TICKS;
 
   const toggleInsights = useCallback(async (docId: string) => {
     if (expandedDocId === docId) {
@@ -283,8 +287,10 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
             // Maintain (reclaim/finalize) every N ticks; always refresh after
             // split-status so the UI picks up page rollups without double scans.
             pollTickRef.current += 1;
-            const doMaintain = pollTickRef.current === 1
-              || pollTickRef.current % MAINTAIN_EVERY_N_TICKS === 0;
+            const doMaintain = shouldMaintainOnTick(
+              pollTickRef.current,
+              MAINTAIN_EVERY_N_TICKS,
+            );
             const list = await loadDocuments(false, 1, { maintain: doMaintain });
             await pollSplitStatus(list);
             await loadDocuments(false, 1, { maintain: false });
