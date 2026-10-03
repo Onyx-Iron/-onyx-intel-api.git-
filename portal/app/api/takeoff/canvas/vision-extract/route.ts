@@ -7,6 +7,8 @@ import { auditUpdate } from "@/lib/audit";
 import { headerSafe } from "@/lib/http";
 import { runScopeGapAgent } from "@/lib/agents/scope-gap";
 import { runRfiDrafterAgent } from "@/lib/agents/rfi-drafter";
+import { quantitiesAllowedForDocType, takeoffBlockReason } from "@/lib/documents/processing-display";
+import { countAlreadyDecided } from "@/lib/takeoff/extraction-skip";
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
@@ -137,9 +139,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
   }
 
+  const quantityGate = await assertDrawingQuantities(anyDb, tenantId, page.document_id ?? null);
+  if (quantityGate) return quantityGate;
+
   if (page.vision_extractions && !body.force) {
     const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, page.document_id ?? null, body.page_id);
-    return NextResponse.json({ result: page.vision_extractions as VisionResult, cached: true, takeoffItems });
+    const alreadyDecided = await countDecidedVisionItems(anyDb, tenantId, page.document_id ?? null, body.page_id, (page.vision_extractions as VisionResult).items ?? []);
+    return NextResponse.json({ result: page.vision_extractions as VisionResult, cached: true, takeoffItems, already_decided: alreadyDecided });
   }
 
   // Download page PDF bytes
@@ -336,7 +342,45 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }).catch((e) => console.error("[agents]", e));
 
   const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, page.document_id ?? null, body.page_id);
-  return NextResponse.json({ result, cached: false, takeoffItems });
+  const alreadyDecided = await countDecidedVisionItems(anyDb, tenantId, page.document_id ?? null, body.page_id, items);
+  return NextResponse.json({ result, cached: false, takeoffItems, already_decided: alreadyDecided });
+}
+
+async function assertDrawingQuantities(anyDb: any, tenantId: string, documentId: string | null): Promise<NextResponse | null> {
+  if (!documentId) return null;
+  const { data: doc } = await anyDb
+    .from("documents")
+    .select("status, doc_type, page_count, last_error, last_error_step, split_status, ocr_status, vector_status, meta")
+    .eq("id", documentId)
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  if (!doc) return null;
+  if (!quantitiesAllowedForDocType(doc.doc_type)) {
+    return NextResponse.json({ error: "Only drawings produce quantities. This file stays available to search.", code: "not_a_drawing" }, { status: 422 });
+  }
+  const block = takeoffBlockReason(doc);
+  if (block) return NextResponse.json({ error: block, code: "takeoff_blocked" }, { status: 422 });
+  return null;
+}
+
+async function countDecidedVisionItems(
+  anyDb: any,
+  tenantId: string,
+  documentId: string | null,
+  pageId: string,
+  items: Array<{ description?: string | null; quantity?: number | null; unit?: string | null }>,
+): Promise<number> {
+  const { data } = await anyDb
+    .from("takeoff_items")
+    .select("review_status, meta")
+    .eq("tenant_id", tenantId)
+    .eq("document_id", documentId ?? "")
+    .in("review_status", ["approved", "rejected"])
+    .contains("meta", { vision_page_id: pageId });
+  const keys = ((data ?? []) as Array<{ meta?: { item_key?: string } }>)
+    .map((row) => row.meta?.item_key)
+    .filter((key): key is string => Boolean(key));
+  return countAlreadyDecided(items, keys);
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

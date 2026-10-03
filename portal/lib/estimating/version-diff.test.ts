@@ -45,6 +45,14 @@ describe("estimate version diff", () => {
     assert.equal(diff.unchangedCount, 1);
   });
 
+  it("reports a quantity-source change", () => {
+    const diff = diffEstimateVersions(
+      [{ csi_code: "03-30-00", description: "Slab", quantity: 10, unit_cost: 12, total_price: 120, drawing_ref: "A1", quantity_basis: "manual" }],
+      [{ csi_code: "03-30-00", description: "Slab", quantity: 10, unit_cost: 12, total_price: 120, drawing_ref: "A2", quantity_basis: "manual" }],
+    );
+    assert.deepEqual(diff.changed[0].changes, ["source"]);
+  });
+
   it("ignores sub-cent money drift", () => {
     const diff = diffEstimateVersions(
       [{ csi_code: "03-30-00", description: "Slab", quantity: 1, unit_cost: 100, total_price: 100 }],

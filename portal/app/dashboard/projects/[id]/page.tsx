@@ -8,6 +8,7 @@ import ActivityFeed from "@/components/project/ActivityFeed";
 import ProjectTabs from "./ProjectTabs";
 import PageHero from "@/components/layout/PageHero";
 import ProjectUploadButton from "@/components/project/ProjectUploadButton";
+import DocumentProcessingPanel from "@/components/documents/DocumentProcessingPanel";
 import GenerateDocDropdown from "@/components/common/GenerateDocDropdown";
 import ProjectLocationCard from "@/components/project/ProjectLocationCard";
 import SyncActiveProject from "@/components/project/SyncActiveProject";
@@ -89,6 +90,8 @@ export default async function ProjectDetailPage({ params }: PageProps) {
           <RiskDigestCard projectId={id} />
         </div>
       </div>
+
+      <DocumentProcessingPanel projectId={id} />
 
       <Suspense fallback={<div className="px-4 py-10 text-sm text-white/40 sm:px-6">Loading workspace…</div>}>
         <ProjectTabs projectId={id} projectName={project.name} />

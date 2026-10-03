@@ -1139,7 +1139,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }, [tool, selectTool, clearDrafts, finishDraft, undoLast, redoLast, deleteSelection, selectAllShapes, duplicateSelection]);
 
   // ── Persistence ───────────────────────────────────────────────────────────
-  async function saveCalibration(pointA: Pt, pointB: Pt, knownDistanceFt: number) {
+  async function saveCalibration(pointA: Pt, pointB: Pt, knownDistanceFt: number, applyToDrafts = false) {
     const res = await fetch("/api/takeoff/canvas/calibration", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -1147,11 +1147,30 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         project_id: projectId, page_id: pageId,
         point_a: pointA, point_b: pointB,
         known_distance: knownDistanceFt, known_unit: "LF",
+        apply_to_drafts: applyToDrafts,
       }),
     });
+    if (res.status === 409) {
+      const pending = await res.json().catch(() => ({})) as {
+        requires_confirmation?: boolean;
+        preview?: Array<{ label: string; before: number; after: number; unit: string | null; recomputed: boolean }>;
+      };
+      if (pending.requires_confirmation && pending.preview) {
+        const lines = pending.preview
+          .filter((line) => line.recomputed)
+          .map((line) => `${line.label}: ${line.before} → ${line.after} ${line.unit ?? ""}`.trim())
+          .join("\n");
+        const accepted = window.confirm(
+          `This scale change updates draft measurements on this sheet:\n\n${lines}\n\nApproved estimate versions stay unchanged. Apply these quantities?`,
+        );
+        if (accepted) await saveCalibration(pointA, pointB, knownDistanceFt, true);
+        return;
+      }
+    }
     if (res.ok) {
       const data = await res.json() as { calibration: Calibration };
       queryClient.setQueryData(takeoffQueryKeys.calibration(pageId), data.calibration);
+      if (applyToDrafts) window.location.reload();
     } else {
       const err = await res.json().catch(() => ({}));
       alert(`Calibration failed: ${err.error ?? res.status}`);
@@ -1463,6 +1482,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     const unsavedAreas = areaBounds.filter((a) => !a.saved);
     const unsavedWalls = wallRuns.filter((w) => !w.saved);
     if (unsaved.length === 0 && unsavedRuns.length === 0 && unsavedTopo.length === 0 && unsavedAreas.length === 0 && unsavedWalls.length === 0) return;
+    const pageSpaceReady = calibration?.status === "verified" && calibration.page_space_scale_factor != null;
+    if (!pageSpaceReady) {
+      alert("Set the sheet scale before saving a measurement.");
+      selectTool("calibrate");
+      return;
+    }
     setSaving(true);
     try {
       const requests: Promise<Response>[] = [];
@@ -1606,7 +1631,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         setWallRuns((prev) => prev.map((w) => (w.saved ? w : { ...w, points: toPersistedPoints(w.points, w.coordinateSpace), coordinateSpace: "page_space", saved: true })));
       } else {
         const failed = results.find((r) => !r.ok);
-        const err = failed ? await failed.json().catch(() => ({})) : {};
+        const err = failed ? await failed.json().catch(() => ({})) as { error?: string; code?: string } : {};
+        if (err.code === "calibration_required") selectTool("calibrate");
         alert(`Save failed: ${err.error ?? failed?.status}`);
       }
     } finally {
@@ -1819,10 +1845,6 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                     // never silently change, STEP 5). It only changes what
                     // scale NEW draws use going forward, so the confirmation
                     // here is about that distinction, not a batch recompute.
-                    if (!window.confirm(
-                      "Recalibrating sets the scale for NEW measurements drawn from now on.\n\n" +
-                      "Existing saved measurements keep their already-computed quantities unchanged — recalibration never silently alters them.\n\nContinue?",
-                    )) return;
                     selectTool("calibrate");
                   }}
                   className="rounded-full border border-white/10 px-2 py-0.5 text-white/60 hover:text-white hover:bg-white/[0.06] normal-case tracking-normal"
@@ -1831,7 +1853,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 </button>
               </>
             ) : (
-              <span className="text-amber-400">Not calibrated — pick <b>calibrate</b> tool</span>
+              <span className="text-amber-400">Set the sheet scale before saving a measurement.</span>
             )}
           </div>
         </div>

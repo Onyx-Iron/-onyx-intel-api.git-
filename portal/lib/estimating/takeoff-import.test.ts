@@ -195,7 +195,7 @@ describe("takeoff to estimate import quality", () => {
     assert.equal(result.rows.length, 0);
   });
 
-  it("marks AI vision takeoff rows for estimator review even when pricing is available", () => {
+  it("keeps an unapproved AI vision quantity out of the estimate", () => {
     const result = buildEstimateImportRows({
       takeoffItems: [
         {
@@ -219,10 +219,8 @@ describe("takeoff to estimate import quality", () => {
       projectId: "project-1",
     });
 
-    assert.equal(result.rows.length, 1);
-    assert.equal(result.rows[0].unit_cost, 325);
-    assert.equal(result.rows[0].pricing_status, "review");
-    assert.match(result.rows[0].notes, /Review required: AI vision quantity/);
+    assert.equal(result.rows.length, 0);
+    assert.equal(result.blockedByReview, 1);
   });
 
   it("excludes suggested AI takeoff items from the estimate entirely", () => {

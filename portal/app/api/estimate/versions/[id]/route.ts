@@ -33,6 +33,8 @@ interface ItemPatch {
   is_allowance?: boolean;
   is_alternate?: boolean;
   alternate_accepted?: boolean;
+  item_type?: string | null;
+  csi_code?: string | null;
 }
 
 /**
@@ -195,6 +197,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       project_id: version.project_id,
       estimate_version_id: id,
       cost_code: item.cost_code ?? null,
+      csi_code: item.csi_code ?? item.cost_code ?? null,
+      item_type: item.item_type ?? "material",
       description: item.description ?? "Untitled item",
       scope_category: item.scope_category ?? null,
       quantity: item.quantity ?? null,

@@ -146,6 +146,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const documentId = it.page_id ? pageInfoById.get(it.page_id)?.documentId ?? null : null;
     const calibration = it.page_id ? calibrationByPageId.get(it.page_id) : undefined;
 
+    if (it.page_id && !isVisionSourced) {
+      const verified = calibration?.status === "verified" && calibration.page_space_scale_factor != null;
+      if (!verified) {
+        return NextResponse.json({
+          error: "Set the sheet scale before saving a measurement.",
+          code: "calibration_required",
+        }, { status: 422 });
+      }
+    }
+
     let quantity = it.quantity;
     let calculationFormulaVersion: string | null = null;
     let discrepancyWarning: string | null = null;

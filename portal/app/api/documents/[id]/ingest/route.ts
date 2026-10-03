@@ -11,6 +11,8 @@ import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import { fetchDriveFileSize } from "@/lib/google/driveFile";
 import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
 import { looksLikePdf, publishSheetPages } from "@/lib/documents/sheet-pages";
+import { missingPageNumbers, normalizeDocumentClass, pdfDeclaresEncryption } from "@/lib/documents/processing-display";
+import { unlockPdf } from "@/lib/documents/pdf-unlock";
 import {
   PLANS_BUCKET,
   ASYNC_SPLIT_BYTES,
@@ -37,7 +39,7 @@ function geminiApiKey(): string {
 
 const EXTRACTION_PROMPT = `Analyze this construction document and return ONLY a JSON object with this exact structure — no markdown, no explanation:
 {
-  "doc_type": "<one of: drawing, spec, rfi, submittal, other>",
+  "doc_type": "<one of: drawing, spec, rfi, submittal, report, contract, correspondence, other>",
   "page_count": <integer>,
   "title": "<document title or main subject>",
   "pages": [
@@ -54,7 +56,10 @@ Classification:
 - spec: CSI specifications, division sections, material/installation requirements, standards
 - rfi: request for information forms or RFI logs
 - submittal: submittal forms, shop drawings, product data sheets, cut sheets
-- other: contracts, change orders, reports, schedules, correspondence, meeting minutes`;
+- report: inspection reports, test results, engineering reports
+- contract: agreements, general conditions, supplementary conditions
+- correspondence: letters, memos, meeting minutes, emails
+- other: schedules or anything that does not fit the categories above`;
 
 interface GeminiPage {
   page_number: number;
@@ -209,8 +214,9 @@ export async function POST(
       return NextResponse.json({ error: msg }, { status: 503 });
     }
 
-    const body = await req.json().catch(() => ({})) as { access_token?: string };
+    const body = await req.json().catch(() => ({})) as { access_token?: string; password?: string };
     const accessToken = body.access_token; // optional — server falls back to stored token
+    const pdfPassword = typeof body.password === "string" ? body.password : "";
 
     tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     // Narrowed const, since `tenantId` is captured by the markError() closure above,
@@ -396,6 +402,25 @@ export async function POST(
       pdfBytes = Buffer.from(await storageRes.arrayBuffer());
     }
 
+    if (pdfDeclaresEncryption(pdfBytes)) {
+      const unlocked = await unlockPdf(pdfBytes, pdfPassword);
+      if (!unlocked.ok) {
+        await markError(unlocked.message, "download");
+        return NextResponse.json({ error: unlocked.message, code: unlocked.code }, { status: 422 });
+      }
+      pdfBytes = Buffer.from(unlocked.bytes);
+      if (storagePath) {
+        const { error: replaceErr } = await db.storage.from(storageBucket).upload(storagePath, pdfBytes, {
+          contentType: "application/pdf",
+          upsert: true,
+        });
+        if (replaceErr) {
+          await markError(replaceErr.message, "download");
+          return NextResponse.json({ error: replaceErr.message }, { status: 500 });
+        }
+      }
+    }
+
     await assertWithinBudget("download");
 
     // Late size discovery: meta.size was missing/wrong but file is actually large.
@@ -521,18 +546,34 @@ export async function POST(
       throw new Error(`Gemini returned non-JSON extraction payload: ${rawJson.slice(0, 200)}`);
     }
 
-    const VALID_TYPES = ["drawing", "spec", "rfi", "submittal", "other"] as const;
-    const docType = VALID_TYPES.includes(extraction.doc_type as (typeof VALID_TYPES)[number])
-      ? extraction.doc_type
-      : "other";
-    const pageCount = extraction.page_count ?? extraction.pages?.length ?? 0;
+    const docType = normalizeDocumentClass(extraction.doc_type);
+    const summaryCount = extraction.page_count ?? extraction.pages?.length ?? 0;
     const pages = extraction.pages ?? [];
+    let pdfPageCount = summaryCount;
+    try {
+      const { PDFDocument } = await import("pdf-lib");
+      const parsedPdf = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+      pdfPageCount = parsedPdf.getPageCount();
+    } catch {
+      pdfPageCount = summaryCount;
+    }
+    const missingPages = missingPageNumbers(pdfPageCount, pages.map((page) => page.page_number));
+    const pageCount = pdfPageCount > 0 ? pdfPageCount : summaryCount;
 
     // 5. Update doc with classification
     await db.from("documents").update({
       doc_type: docType,
       page_count: pageCount,
-      meta: { ...meta, title: extraction.title ?? null, gemini_file_uri: fileUri },
+      meta: {
+        ...meta,
+        title: extraction.title ?? null,
+        gemini_file_uri: fileUri,
+        processing_summary: {
+          pages_total: pageCount,
+          pages_summarized: pages.length,
+          missing_page_numbers: missingPages,
+        },
+      },
     }).eq("id", docId).eq("tenant_id", resolvedTenantId);
 
     // 6. Insert pages
@@ -621,9 +662,12 @@ export async function POST(
     }
 
     // 8. Mark complete
+    const finalStatus = missingPages.length > 0 ? "complete_with_errors" : "complete";
     await db.from("documents").update({
-      status: "complete",
+      status: finalStatus,
       processed_at: new Date().toISOString(),
+      last_error: missingPages.length > 0 ? `Missing pages: ${missingPages.join(", ")}` : null,
+      last_error_step: missingPages.length > 0 ? "parse" : null,
     }).eq("id", docId).eq("tenant_id", resolvedTenantId);
 
     // 9. Cleanup Gemini file (best effort)

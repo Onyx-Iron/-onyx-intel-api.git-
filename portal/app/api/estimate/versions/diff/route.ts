@@ -9,7 +9,7 @@ export const runtime = "nodejs";
 async function loadItems(db: Awaited<ReturnType<typeof getServiceDb>>, versionId: string): Promise<VersionDiffItem[]> {
   const { data, error } = await db
     .from("estimate_items")
-    .select("id, source_takeoff_id, csi_code, description, quantity, unit_cost, total_price")
+    .select("id, source_takeoff_id, csi_code, description, quantity, unit_cost, total_price, drawing_ref, quantity_basis")
     .eq("estimate_version_id", versionId);
   if (error) throw new Error(error.message);
   return (data ?? []) as VersionDiffItem[];

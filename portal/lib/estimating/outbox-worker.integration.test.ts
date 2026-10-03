@@ -164,7 +164,7 @@ if (!HAS_DB) {
   });
 
   describe("Outbox worker — delete reconciliation (STEP 14)", () => {
-    it("a soft-deleted takeoff's already-synced estimate_items row is removed when its estimate version is still DRAFT", async () => {
+    it("a soft-deleted takeoff's already-synced draft estimate line is flagged source removed", async () => {
       const ctx = await createProjectContext();
       const created = await saveTx(`${TEST_MARK}-delete-draft-1`, 20, ctx);
       await processBatch(); // syncs into the draft estimate
@@ -175,8 +175,11 @@ if (!HAS_DB) {
       if (delErr) throw delErr;
 
       await processBatch();
-      const { data: afterDelete } = await db.from("estimate_items").select("id").eq("source_takeoff_id", created.mirror_takeoff_item_id);
-      assert.equal(afterDelete.length, 0, "a draft-version estimate line sourced purely from the deleted measurement must be reconciled away");
+      const { data: afterDelete } = await db.from("estimate_items").select("id, notes, pricing_status, total_price").eq("source_takeoff_id", created.mirror_takeoff_item_id);
+      assert.equal(afterDelete.length, 1, "the draft line stays visible after its measurement is deleted");
+      assert.equal(String(afterDelete[0].notes ?? "").startsWith("Source removed"), true);
+      assert.equal(afterDelete[0].pricing_status, "unpriced");
+      assert.equal(Number(afterDelete[0].total_price), 0);
     });
 
     it("a soft-deleted takeoff's estimate_items row is left completely untouched when its version is APPROVED", async () => {

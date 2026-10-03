@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { FolderOpen, FileText, X, RefreshCw, Sparkles, Send, Upload, ChevronDown, ChevronRight } from "lucide-react";
 import GoogleDrivePicker from "./GoogleDrivePicker";
@@ -15,9 +15,18 @@ import {
   isRetryable,
   isTerminalSuccess,
   needsSplitStatusPoll,
-  statusLabel,
 } from "@/lib/documents/status";
 import { PipelineStage, type PipelineStatus } from "@/components/documents/PipelineStage";
+import {
+  DOCUMENT_CLASSES,
+  isPasswordRequired,
+  listedMissingPages,
+  normalizeDocumentClass,
+  partialWasAcknowledged,
+  plainLanguageError,
+  processingStage,
+  takeoffBlockReason,
+} from "@/lib/documents/processing-display";
 
 interface ParsedPage {
   page_number: number;
@@ -46,7 +55,7 @@ type DocStatus =
 
 type SplitStatus = "pending" | "processing" | "done" | "error" | "skipped";
 
-type DocType = "drawing" | "spec" | "rfi" | "submittal" | "other" | null;
+type DocType = "drawing" | "spec" | "rfi" | "submittal" | "report" | "contract" | "correspondence" | "other" | null;
 
 interface Document {
   id: string;
@@ -83,6 +92,9 @@ const DOC_TYPE_STYLES: Record<string, string> = {
   spec:      "bg-purple-500/10 text-purple-400 border-purple-500/20",
   rfi:       "bg-orange-500/10 text-orange-400 border-orange-500/20",
   submittal: "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
+  report:    "bg-sky-500/10 text-sky-300 border-sky-500/20",
+  contract:  "bg-emerald-500/10 text-emerald-300 border-emerald-500/20",
+  correspondence: "bg-pink-500/10 text-pink-300 border-pink-500/20",
   other:     "bg-white/5 text-gray-500 border-white/10",
 };
 
@@ -135,6 +147,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   const [asking, setAsking] = useState(false);
   const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
   const [retryingDocId, setRetryingDocId] = useState<string | null>(null);
+  const [passwords, setPasswords] = useState<Record<string, string>>({});
   const [expandedDocId, setExpandedDocId] = useState<string | null>(null);
   const [pagesByDoc, setPagesByDoc] = useState<Record<string, { loading: boolean; pages: ParsedPage[]; questions: SavedQuestion[]; classification?: Record<string, string>; error?: string }>>({});
 
@@ -371,7 +384,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     }
   }, [askDoc]);
 
-  const retryIngest = useCallback(async (doc: Document) => {
+  const retryIngest = useCallback(async (doc: Document, password?: string) => {
     if (retryingDocId) return;
     if (!documentHasAskableSource(doc)) {
       toast({ title: String("No stored file to retry — re-upload this document."), kind: "error" });
@@ -382,7 +395,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
       const res = await fetch(`/api/documents/${encodeURIComponent(doc.id)}/ingest`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify(password ? { password } : {}),
       });
       const data = await res.json().catch(() => ({})) as {
         error?: string;
@@ -425,6 +438,34 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
       setRetryingDocId(null);
     }
   }, [retryingDocId, loadDocuments, toast]);
+
+  const acknowledgePartial = useCallback(async (doc: Document) => {
+    setRetryingDocId(doc.id);
+    try {
+      const res = await fetch(`/api/documents/${encodeURIComponent(doc.id)}/acknowledge-partial`, { method: "POST" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({})) as { error?: string };
+        toast({ title: String(data.error ?? "Could not continue without the missing pages."), kind: "error" });
+        return;
+      }
+      await loadDocuments(false);
+    } finally {
+      setRetryingDocId(null);
+    }
+  }, [loadDocuments, toast]);
+
+  const groupedDocuments = useMemo(() => {
+    const buckets = new Map<string, Document[]>();
+    for (const doc of documents) {
+      const key = doc.doc_type ? normalizeDocumentClass(doc.doc_type) : "other";
+      const list = buckets.get(key) ?? [];
+      list.push(doc);
+      buckets.set(key, list);
+    }
+    return DOCUMENT_CLASSES
+      .filter((key) => (buckets.get(key)?.length ?? 0) > 0)
+      .map((key) => ({ key, docs: buckets.get(key) ?? [] }));
+  }, [documents]);
 
   return (
     <div className="space-y-3">
@@ -523,14 +564,25 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                   </td>
                 </tr>
               ) : (
-                documents.flatMap((doc) => {
+                groupedDocuments.flatMap((group) => [
+                  <tr key={`group-${group.key}`} className="bg-[#0A0A0B]">
+                    <td colSpan={6} className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-white/40">
+                      {group.key} · {group.docs.length}
+                    </td>
+                  </tr>,
+                  ...group.docs.flatMap((doc) => {
                   const statusKey = doc.status in STATUS_STYLES ? doc.status : "pending";
+                  const stage = processingStage(doc);
                   const isProcessing = isInFlightStatus(doc.status)
                     || doc.split_status === "pending"
                     || doc.split_status === "processing";
                   const isReady = isTerminalSuccess(doc.status);
                   const isExpanded = expandedDocId === doc.id;
                   const insights = pagesByDoc[doc.id];
+                  const block = takeoffBlockReason(doc);
+                  const missing = listedMissingPages(doc);
+                  const readableError = plainLanguageError(doc.last_error, doc.last_error_step);
+                  const needsPassword = isPasswordRequired(doc.last_error);
                   return [
                     <tr key={doc.id} className="hover:bg-white/[0.02] transition-colors">
                       <td className="px-4 py-3">
@@ -568,7 +620,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                       <td className="px-4 py-3">
                         <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded border text-[9px] font-bold tracking-widest uppercase ${STATUS_STYLES[statusKey]}`}>
                           {isProcessing && <span className="w-1.5 h-1.5 rounded-full bg-[#00D2FF] animate-pulse" />}
-                          {statusLabel(doc.status)}
+                          {stage}
                         </span>
                         {(doc.split_status || doc.ocr_status || doc.takeoff_status) && (
                           <div className="mt-1.5 flex flex-wrap gap-x-2 gap-y-1">
@@ -577,10 +629,13 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                             <PipelineStage label="Takeoff" status={doc.takeoff_status ?? null} />
                           </div>
                         )}
-                        {doc.last_error && (
-                          <p className="mt-1 max-w-[14rem] truncate text-[9px] text-[#E50914]" title={doc.last_error}>
-                            {doc.last_error_step ? `${doc.last_error_step}: ` : ""}{doc.last_error}
+                        {readableError && stage !== "Complete" && (
+                          <p className="mt-1 max-w-[14rem] text-[9px] text-[#E50914]" title={doc.last_error ?? readableError}>
+                            {readableError}
                           </p>
+                        )}
+                        {missing.length > 0 && (
+                          <p className="mt-1 max-w-[14rem] text-[9px] text-[#F5A623]">Missing pages: {missing.join(", ")}</p>
                         )}
                       </td>
                       <td className="px-4 py-3 text-right text-gray-500 font-mono text-xs">
@@ -590,12 +645,18 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-3">
                           {doc.file_name.toLowerCase().endsWith(".pdf") && (
-                            <Link
-                              href={`/dashboard/projects/${projectId}/takeoff/canvas?document_id=${encodeURIComponent(doc.id)}`}
-                              className="text-[10px] uppercase tracking-widest font-mono text-gray-600 hover:text-[#CCFF00] transition-colors"
-                            >
-                              Canvas
-                            </Link>
+                            block ? (
+                              <span className="max-w-[8rem] text-left text-[10px] uppercase tracking-widest font-mono text-[#F5A623]" title={block}>
+                                Takeoff blocked
+                              </span>
+                            ) : (
+                              <Link
+                                href={`/dashboard/projects/${projectId}/takeoff/canvas?document_id=${encodeURIComponent(doc.id)}`}
+                                className="text-[10px] uppercase tracking-widest font-mono text-gray-600 hover:text-[#CCFF00] transition-colors"
+                              >
+                                Canvas
+                              </Link>
+                            )
                           )}
                           {documentHasAskableSource(doc) && (
                             <button
@@ -607,7 +668,37 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                               <span className="text-[10px] uppercase tracking-widest font-mono">Ask</span>
                             </button>
                           )}
-                          {(isRetryable(doc.status) || (pollTimedOut && isProcessing)) && (
+                          {needsPassword && (
+                            <form
+                              className="flex items-center gap-1"
+                              onSubmit={(event) => {
+                                event.preventDefault();
+                                void retryIngest(doc, passwords[doc.id] ?? "");
+                              }}
+                            >
+                              <input
+                                type="password"
+                                value={passwords[doc.id] ?? ""}
+                                onChange={(event) => setPasswords((prev) => ({ ...prev, [doc.id]: event.target.value }))}
+                                placeholder="Password"
+                                className="h-7 w-24 rounded border border-white/15 bg-black/40 px-2 text-[10px] text-white"
+                              />
+                              <button type="submit" disabled={retryingDocId === doc.id} className="text-[10px] uppercase tracking-widest font-mono text-[#00D2FF]">
+                                Unlock
+                              </button>
+                            </form>
+                          )}
+                          {stage === "Partial" && !partialWasAcknowledged(doc.meta) && (
+                            <button
+                              type="button"
+                              onClick={() => void acknowledgePartial(doc)}
+                              disabled={retryingDocId === doc.id}
+                              className="text-[10px] uppercase tracking-widest font-mono text-[#F5A623]"
+                            >
+                              Continue
+                            </button>
+                          )}
+                          {(isRetryable(doc.status) || (pollTimedOut && isProcessing)) && !needsPassword && (
                             <button
                               onClick={() => void retryIngest(doc)}
                               disabled={retryingDocId === doc.id}
@@ -641,7 +732,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                         </div>
                       </td>
                     </tr>,
-                    isExpanded ? (
+                    isExpanded && insights ? (
                       <tr key={`${doc.id}-insights`} className="bg-[#0A0A0B]">
                         <td colSpan={6} className="px-4 py-4">
                           <div className="flex items-start justify-between gap-3 mb-3">
@@ -736,7 +827,8 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                       </tr>
                     ) : null,
                   ];
-                })
+                  }),
+                ])
               )}
             </tbody>
           </table>

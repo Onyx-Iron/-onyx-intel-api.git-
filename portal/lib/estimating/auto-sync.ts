@@ -48,7 +48,7 @@ export async function syncTakeoffToEstimate(
   const [takeoff, versionIds, catalog, project, versionRow, pendingReviewCount] = await Promise.all([
     anyDb
       .from("takeoff_items")
-      .select("id,label,csi_code,division,quantity,unit,type,meta,review_status")
+      .select("id,label,csi_code,division,quantity,unit,type,meta,review_status,source_method")
       .eq("tenant_id", tenantId)
       .eq("project_id", projectId)
       .or("review_status.is.null,review_status.eq.approved")

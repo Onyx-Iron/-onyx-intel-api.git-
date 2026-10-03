@@ -144,11 +144,8 @@ export async function processOutboxBatch(
 /**
  * A manual takeoff's source measurement is gone (soft-deleted) — any
  * estimate_items row synced from it while it still existed is reconciled:
- * removed from a still-DRAFT version (the line item no longer has a source
- * to justify its presence in an editable estimate), left completely
- * untouched if it belongs to an approved/superseded version (immutability
- * — STEP 9/RULE 9: approved estimate versions must never be silently
- * mutated by takeoff edits, including deletions).
+ * a still-DRAFT line is flagged source-removed and zeroed so it cannot stay
+ * a live priced quantity. Approved and superseded versions stay untouched.
  */
 async function reconcileDeletedTakeoffEstimateItems(
   db: AnyDb,
@@ -189,8 +186,32 @@ async function reconcileDeletedTakeoffEstimateItems(
   const { data: versions } = await db.from("estimate_versions").select("id, status").in("id", versionIds);
   const draftVersionIds = new Set((versions ?? []).filter((v: { status: string }) => v.status === "draft" || v.status === "review").map((v: { id: string }) => v.id));
 
-  const toRemove = linkedItems.filter((i: { estimate_version_id: string }) => draftVersionIds.has(i.estimate_version_id));
-  if (toRemove.length === 0) return;
+  const toFlag = linkedItems.filter((i: { estimate_version_id: string }) => draftVersionIds.has(i.estimate_version_id));
+  if (toFlag.length === 0) return;
 
-  await db.from("estimate_items").delete().in("id", toRemove.map((i: { id: string }) => i.id));
+  const { data: existing } = await db
+    .from("estimate_items")
+    .select("id, notes")
+    .in("id", toFlag.map((i: { id: string }) => i.id));
+  for (const row of (existing ?? []) as Array<{ id: string; notes: string | null }>) {
+    const prior = (row.notes ?? "").trim();
+    const notes = prior.startsWith("Source removed") ? prior : `Source removed${prior ? ` — ${prior}` : ""}`;
+    await db.from("estimate_items").update({
+      notes,
+      pricing_status: "unpriced",
+      labor_cost: 0,
+      material_cost: 0,
+      equipment_cost: 0,
+      trucking_cost: 0,
+      subcontract_cost: 0,
+      disposal_cost: 0,
+      total_direct_cost: 0,
+      contingency: 0,
+      overhead: 0,
+      profit: 0,
+      total_price: 0,
+      unit_price: null,
+      unit_cost: null,
+    }).eq("id", row.id);
+  }
 }

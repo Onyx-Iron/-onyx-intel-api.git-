@@ -26,6 +26,7 @@ export interface TakeoffItemForEstimate extends TakeoffFingerprintInput {
   // migration backfills existing rows to 'approved' via its column
   // default, so this fallback is a belt-and-suspenders match).
   review_status?: "suggested" | "reviewed" | "approved" | "rejected" | null;
+  source_method?: string | null;
 }
 
 export interface TakeoffRowForSave extends TakeoffFingerprintInput {
@@ -200,6 +201,11 @@ export function buildEstimateImportRows(input: BuildEstimateImportInput): BuildE
 
   for (const takeoff of input.takeoffItems) {
     const fingerprint = takeoffFingerprint(takeoff);
+    const aiVision = takeoff.meta?.extraction_method === "ai_vision" || takeoff.source_method === "ai_vision";
+    if (aiVision && takeoff.review_status !== "approved") {
+      blockedByReview++;
+      continue;
+    }
     // Hard gate: only 'approved' items may reach the estimate. 'suggested'
     // and 'reviewed' are both still unapproved — a human having looked at
     // an item (reviewed) is not the same as having approved it — and

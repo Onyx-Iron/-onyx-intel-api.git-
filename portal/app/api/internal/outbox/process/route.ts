@@ -60,6 +60,13 @@ async function run(req: NextRequest): Promise<NextResponse> {
 
   try {
     const result = await processOutboxBatch(anyDb, `http-worker-${Date.now()}`, batchSize);
+    if (result.deadLettered > 0 || result.failed > 0) {
+      console.error("[outbox] estimate sync needs attention", {
+        failed: result.failed,
+        deadLettered: result.deadLettered,
+        errors: result.errors,
+      });
+    }
     return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
