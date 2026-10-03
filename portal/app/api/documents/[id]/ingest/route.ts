@@ -244,7 +244,7 @@ export async function POST(
       .from("documents")
       .select("id, file_name, project_id, drive_file_id, meta")
       .eq("id", docId)
-      .eq("tenant_id", tenantId)
+      .eq("tenant_id", resolvedTenantId)
       .single();
     if (docErr || !doc) {
       return NextResponse.json({ error: "Document not found" }, { status: 404 });
@@ -268,7 +268,7 @@ export async function POST(
     }
 
     const queueLargeDriveSplit = async (): Promise<NextResponse> => {
-      const driveToken = accessToken ?? await getAccessToken(tenantId, userId);
+      const driveToken = accessToken ?? await getAccessToken(resolvedTenantId, userId);
       if (!driveToken) {
         return NextResponse.json({
           error: "Google Drive is not connected. Connect Google in Settings.",
@@ -285,7 +285,7 @@ export async function POST(
         last_error: null,
         last_error_step: null,
         meta: { ...meta, storage_path: originalPath, storage: "plans-bucket" },
-      }).eq("id", docId).eq("tenant_id", tenantId);
+      }).eq("id", docId).eq("tenant_id", resolvedTenantId);
       try {
         await invokePageSplitWorker({
           document_id: docId,
@@ -321,7 +321,7 @@ export async function POST(
         processing_started_at: new Date().toISOString(),
         last_error: null,
         last_error_step: null,
-      }).eq("id", docId).eq("tenant_id", tenantId);
+      }).eq("id", docId).eq("tenant_id", resolvedTenantId);
       try {
         await invokePageSplitWorker({
           document_id: docId,
@@ -359,7 +359,7 @@ export async function POST(
     let pdfBytes: Buffer;
 
     if (driveFileId) {
-      const driveToken = accessToken ?? await getAccessToken(tenantId, userId);
+      const driveToken = accessToken ?? await getAccessToken(resolvedTenantId, userId);
       if (!driveToken) {
         return NextResponse.json({
           error: "Google Drive is not connected. Connect Google in Settings.",
@@ -407,7 +407,7 @@ export async function POST(
     await db.from("documents").update({
       status: "processing",
       processing_started_at: new Date().toISOString(),
-    }).eq("id", docId).eq("tenant_id", tenantId);
+    }).eq("id", docId).eq("tenant_id", resolvedTenantId);
 
     // 2. Upload to Gemini Files API
     const { uri: fileUri, name: gName } = await uploadToGeminiFiles(pdfBytes, doc.file_name);
@@ -460,7 +460,7 @@ export async function POST(
       doc_type: docType,
       page_count: pageCount,
       meta: { ...meta, title: extraction.title ?? null, gemini_file_uri: fileUri },
-    }).eq("id", docId).eq("tenant_id", tenantId);
+    }).eq("id", docId).eq("tenant_id", resolvedTenantId);
 
     // 6. Insert pages
     if (pages.length > 0) {
@@ -538,7 +538,7 @@ export async function POST(
             updated_at: new Date().toISOString(),
           },
         },
-      }).eq("id", docId).eq("tenant_id", tenantId);
+      }).eq("id", docId).eq("tenant_id", resolvedTenantId);
     }
 
     if (chunkRows.length > 0) {
@@ -550,7 +550,7 @@ export async function POST(
     await db.from("documents").update({
       status: "complete",
       processed_at: new Date().toISOString(),
-    }).eq("id", docId).eq("tenant_id", tenantId);
+    }).eq("id", docId).eq("tenant_id", resolvedTenantId);
 
     // 9. Cleanup Gemini file (best effort)
     await deleteGeminiFile(geminiName);
@@ -566,7 +566,7 @@ export async function POST(
 
     void logEvent({
       projectId: projectId,
-      tenantId,
+      tenantId: resolvedTenantId,
       userId,
       entityType: "document",
       entityId: docId,
