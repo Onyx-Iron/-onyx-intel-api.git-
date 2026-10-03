@@ -9,6 +9,26 @@ import { auditDelete } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
 import { reclaimStuckProcessingDocuments, reclaimStuckProcessingPages } from "@/lib/documents/reclaimStuck";
 import { finalizeDocumentsFromOcr } from "@/lib/documents/finalizeDocument";
+import { parseMaintainFlag } from "../../../supabase/functions/_shared/splitBatch";
+
+/** Columns the Documents UI needs — avoid select("*") on every poll. */
+const DOCUMENT_LIST_COLUMNS = [
+  "id",
+  "file_name",
+  "status",
+  "split_status",
+  "ocr_status",
+  "vector_status",
+  "takeoff_status",
+  "last_error",
+  "last_error_step",
+  "doc_type",
+  "page_count",
+  "uploaded_at",
+  "processed_at",
+  "meta",
+  "project_id",
+].join(", ");
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
@@ -18,25 +38,37 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     }
 
     const projectId = req.nextUrl.searchParams.get("project_id");
+    // maintain=1 (default when project-scoped) runs reclaim + OCR finalize.
+    // Pass maintain=0 for a cheap refresh after split-status already ran.
+    const maintain = parseMaintainFlag(
+      req.nextUrl.searchParams.get("maintain"),
+      Boolean(projectId),
+    );
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const { page, limit, offset } = parsePagination(req.nextUrl.searchParams);
 
     const db = await createServiceClient();
-    // Opportunistic reclaim + OCR finalize so list polls advance stuck / split
-    // docs instead of spinning forever in the Documents UI.
-    await reclaimStuckProcessingDocuments(db, tenantId).catch((err) =>
-      console.error("[GET /api/documents] stuck reclaim failed", err),
-    );
-    await reclaimStuckProcessingPages(db, tenantId).catch((err) =>
-      console.error("[GET /api/documents] stuck page reclaim failed", err),
-    );
-    await finalizeDocumentsFromOcr(db, tenantId).catch((err) =>
-      console.error("[GET /api/documents] OCR finalize failed", err),
-    );
+    if (maintain) {
+      // Scope reclaim/finalize to the project when listing a project — tenant-wide
+      // scans on every poll were the hot path for Documents.
+      // Reclaim docs + pages in parallel; finalize after so terminal page
+      // errors are visible to the OCR rollup.
+      await Promise.all([
+        reclaimStuckProcessingDocuments(db, tenantId, undefined, projectId).catch((err) =>
+          console.error("[GET /api/documents] stuck reclaim failed", err),
+        ),
+        reclaimStuckProcessingPages(db, tenantId, undefined, undefined, projectId).catch((err) =>
+          console.error("[GET /api/documents] stuck page reclaim failed", err),
+        ),
+      ]);
+      await finalizeDocumentsFromOcr(db, tenantId, undefined, projectId).catch((err) =>
+        console.error("[GET /api/documents] OCR finalize failed", err),
+      );
+    }
 
     let query = db
       .from("documents")
-      .select("*", { count: "exact" })
+      .select(DOCUMENT_LIST_COLUMNS, { count: "exact" })
       .eq("tenant_id", tenantId)
       .order("uploaded_at", { ascending: false });
 
@@ -81,7 +113,7 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     // Fetch the document first so we can log the project_id after deletion.
     const { data: docRow } = await db
       .from("documents")
-      .select("*")
+      .select("id, project_id, file_name, status")
       .eq("id", idParse.data)
       .eq("tenant_id", tenantId)
       .single();

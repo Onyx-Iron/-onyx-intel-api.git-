@@ -36,12 +36,16 @@ export async function finalizeDocumentsFromOcr(
   db: AnyDb,
   tenantId: string,
   documentIds?: string[],
+  projectId?: string | null,
 ): Promise<FinalizeResult[]> {
   let docsQ = db
     .from("documents")
     .select("id, status, page_count, meta")
     .eq("tenant_id", tenantId)
     .in("status", ["split", "processing", "queued"]);
+  if (projectId) {
+    docsQ = docsQ.eq("project_id", projectId);
+  }
   if (documentIds?.length) {
     docsQ = docsQ.in("id", documentIds);
   }
