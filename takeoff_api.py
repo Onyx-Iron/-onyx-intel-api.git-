@@ -944,6 +944,20 @@ logger.info(
 )
 
 
+def _mount_geometry_engine() -> None:
+    """Load python-engine routes. A missing optional library fails the request, not startup."""
+    import sys
+    engine = Path(__file__).resolve().parent / "python-engine"
+    engine_path = str(engine)
+    if engine_path not in sys.path:
+        sys.path.insert(0, engine_path)
+    from routes import build_router
+    app.include_router(build_router(verify_secret))
+
+
+_mount_geometry_engine()
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

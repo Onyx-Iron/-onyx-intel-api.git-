@@ -416,6 +416,7 @@ def extract_from_dxf(path: str) -> dict:
     # Aggregate by layer: total polyline/line length, hatch area, block-insert counts.
     layer_len: dict[str, float] = {}
     layer_area: dict[str, float] = {}
+    layer_rings: dict[str, list] = {}
     block_counts: dict[tuple[str, str], int] = {}  # (layer, block_name) -> count
 
     def _polyline_length(points: list) -> float:
@@ -435,7 +436,7 @@ def extract_from_dxf(path: str) -> dict:
                     if etype == "LWPOLYLINE" else [v.dxf.location for v in e.vertices]
                 layer_len[layer] = layer_len.get(layer, 0.0) + _polyline_length(pts)
                 if getattr(e, "closed", False) or getattr(e.dxf, "flags", 0) & 1:
-                    layer_area[layer] = layer_area.get(layer, 0.0) + _polygon_area(pts)
+                    layer_rings.setdefault(layer, []).append(pts)
             elif etype == "CIRCLE":
                 import math
                 layer_area[layer] = layer_area.get(layer, 0.0) + math.pi * e.dxf.radius ** 2
@@ -461,14 +462,16 @@ def extract_from_dxf(path: str) -> dict:
             basis=f"Sum of LINE/POLYLINE geometry on layer '{layer}' ({units}, converted to LF)",
             uom="LF", location_tag=layer,
         ))
-    for layer, area in sorted(layer_area.items()):
+    area_layers = set(layer_area) | set(layer_rings)
+    for layer in sorted(area_layers):
+        area = _union_area(layer_rings.get(layer, [])) + layer_area.get(layer, 0.0)
         area_sf = area * (to_feet ** 2)
         if area_sf <= 0:
             continue
         rows.append(_row(
             description=f"{layer} — area",
             qty=area_sf,
-            basis=f"Sum of closed-polygon/hatch area on layer '{layer}' ({units}², converted to SF)",
+            basis=f"Union of closed-polygon/hatch area on layer '{layer}' ({units}², converted to SF)",
             uom="SF", location_tag=layer,
         ))
     for (layer, block_name), count in sorted(block_counts.items()):
@@ -483,13 +486,31 @@ def extract_from_dxf(path: str) -> dict:
         "rows": rows,
         "coverage": {
             "layers_with_length": len(layer_len),
-            "layers_with_area": len(layer_area),
+            "layers_with_area": len(area_layers),
             "block_types": len(block_counts),
             "rows_extracted": len(rows),
             "drawing_units": units,
         },
         "ai_candidate_pages": [],
     }
+
+
+def _union_area(rings: list) -> float:
+    """Union closed rings so overlapping slabs on one layer are not double-counted.
+
+    Falls back to a shoelace sum when GEOS is not installed.
+    """
+    if not rings:
+        return 0.0
+    try:
+        import sys
+        engine = str(Path(__file__).resolve().parent / "python-engine")
+        if engine not in sys.path:
+            sys.path.insert(0, engine)
+        from services.geometry_service import union_area
+        return union_area([[(float(p[0]), float(p[1])) for p in ring] for ring in rings])
+    except Exception:
+        return sum(_polygon_area(ring) for ring in rings)
 
 
 def _polygon_area(points: list) -> float:
