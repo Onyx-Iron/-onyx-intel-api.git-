@@ -5,6 +5,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { getTenantConnectionAccessToken } from "@/lib/connections/store";
 import { logEvent } from "@/lib/activity";
+import { pingIndexNow } from "@/lib/seo/indexNow";
 
 export const runtime = "nodejs";
 
@@ -133,9 +134,39 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
   }
 
+  // Free SEO: ping IndexNow when we have a website + key and publish succeeded.
+  let indexnow: { ok: boolean; status: number; detail?: string } | null = null;
+  if (status === "published" && presence?.website_url && presence?.indexnow_key) {
+    try {
+      const host = String(presence.website_url);
+      const url = presence.website_url.replace(/\/$/, "");
+      indexnow = await pingIndexNow({
+        host,
+        key: presence.indexnow_key,
+        keyLocation: `${url}/${presence.indexnow_key}.txt`,
+        urlList: [url, ...(body.project_id ? [`${url}/projects/${body.project_id}`] : [])],
+      });
+      if (body.project_id) {
+        void logEvent({
+          projectId: body.project_id,
+          tenantId,
+          userId,
+          entityType: "seo_ping",
+          entityId: post.id,
+          action: "published",
+          title: "IndexNow ping after organic publish",
+          meta: { href: "/dashboard/marketing", indexnow },
+        });
+      }
+    } catch {
+      indexnow = { ok: false, status: 0, detail: "IndexNow ping failed" };
+    }
+  }
+
   return NextResponse.json({
     post,
     linkedin_share_url: linkedinShareUrl,
     errors,
+    indexnow,
   }, { status: status === "failed" ? 502 : 200 });
 }

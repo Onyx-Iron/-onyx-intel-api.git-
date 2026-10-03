@@ -17,6 +17,7 @@ interface BidOpportunity {
   project_id: string | null;
   source: string;
   notes: string | null;
+  meta?: { document_ids?: string[] } | null;
 }
 
 const ACTIVE_COLUMNS: BidStage[] = [
@@ -31,6 +32,9 @@ export default function BidBoard() {
   const [clientName, setClientName] = useState("");
   const [dueAt, setDueAt] = useState("");
   const [creating, setCreating] = useState(false);
+  const [attachDocId, setAttachDocId] = useState<Record<string, string>>({});
+  const [publishDraft, setPublishDraft] = useState<{ opportunityId: string; copy: string } | null>(null);
+  const [publishing, setPublishing] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -113,6 +117,70 @@ export default function BidBoard() {
     await load();
   };
 
+  const attachDocument = async (id: string) => {
+    const docId = (attachDocId[id] ?? "").trim();
+    if (!docId) {
+      toast({ title: "Enter a document id", kind: "error" });
+      return;
+    }
+    const res = await fetch(`/api/preconstruction/opportunities/${id}/attach-documents`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document_ids: [docId] }),
+    });
+    const data = await res.json() as { error?: string };
+    if (!res.ok) {
+      toast({ title: String(data.error ?? "Attach failed"), kind: "error" });
+      return;
+    }
+    toast({ title: "Document linked to bid", kind: "success" });
+    setAttachDocId((prev) => ({ ...prev, [id]: "" }));
+    await load();
+  };
+
+  const draftPublishWin = async (card: BidOpportunity) => {
+    setPublishing(true);
+    try {
+      const res = await fetch("/api/presence/publish-win", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ opportunity_id: card.id }),
+      });
+      const data = await res.json() as { draft?: string; error?: string };
+      if (!res.ok) throw new Error(data.error ?? "Draft failed");
+      setPublishDraft({ opportunityId: card.id, copy: data.draft ?? "" });
+    } catch (e) {
+      toast({ title: String(e instanceof Error ? e.message : e), kind: "error" });
+    } finally {
+      setPublishing(false);
+    }
+  };
+
+  const confirmPublishWin = async () => {
+    if (!publishDraft) return;
+    setPublishing(true);
+    try {
+      const res = await fetch("/api/presence/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channels: ["linkedin_share", "gbp", "meta"],
+          copy: publishDraft.copy,
+          confirm: true,
+        }),
+      });
+      const data = await res.json() as { error?: string; linkedin_share_url?: string };
+      if (!res.ok) throw new Error(data.error ?? "Publish failed");
+      if (data.linkedin_share_url) window.open(data.linkedin_share_url, "_blank", "noopener,noreferrer");
+      toast({ title: "Win published (organic + IndexNow when configured)", kind: "success" });
+      setPublishDraft(null);
+    } catch (e) {
+      toast({ title: String(e instanceof Error ? e.message : e), kind: "error" });
+    } finally {
+      setPublishing(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <SamImportPanel onImported={() => void load()} />
@@ -180,6 +248,11 @@ export default function BidBoard() {
                       </p>
                     )}
                     {card.project_id && <ProjectContactsInline projectId={card.project_id} />}
+                    {(card.meta?.document_ids?.length ?? 0) > 0 && (
+                      <p className="mt-1 text-[10px] text-white/40">
+                        {card.meta?.document_ids?.length} doc{(card.meta?.document_ids?.length ?? 0) === 1 ? "" : "s"} attached
+                      </p>
+                    )}
                     <div className="mt-2 flex flex-wrap gap-1">
                       <select
                         value={card.stage}
@@ -218,14 +291,77 @@ export default function BidBoard() {
                           >
                             Estimate
                           </Link>
+                          <Link
+                            href={`/dashboard/projects/${card.project_id}?phase=documents&tab=documents`}
+                            className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-white/80"
+                          >
+                            Docs
+                          </Link>
                         </>
                       )}
+                      {card.stage === "won" && (
+                        <button
+                          type="button"
+                          disabled={publishing}
+                          onClick={() => void draftPublishWin(card)}
+                          className="rounded bg-[#CCFF00]/20 px-1.5 py-0.5 text-[10px] text-[#CCFF00]"
+                        >
+                          Publish win
+                        </button>
+                      )}
+                    </div>
+                    <div className="mt-2 flex gap-1">
+                      <input
+                        type="text"
+                        placeholder="Document UUID"
+                        value={attachDocId[card.id] ?? ""}
+                        onChange={(e) => setAttachDocId((prev) => ({ ...prev, [card.id]: e.target.value }))}
+                        className="min-w-0 flex-1 rounded border border-white/10 bg-black/50 px-1.5 py-0.5 font-mono text-[10px] text-white/70"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void attachDocument(card.id)}
+                        className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-white/80"
+                      >
+                        Attach
+                      </button>
                     </div>
                   </li>
                 ))}
               </ul>
             </div>
           ))}
+        </div>
+      )}
+
+      {publishDraft && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-lg rounded-xl border border-white/15 bg-[#0E0F12] p-4">
+            <p className="text-xs font-semibold uppercase tracking-widest text-white/50">Publish win — review draft</p>
+            <textarea
+              value={publishDraft.copy}
+              onChange={(e) => setPublishDraft({ ...publishDraft, copy: e.target.value })}
+              rows={8}
+              className="mt-3 w-full rounded border border-white/10 bg-black/40 p-3 text-sm text-white"
+            />
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPublishDraft(null)}
+                className="rounded border border-white/15 px-3 py-1.5 text-xs text-white/70"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={publishing || !publishDraft.copy.trim()}
+                onClick={() => void confirmPublishWin()}
+                className="rounded bg-[#CCFF00] px-3 py-1.5 text-xs font-semibold text-black disabled:opacity-50"
+              >
+                {publishing ? "Publishing…" : "Approve & publish"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
