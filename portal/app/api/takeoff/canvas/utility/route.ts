@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
+import type { UtilityRunItem } from "@/lib/types/takeoff";
 import { logEvent } from "@/lib/activity";
 import { auditInsert, auditDelete } from "@/lib/audit";
 import { mirrorCivilItemsToTakeoff, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
@@ -58,19 +59,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const { data, error } = await query.order("created_at", { ascending: false });
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ items: data ?? [] });
-}
-
-interface UtilityRunItem {
-  project_id: string;
-  page_id?: string | null;
-  cost_code?: string | null;
-  system_type: string;
-  pipe_diameter_in: number;
-  invert_elevation_start: number;
-  invert_elevation_end: number;
-  trench_width_ft: number;
-  run_length_lf: number;
-  geometry: unknown;
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {

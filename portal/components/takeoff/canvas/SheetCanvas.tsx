@@ -479,6 +479,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     return 0;
   }, [draftPoints, tool, scale]);
 
+  const onCanvasMouseLeave = () => setSnapTarget(null);
+
   // ── Click handling ────────────────────────────────────────────────────────
   const onCanvasClick: React.MouseEventHandler<SVGSVGElement> = (e) => {
     if (!renderSize) return;
@@ -1196,9 +1198,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               viewBox={`0 0 ${renderSize.w} ${renderSize.h}`}
               className={`absolute inset-0 select-none ${tool === "pan" ? "cursor-grab" : "cursor-crosshair"}`}
               onClick={onCanvasClick}
-              onDoubleClick={finishDraft}
               onMouseMove={onCanvasMouseMove}
-              onMouseLeave={() => setSnapTarget(null)}
+              onMouseLeave={onCanvasMouseLeave}
+              onDoubleClick={finishDraft}
             >
               {/* Committed shapes */}
               {shapes.map((s) => {
@@ -1361,10 +1363,29 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   <circle
                     cx={snapTarget.point.x}
                     cy={snapTarget.point.y}
-                    r={3}
+                    r={4}
                     fill="#22c55e"
                     stroke="#052e16"
                     strokeWidth={1}
+                    opacity={0.85}
+                  />
+                  <line
+                    x1={snapTarget.point.x - 14}
+                    y1={snapTarget.point.y}
+                    x2={snapTarget.point.x + 14}
+                    y2={snapTarget.point.y}
+                    stroke="#22c55e"
+                    strokeWidth={1.5}
+                    opacity={0.7}
+                  />
+                  <line
+                    x1={snapTarget.point.x}
+                    y1={snapTarget.point.y - 14}
+                    x2={snapTarget.point.x}
+                    y2={snapTarget.point.y + 14}
+                    stroke="#22c55e"
+                    strokeWidth={1.5}
+                    opacity={0.7}
                   />
                 </g>
               )}

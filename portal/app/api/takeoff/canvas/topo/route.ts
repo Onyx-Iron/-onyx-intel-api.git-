@@ -10,6 +10,7 @@ import {
 } from "@/lib/project-controls/server";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditInsert, auditDelete } from "@/lib/audit";
+import type { TopoNodeItem } from "@/lib/types/takeoff";
 
 export const runtime = "nodejs";
 
@@ -71,15 +72,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const { data, error } = await query.order("created_at", { ascending: false });
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ items: data ?? [] });
-}
-
-interface TopoNodeItem {
-  project_id: string;
-  page_id: string;
-  node_type: "contour_line" | "spot_elevation";
-  elevation: number;
-  geometry: unknown;
-  layer_assignment?: string | null;
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
