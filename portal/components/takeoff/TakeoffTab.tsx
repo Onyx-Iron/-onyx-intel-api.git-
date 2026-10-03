@@ -368,6 +368,8 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
   // ── Async page-split polling (large uploads routed off the sync stream) ──
   const [asyncPages, setAsyncPages] = useState<{ total: number; done: number; error: number }>({ total: 0, done: 0, error: 0 });
   const pollTimerRef = useRef<number | null>(null);
+  const pollStartedAtRef = useRef<number | null>(null);
+  const POLL_TIMEOUT_MS = 5 * 60 * 1000;
 
   // ── Saved items from DB ──
   const [savedItems, setSavedItems] = useState<SavedItem[]>([]);
@@ -531,6 +533,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
   const reset = () => {
     abortRef.current?.abort();
     if (pollTimerRef.current != null) { window.clearTimeout(pollTimerRef.current); pollTimerRef.current = null; }
+    pollStartedAtRef.current = null;
     setPhase("idle"); setRows([]); setProgress(0); setStatusMsg("");
     setTotalRows(0); setAuditStatus(null); setFailedRows(0); setFileName("");
     setSourceType(null); setCoverage(null); setAiPages([]); setAiRunning(false);
@@ -546,14 +549,24 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     setPhase("processing_async");
     setStatusMsg(`Queued for background processing — ${docName}`);
     setProgress(0);
+    pollStartedAtRef.current = Date.now();
 
     const tick = async () => {
       if (abortRef.current?.signal.aborted) return;
+      const startedAt = pollStartedAtRef.current ?? Date.now();
+      if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        setPhase("error");
+        setStatusMsg(
+          `Background processing timed out after ${Math.round(POLL_TIMEOUT_MS / 60_000)} minutes — check the document list or retry.`,
+        );
+        return;
+      }
       try {
         const res = await fetch(`/api/takeoff/split-status?document_id=${encodeURIComponent(documentId)}`, { cache: "no-store" });
         const data = await res.json().catch(() => ({})) as {
           pages_total?: number; pages_done?: number; pages_error?: number;
           finished?: boolean; document_status?: string; items?: SavedTakeoffItem[];
+          page_errors?: Array<{ page_number: number; error: string | null }>;
         };
         if (!res.ok) {
           setPhase("error"); setStatusMsg("Lost track of background processing — check the document list."); return;
@@ -591,10 +604,13 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
           setTotalRows(extracted.length);
           setProgress(100);
           setAuditStatus(extracted.length > 0 ? "VERIFIED_SUCCESS" : "PARTIAL_WITH_ERRORS");
+          const pageErrCount = data.page_errors?.length ?? errorCount;
           setStatusMsg(
             data.document_status === "failed"
               ? `Background processing failed for ${docName}.`
-              : `Complete — ${extracted.length} line items from ${docName}`,
+              : pageErrCount > 0
+                ? `Complete with ${pageErrCount} page error(s) — ${extracted.length} line items from ${docName}`
+                : `Complete — ${extracted.length} line items from ${docName}`,
           );
           setPhase(data.document_status === "failed" && extracted.length === 0 ? "error" : "done");
           // Rows are already persisted by page-takeoff-worker directly —
@@ -609,7 +625,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
       pollTimerRef.current = window.setTimeout(tick, 2500);
     };
     void tick();
-  }, [loadSavedItems]);
+  }, [loadSavedItems, POLL_TIMEOUT_MS]);
 
   // ── Deterministic extraction (PDF tables / DXF / IFC / XLSX) ──
   //

@@ -163,12 +163,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       });
       if ("error" in inserted) return NextResponse.json(inserted, { status: inserted.status });
 
-      fireIngest(req, inserted.id);
+      const TERMINAL = new Set(["complete", "ready", "done"]);
+      if (!inserted.deduped || !TERMINAL.has(inserted.status)) {
+        fireIngest(req, inserted.id);
+      }
       return NextResponse.json({
         document: {
           id: inserted.id,
           file_name,
-          status: "processing",
+          status: inserted.status,
           drive_file_id,
         },
         deduped: inserted.deduped,
@@ -231,20 +234,8 @@ async function insertDriveRow(args: {
   driveFileId: string;
   mimeType: string;
   size: number | null;
-}): Promise<{ id: string; deduped: boolean } | { error: string; status: number }> {
+}): Promise<{ id: string; deduped: boolean; status: string } | { error: string; status: number }> {
   const { db, tenantId, userId, projectId, fileName, driveFileId, mimeType, size } = args;
-
-  // Explicit check-then-insert dedupe (the race-proof partial unique index
-  // isn't applied to the DB yet). Idempotent across browser retries on the
-  // same (tenant, project, drive_file_id).
-  const { data: existing } = await db
-    .from("documents")
-    .select("id")
-    .eq("tenant_id", tenantId)
-    .eq("project_id", projectId)
-    .eq("drive_file_id", driveFileId)
-    .maybeSingle();
-  if (existing) return { id: existing.id, deduped: true };
 
   const documentId = crypto.randomUUID();
   const originalPath = `originals/${documentId}.pdf`;
@@ -266,8 +257,21 @@ async function insertDriveRow(args: {
     }),
   };
   const { data: doc, error } = await db
-    .from("documents").insert(insertRow).select("id").single();
-  if (error || !doc) return { error: `[insert] ${error?.message}`, status: 500 };
+    .from("documents").insert(insertRow).select("id, status").single();
+  if (error) {
+    if (error.code === "23505") {
+      const { data: existing } = await db
+        .from("documents")
+        .select("id, status")
+        .eq("tenant_id", tenantId)
+        .eq("project_id", projectId)
+        .eq("drive_file_id", driveFileId)
+        .maybeSingle();
+      if (existing) return { id: existing.id, deduped: true, status: existing.status };
+    }
+    return { error: `[insert] ${error.message}`, status: 500 };
+  }
+  if (!doc) return { error: "[insert] no row returned", status: 500 };
   auditInsert({
     tenant_id: tenantId,
     user_id: userId,
@@ -275,7 +279,7 @@ async function insertDriveRow(args: {
     record_id: doc.id,
     new_values: insertRow as unknown as Record<string, unknown>,
   });
-  return { id: doc.id, deduped: false };
+  return { id: doc.id, deduped: false, status: doc.status };
 }
 
 function fireIngest(req: NextRequest, docId: string): void {
