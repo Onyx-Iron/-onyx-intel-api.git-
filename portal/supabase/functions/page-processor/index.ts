@@ -6,20 +6,20 @@
 //
 // Pipeline:
 //   1. Download single-page PDF bytes from storage.
-//   2. Send to Gemini via `generateContent` with inlineData
-//      (base64-encoded PDF). NOTE: payload deliberately omits any
-//      `display_name` field — Gemini's REST schema doesn't accept it and
-//      rejects the whole request if present.
-//   3. Chunk the extracted text (~1200 chars, 200-char overlap).
-//   4. Embed each chunk with text-embedding-004.
-//   5. Insert into `document_chunks` with page_id + page_number.
-//   6. Update `document_pages.status="done"` and stash `ocr_text`.
+//   2. If ENABLE_DOCLING + PYTHON_API_URL: density-check via pdfplumber
+//      (/api/parse/document); when text-rich, try Docling Markdown.
+//   3. Else / on Docling miss: Gemini generateContent OCR (drawings/scans).
+//   4. Chunk (~1200 / 200 overlap) → embed → insert document_chunks with meta.
+//   5. Mark document_pages.status="done" and stash ocr_text.
 //
 // Env vars:
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GEMINI_API_KEY,
 //   PLANS_BUCKET (default "plans-bucket"),
 //   GEMINI_TEXT_MODEL  (default "gemini-2.5-pro"),
-//   GEMINI_EMBED_MODEL (default "text-embedding-004").
+//   GEMINI_EMBED_MODEL (default "text-embedding-004"),
+//   PYTHON_API_URL, ONYX_API_SECRET (optional Docling path),
+//   ENABLE_DOCLING (try Docling when density high),
+//   DOCLING_MIN_CHARS (default 400).
 
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
@@ -30,11 +30,32 @@ const GEMINI_API_KEY     = Deno.env.get("GEMINI_API_KEY")!;
 const PLANS_BUCKET       = Deno.env.get("PLANS_BUCKET") ?? "plans-bucket";
 const TEXT_MODEL         = Deno.env.get("GEMINI_TEXT_MODEL") ?? "gemini-2.5-pro";
 const EMBED_MODEL        = Deno.env.get("GEMINI_EMBED_MODEL") ?? "text-embedding-004";
+const PYTHON_API_URL     = (Deno.env.get("PYTHON_API_URL") ?? "").replace(/\/$/, "");
+const ONYX_API_SECRET    = Deno.env.get("ONYX_API_SECRET") ?? "";
+const TRY_DOCLING        = ["1", "true", "yes", "on"].includes(
+  (Deno.env.get("ENABLE_DOCLING") ?? "").trim().toLowerCase(),
+);
+const DOCLING_MIN_CHARS  = Number(Deno.env.get("DOCLING_MIN_CHARS") ?? "400") || 400;
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
-// Gemini calls occasionally 429/5xx under load; retry with exponential
-// backoff rather than failing the whole page on a transient blip.
+interface ChunkMeta {
+  parser_id: "docling" | "gemini" | "pdfplumber";
+  confidence: number | null;
+  heading_path: string[] | null;
+  bbox: null;
+  source: "page-processor";
+  density_chars?: number;
+}
+
+interface ExtractedText {
+  text: string;
+  parserId: ChunkMeta["parser_id"];
+  headings: string[];
+  densityChars: number | null;
+  confidence: number | null;
+}
+
 async function fetchWithRetry(url: string, options: RequestInit, maxAttempts = 3, timeoutMs = 45_000): Promise<Response> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -114,55 +135,29 @@ Deno.serve(async (req) => {
     // ── 1. Download page bytes ──────────────────────────────────────────────
     const dl = await db.storage.from(PLANS_BUCKET).download(body.storage_path);
     if (dl.error || !dl.data) throw new Error(`storage download: ${dl.error?.message ?? "empty"}`);
-    const arrayBuf = await dl.data.arrayBuffer();
-    const b64 = base64Encode(new Uint8Array(arrayBuf));
+    const pageBlob = dl.data;
 
-    // ── 2. Extract text via Gemini ───────────────────────────────────────────
-    // Payload strictly omits `display_name` — the v1beta REST endpoint rejects
-    // it (it exists only in the Files API, not inlineData parts).
-    const genBody = {
-      contents: [{
-        role: "user",
-        parts: [
-          { text: "Extract all readable text from this construction plan sheet. Preserve line breaks and tabular structure. Return raw text only." },
-          { inlineData: { mimeType: "application/pdf", data: b64 } },
-        ],
-      }],
-      generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
-    };
-
-    const genRes = await fetchWithRetry(
-      `${GEMINI_BASE}/models/${TEXT_MODEL}:generateContent`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-goog-api-key": GEMINI_API_KEY },
-        body: JSON.stringify(genBody),
-      },
-    );
-    if (!genRes.ok) {
-      const errText = (await genRes.text().catch(() => "")).slice(0, 500);
-      throw new Error(`gemini generate ${genRes.status}: ${errText}`);
-    }
-    const genJson = await genRes.json();
-    const text: string = (genJson.candidates?.[0]?.content?.parts ?? [])
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .map((p: any) => p.text ?? "")
-      .join("")
-      .trim();
+    // ── 2. Extract text: Docling (text-rich) → Gemini fallback ───────────────
+    const extracted = await extractPageText(pageBlob, body);
 
     // ── 3. Chunk ────────────────────────────────────────────────────────────
-    const chunks = chunkText(text, 1200, 200);
+    const chunks = chunkText(extracted.text, 1200, 200);
     if (chunks.length === 0) {
       await db.from("document_pages")
-        .update({ status: "done", ocr_text: text || null, updated_at: new Date().toISOString() })
+        .update({ status: "done", ocr_text: extracted.text || null, updated_at: new Date().toISOString() })
         .eq("id", body.page_id);
-      await recordEvent("ocr", "succeeded");
+      await recordEvent("ocr", "succeeded", `parser=${extracted.parserId}; empty`);
       await recordEvent("embedding", "skipped", "no chunks extracted");
       await refreshDocumentSummary();
-      return new Response(JSON.stringify({ ok: true, page_id: body.page_id, chunks: 0 }), { status: 200 });
+      return new Response(JSON.stringify({
+        ok: true,
+        page_id: body.page_id,
+        chunks: 0,
+        parser_id: extracted.parserId,
+      }), { status: 200 });
     }
 
-    // ── 4. Embed (batched — text-embedding-004 supports batch mode) ─────────
+    // ── 4. Embed ────────────────────────────────────────────────────────────
     await recordEvent("embedding", "started");
     const embeddings = await embedBatch(chunks);
     const embeddedCount = embeddings.filter((e) => Array.isArray(e) && e.length > 0).length;
@@ -170,19 +165,30 @@ Deno.serve(async (req) => {
       throw new Error(`embedBatch returned no usable vectors for ${chunks.length} chunk(s)`);
     }
 
-    // ── 5. Insert chunks (skip slots with null embeddings rather than
-    // claiming success with unsearchable null vectors) ───────────────────────
+    // ── 5. Insert with XD-02 meta provenance ────────────────────────────────
     const rows = chunks
-      .map((content, i) => ({
-        id: crypto.randomUUID(),
-        tenant_id: body.tenant_id,
-        document_id: body.document_id,
-        page_id: body.page_id,
-        page_number: body.page_number,
-        chunk_index: i,
-        content,
-        embedding: embeddings[i] ?? null,
-      }))
+      .map((content, i) => {
+        const heading_path = headingPathForChunk(extracted.text, content, extracted.headings);
+        const meta: ChunkMeta = {
+          parser_id: extracted.parserId,
+          confidence: extracted.confidence,
+          heading_path: heading_path.length ? heading_path : null,
+          bbox: null,
+          source: "page-processor",
+          ...(extracted.densityChars != null ? { density_chars: extracted.densityChars } : {}),
+        };
+        return {
+          id: crypto.randomUUID(),
+          tenant_id: body.tenant_id,
+          document_id: body.document_id,
+          page_id: body.page_id,
+          page_number: body.page_number,
+          chunk_index: i,
+          content,
+          embedding: embeddings[i] ?? null,
+          meta,
+        };
+      })
       .filter((r) => Array.isArray(r.embedding) && r.embedding.length > 0);
     if (rows.length === 0) {
       throw new Error("no chunks with embeddings to insert");
@@ -191,15 +197,13 @@ Deno.serve(async (req) => {
     if (insErr) throw new Error(`insert chunks: ${insErr.message}`);
 
     // ── 6. Done ─────────────────────────────────────────────────────────────
-    // Partial embed success still marks the page done for OCR, but records
-    // how many chunks were dropped so ops can see search coverage gaps.
     const embedNote = embeddedCount < chunks.length
-      ? `${chunks.length - embeddedCount} chunk embed(s) dropped`
-      : undefined;
+      ? `${chunks.length - embeddedCount} chunk embed(s) dropped; parser=${extracted.parserId}`
+      : `parser=${extracted.parserId}`;
     await db.from("document_pages")
-      .update({ status: "done", ocr_text: text, updated_at: new Date().toISOString() })
+      .update({ status: "done", ocr_text: extracted.text, updated_at: new Date().toISOString() })
       .eq("id", body.page_id);
-    await recordEvent("ocr", "succeeded");
+    await recordEvent("ocr", "succeeded", `parser=${extracted.parserId}`);
     await recordEvent("embedding", "succeeded", embedNote);
     await refreshDocumentSummary();
 
@@ -209,6 +213,7 @@ Deno.serve(async (req) => {
       chunks: rows.length,
       chunks_requested: chunks.length,
       embeds_missing: chunks.length - embeddedCount,
+      parser_id: extracted.parserId,
     }), { status: 200 });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
@@ -223,7 +228,148 @@ Deno.serve(async (req) => {
   }
 });
 
+// ── extract paths ────────────────────────────────────────────────────────────
+
+async function extractPageText(pageBlob: Blob, body: Payload): Promise<ExtractedText> {
+  const docling = await tryDoclingExtract(pageBlob, body);
+  if (docling) return docling;
+  return await extractWithGemini(pageBlob);
+}
+
+async function tryDoclingExtract(pageBlob: Blob, body: Payload): Promise<ExtractedText | null> {
+  if (!TRY_DOCLING || !PYTHON_API_URL) return null;
+  try {
+    // Density probe (pdfplumber) — skip Docling on drawing-like pages.
+    const densForm = new FormData();
+    densForm.append("file", pageBlob, `page-${body.page_number}.pdf`);
+    const densRes = await fetchWithRetry(`${PYTHON_API_URL}/api/parse/document`, {
+      method: "POST",
+      headers: {
+        "X-Onyx-Secret": ONYX_API_SECRET,
+        "X-Onyx-Tenant": body.tenant_id,
+        ...(body.project_id ? { "X-Onyx-Project": body.project_id } : {}),
+      },
+      body: densForm,
+    }, 2, 30_000);
+    if (!densRes.ok) {
+      console.warn(`[page-processor] density probe ${densRes.status}`);
+      return null;
+    }
+    const densJson = await densRes.json() as {
+      text_preview?: string | null;
+      text_density?: { char_count?: number; is_text_rich?: boolean };
+    };
+    const charCount = densJson.text_density?.char_count
+      ?? (densJson.text_preview?.length ?? 0);
+    const rich = densJson.text_density?.is_text_rich
+      ?? (charCount >= DOCLING_MIN_CHARS);
+    if (!rich) {
+      console.log(`[page-processor] skip Docling — low text density chars=${charCount}`);
+      return null;
+    }
+
+    const form = new FormData();
+    form.append("file", pageBlob, `page-${body.page_number}.pdf`);
+    const res = await fetchWithRetry(`${PYTHON_API_URL}/api/parse/docling`, {
+      method: "POST",
+      headers: {
+        "X-Onyx-Secret": ONYX_API_SECRET,
+        "X-Onyx-Tenant": body.tenant_id,
+        ...(body.project_id ? { "X-Onyx-Project": body.project_id } : {}),
+      },
+      body: form,
+    }, 2, 60_000);
+    if (!res.ok) {
+      console.warn(`[page-processor] docling ${res.status}`);
+      return null;
+    }
+    const json = await res.json() as {
+      status?: string;
+      markdown?: string | null;
+      text_preview?: string | null;
+      metadata?: { headings?: string[]; markdown_chars?: number };
+    };
+    if (json.status !== "parsed") {
+      console.log(`[page-processor] docling status=${json.status} — fallback Gemini`);
+      return null;
+    }
+    const text = (json.markdown ?? json.text_preview ?? "").trim();
+    if (!text) return null;
+    const headings = Array.isArray(json.metadata?.headings) ? json.metadata!.headings! : [];
+    const mdChars = json.metadata?.markdown_chars ?? text.length;
+    return {
+      text,
+      parserId: "docling",
+      headings,
+      densityChars: charCount,
+      confidence: Math.min(0.95, 0.55 + Math.min(mdChars, 4000) / 8000),
+    };
+  } catch (err) {
+    console.warn("[page-processor] Docling path failed, falling back to Gemini", err);
+    return null;
+  }
+}
+
+async function extractWithGemini(pageBlob: Blob): Promise<ExtractedText> {
+  const arrayBuf = await pageBlob.arrayBuffer();
+  const b64 = base64Encode(new Uint8Array(arrayBuf));
+  const genBody = {
+    contents: [{
+      role: "user",
+      parts: [
+        { text: "Extract all readable text from this construction plan sheet. Preserve line breaks and tabular structure. Return raw text only." },
+        { inlineData: { mimeType: "application/pdf", data: b64 } },
+      ],
+    }],
+    generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
+  };
+
+  const genRes = await fetchWithRetry(
+    `${GEMINI_BASE}/models/${TEXT_MODEL}:generateContent`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-goog-api-key": GEMINI_API_KEY },
+      body: JSON.stringify(genBody),
+    },
+  );
+  if (!genRes.ok) {
+    const errText = (await genRes.text().catch(() => "")).slice(0, 500);
+    throw new Error(`gemini generate ${genRes.status}: ${errText}`);
+  }
+  const genJson = await genRes.json();
+  const text: string = (genJson.candidates?.[0]?.content?.parts ?? [])
+    .map((p: any) => p.text ?? "")
+    .join("")
+    .trim();
+  return {
+    text,
+    parserId: "gemini",
+    headings: [],
+    densityChars: null,
+    confidence: text ? 0.7 : null,
+  };
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+function headingPathForChunk(fullText: string, chunk: string, docHeadings: string[]): string[] {
+  if (docHeadings.length === 0 && !fullText.includes("#")) return [];
+  const idx = fullText.indexOf(chunk.slice(0, Math.min(80, chunk.length)));
+  const prefix = idx >= 0 ? fullText.slice(0, idx) : "";
+  const trail: string[] = [];
+  for (const line of prefix.split("\n")) {
+    const s = line.trim();
+    if (!s.startsWith("#")) continue;
+    const level = s.match(/^#+/)?.[0].length ?? 1;
+    const title = s.replace(/^#+\s*/, "").trim();
+    if (!title) continue;
+    while (trail.length >= level) trail.pop();
+    trail.push(title);
+  }
+  if (trail.length > 0) return trail.slice(-4);
+  // Fallback: first document-level headings from Docling metadata.
+  return docHeadings.slice(0, 3);
+}
 
 function chunkText(text: string, size: number, overlap: number): string[] {
   if (!text) return [];
@@ -231,7 +377,6 @@ function chunkText(text: string, size: number, overlap: number): string[] {
   let i = 0;
   while (i < text.length) {
     const end = Math.min(text.length, i + size);
-    // Break on newline if we can, to keep chunks readable
     let cut = end;
     if (end < text.length) {
       const nl = text.lastIndexOf("\n", end);
@@ -254,14 +399,10 @@ function base64Encode(bytes: Uint8Array): string {
 }
 
 async function embedBatch(inputs: string[]): Promise<Array<number[] | null>> {
-  // v1beta batch embed endpoint: batchEmbedContents
   const body = {
     requests: inputs.map((text) => ({
       model: `models/${EMBED_MODEL}`,
       content: { parts: [{ text }] },
-      // Pin the output size so a future model swap/version bump on Google's
-      // side can't silently change vector length and break the pgvector
-      // column dimension check on `document_chunks.embedding`.
       outputDimensionality: 768,
     })),
   };
@@ -278,6 +419,5 @@ async function embedBatch(inputs: string[]): Promise<Array<number[] | null>> {
     return inputs.map(() => null);
   }
   const json = await res.json();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return (json.embeddings ?? []).map((e: any) => (Array.isArray(e?.values) ? e.values : null));
 }

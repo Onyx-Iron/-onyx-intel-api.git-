@@ -5,7 +5,7 @@ Three functions power the Drive / local upload → page-split → OCR + takeoff 
 | Function               | Trigger                                            | Purpose                                                        |
 | ---------------------- | -------------------------------------------------- | -------------------------------------------------------------- |
 | `page-split-worker`    | Portal `queuePageSplit` / import-drive / from-document | Stream Drive or read Storage → pdf-lib split → insert `document_pages` → fan-out |
-| `page-processor`       | Fan-out from `page-split-worker` (one per page)    | Gemini extract → chunk → embed → `document_chunks`             |
+| `page-processor`       | Fan-out from `page-split-worker` (one per page)    | Density → Docling (text) or Gemini (drawings) → chunk/embed + `meta` |
 | `page-takeoff-worker`  | Fan-out from `page-split-worker` (one per page)    | CSI takeoff extraction per page → estimate rows                |
 
 ## Prerequisites
@@ -22,8 +22,16 @@ Three functions power the Drive / local upload → page-split → OCR + takeoff 
      GEMINI_API_KEY="AQ...your-billing-key" \
      PLANS_BUCKET="plans-bucket" \
      GEMINI_TEXT_MODEL="gemini-2.5-pro" \
-     GEMINI_EMBED_MODEL="text-embedding-004"
+     GEMINI_EMBED_MODEL="text-embedding-004" \
+     PYTHON_API_URL="https://your-railway.example.com" \
+     ONYX_API_SECRET="shared-with-railway" \
+     ENABLE_DOCLING="1"
    ```
+
+   Optional: `DOCLING_MIN_CHARS` (default `400`) — pdfplumber char threshold
+   before trying Docling. Railway must also have `ENABLE_DOCLING=1` and
+   `requirements-docling.txt` installed; otherwise page-processor falls back
+   to Gemini automatically.
 
    `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are auto-injected by the
    Edge Function runtime — do NOT set them manually.
