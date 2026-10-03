@@ -41,7 +41,7 @@ export function isInFlightStatus(status: string): boolean {
 }
 
 export function isRetryable(status: string): boolean {
-  return isTerminalFailure(status);
+  return isTerminalFailure(status) || status === "complete_with_errors";
 }
 
 export function statusLabel(status: string): string {

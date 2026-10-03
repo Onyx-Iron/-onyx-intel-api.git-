@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useToast } from "@/components/common/Toast";
+import { createGisTokenClient, type GisTokenClient } from "@/lib/google/gisTokenClient";
 
 interface DriveFile {
   id: string;
@@ -52,7 +53,7 @@ function loadScript(src: string, onLoad: () => void) {
 export default function GoogleDrivePicker({ onFilesSelected, disabled, children }: Props) {
   const { toast } = useToast();
   const [loading, setLoading] = useState(false);
-  const tokenClientRef = useRef<{ requestAccessToken: (overrides?: { prompt?: string }) => void } | null>(null);
+  const tokenClientRef = useRef<GisTokenClient | null>(null);
   const accessTokenRef = useRef<string | null>(null);
   const onFilesRef = useRef(onFilesSelected);
 
@@ -89,41 +90,46 @@ export default function GoogleDrivePicker({ onFilesSelected, disabled, children 
 
     picker.setVisible(true);
     setLoading(false);
-  }, []);
+  }, [toast]);
 
   const requestToken = useCallback(() => {
     if (!tokenClientRef.current) {
-      const oauth2 = window.google?.accounts?.oauth2;
-      if (!oauth2) {
+      if (!window.google?.accounts?.oauth2) {
         setLoading(false);
         toast({ title: String("Google sign-in is still loading. Try again in a second."), kind: "info" });
         return;
       }
 
-      tokenClientRef.current = oauth2.initTokenClient({
-        client_id: CLIENT_ID,
-        scope: SCOPES,
-        callback: (resp) => {
-          if (resp.access_token) {
-            accessTokenRef.current = resp.access_token;
-            // Load picker API then open
-            window.gapi?.load("picker", () => openPicker(resp.access_token!));
-          } else if (resp.error) {
+      try {
+        tokenClientRef.current = createGisTokenClient({
+          clientId: CLIENT_ID,
+          scope: SCOPES,
+          callback: (resp) => {
+            if (resp.access_token) {
+              accessTokenRef.current = resp.access_token;
+              // Load picker API then open
+              window.gapi?.load("picker", () => openPicker(resp.access_token!));
+            } else if (resp.error) {
+              setLoading(false);
+              toast({ title: String(`Google sign-in failed: ${resp.error}. If it closes immediately, your Google Workspace may be blocking app access — tell me and I'll walk you through trusting the app.`), kind: "error" });
+            }
             setLoading(false);
-            toast({ title: String(`Google sign-in failed: ${resp.error}. If it closes immediately, your Google Workspace may be blocking app access — tell me and I'll walk you through trusting the app.`), kind: "error" });
-          }
-          setLoading(false);
-        },
-        error_callback: (err: { type?: string; message?: string }) => {
-          setLoading(false);
-          if (err?.type !== "popup_closed") {
-            toast({ title: String(`Google Drive connection error: ${err?.message ?? err?.type ?? "unknown"}.`), kind: "error" });
-          }
-        },
-      });
+          },
+          error_callback: (err) => {
+            setLoading(false);
+            if (err?.type !== "popup_closed") {
+              toast({ title: String(`Google Drive connection error: ${err?.message ?? err?.type ?? "unknown"}.`), kind: "error" });
+            }
+          },
+        });
+      } catch {
+        setLoading(false);
+        toast({ title: String("Google sign-in is still loading. Try again in a second."), kind: "info" });
+        return;
+      }
     }
     tokenClientRef.current?.requestAccessToken();
-  }, [openPicker]);
+  }, [openPicker, toast]);
 
   // Preload Google's scripts on mount. The OAuth popup must open synchronously
   // inside the click event — if we instead load scripts on click and open the
@@ -153,7 +159,7 @@ export default function GoogleDrivePicker({ onFilesSelected, disabled, children 
     // Request the token NOW, synchronously, so the sign-in popup isn't blocked.
     setLoading(true);
     requestToken();
-  }, [disabled, loading, openPicker, requestToken]);
+  }, [disabled, loading, openPicker, requestToken, toast]);
 
   return (
     <div onClick={handleClick} className="contents cursor-pointer">
