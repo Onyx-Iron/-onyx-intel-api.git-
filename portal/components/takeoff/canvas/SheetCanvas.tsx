@@ -190,7 +190,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [priorLabel, setPriorLabel] = useState<string | null>(null);
   const [showPrior, setShowPrior] = useState(false);
   const [sheets, setSheets] = useState<Array<{ id: string; page_number: number; status: string }>>([]);
-  const [revisionDiff, setRevisionDiff] = useState<{ added: Polyline[]; removed: Polyline[] } | null>(null);
+  const [revisionDiff, setRevisionDiff] = useState<{
+    pageId: string;
+    priorPageId: string;
+    added: Polyline[];
+    removed: Polyline[];
+  } | null>(null);
   const snapWorkerRef = useRef<Worker | null>(null);
   const snapRequestIdRef = useRef(0);
   const latestSnapRef = useRef<SnapResult | null>(null);
@@ -475,29 +480,35 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }, [documentId]);
 
   useEffect(() => {
-    if (!showPrior || !priorPageId) {
-      setRevisionDiff(null);
-      return;
-    }
+    if (!showPrior || !priorPageId) return;
+    const requestedPageId = pageId;
+    const requestedPriorId = priorPageId;
     let cancelled = false;
     (async () => {
       const [currentRes, priorRes] = await Promise.all([
-        fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
-        fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(priorPageId)}`, { cache: "no-store" }),
+        fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(requestedPageId)}`, { cache: "no-store" }),
+        fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(requestedPriorId)}`, { cache: "no-store" }),
       ]);
       if (cancelled) return;
       const current = currentRes.ok ? await currentRes.json() as { vectors?: unknown } : { vectors: [] };
       const prior = priorRes.ok ? await priorRes.json() as { vectors?: unknown } : { vectors: [] };
-      setRevisionDiff(diffRevisionVectors(
+      const diff = diffRevisionVectors(
         polylinesFromUnknown(current.vectors),
         polylinesFromUnknown(prior.vectors),
-      ));
-    })().catch(() => { if (!cancelled) setRevisionDiff(null); });
+      );
+      setRevisionDiff({
+        pageId: requestedPageId,
+        priorPageId: requestedPriorId,
+        added: diff.added,
+        removed: diff.removed,
+      });
+    })().catch(() => { /* a failed compare leaves the previous sheet's diff unused */ });
     return () => { cancelled = true; };
   }, [showPrior, priorPageId, pageId]);
 
   const revisionPaths = useMemo(() => {
-    if (!showPrior || !revisionDiff || !renderSize) return null;
+    if (!showPrior || !priorPageId || !revisionDiff || !renderSize) return null;
+    if (revisionDiff.pageId !== pageId || revisionDiff.priorPageId !== priorPageId) return null;
     const all = [...revisionDiff.added, ...revisionDiff.removed];
     if (all.length === 0) return null;
     const frame = vectorCanvasFrame(all.map((line) => ({
@@ -512,7 +523,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       added: revisionDiff.added.map(toPath),
       removed: revisionDiff.removed.map(toPath),
     };
-  }, [showPrior, revisionDiff, renderSize]);
+  }, [showPrior, priorPageId, pageId, revisionDiff, renderSize]);
 
   useEffect(() => {
     if (!showPrior || !priorUrl || renderScale <= 0) return;
