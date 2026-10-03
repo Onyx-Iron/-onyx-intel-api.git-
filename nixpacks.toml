@@ -1,8 +1,13 @@
 [phases.setup]
-nixPkgs = ["python312"]
+nixPkgs = ["python312", "python312Packages.pip"]
 
 [phases.install]
-cmds = ["pip install -r requirements.txt"]
+# Use `python -m pip` — Nixpacks/Railpack images often lack a bare `pip` on PATH
+# (production builds were failing with exit 127).
+cmds = [
+  "python -m pip install -r requirements.txt",
+  "python -m pip install -r requirements-docling.txt",
+]
 
 [start]
 cmd = "uvicorn takeoff_api:app --host 0.0.0.0 --port $PORT --workers 2"
