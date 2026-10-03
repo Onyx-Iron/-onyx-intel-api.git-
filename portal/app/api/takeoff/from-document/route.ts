@@ -3,10 +3,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { headerSafe } from "@/lib/http";
 import { getAccessToken } from "@/lib/google/oauth";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { pythonApiHeaders } from "@/lib/python-api";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
+import { fetchDriveFileSize } from "@/lib/google/driveFile";
 
 const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
 // Aligned with the Supabase Edge Functions — see `page-split-worker/index.ts`.
@@ -45,20 +47,42 @@ export async function POST(req: NextRequest): Promise<Response> {
 
     const tenantOrgId = authTenantKey(userId, orgId);
     const tenantId = await getOrCreateTenant(tenantOrgId, authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    try {
+      await assertProjectBelongsToTenant(project_id, tenantId);
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
+    }
     const db = await createServiceClient();
 
     const { data: doc, error } = await db
       .from("documents")
       .select("id, file_name, meta")
-      .eq("id", document_id).eq("tenant_id", tenantId).single();
+      .eq("id", document_id).eq("tenant_id", tenantId).eq("project_id", project_id).single();
     if (error || !doc) return NextResponse.json({ error: "Document not found" }, { status: 404 });
 
     const meta = (doc.meta as Record<string, unknown> | null) ?? {};
     const storagePath = meta.storage_path as string | undefined;
     const driveFileId = meta.drive_file_id as string | undefined;
     const localPath = meta.local_path as string | undefined;
-    const fileSize = typeof meta.size === "number" ? meta.size : null;
+    let fileSize = typeof meta.size === "number" ? meta.size : null;
     const isPdf = doc.file_name.toLowerCase().endsWith(".pdf");
+
+    if (isPdf && fileSize === null && driveFileId) {
+      const gToken = await getAccessToken(tenantId, userId);
+      if (gToken) {
+        const resolvedSize = await fetchDriveFileSize(driveFileId, gToken);
+        if (resolvedSize != null) {
+          fileSize = resolvedSize;
+          await db.from("documents")
+            .update({ meta: { ...meta, size: resolvedSize } } as never)
+            .eq("id", document_id).eq("tenant_id", tenantId);
+        }
+      }
+    }
 
     // ── Large PDF → async page-split pipeline ────────────────────────────────
     // Applies whether the original lives in Supabase Storage (older local

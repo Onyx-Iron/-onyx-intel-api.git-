@@ -5,7 +5,9 @@ import {
   authTenantName,
   getOrCreateTenant,
   requireProjectId,
+  assertProjectBelongsToTenant,
 } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { getLastRiskScoutFindings, runRiskScout } from "@/lib/agents/riskScout";
 
 export const runtime = "nodejs";
@@ -21,10 +23,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       authTenantKey(userId, orgId),
       authTenantName(userId, orgSlug),
     );
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    await assertProjectBelongsToTenant(projectId, tenantId);
 
     const result = await runRiskScout(tenantId, projectId);
     return NextResponse.json(result);
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     const msg = err instanceof Error ? err.message : String(err);
     const status = msg.includes("project_id") ? 400 : 500;
     return NextResponse.json({ error: msg }, { status });

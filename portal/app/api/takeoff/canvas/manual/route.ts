@@ -2,10 +2,12 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant, assertPageBelongsToProject } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { logEvent } from "@/lib/activity";
 import { processOutboxBatch } from "@/lib/estimating/outbox-worker";
 import { calculateLinearLength, calculatePolygonArea, calculateCount, FORMULA_VERSION } from "@/lib/takeoff/canvas/quantity";
 import type { Point } from "@/lib/takeoff/canvas/coordinates";
+import type { ManualTakeoffItem, ManualTakeoffUpdateBody } from "@/lib/types/takeoff";
 
 export const runtime = "nodejs";
 
@@ -65,16 +67,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   return NextResponse.json({ items: data ?? [] });
 }
 
-interface Item {
-  project_id: string;
-  page_id?: string | null;
-  cost_code?: string | null;
-  takeoff_type: string;     // count | length | area
-  quantity: number;
-  unit?: string | null;     // EA | LF | SF
-  geometry: { points?: Point[]; coordinate_space?: string; [k: string]: unknown };
-  client_key?: string | null;
-}
+type Item = ManualTakeoffItem;
 
 const QUANTITY_TOLERANCE_PCT = 1; // >1% discrepancy between submitted and server-calculated quantity is flagged
 
@@ -95,13 +88,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
 
   const distinctProjectIds = [...new Set(items.map((it) => it.project_id))];
   for (const pid of distinctProjectIds) {
     try {
       await assertProjectBelongsToTenant(pid, tenantId);
-    } catch {
-      return NextResponse.json({ error: `project_id ${pid} does not belong to this tenant` }, { status: 403 });
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
     }
   }
 
@@ -111,8 +108,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   for (const { pageId, projectId: pid } of distinctPagePairs) {
     try {
       await assertPageBelongsToProject(pageId, pid, tenantId);
-    } catch {
-      return NextResponse.json({ error: `page_id ${pageId} does not belong to project ${pid}` }, { status: 403 });
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
     }
   }
 
@@ -259,6 +258,8 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
@@ -296,6 +297,8 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
@@ -330,14 +333,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   });
 }
 
-interface UpdateBody {
-  id?: string;
-  row_version?: number;
-  quantity?: number;
-  unit?: string | null;
-  cost_code?: string | null;
-  geometry?: { points?: Point[]; coordinate_space?: string; [k: string]: unknown };
-}
+type UpdateBody = Partial<ManualTakeoffUpdateBody>;
 
 /**
  * PATCH { id, row_version, quantity, unit?, cost_code?, geometry }
@@ -364,6 +360,8 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   }
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;

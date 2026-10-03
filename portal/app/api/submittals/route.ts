@@ -9,6 +9,8 @@ import {
   requireProjectId,
   assertProjectBelongsToTenant,
 } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { auditInsert } from "@/lib/audit";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 
 export const runtime = "nodejs";
@@ -50,6 +52,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const body = (await req.json()) as Record<string, unknown>;
     const projectId = requireProjectId(body.project_id);
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
     await assertProjectBelongsToTenant(projectId, tenantId);
     const payload = buildSubmittalPayload(body, { tenantId, projectId });
     const db = await getControlDb();
@@ -61,10 +65,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .single();
 
     if (error) return NextResponse.json({ ...UNAVAILABLE }, { status: 503 });
+
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "submittal_items",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      record_id: (data as any)?.id,
+      new_values: data as Record<string, unknown>,
+    });
+
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     const msg = err instanceof Error ? err.message : String(err);
-    const status = msg.includes("required") ? 400 : msg.includes("does not belong") ? 403 : 500;
+    const status = msg.includes("required") ? 400 : 500;
     return NextResponse.json({ error: msg }, { status });
   }
 }

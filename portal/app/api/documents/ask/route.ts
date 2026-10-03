@@ -5,14 +5,16 @@ import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { getAccessToken } from "@/lib/google/oauth";
 import { headerSafe } from "@/lib/http";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
+import { auditUpdate } from "@/lib/audit";
 import { checkAiRateLimit } from "@/lib/ai/rate-limit";
+import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
 const GEMINI_API_KEY = headerSafe(process.env.GEMINI_API_KEY);
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-pro";
-const BUCKET = "project-documents";
 
 const SYSTEM =
   "You are a construction document assistant. Answer the user's question using ONLY the attached " +
@@ -40,11 +42,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
     const db = await createServiceClient();
 
     const { data: doc, error } = await db
       .from("documents")
-      .select("id, file_name, meta")
+      .select("id, file_name, project_id, meta")
       .eq("id", document_id)
       .eq("tenant_id", tenantId)
       .single();
@@ -74,6 +78,68 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     const storagePath = meta.storage_path as string | undefined;
     const driveFileId = meta.drive_file_id as string | undefined;
+
+    // Async split pipeline stores OCR per page — prefer that over re-uploading
+    // the full PDF when available (large Drive plans live in plans-bucket).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: asyncPages } = await (db as any)
+      .from("document_pages")
+      .select("page_number, ocr_text, status")
+      .eq("document_id", document_id)
+      .eq("tenant_id", tenantId)
+      .eq("status", "done")
+      .not("ocr_text", "is", null)
+      .order("page_number", { ascending: true });
+    const ocrPages = (asyncPages ?? []) as Array<{ page_number: number; ocr_text: string }>;
+    if (ocrPages.length > 0) {
+      const context = ocrPages
+        .map((p) => `=== Page ${p.page_number} ===\n${p.ocr_text}`)
+        .join("\n\n");
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-goog-api-key": GEMINI_API_KEY },
+          body: JSON.stringify({
+            system_instruction: {
+              parts: [{
+                text: buildGroundedSystemPrompt(SYSTEM, {
+                  requireCitations: true,
+                  sourceLabel: "document OCR excerpts",
+                }),
+              }],
+            },
+            contents: [{
+              role: "user",
+              parts: [{ text: `${context}\n\nQuestion: ${question.trim()}` }],
+            }],
+            generationConfig: { temperature: 0.2, maxOutputTokens: 2048 },
+          }),
+        },
+      );
+      if (!res.ok) {
+        const detail = await res.text().catch(() => res.statusText);
+        return NextResponse.json({ error: `[gemini ${res.status}] ${detail.slice(0, 300)}` }, { status: 502 });
+      }
+      const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+      const answer = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "(no answer)";
+      const newQ = {
+        id: `q_${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
+        question: question.trim(),
+        answer,
+        asked_at: new Date().toISOString(),
+        asked_by: userId,
+      };
+      const updatedMeta = { ...meta, questions: [...existingQsForCache, newQ] };
+      await db.from("documents").update({ meta: updatedMeta } as never).eq("id", doc.id).eq("tenant_id", tenantId);
+      return NextResponse.json({
+        answer,
+        document: doc.file_name,
+        question_id: newQ.id,
+        source: "document_pages_ocr",
+      });
+    }
+
     let bytes: Buffer;
     let contentType = "application/pdf";
 
@@ -81,7 +147,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       if (!doc.file_name.toLowerCase().endsWith(".pdf")) {
         return NextResponse.json({ error: "Document Q&A currently supports PDF files only." }, { status: 422 });
       }
-      const { data: fileData, error: dlErr } = await db.storage.from(BUCKET).download(storagePath);
+      const bucket = resolveDocumentStorageBucket(meta);
+      const { data: fileData, error: dlErr } = await db.storage.from(bucket).download(storagePath);
       if (dlErr || !fileData) return NextResponse.json({ error: `Could not load file: ${dlErr?.message}` }, { status: 502 });
       bytes = Buffer.from(await fileData.arrayBuffer());
       contentType = "application/pdf";
@@ -150,6 +217,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .update({ meta: updatedMeta } as never)
       .eq("id", doc.id)
       .eq("tenant_id", tenantId);
+
+    auditUpdate({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "documents",
+      record_id: doc.id,
+      old_values: { meta } as unknown as Record<string, unknown>,
+      new_values: { meta: updatedMeta } as unknown as Record<string, unknown>,
+    });
 
     return NextResponse.json({ answer, document: doc.file_name, question_id: newQ.id });
   } catch (err: unknown) {

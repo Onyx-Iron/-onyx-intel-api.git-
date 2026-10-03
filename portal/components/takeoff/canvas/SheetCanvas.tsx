@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import CADVectorLayer from "./CADVectorLayer";
 import VisionExtractionsPanel from "./VisionExtractionsPanel";
@@ -14,6 +15,13 @@ import {
   type CanvasCollabEvent,
 } from "@/lib/takeoff/canvas/canvas-realtime";
 import { useCanvasRealtime } from "@/lib/takeoff/canvas/useCanvasRealtime";
+import { CANVAS_HOTKEY_HINT, resolveCanvasHotkey, type CanvasTool } from "@/lib/takeoff/canvas/hotkeys";
+import {
+  DEFAULT_SNAP_THRESHOLD_PX,
+  type VectorPoint,
+} from "@/lib/takeoff/canvas/vector-snap";
+import { takeoffQueryKeys, useSheetCalibration } from "@/lib/takeoff/queries";
+import type { SnapResult } from "@/lib/takeoff/canvas/snap-algorithm";
 
 // Coordinate-space tag carried alongside each committed item (professional-
 // manual-takeoff milestone, PERMANENT RULE 1/2). 'page_space' points are
@@ -31,7 +39,19 @@ type CoordinateSpace = "page_space" | "legacy_pixel";
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
-type Tool = "pan" | "calibrate" | "count" | "length" | "area" | "utility_pipe" | "spot_elevation" | "contour_line" | "civil_area_bounds";
+type Tool = CanvasTool;
+
+/** Tools where cursor magnetic-snap to CAD/PDF vector vertices is useful. */
+const SNAP_TOOLS: ReadonlySet<Tool> = new Set([
+  "calibrate",
+  "count",
+  "length",
+  "area",
+  "utility_pipe",
+  "spot_elevation",
+  "contour_line",
+  "civil_area_bounds",
+]);
 
 interface Pt { x: number; y: number }
 
@@ -138,9 +158,16 @@ interface Props {
 // ─────────────────────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
+type SnapWorkerResponse = { type: "snap-result"; id: number; result: SnapResult };
+
 export default function SheetCanvas({ projectId, projectName, pageId, pageNumber }: Props) {
+  const queryClient = useQueryClient();
+  const { data: calibration = null } = useSheetCalibration(pageId);
   const wrapRef   = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const snapWorkerRef = useRef<Worker | null>(null);
+  const snapRequestIdRef = useRef(0);
+  const latestSnapRef = useRef<SnapResult | null>(null);
   const [pdfUrl, setPdfUrl]         = useState<string | null>(null);
   const [renderSize, setRenderSize] = useState<{ w: number; h: number } | null>(null);
   // The pdf.js viewport scale actually used for the CURRENT render — distinct
@@ -157,9 +184,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     return coordinateSpace === "page_space" ? pointsToScreenSpace(points, renderScale) : points;
   }, [renderScale]);
   const [tool, setTool]             = useState<Tool>("pan");
+  const toolBeforeSpacePan = useRef<Tool | null>(null);
   const [shapes, setShapes]         = useState<Shape[]>([]);
   const [draftPoints, setDraftPoints] = useState<Pt[]>([]);   // in-progress polygon/line points
-  const [calibration, setCalibration] = useState<Calibration | null>(null);
   const [calibPts, setCalibPts]     = useState<Pt[]>([]);     // during calibrate mode
   const [loadError, setLoadError]   = useState<string | null>(null);
   const [saving, setSaving]         = useState(false);
@@ -170,6 +197,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // runs/topo nodes/area bounds, is deferred — see REMAINING_RISKS.md.
   const [dragState, setDragState] = useState<{ key: string; startClient: Pt; originalPoints: Pt[]; originalRowVersion: number } | null>(null);
   const [vectorDescriptions, setVectorDescriptions] = useState<string[]>([]);
+  const [snapPoints, setSnapPoints] = useState<VectorPoint[]>([]);
+  const [snapTarget, setSnapTarget] = useState<{ point: VectorPoint; distance: number } | null>(null);
   const [utilityRuns, setUtilityRuns] = useState<UtilityRun[]>([]);
   const [utilityDraftPts, setUtilityDraftPts] = useState<Pt[]>([]);
   const [utilityModalPts, setUtilityModalPts] = useState<Pt[] | null>(null); // non-null while the input overlay is open
@@ -227,14 +256,33 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     onRemoteEvent: onRemoteCanvasEvent,
   });
 
-  // ── Load signed URL + existing calibration + saved takeoffs ────────────────
+  // ── Snap worker: nearest-vertex search off the main thread ───────────────
+  useEffect(() => {
+    const worker = new Worker(new URL("../../../workers/snap.worker.ts", import.meta.url));
+    worker.onmessage = (event: MessageEvent<SnapWorkerResponse>) => {
+      const { id, result } = event.data;
+      if (id !== snapRequestIdRef.current) return;
+      latestSnapRef.current = result;
+      setSnapTarget(result.snapped ? { point: result.point, distance: result.distance } : null);
+    };
+    snapWorkerRef.current = worker;
+    return () => {
+      worker.terminate();
+      snapWorkerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    snapWorkerRef.current?.postMessage({ type: "set-points", vectorPoints: snapPoints });
+  }, [snapPoints]);
+
+  // ── Load signed URL + saved takeoffs (calibration via React Query) ───────
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [urlRes, calRes, mtRes, utRes, topoRes, areaRes] = await Promise.all([
+        const [urlRes, mtRes, utRes, topoRes, areaRes] = await Promise.all([
           fetch(`/api/takeoff/canvas/page-url?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
-          fetch(`/api/takeoff/canvas/calibration?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/manual?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/utility?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/topo?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
@@ -244,10 +292,6 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         const urlData = await urlRes.json() as { url: string };
         if (!cancelled) setPdfUrl(urlData.url);
 
-        if (calRes.ok) {
-          const calData = await calRes.json() as { calibration: Calibration | null };
-          if (!cancelled) setCalibration(calData.calibration);
-        }
         if (mtRes.ok) {
           const mtData = await mtRes.json() as { items: Array<{ id: string; takeoff_type: "count" | "length" | "area"; cost_code: string | null; quantity: number; unit: string | null; row_version?: number; geometry: { points?: Pt[]; coordinate_space?: string } }> };
           if (!cancelled) {
@@ -384,7 +428,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // Vector extraction waits until a civil tool needs the CAD overlay.
   const vectorExtractKey = useRef<string | null>(null);
   useEffect(() => {
-    const vectorTools = new Set<Tool>(["utility_pipe", "contour_line", "spot_elevation", "civil_area_bounds"]);
+    const vectorTools = new Set<Tool>([
+      "utility_pipe",
+      "contour_line",
+      "spot_elevation",
+      "civil_area_bounds",
+      "length",
+      "area",
+      "count",
+    ]);
     if (!pdfUrl || !vectorTools.has(tool)) return;
     const key = `${pdfUrl}:${pageId}`;
     if (vectorExtractKey.current === key) return;
@@ -439,6 +491,39 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     };
   }, [renderSize]);
 
+  const resolveSnapPoint = useCallback((cursor: Pt): Pt => {
+    if (!SNAP_TOOLS.has(tool) || snapPoints.length === 0) return cursor;
+    const latest = latestSnapRef.current;
+    if (latest?.snapped) {
+      const dist = Math.hypot(latest.point.x - cursor.x, latest.point.y - cursor.y);
+      if (dist <= DEFAULT_SNAP_THRESHOLD_PX * 1.5) return latest.point;
+    }
+    return cursor;
+  }, [tool, snapPoints]);
+
+  const onCanvasMouseMove: React.MouseEventHandler<SVGSVGElement> = useCallback((e) => {
+    const now = Date.now();
+    if (now - lastCursorTrackRef.current >= 80) {
+      lastCursorTrackRef.current = now;
+      const rect = e.currentTarget.getBoundingClientRect();
+      trackCursor(e.clientX - rect.left, e.clientY - rect.top);
+    }
+
+    if (!SNAP_TOOLS.has(tool) || snapPoints.length === 0) {
+      setSnapTarget(null);
+      latestSnapRef.current = null;
+      return;
+    }
+    const cursor = toLocal(e.clientX, e.clientY, e.currentTarget);
+    const id = ++snapRequestIdRef.current;
+    snapWorkerRef.current?.postMessage({
+      type: "snap",
+      id,
+      cursor,
+      thresholdPixels: DEFAULT_SNAP_THRESHOLD_PX,
+    });
+  }, [tool, snapPoints, toLocal, trackCursor]);
+
   // ── Geometry helpers ──────────────────────────────────────────────────────
   // `scale` is real-world-units per CURRENT-RENDER pixel — every existing
   // `pixelDistance(...) * scale` / `polygonArea(...) * scale * scale` call
@@ -483,10 +568,13 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     return 0;
   }, [draftPoints, tool, scale]);
 
+  const onCanvasMouseLeave = () => setSnapTarget(null);
+
   // ── Click handling ────────────────────────────────────────────────────────
   const onCanvasClick: React.MouseEventHandler<SVGSVGElement> = (e) => {
     if (!renderSize) return;
-    const p = toLocal(e.clientX, e.clientY, e.currentTarget);
+    const raw = toLocal(e.clientX, e.clientY, e.currentTarget);
+    const p = resolveSnapPoint(raw);
 
     if (tool === "calibrate") {
       const next = [...calibPts, p];
@@ -685,15 +773,91 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     setDraftPoints([]);
   }, [draftPoints, tool, scale, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft, broadcast]);
 
-  // Escape/Enter shortcuts for finishing a polygon/line.
+  const clearDrafts = useCallback(() => {
+    setDraftPoints([]);
+    setCalibPts([]);
+    setUtilityDraftPts([]);
+    setContourDraftPts([]);
+    setAreaDraftPts([]);
+  }, []);
+
+  const selectTool = useCallback((next: Tool) => {
+    toolBeforeSpacePan.current = null;
+    setTool(next);
+    clearDrafts();
+  }, [clearDrafts]);
+
+  const undoLast = useCallback(() => {
+    // Prefer undoing an in-progress vertex; otherwise drop the newest unsaved measurement.
+    if (draftPoints.length > 0) {
+      setDraftPoints((prev) => prev.slice(0, -1));
+      return;
+    }
+    if (utilityDraftPts.length > 0) {
+      setUtilityDraftPts((prev) => prev.slice(0, -1));
+      return;
+    }
+    if (contourDraftPts.length > 0) {
+      setContourDraftPts((prev) => prev.slice(0, -1));
+      return;
+    }
+    if (areaDraftPts.length > 0) {
+      setAreaDraftPts((prev) => prev.slice(0, -1));
+      return;
+    }
+    if (calibPts.length > 0) {
+      setCalibPts((prev) => prev.slice(0, -1));
+      return;
+    }
+    setShapes((prev) => {
+      for (let i = prev.length - 1; i >= 0; i -= 1) {
+        if (!prev[i].saved) return [...prev.slice(0, i), ...prev.slice(i + 1)];
+      }
+      return prev;
+    });
+  }, [draftPoints.length, utilityDraftPts.length, contourDraftPts.length, areaDraftPts.length, calibPts.length]);
+
+  // Professional hotkeys: L/A/C tools, Space-hold pan, Z undo, Esc cancel, Enter finish.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { setDraftPoints([]); setCalibPts([]); setUtilityDraftPts([]); setContourDraftPts([]); setAreaDraftPts([]); }
-      else if (e.key === "Enter") finishDraft();
+      const action = resolveCanvasHotkey(e);
+      if (!action) return;
+      e.preventDefault();
+
+      switch (action.type) {
+        case "tool":
+          selectTool(action.tool);
+          break;
+        case "cancel":
+          clearDrafts();
+          break;
+        case "finish":
+          finishDraft();
+          break;
+        case "undo":
+          undoLast();
+          break;
+        case "pan_hold_start":
+          if (tool !== "pan") {
+            toolBeforeSpacePan.current = tool;
+            setTool("pan");
+          }
+          break;
+        case "pan_hold_end": {
+          const restore = toolBeforeSpacePan.current;
+          toolBeforeSpacePan.current = null;
+          if (restore) setTool(restore);
+          break;
+        }
+      }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [finishDraft]);
+    window.addEventListener("keyup", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKey);
+    };
+  }, [tool, selectTool, clearDrafts, finishDraft, undoLast]);
 
   // ── Persistence ───────────────────────────────────────────────────────────
   async function saveCalibration(pointA: Pt, pointB: Pt, knownDistanceFt: number) {
@@ -708,7 +872,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     });
     if (res.ok) {
       const data = await res.json() as { calibration: Calibration };
-      setCalibration(data.calibration);
+      queryClient.setQueryData(takeoffQueryKeys.calibration(pageId), data.calibration);
     } else {
       const err = await res.json().catch(() => ({}));
       alert(`Calibration failed: ${err.error ?? res.status}`);
@@ -1125,21 +1289,26 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           </div>
 
           {/* Tool switcher */}
-          <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] p-1">
-            {(["pan", "calibrate", "count", "length", "area", "utility_pipe", "spot_elevation", "contour_line", "civil_area_bounds"] as Tool[]).map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => { setTool(t); setDraftPoints([]); setCalibPts([]); setUtilityDraftPts([]); setContourDraftPts([]); setAreaDraftPts([]); }}
-                className={`px-3 h-7 text-[10px] uppercase tracking-widest font-mono rounded-full transition-colors ${
-                  tool === t
-                    ? "bg-[#CCFF00] text-black"
-                    : "text-white/60 hover:text-white hover:bg-white/[0.06]"
-                }`}
-              >
-                {t}
-              </button>
-            ))}
+          <div className="flex flex-col items-end gap-1">
+            <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] p-1">
+              {(["pan", "calibrate", "count", "length", "area", "utility_pipe", "spot_elevation", "contour_line", "civil_area_bounds"] as Tool[]).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => selectTool(t)}
+                  className={`px-3 h-7 text-[10px] uppercase tracking-widest font-mono rounded-full transition-colors ${
+                    tool === t
+                      ? "bg-[#CCFF00] text-black"
+                      : "text-white/60 hover:text-white hover:bg-white/[0.06]"
+                  }`}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+            <p className="hidden px-1 text-[9px] font-mono uppercase tracking-widest text-white/30 sm:block">
+              {CANVAS_HOTKEY_HINT}
+            </p>
           </div>
 
           <div className="flex items-center gap-3 text-[10px] uppercase tracking-widest font-mono text-white/40">
@@ -1209,7 +1378,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                       "Recalibrating sets the scale for NEW measurements drawn from now on.\n\n" +
                       "Existing saved measurements keep their already-computed quantities unchanged — recalibration never silently alters them.\n\nContinue?",
                     )) return;
-                    setTool("calibrate"); setDraftPoints([]); setCalibPts([]);
+                    selectTool("calibrate");
                   }}
                   className="rounded-full border border-white/10 px-2 py-0.5 text-white/60 hover:text-white hover:bg-white/[0.06] normal-case tracking-normal"
                 >
@@ -1272,14 +1441,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               viewBox={`0 0 ${renderSize.w} ${renderSize.h}`}
               className={`absolute inset-0 select-none ${tool === "pan" ? "cursor-grab" : "cursor-crosshair"}`}
               onClick={onCanvasClick}
+              onMouseMove={onCanvasMouseMove}
+              onMouseLeave={onCanvasMouseLeave}
               onDoubleClick={finishDraft}
-              onMouseMove={(e) => {
-                const now = Date.now();
-                if (now - lastCursorTrackRef.current < 80) return;
-                lastCursorTrackRef.current = now;
-                const rect = e.currentTarget.getBoundingClientRect();
-                trackCursor(e.clientX - rect.left, e.clientY - rect.top);
-              }}
             >
               {/* Committed shapes */}
               {shapes.map((s) => {
@@ -1427,6 +1591,48 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 </g>
               )}
 
+              {/* Magnetic snap target — green ring when cursor locks to a vector vertex */}
+              {SNAP_TOOLS.has(tool) && snapTarget && (
+                <g pointerEvents="none">
+                  <circle
+                    cx={snapTarget.point.x}
+                    cy={snapTarget.point.y}
+                    r={10}
+                    fill="none"
+                    stroke="#22c55e"
+                    strokeWidth={2}
+                    opacity={0.95}
+                  />
+                  <circle
+                    cx={snapTarget.point.x}
+                    cy={snapTarget.point.y}
+                    r={4}
+                    fill="#22c55e"
+                    stroke="#052e16"
+                    strokeWidth={1}
+                    opacity={0.85}
+                  />
+                  <line
+                    x1={snapTarget.point.x - 14}
+                    y1={snapTarget.point.y}
+                    x2={snapTarget.point.x + 14}
+                    y2={snapTarget.point.y}
+                    stroke="#22c55e"
+                    strokeWidth={1.5}
+                    opacity={0.7}
+                  />
+                  <line
+                    x1={snapTarget.point.x}
+                    y1={snapTarget.point.y - 14}
+                    x2={snapTarget.point.x}
+                    y2={snapTarget.point.y + 14}
+                    stroke="#22c55e"
+                    strokeWidth={1.5}
+                    opacity={0.7}
+                  />
+                </g>
+              )}
+
               {/* Remote estimator cursors (presence) */}
               {peers.map((peer) => (
                 peer.x != null && peer.y != null ? (
@@ -1454,6 +1660,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             canvasSize={renderSize}
             scaleRatio={scale}
             onVectorsLoaded={setVectorDescriptions}
+            onSnapPointsChange={setSnapPoints}
             onCommitted={(m) => {
               // Mirror an approved CAD vector into the local shapes dock so
               // estimators see it immediately without needing to reload.

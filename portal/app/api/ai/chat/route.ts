@@ -1,10 +1,12 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 import { headerSafe } from "@/lib/http";
 import { logEvent } from "@/lib/activity";
+import { auditDelete } from "@/lib/audit";
 import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { generateText, availableProviders, NoProviderError, type Provider } from "@/lib/ai/providers";
 import { formatMemoriesBlock, listProjectMemories } from "@/lib/ai/project-memories";
@@ -890,6 +892,15 @@ export async function POST(req: NextRequest): Promise<Response> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    try {
+      await assertProjectBelongsToTenant(body.project_id, tenantId);
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
+    }
 
     // Agentic mode fires up to MAX_TOOL_ROUNDS extra LLM calls per message —
     // throttle it harder than a single rag turn.
@@ -915,6 +926,8 @@ export async function POST(req: NextRequest): Promise<Response> {
         { status: 503 },
       );
     }
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[ai/chat] ${msg}` }, { status: 500 });
   }
@@ -988,10 +1001,27 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     if (!conversation_id) return NextResponse.json({ error: "conversation_id required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
     const db = await createServiceClient();
+
+    const { data: before } = await db
+      .from("conversations")
+      .select("*")
+      .eq("id", conversation_id)
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
 
     await db.from("messages").delete().eq("conversation_id", conversation_id).eq("tenant_id", tenantId);
     await db.from("conversations").delete().eq("id", conversation_id).eq("tenant_id", tenantId);
+
+    auditDelete({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "conversations",
+      record_id: conversation_id,
+      old_values: (before ?? null) as unknown as Record<string, unknown> | null,
+    });
 
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {

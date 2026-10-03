@@ -7,6 +7,8 @@ import {
   getControlDb,
   getOrCreateTenant,
 } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
+import { auditUpdate, auditDelete } from "@/lib/audit";
 
 export const runtime = "nodejs";
 
@@ -27,7 +29,18 @@ export async function PUT(req: NextRequest, ctx: RouteContext): Promise<NextResp
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "financial", "write");
+    if (denied) return denied;
     const db = await getControlDb();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: before } = await (db as any)
+      .from("change_order_items")
+      .select("*")
+      .eq("id", id)
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+
     const { data, error } = await db
       .from<unknown>("change_order_items")
       .update(updates)
@@ -37,6 +50,16 @@ export async function PUT(req: NextRequest, ctx: RouteContext): Promise<NextResp
       .single();
 
     if (error) return NextResponse.json({ error: "Change Orders are not yet available in this workspace.", code: "FEATURE_UNAVAILABLE" }, { status: 503 });
+
+    auditUpdate({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "change_order_items",
+      record_id: id,
+      old_values: (before ?? null) as Record<string, unknown> | null,
+      new_values: data as Record<string, unknown>,
+    });
+
     return NextResponse.json({ item: data });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -51,7 +74,18 @@ export async function DELETE(_req: NextRequest, ctx: RouteContext): Promise<Next
 
     const { id } = await ctx.params;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "financial", "write");
+    if (denied) return denied;
     const db = await getControlDb();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: before } = await (db as any)
+      .from("change_order_items")
+      .select("*")
+      .eq("id", id)
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+
     const { error } = await db
       .from<unknown>("change_order_items")
       .delete()
@@ -59,6 +93,15 @@ export async function DELETE(_req: NextRequest, ctx: RouteContext): Promise<Next
       .eq("tenant_id", tenantId);
 
     if (error) return NextResponse.json({ error: "Change Orders are not yet available in this workspace.", code: "FEATURE_UNAVAILABLE" }, { status: 503 });
+
+    auditDelete({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "change_order_items",
+      record_id: id,
+      old_values: (before ?? null) as Record<string, unknown> | null,
+    });
+
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

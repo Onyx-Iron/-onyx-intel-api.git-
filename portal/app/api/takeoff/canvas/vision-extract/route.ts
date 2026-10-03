@@ -1,7 +1,9 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertPageBelongsToProject } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { auditUpdate } from "@/lib/audit";
 import { headerSafe } from "@/lib/http";
 import { runScopeGapAgent } from "@/lib/agents/scope-gap";
 import { runRfiDrafterAgent } from "@/lib/agents/rfi-drafter";
@@ -107,15 +109,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!body.page_id) return NextResponse.json({ error: "page_id required" }, { status: 400 });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
   const db = await createServiceClient();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
   const { data: page } = await anyDb
     .from("document_pages")
-    .select("id, storage_path, page_number, vision_extractions, document_id")
+    .select("id, storage_path, page_number, vision_extractions, vision_extracted_at, document_id")
     .eq("id", body.page_id).eq("tenant_id", tenantId).single();
   if (!page) return NextResponse.json({ error: "Page not found" }, { status: 404 });
+
+  {
+    const { data: doc } = page.document_id
+      ? await anyDb.from("documents").select("project_id").eq("id", page.document_id).eq("tenant_id", tenantId).maybeSingle()
+      : { data: null };
+    const projectIdForPage = (doc as { project_id?: string } | null)?.project_id;
+    if (projectIdForPage) {
+      try {
+        await assertPageBelongsToProject(body.page_id, projectIdForPage, tenantId);
+      } catch (err) {
+        const owned = ownershipDenied(err);
+        if (owned) return owned;
+        throw err;
+      }
+    }
+  }
 
   if (page.vision_extractions && !body.force) {
     const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, page.document_id ?? null, body.page_id);
@@ -238,6 +258,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     .from("document_pages")
     .update({ vision_extractions: result, vision_extracted_at: result.extracted_at })
     .eq("id", body.page_id).eq("tenant_id", tenantId);
+
+  auditUpdate({
+    tenant_id: tenantId,
+    user_id: userId,
+    table_name: "document_pages",
+    record_id: body.page_id,
+    old_values: {
+      vision_extractions: page.vision_extractions,
+      vision_extracted_at: page.vision_extracted_at,
+    } as unknown as Record<string, unknown>,
+    new_values: {
+      vision_extractions: result,
+      vision_extracted_at: result.extracted_at,
+    } as unknown as Record<string, unknown>,
+  });
 
   // ── Auto-commit into takeoff_items (atomically, via Postgres function) ───
   // Every AI-vision finding is committed as review_status "suggested" —

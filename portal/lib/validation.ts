@@ -60,6 +60,18 @@ export const takeoffItemsSchema = z.object({
   rows: z.array(takeoffRowSchema).min(1).max(500),
 });
 
+export const civilTrenchRequestSchema = z.object({
+  length_lf: z.number().positive(),
+  pipe_od_in: z.number().positive(),
+  cover_ft: z.number().nonnegative().optional(),
+  soil_type: z.enum(["A", "B", "C", "stable_rock"]).optional(),
+  trench_width_ft: z.number().positive().nullable().optional(),
+  initial_backfill_in: z.number().nonnegative().optional(),
+  include_layback: z.boolean().optional(),
+});
+
+export type CivilTrenchRequestInput = z.infer<typeof civilTrenchRequestSchema>;
+
 // ── Estimate ──────────────────────────────────────────────────────────────────
 
 export const estimateItemCreateSchema = z.object({

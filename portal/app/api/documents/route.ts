@@ -2,10 +2,12 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
+import { auditDelete } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
-import { reclaimStuckProcessingDocuments } from "@/lib/documents/reclaimStuck";
+import { reclaimStuckProcessingDocuments, reclaimStuckProcessingPages } from "@/lib/documents/reclaimStuck";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
@@ -19,10 +21,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const { page, limit, offset } = parsePagination(req.nextUrl.searchParams);
 
     const db = await createServiceClient();
-    // Opportunistic reclaim: docs left in "processing" after a platform kill
-    // never get markError() — surface them as retryable errors on list.
+    // Opportunistic reclaim: docs/pages left in "processing" after a platform
+    // kill never get markError() — surface them as retryable errors on list.
     void reclaimStuckProcessingDocuments(db, tenantId).catch((err) =>
       console.error("[GET /api/documents] stuck reclaim failed", err),
+    );
+    void reclaimStuckProcessingPages(db, tenantId).catch((err) =>
+      console.error("[GET /api/documents] stuck page reclaim failed", err),
     );
 
     let query = db
@@ -65,12 +70,14 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
     const db = await createServiceClient();
 
     // Fetch the document first so we can log the project_id after deletion.
     const { data: docRow } = await db
       .from("documents")
-      .select("project_id")
+      .select("*")
       .eq("id", idParse.data)
       .eq("tenant_id", tenantId)
       .single();
@@ -82,6 +89,14 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
       .eq("tenant_id", tenantId);
 
     if (error) return NextResponse.json({ error: error.message }, { status: 422 });
+
+    auditDelete({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "documents",
+      record_id: idParse.data,
+      old_values: (docRow ?? null) as unknown as Record<string, unknown> | null,
+    });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const docProjectId = (docRow as any)?.project_id ?? null;

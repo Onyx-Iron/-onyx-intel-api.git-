@@ -5,7 +5,10 @@ import {
   getOrCreateTenant,
   authTenantKey,
   authTenantName,
+  assertProjectBelongsToTenant,
 } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { auditInsert } from "@/lib/audit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,6 +38,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       authTenantKey(userId, orgId),
       authTenantName(userId, orgSlug),
     );
+    const denied = await requirePermission(tenantId, userId, "financial", "write");
+    if (denied) return denied;
     const body = (await req.json()) as ActualBody;
     if (!body.project_id) {
       return NextResponse.json(
@@ -58,9 +63,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
     }
 
+    try {
+      await assertProjectBelongsToTenant(body.project_id, tenantId);
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
+    }
+
     const db = await createServiceClient();
 
-    // Confirm project belongs to this tenant + pull region
+    // Pull region from the verified project
     const { data: project, error: projErr } = await db
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .from("projects" as any)
@@ -114,8 +127,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 422 });
     }
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "cost_actuals",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      record_id: String((data as any)?.id ?? body.project_id),
+      new_values: data as unknown as Record<string, unknown>,
+    });
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }

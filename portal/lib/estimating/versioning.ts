@@ -176,13 +176,19 @@ export async function approveVersion(
 
   const previousVersionId: string | null = estimate?.current_version_id ?? null;
 
+  // Conditional update: only draft/review may transition to approved.
+  // Concurrent approves of two drafts race on current_version_id otherwise.
   const { data: approved, error: approveError } = await db
     .from("estimate_versions")
     .update({ status: "approved", approved_by: params.userId, approved_at: new Date().toISOString() })
     .eq("id", params.versionId)
+    .in("status", ["draft", "review"])
     .select("*")
-    .single();
+    .maybeSingle();
   if (approveError) throw approveError;
+  if (!approved) {
+    throw new VersionLockedError("approved");
+  }
 
   if (previousVersionId && previousVersionId !== params.versionId) {
     const { data: previous } = await db

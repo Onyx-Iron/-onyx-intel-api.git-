@@ -161,7 +161,7 @@ function buildWorkItems(
       owner: item.assigned_to,
       due_date: item.due_date,
       sort_date: item.due_date ?? item.created_at,
-      href: `/dashboard/projects/${item.project_id}?section=project-controls`,
+      href: `/dashboard/projects/${item.project_id}?phase=controls&tab=controls`,
     }));
 
   const submittals = rows.submittals
@@ -177,7 +177,7 @@ function buildWorkItems(
       owner: item.responsible,
       due_date: item.due_date,
       sort_date: item.due_date ?? item.created_at,
-      href: `/dashboard/projects/${item.project_id}?section=project-controls`,
+      href: `/dashboard/projects/${item.project_id}?phase=controls&tab=controls`,
     }));
 
   const changeOrders = rows.changeOrders
@@ -193,7 +193,7 @@ function buildWorkItems(
       owner: null,
       due_date: item.submitted_date,
       sort_date: item.submitted_date ?? item.created_at,
-      href: `/dashboard/projects/${item.project_id}?section=project-controls`,
+      href: `/dashboard/projects/${item.project_id}?phase=controls&tab=controls`,
     }));
 
   const scheduleTasks = rows.scheduleTasks
@@ -209,7 +209,7 @@ function buildWorkItems(
       owner: null,
       due_date: item.end_date,
       sort_date: item.end_date ?? item.created_at,
-      href: `/dashboard/projects/${item.project_id}?section=schedule`,
+      href: `/dashboard/projects/${item.project_id}?phase=schedule&tab=scheduling`,
     }));
 
   const punchItems = rows.punchItems
@@ -225,7 +225,7 @@ function buildWorkItems(
       owner: item.responsible,
       due_date: item.due_date,
       sort_date: item.due_date ?? item.created_at,
-      href: `/dashboard/projects/${item.project_id}?section=closeout`,
+      href: `/dashboard/projects/${item.project_id}?phase=closeout&tab=punchlist`,
     }));
 
   return [...rfis, ...submittals, ...changeOrders, ...scheduleTasks, ...punchItems]
@@ -233,17 +233,31 @@ function buildWorkItems(
     .slice(0, 75);
 }
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(req: Request): Promise<NextResponse> {
   try {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+    const scopedProjectId = new URL(req.url).searchParams.get("project_id");
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const today = new Date().toISOString().slice(0, 10);
     const recentLogCutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const db = await createServiceClient();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const anyDb = db as any;
+
+    const scopeByProject = <T extends { eq: (column: string, value: string) => T }>(query: T): T =>
+      scopedProjectId ? query.eq("project_id", scopedProjectId) : query;
+
+    const projectsQuery = anyDb
+      .from("projects")
+      .select("id,name,status")
+      .eq("tenant_id", tenantId)
+      .order("created_at", { ascending: false })
+      .limit(500);
+    const scopedProjectsQuery = scopedProjectId
+      ? projectsQuery.eq("id", scopedProjectId)
+      : projectsQuery;
 
     const [
       projectsResult,
@@ -256,61 +270,72 @@ export async function GET(): Promise<NextResponse> {
       weeklyLogsResult,
       staffResult,
     ] = await Promise.all([
-      anyDb
-        .from("projects")
-        .select("id,name,status")
-        .eq("tenant_id", tenantId)
-        .order("created_at", { ascending: false })
-        .limit(500),
-      anyDb
-        .from("rfi_items")
-        .select("id,project_id,subject,status,priority,due_date,assigned_to,created_at")
-        .eq("tenant_id", tenantId)
-        .order("created_at", { ascending: false })
-        .limit(1000),
-      anyDb
-        .from("submittal_items")
-        .select("id,project_id,title,status,due_date,responsible,spec_section,created_at")
-        .eq("tenant_id", tenantId)
-        .order("created_at", { ascending: false })
-        .limit(1000),
-      anyDb
-        .from("change_order_items")
-        .select("id,project_id,description,status,amount,trade,submitted_date,created_at")
-        .eq("tenant_id", tenantId)
-        .order("created_at", { ascending: false })
-        .limit(1000),
-      anyDb
-        .from("schedule_tasks")
-        .select("id,project_id,name,status,end_date,critical,created_at")
-        .eq("tenant_id", tenantId)
-        .order("end_date", { ascending: true, nullsFirst: false })
-        .limit(1000),
-      anyDb
-        .from("punch_list_items")
-        .select("id,project_id,item_number,description,status,priority,due_date,responsible,location,created_at")
-        .eq("tenant_id", tenantId)
-        .order("created_at", { ascending: false })
-        .limit(1000),
-      anyDb
-        .from("daily_logs")
-        .select("id,project_id,log_date,crew_count,weather,work_performed,notes,created_at")
-        .eq("tenant_id", tenantId)
-        .order("log_date", { ascending: false })
-        .order("created_at", { ascending: false })
-        .limit(40),
-      anyDb
-        .from("weekly_logs")
-        .select("id,project_id,week_start,week_end,schedule_status,budget_status,open_issues,decisions_needed,summary,created_at")
-        .eq("tenant_id", tenantId)
-        .order("week_start", { ascending: false })
-        .limit(40),
-      anyDb
-        .from("staff_members")
-        .select("id,project_id,name,role,project_role,removed_at,created_at")
-        .eq("tenant_id", tenantId)
-        .order("created_at", { ascending: false })
-        .limit(1000),
+      scopedProjectsQuery,
+      scopeByProject(
+        anyDb
+          .from("rfi_items")
+          .select("id,project_id,subject,status,priority,due_date,assigned_to,created_at")
+          .eq("tenant_id", tenantId)
+          .order("created_at", { ascending: false })
+          .limit(1000),
+      ),
+      scopeByProject(
+        anyDb
+          .from("submittal_items")
+          .select("id,project_id,title,status,due_date,responsible,spec_section,created_at")
+          .eq("tenant_id", tenantId)
+          .order("created_at", { ascending: false })
+          .limit(1000),
+      ),
+      scopeByProject(
+        anyDb
+          .from("change_order_items")
+          .select("id,project_id,description,status,amount,trade,submitted_date,created_at")
+          .eq("tenant_id", tenantId)
+          .order("created_at", { ascending: false })
+          .limit(1000),
+      ),
+      scopeByProject(
+        anyDb
+          .from("schedule_tasks")
+          .select("id,project_id,name,status,end_date,critical,created_at")
+          .eq("tenant_id", tenantId)
+          .order("end_date", { ascending: true, nullsFirst: false })
+          .limit(1000),
+      ),
+      scopeByProject(
+        anyDb
+          .from("punch_list_items")
+          .select("id,project_id,item_number,description,status,priority,due_date,responsible,location,created_at")
+          .eq("tenant_id", tenantId)
+          .order("created_at", { ascending: false })
+          .limit(1000),
+      ),
+      scopeByProject(
+        anyDb
+          .from("daily_logs")
+          .select("id,project_id,log_date,crew_count,weather,work_performed,notes,created_at")
+          .eq("tenant_id", tenantId)
+          .order("log_date", { ascending: false })
+          .order("created_at", { ascending: false })
+          .limit(40),
+      ),
+      scopeByProject(
+        anyDb
+          .from("weekly_logs")
+          .select("id,project_id,week_start,week_end,schedule_status,budget_status,open_issues,decisions_needed,summary,created_at")
+          .eq("tenant_id", tenantId)
+          .order("week_start", { ascending: false })
+          .limit(40),
+      ),
+      scopeByProject(
+        anyDb
+          .from("staff_members")
+          .select("id,project_id,name,role,project_role,removed_at,created_at")
+          .eq("tenant_id", tenantId)
+          .order("created_at", { ascending: false })
+          .limit(1000),
+      ),
     ]);
 
     const results = [
