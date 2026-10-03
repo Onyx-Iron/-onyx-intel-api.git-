@@ -260,16 +260,3 @@ export function extractVectorsFromOperatorList(input: VectorExtractInput): Extra
   });
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function extractVectorsFromPdfPage(page: any): Promise<ExtractedVector[]> {
-  const ops = await page.getOperatorList();
-  const textContent = await page.getTextContent();
-  const input: VectorExtractInput = {
-    fnArray: Array.from(ops.fnArray as ArrayLike<number>),
-    argsArray: ops.argsArray as unknown[],
-    textItems: (textContent.items ?? []) as VectorExtractInput["textItems"],
-  };
-  if (typeof window === "undefined") return extractVectorsFromOperatorList(input);
-  const { extractVectorsOffMainThread } = await import("./vector-extract-client");
-  return extractVectorsOffMainThread(input);
-}
