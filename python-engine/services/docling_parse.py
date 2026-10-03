@@ -61,8 +61,15 @@ def parse_pdf_with_docling(path: str | Path, *, max_preview_chars: int = 3000) -
             InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
         }
     )
-    result = converter.convert(str(path))
-    doc = result.document
+    try:
+        result = converter.convert(str(path))
+        doc = result.document
+    except Exception as exc:  # noqa: BLE001 — convert-time failures
+        return DoclingParseResult(
+            status="parse_error",
+            metadata={"error": f"docling convert failed: {type(exc).__name__}: {exc}"},
+        )
+
 
     markdown = ""
     try:
