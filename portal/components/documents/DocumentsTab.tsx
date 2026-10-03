@@ -25,6 +25,7 @@ import {
   type StageCounts,
 } from "@/lib/documents/pipelineProgress";
 import { PipelineStage, type PipelineStatus } from "@/components/documents/PipelineStage";
+import { ProcessingTimeline, type ProcessingEventRow } from "@/components/documents/ProcessingTimeline";
 import {
   DOCUMENT_CLASSES,
   isPasswordRequired,
@@ -47,6 +48,11 @@ interface ParsedPage {
   page_number: number;
   summary: string;
   key_terms: string[];
+  page_id?: string | null;
+  ocr_status?: string | null;
+  takeoff_status?: string | null;
+  error?: string | null;
+  takeoff_error?: string | null;
 }
 
 interface SavedQuestion {
@@ -154,10 +160,12 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
   const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
   const [retryingDocId, setRetryingDocId] = useState<string | null>(null);
   const [retryingPageId, setRetryingPageId] = useState<string | null>(null);
+  const [reprocessingKey, setReprocessingKey] = useState<string | null>(null);
   const [pipelineByDoc, setPipelineByDoc] = useState<Record<string, DocPipelineSnapshot>>({});
   const [passwords, setPasswords] = useState<Record<string, string>>({});
   const [expandedDocId, setExpandedDocId] = useState<string | null>(null);
   const [pagesByDoc, setPagesByDoc] = useState<Record<string, { loading: boolean; pages: ParsedPage[]; questions: SavedQuestion[]; classification?: Record<string, string>; error?: string }>>({});
+  const [eventsByDoc, setEventsByDoc] = useState<Record<string, { loading: boolean; events: ProcessingEventRow[]; error?: string }>>({});
   const pipelinePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadInsights = useCallback(async (docId: string) => {
@@ -172,6 +180,24 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
       setPagesByDoc((prev) => ({ ...prev, [docId]: { loading: false, pages: data.pages ?? [], questions: data.questions ?? [], classification: data.classification ?? {} } }));
     } catch (err) {
       setPagesByDoc((prev) => ({ ...prev, [docId]: { loading: false, pages: [], questions: [], error: err instanceof Error ? err.message : String(err) } }));
+    }
+  }, []);
+
+  const loadEvents = useCallback(async (docId: string) => {
+    setEventsByDoc((prev) => ({ ...prev, [docId]: { loading: true, events: prev[docId]?.events ?? [] } }));
+    try {
+      const res = await fetch(`/api/documents/${encodeURIComponent(docId)}/events`);
+      const data = await res.json() as { events?: ProcessingEventRow[]; error?: string };
+      if (!res.ok) {
+        setEventsByDoc((prev) => ({ ...prev, [docId]: { loading: false, events: [], error: data.error ?? `HTTP ${res.status}` } }));
+        return;
+      }
+      setEventsByDoc((prev) => ({ ...prev, [docId]: { loading: false, events: data.events ?? [] } }));
+    } catch (err) {
+      setEventsByDoc((prev) => ({
+        ...prev,
+        [docId]: { loading: false, events: [], error: err instanceof Error ? err.message : String(err) },
+      }));
     }
   }, []);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -196,8 +222,11 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
       return;
     }
     setExpandedDocId(docId);
-    if (!pagesByDoc[docId]) await loadInsights(docId);
-  }, [expandedDocId, pagesByDoc, loadInsights]);
+    await Promise.all([
+      pagesByDoc[docId] ? Promise.resolve() : loadInsights(docId),
+      loadEvents(docId),
+    ]);
+  }, [expandedDocId, pagesByDoc, loadInsights, loadEvents]);
 
   const pollSplitStatus = useCallback(async (docs: Document[]) => {
     const asyncDocs = docs.filter(needsSplitStatusPoll);
@@ -599,6 +628,56 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
       setRetryingPageId(null);
     }
   }, [retryingPageId, loadDocuments, pollPipelineProgress, toast]);
+
+  const reprocessPages = useCallback(async (
+    doc: Document,
+    stage: "ocr" | "takeoff" | "both",
+    pageNumber?: number,
+  ) => {
+    const key = `${doc.id}:${pageNumber ?? "all"}:${stage}`;
+    if (reprocessingKey) return;
+    setReprocessingKey(key);
+    try {
+      const res = await fetch(`/api/documents/${encodeURIComponent(doc.id)}/reprocess`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stage,
+          ...(pageNumber != null ? { page_number: pageNumber } : {}),
+        }),
+      });
+      const data = await res.json().catch(() => ({})) as { error?: string; pages?: number; queued?: boolean };
+      if (!res.ok) {
+        toast({ title: String(data.error ?? `Reprocess failed (${res.status})`), kind: "error" });
+        return;
+      }
+      toast({
+        title: pageNumber != null
+          ? `Page ${pageNumber} re-queued for ${stage}.`
+          : `${data.pages ?? "Pages"} re-queued for ${stage}.`,
+        kind: "success",
+      });
+      setDocuments((prev) => prev.map((d) => (
+        d.id === doc.id
+          ? {
+              ...d,
+              status: "split",
+              ocr_status: stage === "takeoff" ? d.ocr_status : "processing",
+              takeoff_status: stage === "ocr" ? d.takeoff_status : "processing",
+              last_error: null,
+              last_error_step: null,
+            }
+          : d
+      )));
+      setPollTimedOut(false);
+      await Promise.all([loadDocuments(false), loadInsights(doc.id), loadEvents(doc.id)]);
+      await pollPipelineProgress(await loadDocuments(false));
+    } catch (err) {
+      toast({ title: String(`Reprocess failed: ${err instanceof Error ? err.message : String(err)}`), kind: "error" });
+    } finally {
+      setReprocessingKey(null);
+    }
+  }, [reprocessingKey, toast, loadDocuments, loadInsights, loadEvents, pollPipelineProgress]);
 
   const retryIngest = useCallback(async (doc: Document, password?: string) => {
     if (retryingDocId) return;
@@ -1021,10 +1100,31 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
                                 {insights?.pages?.length ?? 0} of {doc.page_count ?? "?"} pages
                               </span>
                             </div>
-                            <GenerateDocDropdown
-                              projectId={projectId}
-                              sourceDocumentId={doc.id}
-                              label="Generate from this plan"
+                            <div className="flex items-center gap-3">
+                              {insights?.pages?.some((p) => p.page_id) && (
+                                <button
+                                  type="button"
+                                  onClick={() => void reprocessPages(doc, "both")}
+                                  disabled={reprocessingKey?.startsWith(`${doc.id}:`)}
+                                  className="text-[10px] uppercase tracking-widest font-mono text-gray-500 hover:text-[#00D2FF] disabled:opacity-40"
+                                  title="Re-run OCR + takeoff for all split pages"
+                                >
+                                  Reprocess all pages
+                                </button>
+                              )}
+                              <GenerateDocDropdown
+                                projectId={projectId}
+                                sourceDocumentId={doc.id}
+                                label="Generate from this plan"
+                              />
+                            </div>
+                          </div>
+                          <div className="mb-4">
+                            <p className="text-[9px] uppercase tracking-widest text-gray-500 font-bold mb-2">Processing timeline</p>
+                            <ProcessingTimeline
+                              events={eventsByDoc[doc.id]?.events ?? []}
+                              loading={eventsByDoc[doc.id]?.loading}
+                              error={eventsByDoc[doc.id]?.error}
                             />
                           </div>
                           {insights?.classification && Object.keys(insights.classification).length > 0 && (
@@ -1074,31 +1174,81 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
                             )
                           ) : (
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                              {insights.pages.map((p) => (
-                                <div key={p.page_number} className="rounded-lg border border-white/8 bg-[#0E0F12] p-3">
-                                  <div className="flex items-center justify-between mb-1.5">
-                                    <span className="text-[9px] font-bold uppercase tracking-widest text-[#CCFF00]">Page {p.page_number}</span>
-                                    {documentHasAskableSource(doc) && (
-                                      <button
-                                        onClick={() => openAsk(doc)}
-                                        className="text-[9px] uppercase tracking-widest text-gray-600 hover:text-[#CCFF00] transition-colors"
-                                      >
-                                        Ask →
-                                      </button>
+                              {insights.pages.map((p) => {
+                                const pageBusy = reprocessingKey?.startsWith(`${doc.id}:${p.page_number}:`);
+                                const ocrFailed = p.ocr_status === "error";
+                                const takeoffFailed = p.takeoff_status === "error";
+                                return (
+                                  <div key={p.page_number} className="rounded-lg border border-white/8 bg-[#0E0F12] p-3">
+                                    <div className="flex items-center justify-between mb-1.5 gap-2">
+                                      <span className="text-[9px] font-bold uppercase tracking-widest text-[#CCFF00]">Page {p.page_number}</span>
+                                      <div className="flex items-center gap-2">
+                                        {p.page_id && (
+                                          <>
+                                            <PipelineStage label="OCR" status={(p.ocr_status as PipelineStatus | null) ?? null} />
+                                            <PipelineStage label="Takeoff" status={(p.takeoff_status as PipelineStatus | null) ?? null} />
+                                          </>
+                                        )}
+                                        {documentHasAskableSource(doc) && (
+                                          <button
+                                            onClick={() => openAsk(doc)}
+                                            className="text-[9px] uppercase tracking-widest text-gray-600 hover:text-[#CCFF00] transition-colors"
+                                          >
+                                            Ask →
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+                                    <p className="text-[11px] leading-relaxed text-white/75">{p.summary || <span className="text-gray-700 italic">No summary</span>}</p>
+                                    {(p.error || p.takeoff_error) && (
+                                      <p className="mt-1.5 text-[10px] text-[#E50914]/85 truncate" title={p.error || p.takeoff_error || undefined}>
+                                        {p.error || p.takeoff_error}
+                                      </p>
+                                    )}
+                                    {p.page_id && (ocrFailed || takeoffFailed || isRetryable(doc.status) || doc.status === "split") && (
+                                      <div className="mt-2 flex flex-wrap gap-2">
+                                        {(ocrFailed || doc.status === "split" || isRetryable(doc.status)) && (
+                                          <button
+                                            type="button"
+                                            disabled={!!pageBusy || !!reprocessingKey}
+                                            onClick={() => void reprocessPages(doc, "ocr", p.page_number)}
+                                            className="text-[9px] uppercase tracking-widest font-mono text-gray-500 hover:text-[#00D2FF] disabled:opacity-40"
+                                          >
+                                            Retry OCR
+                                          </button>
+                                        )}
+                                        {(takeoffFailed || doc.status === "split" || isRetryable(doc.status)) && (
+                                          <button
+                                            type="button"
+                                            disabled={!!pageBusy || !!reprocessingKey}
+                                            onClick={() => void reprocessPages(doc, "takeoff", p.page_number)}
+                                            className="text-[9px] uppercase tracking-widest font-mono text-gray-500 hover:text-[#00D2FF] disabled:opacity-40"
+                                          >
+                                            Retry takeoff
+                                          </button>
+                                        )}
+                                        <button
+                                          type="button"
+                                          disabled={!!pageBusy || !!reprocessingKey}
+                                          onClick={() => void reprocessPages(doc, "both", p.page_number)}
+                                          className="text-[9px] uppercase tracking-widest font-mono text-gray-500 hover:text-[#00D2FF] disabled:opacity-40"
+                                        >
+                                          Retry both
+                                        </button>
+                                      </div>
+                                    )}
+                                    {p.key_terms.length > 0 && (
+                                      <div className="mt-2 flex flex-wrap gap-1">
+                                        {p.key_terms.slice(0, 6).map((t) => (
+                                          <span key={t} className="text-[9px] font-mono text-gray-500 bg-white/5 border border-white/8 rounded px-1.5 py-0.5">
+                                            {t}
+                                          </span>
+                                        ))}
+                                      </div>
                                     )}
                                   </div>
-                                  <p className="text-[11px] leading-relaxed text-white/75">{p.summary || <span className="text-gray-700 italic">No summary</span>}</p>
-                                  {p.key_terms.length > 0 && (
-                                    <div className="mt-2 flex flex-wrap gap-1">
-                                      {p.key_terms.slice(0, 6).map((t) => (
-                                        <span key={t} className="text-[9px] font-mono text-gray-500 bg-white/5 border border-white/8 rounded px-1.5 py-0.5">
-                                          {t}
-                                        </span>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              ))}
+                                );
+                              })}
                             </div>
                           )}
                         </td>

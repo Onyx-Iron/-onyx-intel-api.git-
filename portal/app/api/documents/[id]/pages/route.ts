@@ -12,8 +12,13 @@ interface ParsedPageRow {
   page_number: number;
   summary: string;
   key_terms: string[];
+  page_id?: string | null;
+  ocr_status?: string | null;
+  takeoff_status?: string | null;
+  /** @deprecated prefer ocr_status — kept for callers that still read `status` */
   status: string | null;
   error: string | null;
+  takeoff_error?: string | null;
 }
 
 function mapSyncPage(extractedText: string | null, pageNumber: number): ParsedPageRow {
@@ -74,9 +79,10 @@ export async function GET(
       return NextResponse.json({ error: pagesErr.message }, { status: 500 });
     }
 
+    // Always load pipeline rows so Partial docs can show failed pages + reprocess.
     const { data: storedPages, error: asyncErr } = await db
       .from("document_pages")
-      .select("page_number, ocr_text, status, error")
+      .select("id, page_number, ocr_text, status, takeoff_status, error, takeoff_error")
       .eq("document_id", documentId)
       .eq("tenant_id", tenantId)
       .order("page_number", { ascending: true });
@@ -95,8 +101,12 @@ export async function GET(
         page_number: page.page_number,
         summary: existing?.summary || fromOcr.summary,
         key_terms: existing?.key_terms.length ? existing.key_terms : fromOcr.key_terms,
+        page_id: page.id,
+        ocr_status: page.status,
+        takeoff_status: page.takeoff_status,
         status: page.status,
         error: page.error,
+        takeoff_error: page.takeoff_error,
       });
     }
     const parsedPages = [...byNumber.values()].sort((a, b) => a.page_number - b.page_number);
