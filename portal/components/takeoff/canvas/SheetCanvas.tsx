@@ -4,7 +4,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import CADVectorLayer from "./CADVectorLayer";
 import VisionExtractionsPanel from "./VisionExtractionsPanel";
-import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
+import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-page";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { pointsToPageSpace, pointsToScreenSpace, samePoints, toPageSpace, translateStoredPoints } from "@/lib/takeoff/canvas/coordinates";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
