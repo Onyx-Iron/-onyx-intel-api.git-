@@ -18,12 +18,13 @@ export type CanvasCollabKind =
   | "topo_remove"
   | "area_upsert"
   | "area_remove"
-  | "cursor";
+  | "wall_upsert"
+  | "wall_remove";
 
 export type CanvasCollabEvent = {
   kind: CanvasCollabKind;
   senderId: string;
-  /** Opaque JSON payload — Shape / UtilityRun / etc. or { key } / cursor pts */
+  /** Opaque JSON payload — Shape / UtilityRun / etc. or { key } */
   payload: unknown;
   ts: number;
 };
@@ -70,16 +71,28 @@ export function removeByKey<T extends { key: string }>(
   return prev.filter((x) => x.key !== key);
 }
 
-/** Merge presence state map from supabase-js into a flat peer list. */
+/**
+ * Merge presence state from supabase-js into a flat peer list.
+ *
+ * IMPORTANT: @supabase/realtime-js PresenceAdapter.transformState strips the
+ * Phoenix `{ metas: [...] }` wrapper — `presenceState()` returns
+ * `{ [key]: Presence[] }`, not `{ [key]: { metas: Presence[] } }`.
+ */
 export function peersFromPresenceState(
-  state: Record<string, { metas?: Array<Record<string, unknown>> }>,
+  state: Record<string, unknown>,
   selfKey: string,
 ): CanvasPeer[] {
   const peers: CanvasPeer[] = [];
   for (const [key, value] of Object.entries(state)) {
     if (key === selfKey) continue;
-    const meta = value.metas?.[value.metas.length - 1];
-    if (!meta) continue;
+    const metas = Array.isArray(value)
+      ? value
+      : value && typeof value === "object" && Array.isArray((value as { metas?: unknown }).metas)
+        ? (value as { metas: unknown[] }).metas
+        : null;
+    if (!metas || metas.length === 0) continue;
+    const meta = metas[metas.length - 1] as Record<string, unknown>;
+    if (!meta || typeof meta !== "object") continue;
     peers.push({
       key,
       name: typeof meta.name === "string" ? meta.name : "Estimator",

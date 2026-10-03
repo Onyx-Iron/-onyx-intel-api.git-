@@ -115,11 +115,7 @@ export function useCanvasRealtime({
         })
         .on("presence", { event: "sync" }, () => {
           if (!channel) return;
-          const state = channel.presenceState() as Record<
-            string,
-            { metas?: Array<Record<string, unknown>> }
-          >;
-          setPeers(peersFromPresenceState(state, senderId));
+          setPeers(peersFromPresenceState(channel.presenceState(), senderId));
         })
         .subscribe(async (subStatus) => {
           if (cancelled) return;
@@ -133,7 +129,8 @@ export function useCanvasRealtime({
             });
           } else if (
             subStatus === "CHANNEL_ERROR" ||
-            subStatus === "TIMED_OUT"
+            subStatus === "TIMED_OUT" ||
+            subStatus === "CLOSED"
           ) {
             setConnectionStatus("error");
           }

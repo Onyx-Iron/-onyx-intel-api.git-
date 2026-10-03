@@ -29,16 +29,29 @@ describe("canvas-realtime helpers", () => {
     assert.match(c1, /^#/);
   });
 
-  it("flattens presence state excluding self", () => {
+  it("flattens supabase-js presence arrays excluding self", () => {
+    // realtime-js PresenceAdapter strips Phoenix `{ metas: [...] }` wrappers.
     const peers = peersFromPresenceState(
       {
-        self: { metas: [{ name: "Me", color: "#fff" }] },
-        peer1: { metas: [{ name: "Alex", color: "#CCFF00", x: 10, y: 20 }] },
+        self: [{ name: "Me", color: "#fff" }],
+        peer1: [{ name: "Alex", color: "#CCFF00", x: 10, y: 20 }],
       },
       "self",
     );
     assert.equal(peers.length, 1);
     assert.equal(peers[0]?.name, "Alex");
     assert.equal(peers[0]?.x, 10);
+  });
+
+  it("also accepts raw Phoenix metas shape for compatibility", () => {
+    const peers = peersFromPresenceState(
+      {
+        peer1: { metas: [{ name: "Sam", color: "#00D2FF", x: 3, y: 4 }] },
+      },
+      "self",
+    );
+    assert.equal(peers.length, 1);
+    assert.equal(peers[0]?.name, "Sam");
+    assert.equal(peers[0]?.y, 4);
   });
 });

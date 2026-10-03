@@ -268,6 +268,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       case "area_remove":
         if (keyPayload.key) setAreaBounds((prev) => removeByKey(prev, keyPayload.key!));
         break;
+      case "wall_upsert":
+        setWallRuns((prev) => upsertByKey(prev, event.payload as WallRun));
+        break;
+      case "wall_remove":
+        if (keyPayload.key) setWallRuns((prev) => removeByKey(prev, keyPayload.key!));
+        break;
       default:
         break;
     }
@@ -553,11 +559,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }, [tool, snapPoints]);
 
   const onCanvasMouseMove: React.MouseEventHandler<SVGSVGElement> = useCallback((e) => {
+    const cursor = toLocal(e.clientX, e.clientY, e.currentTarget);
     const now = Date.now();
     if (now - lastCursorTrackRef.current >= 80) {
       lastCursorTrackRef.current = now;
-      const rect = e.currentTarget.getBoundingClientRect();
-      trackCursor(e.clientX - rect.left, e.clientY - rect.top);
+      // Same SVG viewBox space as shapes — not raw CSS pixels from the client rect.
+      trackCursor(cursor.x, cursor.y);
     }
 
     if (!SNAP_TOOLS.has(tool) || snapPoints.length === 0) {
@@ -565,7 +572,6 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       latestSnapRef.current = null;
       return;
     }
-    const cursor = toLocal(e.clientX, e.clientY, e.currentTarget);
     const id = ++snapRequestIdRef.current;
     snapWorkerRef.current?.postMessage({
       type: "snap",
@@ -758,9 +764,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       rebar_spacing_inches: inputs.rebar_spacing_inches,
     };
     setWallRuns((prev) => [...prev, run]);
+    broadcast("wall_upsert", run);
     setWallModalPts(null);
     setDraftPoints([]);
-  }, [wallModalPts, scale]);
+  }, [wallModalPts, scale, broadcast]);
 
   const finishContourDraft = useCallback(() => {
     if (contourDraftPts.length < 2) { setContourDraftPts([]); return; }
@@ -2066,7 +2073,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                       {w.length_lf.toFixed(1)} <span className="text-white/40">LF</span>
                       <span className="text-white/40 text-xs"> · {w.height_ft}&apos; H · {w.thickness_in}&quot;</span>
                     </div>
-                    <button type="button" onClick={() => setWallRuns((prev) => prev.filter((x) => x.key !== w.key))} className="text-[10px] text-white/30 hover:text-red-400">✕</button>
+                    <button type="button" onClick={() => { setWallRuns((prev) => prev.filter((x) => x.key !== w.key)); broadcast("wall_remove", { key: w.key }); }} className="text-[10px] text-white/30 hover:text-red-400">✕</button>
                   </div>
                   <div className="mt-1 space-y-0.5 text-[10px] font-mono text-white/50">
                     {recipe.map((line) => (
