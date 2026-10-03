@@ -280,6 +280,47 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     }
   }
 
+  async function priceUnpriced() {
+    setSaving(true);
+    try {
+      const res = await fetch("/api/estimate/matrix/price-unpriced", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_id: projectId }),
+      });
+      const data = await res.json() as { priced?: number; still_unpriced?: number; error?: string };
+      if (res.ok) {
+        setSeedResult(`Priced ${data.priced ?? 0} open line${data.priced === 1 ? "" : "s"} (${data.still_unpriced ?? 0} still have no catalog price)`);
+        await load();
+      } else {
+        setSeedResult(`Price update failed: ${data.error ?? res.status}`);
+      }
+      setTimeout(() => setSeedResult(null), 5000);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function auditSpecs() {
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/spec-audit`, { method: "POST" });
+      const data = await res.json() as { gaps?: number; drafted?: number; reason?: string; error?: string };
+      if (!res.ok) setSeedResult(`Spec audit failed: ${data.error ?? res.status}`);
+      else if (data.reason === "no_specs") setSeedResult("No spec documents are indexed for this project yet.");
+      else if ((data.gaps ?? 0) === 0) setSeedResult("Every spec CSI code already appears on the takeoff.");
+      else setSeedResult(`Drafted a review RFI for ${data.gaps} spec code${data.gaps === 1 ? "" : "s"} missing from the takeoff.`);
+      setTimeout(() => setSeedResult(null), 5000);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function exportHref(format: "pdf" | "docx"): string {
+    const preview = versionStatus === "approved" ? "" : "&allow_draft_preview=1";
+    return `/api/estimate/versions/${encodeURIComponent(versionId ?? "")}/export?format=${format}${preview}`;
+  }
+
   // ── Live math ─────────────────────────────────────────────────────────────
   const rowDirect = useCallback((r: EstimateRow): number => {
     const unitSum =
@@ -588,6 +629,8 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
             ) : (
               <>
                 <button type="button" onClick={seed} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white disabled:opacity-40">Load from Takeoffs</button>
+                <button type="button" onClick={priceUnpriced} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white disabled:opacity-40">Price unpriced</button>
+                <button type="button" onClick={auditSpecs} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white disabled:opacity-40">Audit specs</button>
                 <button type="button" onClick={addRow} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white">+ Row</button>
                 {!pricingRestricted && (
                   <button type="button" onClick={() => setAssemblyModalOpen(true)} className="inline-flex h-9 items-center rounded-full border border-[#00D2FF]/30 bg-[#00D2FF]/10 px-4 text-[11px] font-semibold uppercase tracking-widest text-[#00D2FF] hover:bg-[#00D2FF]/20">Insert Assembly Mix</button>
@@ -598,6 +641,12 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
               </>
             )}
             <button type="button" onClick={exportProposal} className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85">Export XLSX</button>
+            {versionId && (
+              <>
+                <a href={exportHref("pdf")} className="inline-flex h-9 items-center rounded-full border border-white/15 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:text-white">PDF</a>
+                <a href={exportHref("docx")} className="inline-flex h-9 items-center rounded-full border border-white/15 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:text-white">DOCX</a>
+              </>
+            )}
           </div>
         </div>
 

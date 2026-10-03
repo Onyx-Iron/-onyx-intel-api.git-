@@ -91,6 +91,24 @@ export function isLegacyHeuristicSplit(
     && Math.abs(equipment / total - LEGACY_EQUIPMENT_SHARE) <= tolerance;
 }
 
+/**
+ * A draft line with no direct dollars and no unit price. A human-entered
+ * unit price, even with a zero split, is left alone.
+ */
+export function isUnpricedDraftLine(row: {
+  labor_cost: number | null;
+  material_cost: number | null;
+  equipment_cost: number | null;
+  unit_cost: number | null;
+}): boolean {
+  const labor = Number(row.labor_cost ?? 0);
+  const material = Number(row.material_cost ?? 0);
+  const equipment = Number(row.equipment_cost ?? 0);
+  const unit = row.unit_cost == null ? 0 : Number(row.unit_cost);
+  if (![labor, material, equipment, unit].every((n) => Number.isFinite(n))) return false;
+  return labor === 0 && material === 0 && equipment === 0 && !(unit > 0);
+}
+
 /** Unit price implied by a legacy 40/45/15 extended split, or null. */
 export function legacyHeuristicUnitCost(
   labor: number,

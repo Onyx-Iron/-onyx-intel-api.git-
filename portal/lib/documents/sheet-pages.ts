@@ -45,10 +45,10 @@ export async function splitPdfIntoPages(pdfBytes: Uint8Array): Promise<Uint8Arra
 export async function publishSheetPages(
   store: SheetPageStore,
   args: { tenantId: string; documentId: string; pdfBytes: Uint8Array },
-): Promise<number> {
+): Promise<{ pageCount: number; created: SheetPageRow[] }> {
   const pages = await splitPdfIntoPages(args.pdfBytes);
   const existing = await store.countExisting(args.documentId, args.tenantId);
-  if (existing >= pages.length && pages.length > 0) return existing;
+  if (existing >= pages.length && pages.length > 0) return { pageCount: existing, created: [] };
 
   const rows: SheetPageRow[] = [];
   for (let i = 0; i < pages.length; i++) {
@@ -65,5 +65,5 @@ export async function publishSheetPages(
     });
   }
   if (rows.length > 0) await store.insertPages(rows);
-  return rows.length;
+  return { pageCount: rows.length, created: rows };
 }

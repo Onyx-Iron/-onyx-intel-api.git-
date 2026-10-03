@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { isLegacyHeuristicSplit, legacyHeuristicUnitCost, seedLineCosts } from "./seed-pricing.ts";
+import { isLegacyHeuristicSplit, isUnpricedDraftLine, legacyHeuristicUnitCost, seedLineCosts } from "./seed-pricing.ts";
 
 describe("seedLineCosts", () => {
   it("books a flat catalog price entirely as material", () => {
@@ -54,5 +54,13 @@ describe("legacy heuristic split", () => {
   it("does not treat a flat material booking as the old split", () => {
     assert.equal(isLegacyHeuristicSplit(0, 250, 0), false);
     assert.equal(legacyHeuristicUnitCost(0, 250, 0, 10), null);
+  });
+});
+
+describe("isUnpricedDraftLine", () => {
+  it("selects a zero line and skips a line that already has a unit price", () => {
+    assert.equal(isUnpricedDraftLine({ labor_cost: 0, material_cost: 0, equipment_cost: 0, unit_cost: null }), true);
+    assert.equal(isUnpricedDraftLine({ labor_cost: 0, material_cost: 0, equipment_cost: 0, unit_cost: 12 }), false);
+    assert.equal(isUnpricedDraftLine({ labor_cost: 0, material_cost: 40, equipment_cost: 0, unit_cost: null }), false);
   });
 });

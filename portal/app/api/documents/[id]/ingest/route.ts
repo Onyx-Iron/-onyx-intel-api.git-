@@ -11,6 +11,7 @@ import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import { fetchDriveFileSize } from "@/lib/google/driveFile";
 import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
 import { looksLikePdf, publishSheetPages } from "@/lib/documents/sheet-pages";
+import { fanOutSheetJobs } from "@/lib/documents/sheet-fanout";
 import {
   PLANS_BUCKET,
   ASYNC_SPLIT_BYTES,
@@ -449,7 +450,7 @@ export async function POST(
 
     if (pdfDocument && projectIdForSplit) {
       await assertWithinBudget("sheet_pages");
-      await publishSheetPages({
+      const published = await publishSheetPages({
         async countExisting(documentId, tenantId) {
           const { count, error } = await db
             .from("document_pages")
@@ -477,6 +478,27 @@ export async function POST(
         documentId: docId,
         pdfBytes,
       });
+      if (published.created.length > 0) {
+        const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || "";
+        const serviceKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+        if (supabaseUrl && serviceKey) {
+          const fanout = await fanOutSheetJobs({
+            jobs: published.created.map((row) => ({
+              page_id: row.id,
+              document_id: row.document_id,
+              tenant_id: row.tenant_id,
+              project_id: projectIdForSplit,
+              page_number: row.page_number,
+              storage_path: row.storage_path,
+            })),
+            supabaseUrl,
+            serviceKey,
+          });
+          if (fanout.failures > 0) {
+            console.error(`[ingest ${docId}] sheet fan-out failed for ${fanout.failures}/${fanout.attempted} jobs`);
+          }
+        }
+      }
     }
 
     // 2. Upload to Gemini Files API
