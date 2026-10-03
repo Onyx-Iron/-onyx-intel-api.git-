@@ -1,7 +1,9 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { auditInsert, auditUpdate } from "@/lib/audit";
 import { massHaulSummary, applyMaterialFactors, type MaterialFactors } from "@/lib/math/earthwork";
 
 export const runtime = "nodejs";
@@ -93,52 +95,80 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
  * — this just records the deduction for the mass-haul/audit trail.
  */
 export async function PATCH(req: NextRequest): Promise<NextResponse> {
-  const { userId, orgId, orgSlug } = await auth();
-  if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  try {
+    const { userId, orgId, orgSlug } = await auth();
+    if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = await req.json().catch(() => ({})) as {
-    project_id?: string;
-    layer_name?: string;
-    deduction?: { kind: string; area_sf: number; depth_in?: number; volume_cy: number; area_limit_id?: string; source?: string };
-  };
-  if (!body.project_id) return NextResponse.json({ error: "project_id required" }, { status: 400 });
-  if (!body.deduction || typeof body.deduction.volume_cy !== "number") {
-    return NextResponse.json({ error: "deduction { kind, area_sf, volume_cy } required" }, { status: 400 });
-  }
+    const body = await req.json().catch(() => ({})) as {
+      project_id?: string;
+      layer_name?: string;
+      deduction?: { kind: string; area_sf: number; depth_in?: number; volume_cy: number; area_limit_id?: string; source?: string };
+    };
+    if (!body.project_id) return NextResponse.json({ error: "project_id required" }, { status: 400 });
+    if (!body.deduction || typeof body.deduction.volume_cy !== "number") {
+      return NextResponse.json({ error: "deduction { kind, area_sf, volume_cy } required" }, { status: 400 });
+    }
 
-  const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
-  const db = await createServiceClient();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const anyDb = db as any;
-  const layerName = body.layer_name || "area_bounds_deductions";
+    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    await assertProjectBelongsToTenant(body.project_id, tenantId);
+    const db = await createServiceClient();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyDb = db as any;
+    const layerName = body.layer_name || "area_bounds_deductions";
 
-  const entry = { ...body.deduction, applied_at: new Date().toISOString() };
+    const entry = { ...body.deduction, applied_at: new Date().toISOString() };
 
-  const { data: existing } = await anyDb
-    .from("earthwork_volumes")
-    .select("id, deductions")
-    .eq("tenant_id", tenantId).eq("project_id", body.project_id).eq("layer_name", layerName)
-    .maybeSingle();
+    const { data: existing } = await anyDb
+      .from("earthwork_volumes")
+      .select("id, deductions")
+      .eq("tenant_id", tenantId).eq("project_id", body.project_id).eq("layer_name", layerName)
+      .maybeSingle();
 
-  if (existing) {
-    const nextDeductions = [...(Array.isArray(existing.deductions) ? existing.deductions : []), entry];
-    const { error } = await anyDb.from("earthwork_volumes")
-      .update({ deductions: nextDeductions, updated_at: new Date().toISOString() })
-      .eq("id", existing.id);
+    if (existing) {
+      const nextDeductions = [...(Array.isArray(existing.deductions) ? existing.deductions : []), entry];
+      const { error } = await anyDb.from("earthwork_volumes")
+        .update({ deductions: nextDeductions, updated_at: new Date().toISOString() })
+        .eq("id", existing.id);
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+      auditUpdate({
+        tenant_id: tenantId,
+        user_id: userId,
+        table_name: "earthwork_volumes",
+        record_id: existing.id,
+        old_values: existing as unknown as Record<string, unknown>,
+        new_values: { deductions: nextDeductions } as unknown as Record<string, unknown>,
+      });
+
+      return NextResponse.json({ ok: true, layer_id: existing.id, deductions: nextDeductions });
+    }
+
+    const { data: created, error } = await anyDb.from("earthwork_volumes").insert({
+      tenant_id: tenantId,
+      project_id: body.project_id,
+      layer_name: layerName,
+      cut_volume_cy: 0,
+      fill_volume_cy: 0,
+      net_balance_cy: 0,
+      deductions: [entry],
+      scope_type: "area_bounds_deduction",
+    }).select("id").single();
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    return NextResponse.json({ ok: true, layer_id: existing.id, deductions: nextDeductions });
-  }
 
-  const { data: created, error } = await anyDb.from("earthwork_volumes").insert({
-    tenant_id: tenantId,
-    project_id: body.project_id,
-    layer_name: layerName,
-    cut_volume_cy: 0,
-    fill_volume_cy: 0,
-    net_balance_cy: 0,
-    deductions: [entry],
-    scope_type: "area_bounds_deduction",
-  }).select("id").single();
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ ok: true, layer_id: created.id, deductions: [entry] });
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "earthwork_volumes",
+      record_id: created.id,
+      new_values: created as unknown as Record<string, unknown>,
+    });
+
+    return NextResponse.json({ ok: true, layer_id: created.id, deductions: [entry] });
+  } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
+    return NextResponse.json({ error: String(err) }, { status: 500 });
+  }
 }

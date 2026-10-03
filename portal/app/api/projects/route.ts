@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import type { TablesInsert } from "@/lib/supabase/types";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
+import { auditInsert } from "@/lib/audit";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
@@ -55,6 +57,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
 
     const payload: TablesInsert<"projects"> = {
       tenant_id: tenantId,
@@ -81,6 +85,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         { status: 422 },
       );
     }
+
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "projects",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      record_id: (data as any).id,
+      new_values: data as unknown as Record<string, unknown>,
+    });
 
     return NextResponse.json({ project: data }, { status: 201 });
   } catch (err: unknown) {

@@ -2,7 +2,9 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import type { TablesUpdate } from "@/lib/supabase/types";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { auditUpdate, auditDelete } from "@/lib/audit";
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -32,6 +34,11 @@ export async function PUT(req: NextRequest, context: RouteContext): Promise<Next
     };
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    if (project_id) {
+      await assertProjectBelongsToTenant(project_id, tenantId);
+    }
 
     const updates: TablesUpdate<"contacts"> = { updated_at: new Date().toISOString() };
     if (name !== undefined) updates.name = name;
@@ -43,6 +50,14 @@ export async function PUT(req: NextRequest, context: RouteContext): Promise<Next
     if (project_id !== undefined) updates.project_id = project_id;
 
     const db = await createServiceClient();
+
+    const { data: before } = await db
+      .from("contacts")
+      .select("*")
+      .eq("id", id)
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+
     const { data, error } = await db
       .from("contacts")
       .update(updates)
@@ -55,8 +70,19 @@ export async function PUT(req: NextRequest, context: RouteContext): Promise<Next
       return NextResponse.json({ error: `[PUT /api/contacts/${id}] ${error.message}` }, { status: 422 });
     }
 
+    auditUpdate({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "contacts",
+      record_id: id,
+      old_values: (before ?? null) as unknown as Record<string, unknown> | null,
+      new_values: data as unknown as Record<string, unknown>,
+    });
+
     return NextResponse.json({ contact: data });
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[PUT /api/contacts/[id]] ${msg}` }, { status: 500 });
   }
@@ -75,8 +101,18 @@ export async function DELETE(_req: NextRequest, context: RouteContext): Promise<
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
 
     const db = await createServiceClient();
+
+    const { data: before } = await db
+      .from("contacts")
+      .select("*")
+      .eq("id", id)
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+
     const { error } = await db
       .from("contacts")
       .delete()
@@ -86,6 +122,14 @@ export async function DELETE(_req: NextRequest, context: RouteContext): Promise<
     if (error) {
       return NextResponse.json({ error: `[DELETE /api/contacts/${id}] ${error.message}` }, { status: 422 });
     }
+
+    auditDelete({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "contacts",
+      record_id: id,
+      old_values: (before ?? null) as unknown as Record<string, unknown> | null,
+    });
 
     return NextResponse.json({ success: true });
   } catch (err: unknown) {

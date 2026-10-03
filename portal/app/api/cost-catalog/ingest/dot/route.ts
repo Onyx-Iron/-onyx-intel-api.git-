@@ -1,6 +1,9 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
+import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
+import { auditInsert } from "@/lib/audit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,6 +47,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     const guard = await requireAdmin();
     if (guard) return guard;
+    const { userId, orgId, orgSlug } = await auth();
+    if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "financial", "write");
+    if (denied) return denied;
     const body = (await req.json()) as DotBody;
     const state = (body.state ?? "").trim().toUpperCase();
     const rows = Array.isArray(body.rows) ? body.rows : [];
@@ -129,6 +137,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 422 });
     }
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "cost_prices",
+      record_id: tenantId,
+      new_values: { inserted: data?.length ?? 0, state, source: `dot_${state.toLowerCase()}` } as unknown as Record<string, unknown>,
+    });
     return NextResponse.json(
       { inserted: data?.length ?? 0, state },
       { status: 201 },

@@ -1,6 +1,6 @@
 /**
- * Magnetic vector snapping — finds the nearest CAD vector vertex within a
- * pixel threshold of the cursor during active drawing modes.
+ * Magnetic snap: pull the cursor onto the nearest CAD/PDF vector vertex
+ * when it is within `thresholdPixels` of that vertex (screen space).
  */
 
 export interface VectorPoint {
@@ -14,77 +14,64 @@ export interface SnapResult {
   distance: number;
 }
 
+export const DEFAULT_SNAP_THRESHOLD_PX = 12;
+
 /**
- * Return the nearest vector vertex to `cursor` when within `thresholdPixels`,
- * otherwise return the raw cursor position with `snapped: false`.
+ * Find the nearest vector vertex to `cursor` within `thresholdPixels`.
+ * When nothing is close enough, returns the original cursor (snapped: false).
  */
 export function getNearestVectorPoint(
   cursor: VectorPoint,
-  vectorPoints: VectorPoint[],
-  thresholdPixels = 12,
+  vectorPoints: ReadonlyArray<VectorPoint>,
+  thresholdPixels: number = DEFAULT_SNAP_THRESHOLD_PX,
 ): SnapResult {
-  if (vectorPoints.length === 0) {
-    return { snapped: false, point: cursor, distance: Infinity };
+  if (!Number.isFinite(cursor.x) || !Number.isFinite(cursor.y)) {
+    return { snapped: false, point: { x: cursor.x, y: cursor.y }, distance: Infinity };
+  }
+  if (vectorPoints.length === 0 || thresholdPixels < 0) {
+    return { snapped: false, point: { x: cursor.x, y: cursor.y }, distance: Infinity };
   }
 
   let best: VectorPoint | null = null;
-  let bestDist = Infinity;
+  let bestDist = thresholdPixels;
 
-  for (const vp of vectorPoints) {
-    const dx = cursor.x - vp.x;
-    const dy = cursor.y - vp.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = vp;
+  for (const candidate of vectorPoints) {
+    if (!Number.isFinite(candidate.x) || !Number.isFinite(candidate.y)) continue;
+    const distance = Math.hypot(candidate.x - cursor.x, candidate.y - cursor.y);
+    if (distance <= bestDist) {
+      bestDist = distance;
+      best = candidate;
     }
   }
 
-  if (best != null && bestDist <= thresholdPixels) {
-    return { snapped: true, point: best, distance: bestDist };
+  if (!best) {
+    return { snapped: false, point: { x: cursor.x, y: cursor.y }, distance: Infinity };
   }
 
-  return { snapped: false, point: cursor, distance: bestDist };
+  return { snapped: true, point: { x: best.x, y: best.y }, distance: bestDist };
 }
 
-/** Flatten CAD vector polylines into screen-space vertex points for snapping. */
-export function extractScreenVertices(
-  vectors: Array<{ points: Array<[number, number]> }>,
-  canvasSize: { w: number; h: number },
+/**
+ * Flatten polyline / point vectors into unique screen-space snap targets.
+ * Coordinates are rounded to 0.1px so near-duplicate vertices collapse.
+ */
+export function collectSnapPoints(
+  vectors: ReadonlyArray<{ points: ReadonlyArray<readonly [number, number] | VectorPoint> }>,
 ): VectorPoint[] {
-  if (vectors.length === 0 || canvasSize.w <= 0 || canvasSize.h <= 0) return [];
-
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const v of vectors) {
-    for (const [x, y] of v.points) {
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-    }
-  }
-  if (!Number.isFinite(minX)) return [];
-
-  const wSpan = Math.max(1e-6, maxX - minX);
-  const hSpan = Math.max(1e-6, maxY - minY);
-  const pad = 20;
-  const sx = (canvasSize.w - pad * 2) / wSpan;
-  const sy = (canvasSize.h - pad * 2) / hSpan;
-  const s = Math.min(sx, sy);
-
-  const project = (x: number, y: number): VectorPoint => ({
-    x: pad + (x - minX) * s,
-    y: canvasSize.h - pad - (y - minY) * s,
-  });
-
+  const seen = new Set<string>();
   const out: VectorPoint[] = [];
-  for (const v of vectors) {
-    for (const [x, y] of v.points) {
-      out.push(project(x, y));
+
+  for (const vector of vectors) {
+    for (const raw of vector.points) {
+      const x = "x" in raw ? raw.x : raw[0];
+      const y = "y" in raw ? raw.y : raw[1];
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      const key = `${Math.round(x * 10)},${Math.round(y * 10)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ x, y });
     }
   }
+
   return out;
 }

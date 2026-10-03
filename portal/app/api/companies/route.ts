@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditInsert, auditUpdate } from "@/lib/audit";
 
 export const runtime = "nodejs";
@@ -41,6 +42,8 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const body = await req.json().catch(() => ({})) as { name?: string; subscription_status?: string };
   const { tenantId, company } = await ensureCompany(userId, orgId ?? null, orgSlug ?? null);
+  const denied = await requirePermission(tenantId, userId, "admin", "write");
+  if (denied) return denied;
 
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

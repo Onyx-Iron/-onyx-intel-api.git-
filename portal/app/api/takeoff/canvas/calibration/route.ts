@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant, assertPageBelongsToProject } from "@/lib/project-controls/server";
 import type { CalibrationPoint, CalibrationUpsertBody } from "@/lib/types/takeoff";
+import { requirePermission } from "@/lib/project-controls/route-guards";
 
 export const runtime = "nodejs";
 
@@ -68,6 +69,8 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   const unit_type = (known_unit ?? "LF").trim().toUpperCase();
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
 
   try {
     await assertProjectBelongsToTenant(project_id, tenantId);

@@ -5,6 +5,7 @@ import { Plus, Search } from "lucide-react";
 import PageHero from "@/components/layout/PageHero";
 
 import { useConfirm } from "@/components/common/ConfirmDialog";
+import { useToast } from "@/components/common/Toast";
 
 interface CatalogItem {
   id: string;
@@ -27,6 +28,7 @@ function money(n: number): string {
 
 export default function PriceBookManager() {
   const { confirm } = useConfirm();
+  const { toast } = useToast();
   const [items, setItems] = useState<CatalogItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -37,7 +39,16 @@ export default function PriceBookManager() {
 
   const load = () => {
     setLoading(true);
-    fetch("/api/cost-catalog").then((r) => r.json()).then((d: { items?: CatalogItem[] }) => { setItems(d.items ?? []); setLoading(false); }).catch(() => setLoading(false));
+    fetch("/api/cost-catalog")
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<{ items?: CatalogItem[] }>;
+      })
+      .then((d) => { setItems(d.items ?? []); setLoading(false); })
+      .catch(() => {
+        setLoading(false);
+        toast({ title: "Could not load Price Book.", kind: "error" });
+      });
   };
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, []);
@@ -59,16 +70,38 @@ export default function PriceBookManager() {
       trade: form.trade || null, uom: form.uom || null, unit_cost: form.unit_cost ? parseFloat(form.unit_cost) : 0,
     };
     try {
-      if (editId) await fetch(`/api/cost-catalog/${encodeURIComponent(editId)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-      else await fetch("/api/cost-catalog", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const res = editId
+        ? await fetch(`/api/cost-catalog/${encodeURIComponent(editId)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
+        : await fetch("/api/cost-catalog", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({})) as { error?: string };
+        toast({ title: String(d.error ?? `Save failed (${res.status})`), kind: "error" });
+        return;
+      }
       cancel(); load();
+      toast({ title: editId ? "Price Book entry updated." : "Price Book entry added.", kind: "success" });
+    } catch {
+      toast({ title: "Network error — could not save Price Book entry.", kind: "error" });
     } finally { setSubmitting(false); }
   };
 
   const remove = async (id: string) => {
     if (!(await confirm({ title: String("Delete this price-book entry?"), destructive: true }))) return;
+    const previous = items;
     setItems((prev) => prev.filter((i) => i.id !== id));
-    await fetch(`/api/cost-catalog/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => load());
+    try {
+      const res = await fetch(`/api/cost-catalog/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!res.ok) {
+        setItems(previous);
+        const d = await res.json().catch(() => ({})) as { error?: string };
+        toast({ title: String(d.error ?? `Delete failed (${res.status})`), kind: "error" });
+        return;
+      }
+      toast({ title: "Price Book entry deleted.", kind: "success" });
+    } catch {
+      setItems(previous);
+      toast({ title: "Network error — could not delete Price Book entry.", kind: "error" });
+    }
   };
 
   const q = search.toLowerCase();

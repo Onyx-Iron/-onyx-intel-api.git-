@@ -1,13 +1,15 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { getUserRole, redactFinancialFields } from "@/lib/project-controls/permissions";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { ESTIMATE_FINANCIAL_FIELDS } from "@/lib/project-controls/financial-redaction";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
+import { getOrCreateDraftVersion, getServiceDb } from "@/lib/estimating/versioning";
 
 export const runtime = "nodejs";
 
@@ -90,14 +92,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
-    const db = await createServiceClient();
+    const denied = await requirePermission(tenantId, userId, "financial", "write");
+    if (denied) return denied;
+    await assertProjectBelongsToTenant(body.project_id, tenantId);
+
+    // Route through draft version helpers so legacy POSTs cannot orphan lines
+    // outside a version or write past an approved lock.
+    const db = await getServiceDb();
+    const { versionId } = await getOrCreateDraftVersion(db, tenantId, body.project_id, userId);
 
     const { data, error } = await db
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .from("estimate_items" as any)
+      .from("estimate_items")
       .insert({
         tenant_id:   tenantId,
         project_id:  body.project_id,
+        estimate_version_id: versionId,
         description: body.description.trim(),
         trade:       body.trade ?? null,
         csi_code:    body.csi_code ?? null,
@@ -112,6 +121,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         drawing_ref:        body.drawing_ref ?? null,
         location_tag:       body.location_tag ?? null,
         pricing_status:     body.pricing_status ?? "manual",
+        created_by: userId,
+        updated_by: userId,
       })
       .select()
       .single();
@@ -142,6 +153,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }

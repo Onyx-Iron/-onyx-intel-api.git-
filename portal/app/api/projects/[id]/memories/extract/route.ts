@@ -2,6 +2,8 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
 import { listProjectMemories, upsertMemoryFacts } from "@/lib/ai/project-memories";
 import { generateText, NoProviderError } from "@/lib/ai/providers";
@@ -31,6 +33,8 @@ export async function POST(
     const parsed = uuidSchema.safeParse(id);
     if (!parsed.success) return NextResponse.json({ error: "id must be a valid UUID" }, { status: 400 });
 
+    const denied = await requirePermission(ctx.tenantId, ctx.userId, "field", "write");
+    if (denied) return denied;
     await assertProjectBelongsToTenant(parsed.data, ctx.tenantId);
     const db = await createServiceClient();
 
@@ -136,16 +140,24 @@ export async function POST(
     }
 
     const inserted = await upsertMemoryFacts(db, ctx.tenantId, parsed.data, facts);
+    if (inserted > 0) {
+      auditInsert({
+        tenant_id: ctx.tenantId,
+        user_id: ctx.userId,
+        table_name: "memories",
+        record_id: parsed.data,
+        new_values: { inserted, source: "extract" } as unknown as Record<string, unknown>,
+      });
+    }
     const memories = await listProjectMemories(db, ctx.tenantId, parsed.data);
     return NextResponse.json({ inserted, memories, provider: result.provider });
   } catch (err: unknown) {
     if (err instanceof NoProviderError) {
       return NextResponse.json({ error: err.message, code: "NO_PROVIDER" }, { status: 503 });
     }
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("does not belong")) {
-      return NextResponse.json({ error: "Project not found" }, { status: 404 });
-    }
     return NextResponse.json({ error: `[extract memories] ${msg}` }, { status: 500 });
   }
 }

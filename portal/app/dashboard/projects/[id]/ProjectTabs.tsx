@@ -78,6 +78,20 @@ const PHASE_SLUGS: Record<Phase, string> = {
   Closeout: "closeout",
 };
 
+/** Old `?section=` deep links from roll-up pages before phase/tab IA. */
+const LEGACY_SECTION_TO_PHASE_TAB: Record<string, { phase: Phase; tab: string }> = {
+  "project-controls": { phase: "Project Controls", tab: "controls" },
+  controls: { phase: "Project Controls", tab: "controls" },
+  schedule: { phase: "Schedule", tab: "scheduling" },
+  field: { phase: "Field", tab: "daily-log" },
+  closeout: { phase: "Closeout", tab: "punchlist" },
+  documents: { phase: "Documents", tab: "documents" },
+  takeoff: { phase: "Takeoff", tab: "takeoff" },
+  estimate: { phase: "Estimate & Budget", tab: "estimates" },
+  procurement: { phase: "Procurement", tab: "procurement" },
+  financials: { phase: "Financials", tab: "ar" },
+};
+
 function phaseFromSlug(slug: string | null): Phase | null {
   if (!slug) return null;
   const entry = (Object.entries(PHASE_SLUGS) as [Phase, string][]).find(([, s]) => s === slug);
@@ -187,9 +201,11 @@ export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps
 
   // URL is the source of truth so back/forward and refresh keep the same tab
   // without syncing search params into React state via an effect.
-  const activePhase = phaseFromSlug(searchParams.get("phase")) ?? "Overview";
+  const legacyFromSection = LEGACY_SECTION_TO_PHASE_TAB[searchParams.get("section") ?? ""];
+  const activePhase =
+    phaseFromSlug(searchParams.get("phase")) ?? legacyFromSection?.phase ?? "Overview";
   const currentSubtabs = PHASES.find((p) => p.id === activePhase)?.subtabs ?? [];
-  const tabFromUrl = searchParams.get("tab");
+  const tabFromUrl = searchParams.get("tab") ?? legacyFromSection?.tab ?? null;
   const activeSubId =
     (tabFromUrl && currentSubtabs.some((s) => s.id === tabFromUrl) ? tabFromUrl : null) ??
     currentSubtabs[0]?.id ??
@@ -199,12 +215,22 @@ export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps
   const syncUrl = useCallback(
     (phase: Phase, tab: string) => {
       const params = new URLSearchParams(searchParams.toString());
+      params.delete("section");
       params.set("phase", PHASE_SLUGS[phase]);
       params.set("tab", tab);
       router.replace(`${pathname}?${params.toString()}`, { scroll: false });
     },
     [pathname, router, searchParams],
   );
+
+  // Normalize stale `?section=` bookmarks into `?phase=&tab=` so shared links stay stable.
+  useEffect(() => {
+    const section = searchParams.get("section");
+    if (!section || searchParams.get("phase")) return;
+    const mapped = LEGACY_SECTION_TO_PHASE_TAB[section];
+    if (!mapped) return;
+    syncUrl(mapped.phase, mapped.tab);
+  }, [searchParams, syncUrl]);
 
   const selectPhase = (phase: Phase) => {
     const first = PHASES.find((p) => p.id === phase)?.subtabs[0];
