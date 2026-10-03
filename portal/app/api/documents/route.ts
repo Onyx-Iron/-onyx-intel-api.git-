@@ -11,6 +11,25 @@ import { reclaimStuckProcessingDocuments, reclaimStuckProcessingPages, reclaimSt
 import { finalizeDocumentsFromOcr } from "@/lib/documents/finalizeDocument";
 import { settleRailwayExtracts } from "@/lib/documents/railwaySettle";
 
+/** Columns the Documents UI needs — avoid select("*") on every poll. */
+const DOCUMENT_LIST_COLUMNS = [
+  "id",
+  "file_name",
+  "status",
+  "split_status",
+  "ocr_status",
+  "vector_status",
+  "takeoff_status",
+  "last_error",
+  "last_error_step",
+  "doc_type",
+  "page_count",
+  "uploaded_at",
+  "processed_at",
+  "meta",
+  "project_id",
+].join(", ");
+
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
     const { userId, orgId, orgSlug } = await auth();
@@ -19,36 +38,48 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     }
 
     const projectId = req.nextUrl.searchParams.get("project_id");
+    // maintain=1 (default when project-scoped) runs reclaim + OCR finalize.
+    // Pass maintain=0 for a cheap refresh after split-status already ran.
+    const maintainParam = req.nextUrl.searchParams.get("maintain");
+    const maintain = maintainParam == null
+      ? Boolean(projectId)
+      : maintainParam === "1" || maintainParam === "true";
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const { page, limit, offset } = parsePagination(req.nextUrl.searchParams);
 
     const db = await createServiceClient();
-    // CAD jobs must settle (and refresh processing_started_at) before the
-    // 10-minute stuck reclaim would mark them error.
-    await settleRailwayExtracts(db, tenantId).catch((err) =>
-      console.error("[GET /api/documents] railway settle failed", err),
-    );
-    // Opportunistic reclaim + OCR finalize so list polls advance stuck / split
-    // docs instead of spinning forever in the Documents UI.
-    await reclaimStuckProcessingDocuments(db, tenantId).catch((err) =>
-      console.error("[GET /api/documents] stuck reclaim failed", err),
-    );
-    await reclaimStuckProcessingPages(db, tenantId).catch((err) =>
-      console.error("[GET /api/documents] stuck page reclaim failed", err),
-    );
-    try {
-      await reclaimStuckProcessingSheets(db, tenantId);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return NextResponse.json({ error: `[GET /api/documents] ${msg}` }, { status: 500 });
+    if (maintain) {
+      // CAD jobs must settle (and refresh processing_started_at) before the
+      // 10-minute stuck reclaim would mark them error.
+      await settleRailwayExtracts(db, tenantId).catch((err) =>
+        console.error("[GET /api/documents] railway settle failed", err),
+      );
+      // Scope reclaim/finalize to the project when listing a project — tenant-wide
+      // scans on every poll were the hot path for Documents.
+      // Reclaim docs + pages in parallel; finalize after so terminal page
+      // errors are visible to the OCR rollup.
+      await Promise.all([
+        reclaimStuckProcessingDocuments(db, tenantId, undefined, projectId).catch((err) =>
+          console.error("[GET /api/documents] stuck reclaim failed", err),
+        ),
+        reclaimStuckProcessingPages(db, tenantId, undefined, undefined, projectId).catch((err) =>
+          console.error("[GET /api/documents] stuck page reclaim failed", err),
+        ),
+      ]);
+      try {
+        await reclaimStuckProcessingSheets(db, tenantId);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return NextResponse.json({ error: `[GET /api/documents] ${msg}` }, { status: 500 });
+      }
+      await finalizeDocumentsFromOcr(db, tenantId, undefined, projectId).catch((err) =>
+        console.error("[GET /api/documents] OCR finalize failed", err),
+      );
     }
-    await finalizeDocumentsFromOcr(db, tenantId).catch((err) =>
-      console.error("[GET /api/documents] OCR finalize failed", err),
-    );
 
     let query = db
       .from("documents")
-      .select("*", { count: "exact" })
+      .select(DOCUMENT_LIST_COLUMNS, { count: "exact" })
       .eq("tenant_id", tenantId)
       .order("uploaded_at", { ascending: false });
 
@@ -93,7 +124,7 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     // Fetch the document first so we can log the project_id after deletion.
     const { data: docRow } = await db
       .from("documents")
-      .select("*")
+      .select("id, project_id, file_name, status")
       .eq("id", idParse.data)
       .eq("tenant_id", tenantId)
       .single();

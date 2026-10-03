@@ -16,10 +16,16 @@ export const STUCK_QUEUED_MS = 15 * 60 * 1000;
 /** Pending pages that never got a processor claim after this are abandoned. */
 export const STUCK_PENDING_PAGE_MS = 15 * 60 * 1000;
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function scopeProject(q: any, projectId?: string | null) {
+  return projectId ? q.eq("project_id", projectId) : q;
+}
+
 export async function reclaimStuckProcessingDocuments(
   db: AnyDb,
   tenantId: string,
   olderThanMs: number = STUCK_PROCESSING_MS,
+  projectId?: string | null,
 ): Promise<number> {
   const cutoff = new Date(Date.now() - olderThanMs).toISOString();
 
@@ -28,7 +34,7 @@ export async function reclaimStuckProcessingDocuments(
   // Do NOT reclaim status="split" here — kick time is often >10m before OCR
   // finishes on large plans. Stuck pages are reclaimed separately; OCR
   // finalize then rolls the parent to complete / complete_with_errors / error.
-  const { data: byStart, error: startErr } = await db
+  let byStartQ = db
     .from("documents")
     .update({
       status: "error",
@@ -38,13 +44,14 @@ export async function reclaimStuckProcessingDocuments(
     .eq("tenant_id", tenantId)
     .eq("status", "processing")
     .not("processing_started_at", "is", null)
-    .lt("processing_started_at", cutoff)
-    .select("id");
+    .lt("processing_started_at", cutoff);
+  byStartQ = scopeProject(byStartQ, projectId);
+  const { data: byStart, error: startErr } = await byStartQ.select("id");
 
   if (startErr) console.error("[reclaimStuckProcessingDocuments:started]", startErr);
 
   // Fallback: processing rows that never got processing_started_at set.
-  const { data: byUpload, error: uploadErr } = await db
+  let byUploadQ = db
     .from("documents")
     .update({
       status: "error",
@@ -54,15 +61,16 @@ export async function reclaimStuckProcessingDocuments(
     .eq("tenant_id", tenantId)
     .eq("status", "processing")
     .is("processing_started_at", null)
-    .lt("uploaded_at", cutoff)
-    .select("id");
+    .lt("uploaded_at", cutoff);
+  byUploadQ = scopeProject(byUploadQ, projectId);
+  const { data: byUpload, error: uploadErr } = await byUploadQ.select("id");
 
   if (uploadErr) console.error("[reclaimStuckProcessingDocuments:uploaded]", uploadErr);
 
   // Stale queued / pending — use kick time (processing_started_at) so a Retry
   // on an old upload isn't immediately reclaimed via the original uploaded_at.
   const queuedCutoff = new Date(Date.now() - STUCK_QUEUED_MS).toISOString();
-  const { data: queuedByKick, error: queuedKickErr } = await db
+  let queuedByKickQ = db
     .from("documents")
     .update({
       status: "error",
@@ -72,12 +80,13 @@ export async function reclaimStuckProcessingDocuments(
     .eq("tenant_id", tenantId)
     .in("status", ["queued", "pending"])
     .not("processing_started_at", "is", null)
-    .lt("processing_started_at", queuedCutoff)
-    .select("id");
+    .lt("processing_started_at", queuedCutoff);
+  queuedByKickQ = scopeProject(queuedByKickQ, projectId);
+  const { data: queuedByKick, error: queuedKickErr } = await queuedByKickQ.select("id");
 
   if (queuedKickErr) console.error("[reclaimStuckProcessingDocuments:queuedKick]", queuedKickErr);
 
-  const { data: queuedByUpload, error: queuedUploadErr } = await db
+  let queuedByUploadQ = db
     .from("documents")
     .update({
       status: "error",
@@ -87,8 +96,9 @@ export async function reclaimStuckProcessingDocuments(
     .eq("tenant_id", tenantId)
     .in("status", ["queued", "pending"])
     .is("processing_started_at", null)
-    .lt("uploaded_at", queuedCutoff)
-    .select("id");
+    .lt("uploaded_at", queuedCutoff);
+  queuedByUploadQ = scopeProject(queuedByUploadQ, projectId);
+  const { data: queuedByUpload, error: queuedUploadErr } = await queuedByUploadQ.select("id");
 
   if (queuedUploadErr) console.error("[reclaimStuckProcessingDocuments:queuedUpload]", queuedUploadErr);
 
@@ -107,10 +117,25 @@ export async function reclaimStuckProcessingPages(
   tenantId: string,
   olderThanMs: number = STUCK_PROCESSING_MS,
   documentId?: string,
+  projectId?: string | null,
 ): Promise<{ statusReclaimed: number; takeoffReclaimed: number; pendingReclaimed: number }> {
   const cutoff = new Date(Date.now() - olderThanMs).toISOString();
   const pendingCutoff = new Date(Date.now() - STUCK_PENDING_PAGE_MS).toISOString();
   const now = new Date().toISOString();
+
+  let documentIds: string[] | null = null;
+  if (!documentId && projectId) {
+    const { data: docs } = await db
+      .from("documents")
+      .select("id")
+      .eq("tenant_id", tenantId)
+      .eq("project_id", projectId)
+      .in("status", ["processing", "split", "queued", "pending", "complete_with_errors", "error", "failed"]);
+    documentIds = ((docs ?? []) as Array<{ id: string }>).map((d) => d.id);
+    if (documentIds.length === 0) {
+      return { statusReclaimed: 0, takeoffReclaimed: 0, pendingReclaimed: 0 };
+    }
+  }
 
   let statusQ = db
     .from("document_pages")
@@ -123,6 +148,7 @@ export async function reclaimStuckProcessingPages(
     .eq("status", "processing")
     .lt("updated_at", cutoff);
   if (documentId) statusQ = statusQ.eq("document_id", documentId);
+  else if (documentIds) statusQ = statusQ.in("document_id", documentIds);
 
   // Fire-and-forget fan-out can fail to reach page-processor — reclaim stale
   // pending pages so finalize / Retry can surface them.
@@ -137,6 +163,7 @@ export async function reclaimStuckProcessingPages(
     .eq("status", "pending")
     .lt("updated_at", pendingCutoff);
   if (documentId) pendingQ = pendingQ.eq("document_id", documentId);
+  else if (documentIds) pendingQ = pendingQ.in("document_id", documentIds);
 
   let takeoffQ = db
     .from("document_pages")
@@ -149,6 +176,7 @@ export async function reclaimStuckProcessingPages(
     .eq("takeoff_status", "processing")
     .lt("updated_at", cutoff);
   if (documentId) takeoffQ = takeoffQ.eq("document_id", documentId);
+  else if (documentIds) takeoffQ = takeoffQ.in("document_id", documentIds);
 
   const [statusRes, pendingRes, takeoffRes] = await Promise.all([
     statusQ.select("id"),

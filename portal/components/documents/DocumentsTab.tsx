@@ -205,6 +205,7 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
   const documentsRef = useRef(documents);
   documentsRef.current = documents;
   const eventSourceRef = useRef<EventSource | null>(null);
+  const pollTickRef = useRef(0);
   const [pollTimedOut, setPollTimedOut] = useState(false);
   const [liveStatus, setLiveStatus] = useState<"off" | "connecting" | "live" | "fallback">("off");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -215,6 +216,10 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
   const POLL_TIMEOUT_MS = 5 * 60 * 1000;
   // Slow safety poll when SSE is live — still kicks split-status workers.
   const SAFETY_POLL_MS = 20_000;
+  /** Slightly slower than before — list GET now scopes reclaim/finalize per project. */
+  const POLL_INTERVAL_MS = 6_000;
+  /** Run reclaim/finalize every N ticks; other ticks are cheap list refresh only. */
+  const MAINTAIN_EVERY_N_TICKS = 3;
 
   const toggleInsights = useCallback(async (docId: string) => {
     if (expandedDocId === docId) {
@@ -298,10 +303,17 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
   const [docsPage, setDocsPage] = useState(1);
   const [docsHasMore, setDocsHasMore] = useState(false);
 
-  const loadDocuments = useCallback(async (showLoading = true, page = 1): Promise<Document[]> => {
+  const loadDocuments = useCallback(async (
+    showLoading = true,
+    page = 1,
+    opts?: { maintain?: boolean },
+  ): Promise<Document[]> => {
     if (showLoading && page === 1) setLoading(true);
     try {
-      const r = await fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}&page=${page}&limit=200`);
+      const maintain = opts?.maintain !== false;
+      const r = await fetch(
+        `/api/documents?project_id=${encodeURIComponent(projectId)}&page=${page}&limit=200&maintain=${maintain ? "1" : "0"}`,
+      );
       const d = await r.json() as { documents?: Document[]; pagination?: { hasMore?: boolean } };
       const incoming = (d.documents ?? []).filter((doc) => {
         if (mode !== "closeout") return true;
@@ -352,6 +364,7 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
         eventSourceRef.current = null;
       }
       pollStartedAtRef.current = null;
+      pollTickRef.current = 0;
       setLiveStatus("off");
       if (!hasInFlightDocs && pollTimedOut) setPollTimedOut(false);
       return;
@@ -402,10 +415,16 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
       fallbackTimer = setInterval(() => {
         void (async () => {
           if (cancelled || timedOut()) return;
-          await pollSplitStatus(documentsRef.current);
-          await loadDocuments(false);
+          // Maintain (reclaim/finalize) every N ticks; always refresh after
+          // split-status so the UI picks up page rollups without double scans.
+          pollTickRef.current += 1;
+          const doMaintain = pollTickRef.current === 1
+            || pollTickRef.current % MAINTAIN_EVERY_N_TICKS === 0;
+          const list = await loadDocuments(false, 1, { maintain: doMaintain });
+          await pollSplitStatus(list);
+          await loadDocuments(false, 1, { maintain: false });
         })();
-      }, 4000);
+      }, POLL_INTERVAL_MS);
       pollRef.current = fallbackTimer;
     };
 
@@ -448,6 +467,8 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
     pollTimedOut,
     POLL_TIMEOUT_MS,
     SAFETY_POLL_MS,
+    POLL_INTERVAL_MS,
+    MAINTAIN_EVERY_N_TICKS,
     projectId,
   ]);
 
@@ -474,6 +495,7 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
       }
     };
   }, [documents, docsNeedingPipelinePoll, pollPipelineProgress]);
+
 
   const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
