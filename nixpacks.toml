@@ -1,14 +1,13 @@
+# DEPRECATED for Railway web: builds use Dockerfile (see railway.toml).
+# Kept for local/nixpacks experimentation only.
 [phases.setup]
 nixPkgs = ["python312"]
 
 [phases.install]
-# Nixpacks runs `nix-collect-garbage -d` after setup, which can remove the
-# python312Packages.pip store path. Bootstrap pip via ensurepip, then install.
 cmds = [
-  "python -m ensurepip --upgrade",
-  "python -m pip install --upgrade pip",
-  "python -m pip install -r requirements.txt",
-  "python -m pip install -r requirements-docling.txt",
+  "python -m venv /opt/venv",
+  ". /opt/venv/bin/activate && pip install -r requirements.txt",
+  ". /opt/venv/bin/activate && pip install -r requirements-docling.txt",
 ]
 
 [start]
