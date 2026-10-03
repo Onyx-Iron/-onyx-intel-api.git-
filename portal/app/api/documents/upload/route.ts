@@ -1,6 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { buildDocumentRevisionMeta } from "@/lib/documents/revisions";
+import { VERCEL_SAFE_UPLOAD_BYTES } from "@/lib/documents/signed-upload";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
@@ -17,18 +18,18 @@ const BUCKET = "project-documents";
 /**
  * Unified document upload entry point.
  *
- * Two modes, selected by `storage_type` (or the request Content-Type):
+ * Prefer `/api/documents/upload-url` + browser PUT/TUS for plan PDFs / DWGs —
+ * that path never streams binaries through Vercel (avoids 413 / 4.5MB limits).
+ *
+ * Two legacy modes remain, selected by `storage_type` (or Content-Type):
  *
  *  - storage_type:"drive" (default for JSON requests) — body is JSON:
  *      { project_id, file_name, content_type?, size?, drive_file_id? }
  *    If `drive_file_id` is NOT provided: opens a Drive resumable upload session
- *    and inserts a documents row in one shot; returns { upload_url, document }.
- *    If `drive_file_id` IS provided: the browser already finished a Drive PUT
- *    (e.g. via the Drive picker, or a back-compat call from register-drive);
- *    we just insert the row.
+ *    and returns { upload_url }. If provided: inserts the row + fires ingest.
  *
- *  - storage_type:"supabase" (default for multipart requests) — body is multipart
- *    with `file` and `project_id`. Bytes are uploaded to Supabase Storage server-side.
+ *  - storage_type:"supabase" (multipart) — small files only (< ~3.5MB). Larger
+ *    multipart bodies are rejected with guidance to use upload-url.
  *
  * Ingest is fire-and-forget in both branches.
  */
@@ -59,6 +60,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
       if (!(file instanceof File)) return NextResponse.json({ error: "No file provided" }, { status: 400 });
       if (!project_id) return NextResponse.json({ error: "project_id required" }, { status: 400 });
+      if (file.size > VERCEL_SAFE_UPLOAD_BYTES) {
+        return NextResponse.json({
+          error: "File too large for multipart upload through Vercel. Use POST /api/documents/upload-url then PUT directly to Storage.",
+          code: "USE_SIGNED_UPLOAD",
+          max_bytes: VERCEL_SAFE_UPLOAD_BYTES,
+        }, { status: 413 });
+      }
 
       try {
         await assertProjectBelongsToTenant(project_id, tenantId);

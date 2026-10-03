@@ -6,6 +6,7 @@ import GoogleDrivePicker from "./GoogleDrivePicker";
 import GenerateDocDropdown from "@/components/common/GenerateDocDropdown";
 
 import { useToast } from "@/components/common/Toast";
+import { uploadDocumentDirect } from "@/lib/documents/browser-upload";
 import {
   isInFlightStatus,
   isRetryable,
@@ -251,82 +252,16 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     e.target.value = "";
     setUploading(true);
     try {
-      // Step 1: ask the unified upload endpoint for a Drive resumable upload URL
-      const sessionRes = await fetch("/api/documents/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ storage_type: "drive", file_name: file.name, content_type: file.type || "application/octet-stream", project_id: projectId }),
-      });
-      const sessionData = await sessionRes.json() as { upload_url?: string; error?: string; code?: string };
-      if (!sessionRes.ok) {
-        if (sessionData.code === "NEED_GOOGLE") {
-          toast({ title: String("Google Drive is not connected.\n\nClick \"From Drive\" to connect Google, then try uploading again."), kind: "error" });
-        } else {
-          toast({ title: String(sessionData.error ?? "Could not start upload"), kind: "error" });
-        }
-        return;
-      }
-
-      // Step 2: upload file bytes directly to Google Drive (bypasses Vercel + Supabase size limits)
-      // Use an AbortController-backed timeout so a hung PUT doesn't leave the UI
-      // stuck on "Uploading…" forever (e.g. Drive token expired between session
-      // create and the PUT — Drive sometimes hangs the connection instead of 401-ing fast).
-      const PUT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — large PDFs are slow on flaky links
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), PUT_TIMEOUT_MS);
-      let uploadRes: Response;
-      try {
-        uploadRes = await fetch(sessionData.upload_url!, {
-          method: "PUT",
-          headers: { "Content-Type": file.type || "application/octet-stream" },
-          body: file,
-          signal: ctrl.signal,
-        });
-      } catch (err) {
-        if ((err as { name?: string }).name === "AbortError") {
-          toast({ title: String(`Upload to Google Drive timed out after ${Math.round(PUT_TIMEOUT_MS / 60000)} minutes. The Google sign-in may have expired — click "From Drive" to reconnect Google, then try again.`), kind: "error" });
-          return;
-        }
-        throw err;
-      } finally {
-        clearTimeout(timer);
-      }
-      if (!uploadRes.ok) {
-        const detail = await uploadRes.text().catch(() => "");
-        if (uploadRes.status === 401 || uploadRes.status === 403) {
-          toast({ title: String(`Google Drive rejected the upload (${uploadRes.status}). Your Google sign-in likely expired between starting and finishing the upload. Click "From Drive" to reconnect Google, then try again.\n\n${detail.slice(0, 200)}`), kind: "error" });
-        } else {
-          toast({ title: String(`Upload to Google Drive failed (${uploadRes.status}): ${detail.slice(0, 200)}`), kind: "error" });
-        }
-        return;
-      }
-      const driveFile = await uploadRes.json() as { id?: string };
-      const driveFileId = driveFile.id;
-      if (!driveFileId) {
-        toast({ title: String("Drive upload completed but did not return a file ID. Please try again."), kind: "error" });
-        return;
-      }
-
-      // Step 3: register the document row via the unified endpoint
-      // (the server auto-fires ingest — no separate call needed)
-      const regRes = await fetch("/api/documents/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ storage_type: "drive", project_id: projectId, file_name: file.name, drive_file_id: driveFileId, mime_type: file.type, size: file.size }),
-      });
-      if (!regRes.ok) {
-        const d = await regRes.json().catch(() => ({})) as { error?: string };
-        toast({ title: String(d.error ?? "Registration failed"), kind: "error" });
-        return;
-      }
-
+      // Direct-to-Supabase signed PUT / TUS — bytes never touch Vercel's 4.5MB limit.
+      // Large PDFs are completed via upload-url/complete → ingest → page-split-worker.
+      await uploadDocumentDirect(file, projectId);
       loadDocuments();
     } catch (err) {
       toast({ title: String(`Upload failed: ${err instanceof Error ? err.message : String(err)}`), kind: "error" });
     } finally {
       setUploading(false);
     }
-  }, [projectId, loadDocuments]);
+  }, [projectId, loadDocuments, toast]);
 
   const handleDriveFiles = useCallback(async (
     driveFiles: { id: string; name: string; mimeType: string; sizeBytes?: number }[],

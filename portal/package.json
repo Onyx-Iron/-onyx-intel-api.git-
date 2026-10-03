@@ -25,6 +25,7 @@
     "pdfjs-dist": "^5.4.624",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "tus-js-client": "^4.3.1",
     "xlsx": "npm:@e965/xlsx@^0.20.3",
     "zod": "^4.4.3"
   },
