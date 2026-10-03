@@ -69,6 +69,7 @@ interface Payload {
   original_path: string;
   access_token?: string;
   is_local_upload?: boolean;
+  source_bucket?: string;
   user_id: string;
 }
 
@@ -122,7 +123,10 @@ Deno.serve(async (req) => {
     if (fromStorage) {
       // Local direct-upload — the browser already PUT the original here.
       // Skip the Drive fetch step completely and just read it back.
-      const dl = await db.storage.from(PLANS_BUCKET).download(body.original_path);
+      const sourceBucket = body.source_bucket === "project-documents" || body.source_bucket === PLANS_BUCKET
+        ? body.source_bucket
+        : PLANS_BUCKET;
+      const dl = await db.storage.from(sourceBucket).download(body.original_path);
       if (dl.error || !dl.data) throw new Error(`storage download: ${dl.error?.message ?? "empty"}`);
       originalBytes = new Uint8Array(await dl.data.arrayBuffer());
     } else {

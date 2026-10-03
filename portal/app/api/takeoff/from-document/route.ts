@@ -7,6 +7,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { pythonApiHeaders } from "@/lib/python-api";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
+import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import { CANONICAL_FAILURE, CANONICAL_SUCCESS } from "@/lib/documents/status";
 import { fetchDriveFileSize } from "@/lib/google/driveFile";
@@ -99,8 +100,16 @@ export async function POST(req: NextRequest): Promise<Response> {
       if (driveFileId) {
         const gToken = await getAccessToken(tenantId, userId);
         if (!gToken) {
+          const message = "This plan is in Google Drive, but Google is not connected for this workspace yet. Connect Google or reopen the file from Drive.";
+          await db.from("documents")
+            .update({
+              status: CANONICAL_FAILURE,
+              last_error: message,
+              last_error_step: "drive_auth",
+            } as never)
+            .eq("id", document_id).eq("tenant_id", tenantId);
           return NextResponse.json({
-            error: "This plan is in Google Drive, but Google is not connected for this workspace yet. Connect Google or reopen the file from Drive.",
+            error: message,
             code: "NEED_GOOGLE",
           }, { status: 412 });
         }
@@ -136,7 +145,7 @@ export async function POST(req: NextRequest): Promise<Response> {
             projectId: project_id,
             documentId: document_id,
             step: "split",
-              status: CANONICAL_FAILURE,
+            status: "failed",
             worker: "portal:from-document",
             errorCode: "worker_invoke_failed",
             errorMessage: detail,
@@ -149,6 +158,7 @@ export async function POST(req: NextRequest): Promise<Response> {
           project_id,
           original_path: storagePath!,
           is_local_upload: true,
+          source_bucket: resolveDocumentStorageBucket(meta),
           user_id: userId,
         }).then(async () => {
           await logDocumentProcessingEvent({
@@ -174,7 +184,7 @@ export async function POST(req: NextRequest): Promise<Response> {
             projectId: project_id,
             documentId: document_id,
             step: "split",
-              status: CANONICAL_FAILURE,
+            status: "failed",
             worker: "portal:from-document",
             errorCode: "worker_invoke_failed",
             errorMessage: detail,

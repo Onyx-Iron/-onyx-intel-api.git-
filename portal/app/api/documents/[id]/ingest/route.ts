@@ -11,6 +11,7 @@ import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import { fetchDriveFileSize } from "@/lib/google/driveFile";
 import { PLANS_BUCKET, resolveDocumentStorageBucket } from "@/lib/documents/storage";
+import { ASYNC_SPLIT_BYTES, looksLikePdf, publishSheetPages } from "@/lib/documents/sheet-pages";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
@@ -18,7 +19,6 @@ export const maxDuration = 300;
 
 const EMBED_MODEL = "text-embedding-004";
 const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
-const ASYNC_SPLIT_BYTES = 3.5 * 1024 * 1024;
 /** Leave headroom under Vercel maxDuration=300 so we can write error status before kill. */
 const INGEST_BUDGET_MS = 270_000;
 /** Skip duplicate fire-and-forget ingest while another run is in-flight. */
@@ -233,7 +233,7 @@ export async function POST(
       .from("documents")
       .select("id, file_name, project_id, drive_file_id, meta, status, processing_started_at")
       .eq("id", docId)
-      .eq("tenant_id", tenantId)
+      .eq("tenant_id", resolvedTenantId)
       .single();
     if (docErr || !doc) {
       return NextResponse.json({ error: "Document not found" }, { status: 404 });
@@ -283,19 +283,25 @@ export async function POST(
     const storageBucket = resolveDocumentStorageBucket(meta);
 
     if (!driveFileId && !storagePath) {
-      return NextResponse.json({ error: "Document has no source (no drive_file_id or storage_path)" }, { status: 400 });
+      const message = "Document has no source (no drive_file_id or storage_path)";
+      await markError(message, "source");
+      return NextResponse.json({ error: message }, { status: 400 });
     }
 
     const queueLargeDriveSplit = async (): Promise<NextResponse> => {
-      const driveToken = accessToken ?? await getAccessToken(tenantId, userId);
+      const driveToken = accessToken ?? await getAccessToken(resolvedTenantId, userId);
       if (!driveToken) {
+        const message = "Google Drive is not connected. Connect Google in Settings.";
+        await markError(message, "drive_auth");
         return NextResponse.json({
-          error: "Google Drive is not connected. Connect Google in Settings.",
+          error: message,
           code: "NEED_GOOGLE",
         }, { status: 412 });
       }
       if (!projectIdForSplit) {
-        return NextResponse.json({ error: "Document has no project_id for page split" }, { status: 400 });
+        const message = "Document has no project_id for page split";
+        await markError(message, "split");
+        return NextResponse.json({ error: message }, { status: 400 });
       }
       await db.from("documents").update({
         status: "processing",
@@ -304,7 +310,7 @@ export async function POST(
         last_error: null,
         last_error_step: null,
         meta: { ...meta, storage_path: originalPath, storage: "plans-bucket" },
-      }).eq("id", docId).eq("tenant_id", tenantId);
+      }).eq("id", docId).eq("tenant_id", resolvedTenantId);
       try {
         await invokePageSplitWorker({
           document_id: docId,
@@ -340,7 +346,7 @@ export async function POST(
         processing_started_at: new Date().toISOString(),
         last_error: null,
         last_error_step: null,
-      }).eq("id", docId).eq("tenant_id", tenantId);
+      }).eq("id", docId).eq("tenant_id", resolvedTenantId);
       try {
         await invokePageSplitWorker({
           document_id: docId,
@@ -349,6 +355,7 @@ export async function POST(
           original_path: storagePath,
           user_id: userId,
           is_local_upload: true,
+          source_bucket: storageBucket,
         });
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
@@ -365,14 +372,14 @@ export async function POST(
 
     // Resolve Drive file size before downloading when meta.size is missing.
     if (driveFileId && fileSizeHint === null) {
-      const driveToken = accessToken ?? await getAccessToken(tenantId, userId);
+      const driveToken = accessToken ?? await getAccessToken(resolvedTenantId, userId);
       if (driveToken) {
         const resolvedSize = await fetchDriveFileSize(driveFileId, driveToken);
         if (resolvedSize != null) {
           fileSizeHint = resolvedSize;
           await db.from("documents").update({
             meta: { ...meta, size: resolvedSize },
-          }).eq("id", docId).eq("tenant_id", tenantId);
+          }).eq("id", docId).eq("tenant_id", resolvedTenantId);
         }
       }
     }
@@ -388,16 +395,32 @@ export async function POST(
       return queueLargeDriveSplit();
     }
 
+    const fileName = typeof doc.file_name === "string" ? doc.file_name : "";
+    const contentType = typeof meta.content_type === "string" ? meta.content_type : null;
+    const pdfDocument = looksLikePdf(fileName, contentType);
+    if (
+      pdfDocument
+      && !driveFileId
+      && storagePath
+      && projectIdForSplit
+      && fileSizeHint !== null
+      && fileSizeHint >= ASYNC_SPLIT_BYTES
+    ) {
+      return queueLargeLocalSplit(fileSizeHint);
+    }
+
     await assertWithinBudget("pre_download");
 
     // 1. Download PDF from Drive or Supabase Storage
     let pdfBytes: Buffer;
 
     if (driveFileId) {
-      const driveToken = accessToken ?? await getAccessToken(tenantId, userId);
+      const driveToken = accessToken ?? await getAccessToken(resolvedTenantId, userId);
       if (!driveToken) {
+        const message = "Google Drive is not connected. Connect Google in Settings.";
+        await markError(message, "drive_auth");
         return NextResponse.json({
-          error: "Google Drive is not connected. Connect Google in Settings.",
+          error: message,
           code: "NEED_GOOGLE",
         }, { status: 412 });
       }
@@ -439,6 +462,38 @@ export async function POST(
       const message = "Plan set is too large for synchronous ingest and could not be queued for page split.";
       await markError(message, "split");
       return NextResponse.json({ error: message }, { status: 409 });
+    }
+
+    if (pdfDocument && projectIdForSplit) {
+      await assertWithinBudget("sheet_pages");
+      await publishSheetPages({
+        async countExisting(documentId, tenantId) {
+          const { count, error } = await db
+            .from("document_pages")
+            .select("id", { count: "exact", head: true })
+            .eq("document_id", documentId)
+            .eq("tenant_id", tenantId);
+          if (error) throw new Error(`document_pages count failed: ${error.message}`);
+          return count ?? 0;
+        },
+        async uploadPage(storagePathForPage, bytes) {
+          const { error } = await db.storage.from(PLANS_BUCKET).upload(storagePathForPage, bytes, {
+            contentType: "application/pdf",
+            upsert: true,
+          });
+          if (error) throw new Error(`sheet upload failed: ${error.message}`);
+        },
+        async insertPages(rows) {
+          const { error } = await db.from("document_pages").upsert(rows, {
+            onConflict: "document_id,page_number",
+          });
+          if (error) throw new Error(`document_pages upsert failed: ${error.message}`);
+        },
+      }, {
+        tenantId: resolvedTenantId,
+        documentId: docId,
+        pdfBytes,
+      });
     }
 
     // 2. Upload to Gemini Files API
@@ -495,7 +550,7 @@ export async function POST(
       doc_type: docType,
       page_count: pageCount,
       meta: { ...meta, title: extraction.title ?? null, gemini_file_uri: fileUri },
-    }).eq("id", docId).eq("tenant_id", tenantId);
+    }).eq("id", docId).eq("tenant_id", resolvedTenantId);
 
     // 6. Insert pages
     if (pages.length > 0) {
@@ -574,7 +629,7 @@ export async function POST(
             updated_at: new Date().toISOString(),
           },
         },
-      }).eq("id", docId).eq("tenant_id", tenantId);
+      }).eq("id", docId).eq("tenant_id", resolvedTenantId);
     }
 
     if (chunkRows.length > 0) {
@@ -586,7 +641,7 @@ export async function POST(
     await db.from("documents").update({
       status: "complete",
       processed_at: new Date().toISOString(),
-    }).eq("id", docId).eq("tenant_id", tenantId);
+    }).eq("id", docId).eq("tenant_id", resolvedTenantId);
 
     // 9. Cleanup Gemini file (best effort)
     await deleteGeminiFile(geminiName);
@@ -602,7 +657,7 @@ export async function POST(
 
     void logEvent({
       projectId: projectId,
-      tenantId,
+      tenantId: resolvedTenantId,
       userId,
       entityType: "document",
       entityId: docId,
