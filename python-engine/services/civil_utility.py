@@ -114,3 +114,31 @@ def calc_civil_trench(req: CivilTrenchRequest) -> CivilTrenchResult:
         bedding_material_cy=bedding_cy,
         aggregate_import_cy=aggregate_cy,
     )
+
+
+def plan_footprint_sf(
+    centerline: list[tuple[float, float]] | list[list[float]],
+    top_width_ft: float,
+) -> float:
+    """
+    GEOS-buffered plan-view trench corridor area (SF) for a single run.
+
+    Uses half of top (layback) width as buffer radius — C-backed Shapely/GEOS.
+    """
+    from .geos_geometry import trench_buffer_area_sf
+
+    return round(trench_buffer_area_sf(centerline, top_width_ft), 4)
+
+
+def union_plan_footprints_sf(
+    runs: list[tuple[list[tuple[float, float]] | list[list[float]], float]],
+) -> float:
+    """
+    Union overlapping trench corridors and return net plan SF (GEOS unary_union).
+
+    Crossing utilities with layback wedges are counted once instead of double-
+    summing pure-Python buffer approximations.
+    """
+    from .geos_geometry import union_trench_footprints
+
+    return round(union_trench_footprints(runs), 4)
