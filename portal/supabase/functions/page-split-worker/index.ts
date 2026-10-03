@@ -70,6 +70,7 @@ interface Payload {
   access_token?: string;
   is_local_upload?: boolean;
   user_id: string;
+  openai_api_key?: string;
 }
 
 Deno.serve(async (req) => {
@@ -219,6 +220,7 @@ Deno.serve(async (req) => {
           tenant_id: p.tenant_id,
           page_number: p.page_number,
           storage_path: p.storage_path,
+          ...(body.openai_api_key ? { openai_api_key: body.openai_api_key } : {}),
         },
       },
       {

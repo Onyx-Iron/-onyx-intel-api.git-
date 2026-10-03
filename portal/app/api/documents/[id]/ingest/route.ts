@@ -7,6 +7,7 @@ import { logEvent } from "@/lib/activity";
 import { requireEnv } from "@/lib/env";
 import { fetchGemini, geminiAnswerText, readGeminiError } from "@/lib/ai/gemini";
 import { DOCUMENT_EMBED_MODEL, DOCUMENT_EXTRACT_MODEL, EMBEDDING_DIMENSIONS, liveModel } from "@/lib/ai/live-model";
+import { configuredDocumentProvider, embedWithOpenAI, readWithOpenAI } from "@/lib/ai/document-ai";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import { pagesStillNeedingChunks } from "@/lib/documents/ingest-resume";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
@@ -130,6 +131,7 @@ async function deleteGeminiFile(geminiName: string): Promise<void> {
 }
 
 async function embedText(text: string): Promise<number[]> {
+  if (configuredDocumentProvider() === "openai") return embedWithOpenAI(text);
   const res = await fetchGemini(
     `https://generativelanguage.googleapis.com/v1beta/models/${EMBED_MODEL}:embedContent?key=${geminiApiKey()}`,
     {
@@ -199,11 +201,11 @@ export async function POST(
   try {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    try {
-      geminiApiKey();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return NextResponse.json({ error: msg }, { status: 503 });
+    if (!configuredDocumentProvider()) {
+      return NextResponse.json({
+        error: "No document AI provider configured. Set OPENAI_API_KEY or GEMINI_API_KEY.",
+        code: "NO_PROVIDER",
+      }, { status: 503 });
     }
     const startedAt = Date.now();
 
@@ -358,50 +360,58 @@ export async function POST(
       processing_started_at: new Date().toISOString(),
     }).eq("id", docId).eq("tenant_id", tenantId);
 
-    // 2. Upload to Gemini Files API
     const sourceMime = mimeTypeForFile(
       doc.file_name,
       typeof meta.content_type === "string" ? meta.content_type : null,
     );
-    const { uri: fileUri, name: gName } = await uploadToGeminiFiles(pdfBytes, doc.file_name, sourceMime);
-    geminiName = gName;
-
-    // 3. Wait for ACTIVE
-    await waitForActive(geminiName);
-
-    // 4. Extract text + classify
-    const extractRes = await fetchGemini(
-      `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${geminiApiKey()}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { fileData: { mimeType: sourceMime, fileUri: fileUri } },
-              { text: EXTRACTION_PROMPT },
-            ],
-          }],
-          generationConfig: {
-            responseMimeType: "application/json",
-            thinkingConfig: { thinkingLevel: "MINIMAL" },
-          },
-        }),
-      },
-      { label: "Gemini document extraction", timeoutMs: 60_000 },
-    );
-    if (!extractRes.ok) {
-      await readGeminiError(extractRes, "Gemini document extraction");
+    let rawJson: string;
+    let fileUri: string | null = null;
+    if (configuredDocumentProvider() === "openai") {
+      rawJson = await readWithOpenAI({
+        bytes: pdfBytes,
+        fileName: doc.file_name,
+        mimeType: sourceMime,
+        prompt: EXTRACTION_PROMPT,
+        json: true,
+      });
+    } else {
+      const uploaded = await uploadToGeminiFiles(pdfBytes, doc.file_name, sourceMime);
+      fileUri = uploaded.uri;
+      geminiName = uploaded.name;
+      await waitForActive(geminiName);
+      const extractRes = await fetchGemini(
+        `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${geminiApiKey()}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { fileData: { mimeType: sourceMime, fileUri } },
+                { text: EXTRACTION_PROMPT },
+              ],
+            }],
+            generationConfig: {
+              responseMimeType: "application/json",
+              thinkingConfig: { thinkingLevel: "MINIMAL" },
+            },
+          }),
+        },
+        { label: "Gemini document extraction", timeoutMs: 60_000 },
+      );
+      if (!extractRes.ok) {
+        await readGeminiError(extractRes, "Gemini document extraction");
+      }
+      const extractData = (await extractRes.json()) as {
+        candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
+      };
+      rawJson = geminiAnswerText(extractData.candidates?.[0]?.content?.parts) || "{}";
     }
-    const extractData = (await extractRes.json()) as {
-      candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
-    };
-    const rawJson = geminiAnswerText(extractData.candidates?.[0]?.content?.parts) || "{}";
     let extraction: ExtractionResult;
     try {
       extraction = JSON.parse(rawJson) as ExtractionResult;
     } catch {
-      throw new Error(`Gemini returned non-JSON extraction payload: ${rawJson.slice(0, 200)}`);
+      throw new Error(`Document extraction returned non-JSON: ${rawJson.slice(0, 200)}`);
     }
 
     const VALID_TYPES = ["drawing", "spec", "rfi", "submittal", "other"] as const;
@@ -415,7 +425,7 @@ export async function POST(
     await db.from("documents").update({
       doc_type: docType,
       page_count: pageCount,
-      meta: { ...meta, title: extraction.title ?? null, gemini_file_uri: fileUri },
+      meta: { ...meta, title: extraction.title ?? null, ...(fileUri ? { gemini_file_uri: fileUri } : {}) },
     }).eq("id", docId).eq("tenant_id", tenantId);
 
     // 6. Insert pages
