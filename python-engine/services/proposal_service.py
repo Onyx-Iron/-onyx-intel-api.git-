@@ -45,14 +45,27 @@ def proposal_totals(rows: list[dict], settings: dict) -> dict:
     }
 
 
-def build_proposal_pdf(rows: list[dict], settings: dict, project_name: str, company_name: str = "Onyx Intel") -> bytes:
+def build_proposal_pdf(
+    rows: list[dict],
+    settings: dict,
+    project_name: str,
+    company_name: str = "Onyx Intel",
+    alternates: list[str] | None = None,
+    exclusions: list[str] | None = None,
+) -> bytes:
     totals = proposal_totals(rows, settings)
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, leftMargin=0.7 * inch, rightMargin=0.7 * inch, topMargin=0.7 * inch, bottomMargin=0.7 * inch)
+    doc.pageCompression = 0
     styles = getSampleStyleSheet()
     story = [
         Paragraph(company_name, styles["Title"]),
         Paragraph(f"Bid proposal · {project_name}", styles["Heading2"]),
+        Paragraph(
+            f"{company_name} proposes to furnish labor, material, and equipment for {project_name} "
+            "in accordance with the quantities below.",
+            styles["Normal"],
+        ),
         Spacer(1, 12),
     ]
     table_rows = [["Cost code", "Description", "Qty", "Unit", "Direct"]]
@@ -82,10 +95,19 @@ def build_proposal_pdf(rows: list[dict], settings: dict, project_name: str, comp
         ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
     ]))
+    story.append(table)
+    if alternates:
+        story.extend([Spacer(1, 16), Paragraph("Alternates", styles["Heading3"])])
+        for item in alternates:
+            story.append(Paragraph(f"• {item}", styles["Normal"]))
+    if exclusions:
+        story.extend([Spacer(1, 16), Paragraph("Exclusions", styles["Heading3"])])
+        for item in exclusions:
+            story.append(Paragraph(f"• {item}", styles["Normal"]))
     story.extend([
-        table,
         Spacer(1, 28),
         Paragraph("Accepted by ________________________________    Date ______________", styles["Normal"]),
+        Paragraph("Signature", styles["Normal"]),
     ])
     doc.build(story)
     return buffer.getvalue()

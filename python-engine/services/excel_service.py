@@ -25,6 +25,7 @@ def build_estimate_workbook(
     rows: list[Line],
     settings: dict,
     project_name: str,
+    cut_fill: list[dict] | None = None,
 ) -> bytes:
     contingency = float(settings.get("contingency_pct") or 0) / 100.0
     overhead = float(settings.get("overhead_pct") or 0) / 100.0
@@ -107,6 +108,44 @@ def build_estimate_workbook(
     schedule.column_dimensions["C"].width = 36
     proposal.column_dimensions["A"].width = 22
     proposal.column_dimensions["B"].width = 18
+
+    prices = book.create_sheet("Unit Prices")
+    prices.append(["Item", "Description", "Qty", "Unit", "Unit Price", "Extension"])
+    for cell in prices[1]:
+        cell.font = Font(bold=True)
+    for index, row in enumerate(rows):
+        excel_row = index + 2
+        prices.append([
+            index + 1,
+            row.get("description") or "",
+            _money(row.get("quantity") or 0),
+            row.get("unit") or "",
+            None,
+            f"=C{excel_row}*E{excel_row}",
+        ])
+    if rows:
+        total_row = len(rows) + 2
+        prices[f"A{total_row}"] = "Total"
+        prices[f"F{total_row}"] = f"=SUM(F2:F{total_row - 1})"
+        prices[f"F{total_row}"].font = Font(bold=True)
+    prices.column_dimensions["B"].width = 36
+
+    if cut_fill:
+        earth = book.create_sheet("Cut Fill")
+        earth.append(["X", "Y", "Existing", "Proposed", "Delta", "Cut", "Fill"])
+        for cell in earth[1]:
+            cell.font = Font(bold=True)
+        for index, cell_row in enumerate(cut_fill):
+            excel_row = index + 2
+            earth.append([
+                float(cell_row.get("x") or 0),
+                float(cell_row.get("y") or 0),
+                float(cell_row.get("existing_z") or 0),
+                float(cell_row.get("proposed_z") or 0),
+                f"=D{excel_row}-C{excel_row}",
+                f'=IF(E{excel_row}<0,-E{excel_row},0)',
+                f"=IF(E{excel_row}>0,E{excel_row},0)",
+            ])
 
     buffer = BytesIO()
     book.save(buffer)

@@ -7,7 +7,7 @@ of a Python shoelace loop.
 
 from __future__ import annotations
 
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
@@ -55,3 +55,36 @@ def offset_ring(ring: Ring, distance: float) -> dict:
             continue
         rings.append([(float(x), float(y)) for x, y in part.exterior.coords])
     return {"area": float(grown.area), "rings": rings}
+
+
+def _rings_of(geom) -> list[Ring]:
+    rings: list[Ring] = []
+    parts = list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom]
+    for part in parts:
+        if part.geom_type != "Polygon" or part.is_empty:
+            continue
+        rings.append([(float(x), float(y)) for x, y in part.exterior.coords])
+    return rings
+
+
+def buffer_centerline(points: Ring, half_width: float, obstacles: list[Ring] | None = None) -> dict:
+    """Buffer an open centerline into a paving or wall polygon.
+
+    Flat caps keep the area equal to length times full width on a straight
+    run. Obstacle rings (crossings, shafts) are subtracted.
+    """
+    if len(points) < 2:
+        raise ValueError("a centerline needs at least 2 points")
+    if half_width <= 0:
+        raise ValueError("half_width must be positive")
+    line = LineString(points)
+    if line.length == 0:
+        raise ValueError("centerline has no length")
+    grown = line.buffer(half_width, cap_style="flat", join_style="mitre")
+    for ring in obstacles or []:
+        if len(ring) < 3:
+            continue
+        grown = grown.difference(_polygon(ring))
+    if grown.is_empty:
+        return {"area": 0.0, "rings": []}
+    return {"area": float(grown.area), "rings": _rings_of(grown)}
