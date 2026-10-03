@@ -14,7 +14,8 @@ const ANTHROPIC_API_KEY = headerSafe(process.env.ANTHROPIC_API_KEY);
 const ANTHROPIC_MODEL   = process.env.TAKEOFF_AI_MODEL ?? "claude-sonnet-4-6";
 
 export const runtime = "nodejs";
-export const maxDuration = 300; // CAD/IFC parsing + AI vision can both take time
+// Pro extended duration (Node.js 24). CAD/IFC parsing and vision both wait here.
+export const maxDuration = 1800;
 
 /**
  * Unified takeoff extraction entry point.

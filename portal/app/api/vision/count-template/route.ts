@@ -6,7 +6,8 @@ import { pythonApiHeaders } from "@/lib/python-api";
 const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+// Pro Fluid cap. This waits on the Python template matcher.
+export const maxDuration = 800;
 
 /** Crop from the sheet canvas, counted by the Python template matcher. */
 export async function POST(req: NextRequest): Promise<NextResponse> {

@@ -10,7 +10,8 @@ import { generateText, availableProviders, NoProviderError, type Provider } from
 import { DOCUMENT_EMBED_MODEL, DOCUMENT_EXTRACT_MODEL, EMBEDDING_DIMENSIONS, liveModel } from "@/lib/ai/live-model";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+// Pro Fluid cap. RAG and tool loops stream for longer than the old 2-minute ceiling.
+export const maxDuration = 800;
 
 // =============================================================================
 // Unified AI chat route — dispatches by `mode` in the request body.

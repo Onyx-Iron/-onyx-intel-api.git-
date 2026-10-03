@@ -9,7 +9,8 @@ import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 import { documentStorageBuckets } from "@/lib/documents/upload-plan";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+// Pro Fluid cap. Answers stream while the model reads the attached document.
+export const maxDuration = 800;
 
 const GEMINI_API_KEY = headerSafe(process.env.GEMINI_API_KEY);
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-pro";

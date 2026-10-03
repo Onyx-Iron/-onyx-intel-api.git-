@@ -7,7 +7,7 @@ import { generateProjectStatusReport } from "@/lib/reports/project-status";
 import { createServiceClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 800;
 
 const VALID_TYPES = new Set(["project_status"]);
 

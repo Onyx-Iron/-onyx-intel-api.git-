@@ -5,7 +5,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { compareGrids, applyDeductions, massHaulSummary, type GridSurface, type Deductions, type MaterialFactors } from "@/lib/math/earthwork";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 800;
 
 /**
  * POST /api/earthwork/calculate

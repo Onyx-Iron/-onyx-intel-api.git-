@@ -6,7 +6,7 @@ import { generateText, NoProviderError } from "@/lib/ai/providers";
 import { logEvent } from "@/lib/activity";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 interface RouteContext { params: Promise<{ id: string }> }
 

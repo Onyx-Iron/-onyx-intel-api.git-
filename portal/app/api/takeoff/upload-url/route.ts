@@ -19,8 +19,9 @@ const BUCKET = "plans-bucket";
  * Body: { project_id, file_name, size, content_type }
  *
  * Returns a Supabase Storage signed upload URL so the browser can PUT the
- * file bytes DIRECTLY to storage — bypassing Vercel's ~4.5 MB request-body
- * ceiling on Serverless Functions.
+ * file bytes DIRECTLY to storage. Plan sets belong here (plans-bucket, 1 GB).
+ * Function bodies now accept up to 100 MB, so medium CAD and spreadsheet
+ * files can POST to /api/takeoff/extract instead.
  *
  * Flow:
  *   1. Client POSTs metadata (small JSON, well under body limit).
@@ -33,9 +34,9 @@ const BUCKET = "plans-bucket";
  *   5. Client calls `POST /api/takeoff/from-document` with document_id
  *      to run the takeoff.
  *
- * Small files (< 3.5 MB) can skip this and POST directly to
- * `/api/takeoff/extract` for a slightly simpler round trip. TakeoffTab
- * routes large files through here automatically.
+ * TakeoffTab sends plan-set PDFs and files over the function body limit
+ * through here, and posts smaller CAD, IFC, and spreadsheet files directly
+ * to `/api/takeoff/extract`.
  */
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {

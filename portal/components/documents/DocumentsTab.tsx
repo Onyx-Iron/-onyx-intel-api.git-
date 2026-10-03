@@ -128,7 +128,9 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   // Stop polling after this many ms if status still hasn't changed —
   // a stuck "processing" usually means the fire-and-forget ingest crashed
   // before it could update the row to "error".
-  const POLL_TIMEOUT_MS = 5 * 60 * 1000;
+  // Matches the Pro extended ingest duration. A large set can stay in
+  // "processing" for most of that window while pages embed.
+  const POLL_TIMEOUT_MS = 30 * 60 * 1000;
 
   const toggleInsights = useCallback(async (docId: string) => {
     if (expandedDocId === docId) {
@@ -393,7 +395,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
         <div className="rounded-xl border border-[#E50914]/30 bg-[#E50914]/5 px-4 py-3 text-[11px] text-[#E50914]">
           <div className="flex items-center justify-between gap-3">
             <span>
-              One or more documents have been stuck in &ldquo;Processing&rdquo; for over 5 minutes. The background ingest likely failed silently — try deleting and re-uploading, or click Refresh.
+              One or more documents have been stuck in &ldquo;Processing&rdquo; for over 30 minutes. The background ingest likely failed silently — try deleting and re-uploading, or click Refresh.
             </span>
             <button
               onClick={() => { setPollTimedOut(false); loadDocuments(); }}

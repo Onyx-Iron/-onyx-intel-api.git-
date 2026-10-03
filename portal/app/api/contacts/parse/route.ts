@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { generateText, NoProviderError, availableProviders } from "@/lib/ai/providers";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 const SYSTEM =
   "You extract contact records from construction documents (spec cover sheets, emails, " +

@@ -17,8 +17,8 @@
 
 ## Invocation (no new queue system — STEP 14's explicit instruction)
 1. **Opportunistic, in-process**: `app/api/takeoff/canvas/manual/route.ts`'s POST/DELETE/PATCH each call `processOutboxBatch` right after their own atomic write commits — this is what makes retry actually happen today, without any external scheduler.
-2. **Server-to-server trigger**: `POST /api/internal/outbox/process` (shared-secret auth via `INTERNAL_WORKER_SECRET`, not Clerk) — intended for a `pg_cron` + `pg_net` job on a short interval, following the exact pattern already established by `20260707_schedule_commodity_sync.sql`. **Not wired up as a live cron job in this milestone** — the deployed app URL and a Vault secret are environment-specific one-time setup steps the user must perform (see that migration's own header comment for the analogous `vault.create_secret` step). The worker logic itself is fully implemented and tested; only the periodic trigger is a manual follow-up.
+2. **Server-to-server trigger**: `POST /api/internal/outbox/process` (shared-secret auth via `INTERNAL_WORKER_SECRET`, not Clerk). `GET` on the same path is the Vercel Cron sweep in `portal/vercel.json` (every 5 minutes). Vercel sends `Authorization: Bearer <CRON_SECRET>` only when `CRON_SECRET` is set on the Vercel project; until then the sweep returns 401. Clerk does not gate this path. No Vault secret and no new migration.
 3. **User-facing manual retry**: `POST /api/internal/outbox/retry { id }` (Clerk-authenticated, tenant-scoped) for a `dead_letter` event — STEP 15's "retry failed sync where authorized."
 
 ## Known limitation
-No scheduled sweep exists yet for a `pending`/`failed` event that never gets touched again by (1) — see `REMAINING_RISKS.md`.
+The 5-minute sweep only drains the queue after `CRON_SECRET` is set on the Vercel project. Until then, a `pending`/`failed` event that never gets touched again by (1) still waits. See `REMAINING_RISKS.md`.
