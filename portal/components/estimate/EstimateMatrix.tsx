@@ -439,7 +439,40 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         }),
       });
       if (res.ok) {
-        await load(); // reload to pick up server-assigned IDs + recalculated totals
+        // Merge server-assigned IDs / recalculated rates in place — avoid a
+        // full matrix reload (and the flash / scroll jump that comes with it).
+        const data = await res.json() as {
+          items?: Array<{
+            id: string; cost_code: string | null; description: string | null; quantity: number | null; uom: string | null;
+            labor_cost: number; material_cost: number; equipment_cost: number; trucking_cost: number;
+            subcontract_cost: number; disposal_cost: number; notes: string | null; sort_order?: number;
+          }>;
+          version?: { overhead_pct?: number; profit_pct?: number; contingency_pct?: number; status?: string };
+        };
+        const returned = data.items ?? [];
+        if (returned.length > 0) {
+          let dirtyIdx = 0;
+          setRows((prev) => prev.map((r) => {
+            if (!r._dirty) return r;
+            const server = returned[dirtyIdx++];
+            if (!server) return { ...r, _dirty: false };
+            return itemToRow(server, r.sort_order);
+          }));
+        } else {
+          setRows((prev) => prev.map((r) => (r._dirty ? { ...r, _dirty: false } : r)));
+        }
+        if (data.version) {
+          if (typeof data.version.overhead_pct === "number"
+            || typeof data.version.profit_pct === "number"
+            || typeof data.version.contingency_pct === "number") {
+            setSettings((s) => ({
+              overhead_pct: data.version!.overhead_pct ?? s.overhead_pct,
+              profit_pct: data.version!.profit_pct ?? s.profit_pct,
+              contingency_pct: data.version!.contingency_pct ?? s.contingency_pct,
+            }));
+          }
+          if (typeof data.version.status === "string") setVersionStatus(data.version.status);
+        }
       }
     } finally {
       setSaving(false);

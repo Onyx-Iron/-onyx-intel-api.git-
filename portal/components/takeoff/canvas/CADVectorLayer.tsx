@@ -3,8 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { classifyLayer, type LayerClassification } from "@/lib/cad/layer-classify";
-import { projectToCanvas, vectorCanvasFrame } from "@/lib/takeoff/canvas/snap";
-import { shapesInView, type Box } from "@/lib/takeoff/canvas/visible-shapes";
+import { projectToCanvas, screenViewToWorld, vectorCanvasFrame, type VectorCanvasFrame } from "@/lib/takeoff/canvas/snap";
+import { shapesInView, worldBoxFromPoints, type Box } from "@/lib/takeoff/canvas/visible-shapes";
 import { collectSnapPoints } from "@/lib/takeoff/canvas/vector-snap";
 import { takeoffQueryKeys, useCadVectorMetadata } from "@/lib/takeoff/queries";
 
@@ -18,13 +18,20 @@ interface RawVector {
   text_tag?: string;
 }
 
-interface RenderedVector extends RawVector {
+/** Classified + measured in world units — no screen projection yet. */
+interface PreparedVector extends RawVector {
   key: string;
   classification: LayerClassification;
-  measure: number;                   // LF / SF / EA
-  screenPoints: Array<[number, number]>;  // canvas pixel coords
-  bbox: { minX: number; minY: number; maxX: number; maxY: number };
+  measure: number;
+  bbox: Box; // world-space
 }
+
+interface RenderedVector extends PreparedVector {
+  screenPoints: Array<[number, number]>;  // canvas pixel coords
+  screenBbox: Box;
+}
+
+const WORLD_VIEW_PAD_RATIO = 0.05; // ~5% of view span as world pad when culling
 
 interface Props {
   pageId: string;
@@ -84,31 +91,12 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
     return () => window.removeEventListener("onyx:cad-vectors-refresh", onRefresh as EventListener);
   }, [pageId, queryClient]);
 
-  // ── World→screen projection ───────────────────────────────────────────────
-  // Fit-to-canvas: compute overall bbox in world units and scale to fit the
-  // rendered PDF canvas. This works even when the CAD drawing's world origin
-  // is far from the PDF's.
-  const rendered: RenderedVector[] = useMemo(() => {
-    if (!canvasSize || raw.length === 0) return [];
-    const frame = vectorCanvasFrame(raw, canvasSize);
-    if (!frame) return [];
-
-    const project = (x: number, y: number): [number, number] => {
-      const projected = projectToCanvas(x, y, frame);
-      return [projected.x, projected.y];
-    };
-
-    return raw.map((v, i) => {
+  // ── Classify + measure in world units (no screen projection) ──────────────
+  const prepared: PreparedVector[] = useMemo(() => {
+    return raw.flatMap((v, i) => {
+      const worldBbox = worldBoxFromPoints(v.points);
+      if (!worldBbox) return [];
       const cls = classifyLayer(v.layer);
-      const screen = v.points.map(([x, y]) => project(x, y));
-      let sMinX = Infinity, sMinY = Infinity, sMaxX = -Infinity, sMaxY = -Infinity;
-      for (const [x, y] of screen) {
-        if (x < sMinX) sMinX = x; if (y < sMinY) sMinY = y;
-        if (x > sMaxX) sMaxX = x; if (y > sMaxY) sMaxY = y;
-      }
-      // Compute measure using WORLD units for length/area, then apply scale if needed.
-      // World units are trusted for CAD (usually feet). Scale only applied if the
-      // page also has a pixel-calibration set (then screen distance × scale).
       let measure = 0;
       if (cls.takeoff_type === "count") {
         measure = 1;
@@ -121,7 +109,6 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
         }
         measure = sum;
       } else {
-        // area — shoelace on world coords
         let s2 = 0;
         for (let k = 0, n = v.points.length; k < n; k++) {
           const [ax, ay] = v.points[k];
@@ -130,27 +117,39 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
         }
         measure = Math.abs(s2) / 2;
       }
-      return {
+      return [{
         ...v,
         key: `${v.layer}-${i}`,
         classification: cls,
         measure: +measure.toFixed(2),
-        screenPoints: screen,
-        bbox: { minX: sMinX, minY: sMinY, maxX: sMaxX, maxY: sMaxY },
-      };
+        bbox: worldBbox,
+      }];
     });
+  }, [raw]);
+
+  const frame: VectorCanvasFrame | null = useMemo(() => {
+    if (!canvasSize || raw.length === 0) return null;
+    return vectorCanvasFrame(raw, canvasSize);
   }, [raw, canvasSize]);
 
   // Publish screen-space vertices so SheetCanvas can magnetically snap draws.
+  // Endpoint projection only — full polyline projection is deferred to the
+  // visible-set pass below.
   useEffect(() => {
-    if (!onSnapPointsChange) return;
-    onSnapPointsChange(collectSnapPoints(rendered.map((v) => ({ points: v.screenPoints }))));
-  }, [rendered, onSnapPointsChange]);
+    if (!onSnapPointsChange || !frame) return;
+    const projected = prepared.map((v) => ({
+      points: v.points.map(([x, y]) => {
+        const p = projectToCanvas(x, y, frame);
+        return [p.x, p.y] as [number, number];
+      }),
+    }));
+    onSnapPointsChange(collectSnapPoints(projected));
+  }, [prepared, frame, onSnapPointsChange]);
 
   // ── Layer legend ──────────────────────────────────────────────────────────
   const layers = useMemo(() => {
     const map = new Map<string, { color: string; count: number; measure: number; unit: string }>();
-    for (const v of rendered) {
+    for (const v of prepared) {
       const key = v.layer;
       const e = map.get(key) ?? { color: v.classification.color, count: 0, measure: 0, unit: v.classification.unit };
       e.count += 1;
@@ -158,7 +157,7 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
       map.set(key, e);
     }
     return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [rendered]);
+  }, [prepared]);
 
   useEffect(() => {
     if (!canvasSize) return;
@@ -189,15 +188,51 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
     };
   }, [canvasSize, enabled]);
 
-  const visible = useMemo(() => {
-    const layered = rendered.filter((v) => !layerFilter.has(v.layer));
-    if (!view) return layered;
-    return shapesInView(layered, view, 80);
-  }, [rendered, layerFilter, view]);
+  // Cull in world space first, then project only survivors to screen pixels.
+  const visible: RenderedVector[] = useMemo(() => {
+    if (!frame) return [];
+    const layered = prepared.filter((v) => !layerFilter.has(v.layer));
+    let candidates = layered;
+    if (view) {
+      const worldView = screenViewToWorld(view, frame);
+      const pad = Math.max(
+        (worldView.maxX - worldView.minX) * WORLD_VIEW_PAD_RATIO,
+        (worldView.maxY - worldView.minY) * WORLD_VIEW_PAD_RATIO,
+        1e-6,
+      );
+      candidates = shapesInView(layered, worldView, pad);
+    }
+    // Always keep the shape being edited even if it scrolls off-screen.
+    if (editingKey && !candidates.some((v) => v.key === editingKey)) {
+      const editing = layered.find((v) => v.key === editingKey);
+      if (editing) candidates = [...candidates, editing];
+    }
+    return candidates.map((v) => {
+      const screen = v.points.map(([x, y]) => {
+        const p = projectToCanvas(x, y, frame);
+        return [p.x, p.y] as [number, number];
+      });
+      let sMinX = Infinity, sMinY = Infinity, sMaxX = -Infinity, sMaxY = -Infinity;
+      for (const [x, y] of screen) {
+        if (x < sMinX) sMinX = x; if (y < sMinY) sMinY = y;
+        if (x > sMaxX) sMaxX = x; if (y > sMaxY) sMaxY = y;
+      }
+      return {
+        ...v,
+        screenPoints: screen,
+        screenBbox: { minX: sMinX, minY: sMinY, maxX: sMaxX, maxY: sMaxY },
+      };
+    });
+  }, [prepared, frame, layerFilter, view, editingKey]);
+
   const hover = useMemo(() => visible.find((v) => v.key === hoverKey) ?? null, [visible, hoverKey]);
+  const editingVector = useMemo(
+    () => (editingKey ? (visible.find((r) => r.key === editingKey) ?? prepared.find((r) => r.key === editingKey) ?? null) : null),
+    [editingKey, visible, prepared],
+  );
 
   // ── Approve → persist as manual_takeoff ───────────────────────────────────
-  async function approve(v: RenderedVector, override?: { points?: Array<[number, number]>; cost_code?: string; description?: string }) {
+  async function approve(v: PreparedVector, override?: { points?: Array<[number, number]>; cost_code?: string; description?: string }) {
     setApproving(true);
     setStatus(null);
     try {
@@ -298,7 +333,12 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
           {visible.map((v) => {
             const isHov = v.key === hoverKey;
             const isEdit = v.key === editingKey;
-            const pts = isEdit && editingPoints ? editingPoints.map((p) => [p[0], p[1]] as [number, number]) : v.screenPoints;
+            const pts = isEdit && editingPoints && frame
+              ? editingPoints.map(([x, y]) => {
+                  const p = projectToCanvas(x, y, frame);
+                  return [p.x, p.y] as [number, number];
+                })
+              : v.screenPoints;
             const d = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p[0]},${p[1]}`).join(" ") + (v.classification.takeoff_type === "area" ? " Z" : "");
             const stroke = v.classification.color;
             return (
@@ -318,21 +358,23 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
                 {/* Bounding-box halo on hover */}
                 {isHov && (
                   <rect
-                    x={v.bbox.minX - 6} y={v.bbox.minY - 6}
-                    width={v.bbox.maxX - v.bbox.minX + 12} height={v.bbox.maxY - v.bbox.minY + 12}
+                    x={v.screenBbox.minX - 6} y={v.screenBbox.minY - 6}
+                    width={v.screenBbox.maxX - v.screenBbox.minX + 12} height={v.screenBbox.maxY - v.screenBbox.minY + 12}
                     fill="none" stroke="#CCFF00" strokeWidth={1} strokeDasharray="4 3" opacity={0.6}
                   />
                 )}
-                {/* Vertex handles while editing */}
-                {isEdit && editingPoints && v.screenPoints.map((sp, idx) => (
+                {/* Vertex handles while editing — project world edit points each frame */}
+                {isEdit && editingPoints && frame && editingPoints.map((wp, idx) => {
+                  const sp = projectToCanvas(wp[0], wp[1], frame);
+                  return (
                   <circle
-                    key={idx} cx={sp[0]} cy={sp[1]} r={4}
+                    key={idx} cx={sp.x} cy={sp.y} r={4}
                     fill="#CCFF00" stroke="#000" strokeWidth={1}
                     style={{ cursor: "grab" }}
                     onMouseDown={(e) => {
                       const svg = (e.target as SVGElement).ownerSVGElement!;
                       const rect = svg.getBoundingClientRect();
-                      const startWorld = v.points[idx];
+                      const startWorld = wp;
                       const move = (ev: MouseEvent) => {
                         const dx = (ev.clientX - e.clientX) / (rect.width / canvasSize.w);
                         const dy = (ev.clientY - e.clientY) / (rect.height / canvasSize.h);
@@ -353,7 +395,8 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
                       window.addEventListener("mouseup", up);
                     }}
                   />
-                ))}
+                  );
+                })}
               </g>
             );
           })}
@@ -371,9 +414,9 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
         >
           CAD Vectors {enabled ? "on" : "off"}
         </button>
-        {rendered.length > 0 && (
+        {prepared.length > 0 && (
           <span className="rounded-full border border-white/10 bg-black/50 px-3 py-1 text-[10px] uppercase tracking-widest font-mono text-white/50">
-            {rendered.length} shapes · {layers.length} layers
+            {prepared.length} shapes · {layers.length} layers
           </span>
         )}
       </div>
@@ -417,8 +460,8 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
         <div
           className="absolute z-40 w-[320px] rounded-xl border border-white/15 bg-[#0E0F12] shadow-2xl"
           style={{
-            left: Math.min(canvasSize.w - 340, Math.max(20, hover.bbox.maxX + 20)),
-            top: Math.min(canvasSize.h - 260, Math.max(20, hover.bbox.minY)),
+            left: Math.min(canvasSize.w - 340, Math.max(20, hover.screenBbox.maxX + 20)),
+            top: Math.min(canvasSize.h - 260, Math.max(20, hover.screenBbox.minY)),
           }}
           onMouseEnter={() => setHoverKey(hover.key)}
         >
@@ -469,14 +512,11 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
       )}
 
       {/* Edit card */}
-      {enabled && editingKey && (() => {
-        const v = rendered.find((r) => r.key === editingKey);
-        if (!v) return null;
-        return (
+      {enabled && editingVector && (
           <div className="absolute right-4 top-16 z-40 w-[320px] rounded-xl border border-white/15 bg-[#0E0F12] shadow-2xl">
             <div className="border-b border-white/10 px-4 py-3">
               <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Editing vertices</div>
-              <div className="mt-1 text-sm font-semibold">{v.layer}</div>
+              <div className="mt-1 text-sm font-semibold">{editingVector.layer}</div>
               <div className="mt-1 text-[10px] text-white/40">Drag the green handles on the drawing.</div>
             </div>
             <div className="grid grid-cols-3 gap-2 p-3">
@@ -490,7 +530,7 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
               <div />
               <button
                 type="button"
-                onClick={() => approve(v, { points: editingPoints ?? v.points })}
+                onClick={() => approve(editingVector, { points: editingPoints ?? editingVector.points })}
                 disabled={approving}
                 className="rounded-full bg-[#CCFF00] px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-black hover:opacity-85 disabled:opacity-40"
               >
@@ -498,8 +538,7 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
               </button>
             </div>
           </div>
-        );
-      })()}
+      )}
 
       {/* Bottom-left status */}
       {status && (

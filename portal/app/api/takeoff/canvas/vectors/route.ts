@@ -64,9 +64,10 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
 
+  // Do not SELECT vectors here — payloads can be multi‑MB; audit only logs counts.
   const { data: page } = await anyDb
     .from("document_pages")
-    .select("id, document_id, vectors, vectors_extracted_at")
+    .select("id, document_id, vectors_extracted_at")
     .eq("id", body.page_id)
     .eq("tenant_id", tenantId)
     .maybeSingle();
@@ -98,13 +99,19 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     .eq("tenant_id", tenantId);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
+  // Never persist full vector geometry in audit logs — count + timestamp only.
   auditUpdate({
     tenant_id: tenantId,
     user_id: userId,
     table_name: "document_pages",
     record_id: body.page_id,
-    old_values: { vectors: page.vectors, vectors_extracted_at: page.vectors_extracted_at } as unknown as Record<string, unknown>,
-    new_values: { vectors: body.vectors, count: body.vectors.length } as unknown as Record<string, unknown>,
+    old_values: {
+      vectors_extracted_at: page.vectors_extracted_at,
+    },
+    new_values: {
+      vectors_count: body.vectors.length,
+      vectors_extracted_at: new Date().toISOString(),
+    },
   });
 
   return NextResponse.json({ ok: true, count: body.vectors.length });
