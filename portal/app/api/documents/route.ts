@@ -7,7 +7,7 @@ import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { auditDelete } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
-import { reclaimStuckProcessingDocuments, reclaimStuckProcessingPages } from "@/lib/documents/reclaimStuck";
+import { reclaimStuckProcessingDocuments, reclaimStuckProcessingPages, reclaimStuckProcessingSheets } from "@/lib/documents/reclaimStuck";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
@@ -28,6 +28,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     );
     void reclaimStuckProcessingPages(db, tenantId).catch((err) =>
       console.error("[GET /api/documents] stuck page reclaim failed", err),
+    );
+    void reclaimStuckProcessingSheets(db, tenantId).catch((err) =>
+      console.error("[GET /api/documents] stuck sheet reclaim failed", err),
     );
 
     let query = db
