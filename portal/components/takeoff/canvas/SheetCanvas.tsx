@@ -286,6 +286,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const { peers, status: collabStatus, broadcast, trackCursor } = useCanvasRealtime({
     projectId,
     pageId,
+    // Display name is resolved server-side via /api/takeoff/canvas/realtime-auth.
     displayName: "Estimator",
     onRemoteEvent: onRemoteCanvasEvent,
   });

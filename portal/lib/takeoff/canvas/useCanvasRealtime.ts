@@ -22,9 +22,21 @@ type Options = {
 
 export type CanvasRealtimeStatus = "off" | "connecting" | "live" | "error";
 
+type AuthPayload = {
+  ok: boolean;
+  topic: string;
+  displayName: string;
+  senderId: string;
+  token: string | null;
+  privateChannel: boolean;
+};
+
 /**
  * Supabase Realtime broadcast + presence for multi-estimator sheet canvas.
  * Channel: canvas:{projectId}:{pageId}
+ *
+ * Joins only after Clerk-authenticated preflight. When the API returns a
+ * JWT, the channel is opened as private (Realtime Authorization).
  */
 export function useCanvasRealtime({
   projectId,
@@ -38,20 +50,23 @@ export function useCanvasRealtime({
   const [connectionStatus, setConnectionStatus] = useState<
     Exclude<CanvasRealtimeStatus, "off">
   >("connecting");
-  // Bumped on channel CLOSE/ERROR so the effect tears down and resubscribes.
   const [reconnectNonce, setReconnectNonce] = useState(0);
-  const channelRef = useRef<RealtimeChannel | null>(null);
-  const onRemoteRef = useRef(onRemoteEvent);
-  // Stable per-mount presence key — lazy useState avoids impure useMemo/refs-during-render.
-  const [senderId] = useState(() =>
+  const [resolvedName, setResolvedName] = useState(displayName);
+  const [senderId, setSenderId] = useState(() =>
     typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
       : `est-${Math.random().toString(36).slice(2, 10)}`,
   );
+  const channelRef = useRef<RealtimeChannel | null>(null);
+  const onRemoteRef = useRef(onRemoteEvent);
 
   useEffect(() => {
     onRemoteRef.current = onRemoteEvent;
   }, [onRemoteEvent]);
+
+  useEffect(() => {
+    setResolvedName(displayName);
+  }, [displayName]);
 
   const color = useMemo(() => peerColorForKey(senderId), [senderId]);
   const status: CanvasRealtimeStatus = active ? connectionStatus : "off";
@@ -80,14 +95,14 @@ export function useCanvasRealtime({
       const channel = channelRef.current;
       if (!channel) return;
       void channel.track({
-        name: displayName,
+        name: resolvedName,
         color,
         x,
         y,
         updatedAt: Date.now(),
       });
     },
-    [color, displayName],
+    [color, resolvedName],
   );
 
   useEffect(() => {
@@ -97,58 +112,88 @@ export function useCanvasRealtime({
     let channel: RealtimeChannel | null = null;
     let reconnectTimer: number | null = null;
 
-    try {
-      const supabase = createBrowserSupabaseClient();
-      const topic = canvasChannelName(projectId, pageId);
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset connection phase when (re)joining the channel
+    async function join() {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset connection phase when (re)joining
       setConnectionStatus("connecting");
 
-      channel = supabase.channel(topic, {
-        config: {
-          broadcast: { self: false },
-          presence: { key: senderId },
-        },
-      });
-
-      channel
-        .on("broadcast", { event: "canvas" }, ({ payload }) => {
-          const event = payload as CanvasCollabEvent;
-          if (!event || event.senderId === senderId) return;
-          onRemoteRef.current(event);
-        })
-        .on("presence", { event: "sync" }, () => {
-          if (!channel) return;
-          setPeers(peersFromPresenceState(channel.presenceState(), senderId));
-        })
-        .subscribe(async (subStatus) => {
-          if (cancelled) return;
-          if (subStatus === "SUBSCRIBED") {
-            channelRef.current = channel;
-            setConnectionStatus("live");
-            await channel!.track({
-              name: displayName,
-              color,
-              updatedAt: Date.now(),
-            });
-          } else if (
-            subStatus === "CHANNEL_ERROR" ||
-            subStatus === "TIMED_OUT" ||
-            subStatus === "CLOSED"
-          ) {
-            // Drop the dead channel so broadcast/trackCursor no-op instead of
-            // silently sending into a closed socket; reconnect after a short backoff.
-            channelRef.current = null;
-            setConnectionStatus("error");
-            if (reconnectTimer != null) window.clearTimeout(reconnectTimer);
-            reconnectTimer = window.setTimeout(() => {
-              if (cancelled) return;
-              setReconnectNonce((n) => n + 1);
-            }, 2000) as unknown as number;
-          }
+      let auth: AuthPayload | null = null;
+      try {
+        const res = await fetch("/api/takeoff/canvas/realtime-auth", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project_id: projectId, page_id: pageId }),
         });
-    } catch {
-      if (!cancelled) setConnectionStatus("error");
+        if (!res.ok) throw new Error(`realtime-auth ${res.status}`);
+        auth = (await res.json()) as AuthPayload;
+      } catch {
+        if (!cancelled) setConnectionStatus("error");
+        return;
+      }
+      if (cancelled || !auth?.ok) {
+        if (!cancelled) setConnectionStatus("error");
+        return;
+      }
+
+      setResolvedName(auth.displayName || displayName);
+      setSenderId(auth.senderId);
+      const presenceKey = auth.senderId;
+      const peerName = auth.displayName || displayName;
+
+      try {
+        const supabase = createBrowserSupabaseClient();
+        if (auth.token) {
+          await supabase.realtime.setAuth(auth.token);
+        }
+
+        const topic = auth.topic || canvasChannelName(projectId, pageId);
+        channel = supabase.channel(topic, {
+          config: {
+            broadcast: { self: false },
+            presence: { key: presenceKey },
+            private: Boolean(auth.privateChannel && auth.token),
+          },
+        });
+
+        channel
+          .on("broadcast", { event: "canvas" }, ({ payload }) => {
+            const event = payload as CanvasCollabEvent;
+            if (!event || event.senderId === presenceKey) return;
+            onRemoteRef.current(event);
+          })
+          .on("presence", { event: "sync" }, () => {
+            if (!channel) return;
+            setPeers(peersFromPresenceState(channel.presenceState(), presenceKey));
+          })
+          .subscribe(async (subStatus) => {
+            if (cancelled) return;
+            if (subStatus === "SUBSCRIBED") {
+              channelRef.current = channel;
+              setConnectionStatus("live");
+              await channel!.track({
+                name: peerName,
+                color: peerColorForKey(presenceKey),
+                updatedAt: Date.now(),
+              });
+            } else if (
+              subStatus === "CHANNEL_ERROR" ||
+              subStatus === "TIMED_OUT" ||
+              subStatus === "CLOSED"
+            ) {
+              channelRef.current = null;
+              setConnectionStatus("error");
+              if (reconnectTimer != null) window.clearTimeout(reconnectTimer);
+              reconnectTimer = window.setTimeout(() => {
+                if (cancelled) return;
+                setReconnectNonce((n) => n + 1);
+              }, 2000) as unknown as number;
+            }
+          });
+      } catch {
+        if (!cancelled) setConnectionStatus("error");
+      }
     }
+
+    void join();
 
     return () => {
       cancelled = true;
@@ -160,7 +205,7 @@ export function useCanvasRealtime({
       setPeers([]);
       setConnectionStatus("connecting");
     };
-  }, [active, color, displayName, pageId, projectId, reconnectNonce, senderId]);
+  }, [active, displayName, pageId, projectId, reconnectNonce]);
 
   return { peers, status, senderId, color, broadcast, trackCursor };
 }
