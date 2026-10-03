@@ -12,11 +12,13 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { parseFile, type ParseHint } from "@/lib/parse";
+import { FUNCTION_BODY_LIMIT_BYTES } from "@/lib/vercel/function-limits";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+// Pro extended duration (Node.js 24) for engineering-file parses.
+export const maxDuration = 1800;
 
-const MAX_BYTES = 25 * 1024 * 1024; // 25 MB
+const MAX_BYTES = FUNCTION_BODY_LIMIT_BYTES;
 const VALID_HINTS: ReadonlyArray<ParseHint> = [
   "takeoff", "estimate", "vendors", "invoices", "punch", "contacts", "docs",
 ];

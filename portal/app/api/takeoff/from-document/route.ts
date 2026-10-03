@@ -12,16 +12,15 @@ const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localho
 // Aligned with the Supabase Edge Functions — see `page-split-worker/index.ts`.
 const BUCKET = "plans-bucket";
 
-// Files at or above this size get routed through the async page-split
-// pipeline instead of the synchronous Railway stream — the same 300s
-// maxDuration ceiling that protects small files becomes a silent-failure
-// risk once a plan set gets into the tens of megabytes (confirmed: a 55MB
-// upload was retried 4 times and never produced a single takeoff row,
-// because the stream disconnects mid-transfer with no server-side error).
+// Plan-set PDFs stay on the async page-split pipeline. A synchronous stream
+// of a multi-dozen-MB PDF drops mid-transfer (a 55MB upload was retried 4
+// times and never produced a takeoff row). The longer Pro duration covers
+// the files that remain on the sync path; it does not replace the splitter.
 const ASYNC_THRESHOLD_BYTES = 3.5 * 1024 * 1024;
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+// Pro extended duration (Node.js 24). Sync streams wait on the Python engine.
+export const maxDuration = 1800;
 
 /**
  * Page-by-page takeoff from an already-uploaded document.

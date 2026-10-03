@@ -18,7 +18,8 @@ import type { Json } from "@/lib/supabase/types";
 // with no cap and no maxDuration, i.e. an unbounded synchronous computation
 // on Vercel's default (low) serverless timeout. Cap total cells instead.
 export const runtime = "nodejs";
-export const maxDuration = 300;
+// Pro extended duration (Node.js 24) for a full-site TIN plus the grid pass.
+export const maxDuration = 1800;
 const MAX_GRID_CELLS = 250_000;
 
 interface ComputeBody {

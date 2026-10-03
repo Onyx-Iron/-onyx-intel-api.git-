@@ -7,7 +7,7 @@ import { logEvent } from "@/lib/activity";
 import { DOCUMENT_EXTRACT_MODEL, liveModel } from "@/lib/ai/live-model";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 800;
 
 const GEMINI_API_KEY = headerSafe(process.env.GEMINI_API_KEY);
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";

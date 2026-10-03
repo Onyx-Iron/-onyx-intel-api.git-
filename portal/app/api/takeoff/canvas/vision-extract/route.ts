@@ -7,7 +7,8 @@ import { runScopeGapAgent } from "@/lib/agents/scope-gap";
 import { runRfiDrafterAgent } from "@/lib/agents/rfi-drafter";
 
 export const runtime = "nodejs";
-export const maxDuration = 90;
+// Pro extended duration (Node.js 24). Sheet vision calls run inside this request.
+export const maxDuration = 1800;
 
 const PLANS_BUCKET     = "plans-bucket";
 const GEMINI_API_KEY   = headerSafe(process.env.GEMINI_API_KEY);

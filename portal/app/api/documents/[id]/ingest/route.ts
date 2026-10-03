@@ -14,11 +14,13 @@ import { documentStorageBuckets, mimeTypeForFile, PAGE_SPLIT_BYTES, PLANS_BUCKET
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+// Pro extended duration (Node.js 24). The budget below leaves a minute to
+// flush a partial embed before the platform cuts the invocation.
+export const maxDuration = 1800;
 
 const EMBED_MODEL = liveModel(process.env.GEMINI_EMBED_MODEL, DOCUMENT_EMBED_MODEL);
 const EXTRACT_MODEL = liveModel(process.env.GEMINI_EXTRACT_MODEL, DOCUMENT_EXTRACT_MODEL);
-const INGEST_BUDGET_MS = 240_000;
+const INGEST_BUDGET_MS = 1_740_000;
 
 function geminiApiKey(): string {
   return requireEnv("GEMINI_API_KEY");

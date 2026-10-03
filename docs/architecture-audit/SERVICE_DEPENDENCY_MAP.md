@@ -4,7 +4,7 @@
 
 | Service | Responsibility | Evidence |
 |---|---|---|
-| **Vercel** | Hosts `portal/` (Next.js 16). Runs all API routes, SSR/RSC pages, middleware (`portal/proxy.ts`). | `.vercel/project.json` (root + `portal/`), zero-config Next.js detection (no `vercel.json`) |
+| **Vercel** | Hosts `portal/` (Next.js 16). Runs all API routes, SSR/RSC pages, middleware (`portal/proxy.ts`). Fluid Compute and the estimate-sync cron live in `portal/vercel.json`. | `.vercel/project.json` (root + `portal/`), `portal/vercel.json` |
 | **Railway** | Hosts the Python FastAPI takeoff/estimating engine (`takeoff_api.py`). Deterministic CSI classification, PDF/DXF/IFC/XLSX quantity extraction, AI-vision fallback. | `Procfile:1`, `nixpacks.toml:1-8` |
 | **Supabase Postgres** | Sole system of record: tenants, projects, documents, takeoff_items, estimate_items, cost catalog, contacts/companies, RFIs/submittals/change-orders, audit_logs — 76 tables total. | `portal/supabase/migrations/` |
 | **Supabase Storage** | `plans-bucket` (plan PDFs), `project-documents`, others — created via migration (`20260713_create_plans_bucket.sql`) | Edge Function references, e.g. `page-processor/index.ts:30` |

@@ -9,7 +9,8 @@ import { logEvent } from "@/lib/activity";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+// Pro Fluid cap. The upload itself returns a session; ingest continues separately.
+export const maxDuration = 800;
 
 /**
  * Unified document upload entry point.

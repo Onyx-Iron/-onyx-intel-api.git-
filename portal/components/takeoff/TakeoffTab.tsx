@@ -5,6 +5,7 @@ import { getGoogleToken } from "@/lib/google/clientAuth";
 
 import { useToast } from "@/components/common/Toast";
 import GoogleDrivePicker from "@/components/documents/GoogleDrivePicker";
+import { shouldUseSignedTakeoffUpload } from "@/lib/takeoff/signed-upload";
 
 // ── Types matching SecureTakeoffRow output from takeoff_validator.py ──────────
 
@@ -613,10 +614,9 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
 
   // ── Deterministic extraction (PDF tables / DXF / IFC / XLSX) ──
   //
-  // Small files (< 3.5 MB): POST directly to /api/takeoff/extract — simplest path.
-  // Larger files: use the two-step signed-upload flow to bypass Vercel's 4.5 MB
-  // ingress body limit. Vercel returns a plain 413 with no JSON body if we try
-  // to send a big multipart there.
+  // Files that fit in a function body, except plan-set PDFs, POST directly
+  // to /api/takeoff/extract. Plan sets and anything over the body limit use
+  // the signed upload into plans-bucket (1 GB) and the page splitter.
   const extractDeterministic = useCallback(async (file: File) => {
     setFileName(file.name); setPhase("uploading"); setRows([]);
     setProgress(0); setStatusMsg("Extracting…"); setAuditStatus(null);
@@ -625,9 +625,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     pdfFileRef.current = isPdf ? file : null;
     setHasLocalPdf(isPdf);
 
-    // Threshold slightly under Vercel's ~4.5 MB ingress ceiling for safety.
-    const DIRECT_UPLOAD_LIMIT = 3.5 * 1024 * 1024;
-    const useStorageUpload = file.size > DIRECT_UPLOAD_LIMIT;
+    const useStorageUpload = shouldUseSignedTakeoffUpload(file);
 
     let res: Response;
     try {

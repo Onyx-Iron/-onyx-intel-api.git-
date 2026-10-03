@@ -5,7 +5,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { generateProjectStatusReport } from "@/lib/reports/project-status";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 800;
 
 /**
  * Backward-compatible one-shot status report endpoint. The Reports workspace

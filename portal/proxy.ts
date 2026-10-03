@@ -12,6 +12,9 @@ const isPublicRoute = createRouteMatcher([
   "/public/bids(.*)",
   "/api/public/(.*)",
   "/api/procurement/bids",
+  // Vercel Cron has no Clerk session. The route checks CRON_SECRET
+  // (or x-worker-secret) itself and returns 401 otherwise.
+  "/api/internal/outbox/process",
 ]);
 
 export default clerkMiddleware(async (auth, request) => {

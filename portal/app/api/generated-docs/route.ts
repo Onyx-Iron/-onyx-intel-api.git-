@@ -7,7 +7,7 @@ import { getDocTypeByKey } from "@/lib/ai/generatedDocTypes";
 import { createGoogleDocInProjectFolder } from "@/lib/google/projectFolder";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 800;
 
 const FALLBACK_SYSTEM = "You are an expert construction project assistant. Produce a clear, professional document.";
 
