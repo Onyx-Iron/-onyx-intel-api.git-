@@ -8,6 +8,7 @@ import { requirePermission, ownershipDenied } from "@/lib/project-controls/route
 import { pythonApiHeaders } from "@/lib/python-api";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
+import { fetchDriveFileSize } from "@/lib/google/driveFile";
 
 const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
 // Aligned with the Supabase Edge Functions — see `page-split-worker/index.ts`.
@@ -67,8 +68,21 @@ export async function POST(req: NextRequest): Promise<Response> {
     const storagePath = meta.storage_path as string | undefined;
     const driveFileId = meta.drive_file_id as string | undefined;
     const localPath = meta.local_path as string | undefined;
-    const fileSize = typeof meta.size === "number" ? meta.size : null;
+    let fileSize = typeof meta.size === "number" ? meta.size : null;
     const isPdf = doc.file_name.toLowerCase().endsWith(".pdf");
+
+    if (isPdf && fileSize === null && driveFileId) {
+      const gToken = await getAccessToken(tenantId, userId);
+      if (gToken) {
+        const resolvedSize = await fetchDriveFileSize(driveFileId, gToken);
+        if (resolvedSize != null) {
+          fileSize = resolvedSize;
+          await db.from("documents")
+            .update({ meta: { ...meta, size: resolvedSize } } as never)
+            .eq("id", document_id).eq("tenant_id", tenantId);
+        }
+      }
+    }
 
     // ── Large PDF → async page-split pipeline ────────────────────────────────
     // Applies whether the original lives in Supabase Storage (older local

@@ -26,7 +26,7 @@ export async function reclaimStuckProcessingDocuments(
     })
     .eq("tenant_id", tenantId)
     .eq("status", "processing")
-    .lt("uploaded_at", cutoff)
+    .or(`processing_started_at.lt.${cutoff},and(processing_started_at.is.null,uploaded_at.lt.${cutoff})`)
     .select("id");
   if (error) {
     console.error("[reclaimStuckProcessingDocuments]", error);

@@ -20,7 +20,19 @@ interface SavedQuestion {
   asked_at: string;
 }
 
-type DocStatus = "pending" | "processing" | "ready" | "complete" | "error";
+type DocStatus =
+  | "pending"
+  | "processing"
+  | "split"
+  | "queued"
+  | "ready"
+  | "complete"
+  | "done"
+  | "failed"
+  | "complete_with_errors"
+  | "error";
+
+type SplitStatus = "pending" | "processing" | "done" | "error" | "skipped";
 
 type DocType = "drawing" | "spec" | "rfi" | "submittal" | "other" | null;
 
@@ -28,6 +40,7 @@ interface Document {
   id: string;
   file_name: string;
   status: DocStatus;
+  split_status?: SplitStatus | null;
   doc_type: DocType;
   page_count: number | null;
   uploaded_at: string | null;
@@ -35,13 +48,52 @@ interface Document {
   meta: Record<string, unknown> | null;
 }
 
+const TERMINAL_STATUSES = new Set<string>([
+  "ready", "complete", "done", "error", "failed",
+]);
+
 const STATUS_STYLES: Record<string, string> = {
-  pending:    "bg-white/5 text-gray-500 border-white/10",
-  processing: "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
-  ready:      "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
-  complete:   "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
-  error:      "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
+  pending:               "bg-white/5 text-gray-500 border-white/10",
+  processing:            "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
+  split:                 "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
+  queued:                "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
+  ready:                 "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
+  complete:              "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
+  done:                  "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
+  complete_with_errors:  "bg-[#F5A623]/10 text-[#F5A623] border-[#F5A623]/20",
+  error:                 "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
+  failed:                "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
 };
+
+function needsDocumentPoll(status: string): boolean {
+  return status === "pending" || status === "processing";
+}
+
+function needsSplitStatusPoll(doc: Document): boolean {
+  if (TERMINAL_STATUSES.has(doc.status)) return false;
+  if (doc.status === "split" || doc.status === "queued") return true;
+  const split = doc.split_status;
+  return split === "pending" || split === "processing";
+}
+
+function isDocumentReady(status: string): boolean {
+  return status === "ready"
+    || status === "complete"
+    || status === "done"
+    || status === "complete_with_errors";
+}
+
+function isDocumentProcessing(status: string): boolean {
+  return status === "processing" || status === "split" || status === "queued" || status === "pending";
+}
+
+function statusLabel(status: string): string {
+  if (status === "complete_with_errors") return "Partial";
+  if (status === "split") return "Splitting pages";
+  if (status === "queued") return "Queued";
+  if (status === "processing" || status === "pending") return "Processing";
+  return status;
+}
 
 const DOC_TYPE_STYLES: Record<string, string> = {
   drawing:   "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
@@ -129,40 +181,65 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     if (!pagesByDoc[docId]) await loadInsights(docId);
   }, [expandedDocId, pagesByDoc, loadInsights]);
 
-  const loadDocuments = useCallback((showLoading = true) => {
+  const pollSplitStatus = useCallback(async (docs: Document[]) => {
+    const asyncDocs = docs.filter(needsSplitStatusPoll);
+    await Promise.all(
+      asyncDocs.map(async (doc) => {
+        try {
+          await fetch(
+            `/api/takeoff/split-status?document_id=${encodeURIComponent(doc.id)}`,
+            { cache: "no-store" },
+          );
+        } catch {
+          /* best effort — list refresh picks up finalized status */
+        }
+      }),
+    );
+  }, []);
+
+  const loadDocuments = useCallback(async (showLoading = true): Promise<Document[]> => {
     if (showLoading) setLoading(true);
-    fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}`)
-      .then((r) => r.json())
-      .then((d: unknown) => {
-        const data = d as { documents?: Document[] };
-        setDocuments(data.documents ?? []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+    try {
+      const r = await fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}`);
+      const d = await r.json() as { documents?: Document[] };
+      const list = d.documents ?? [];
+      setDocuments(list);
+      setLoading(false);
+      return list;
+    } catch {
+      setLoading(false);
+      return [];
+    }
   }, [projectId]);
 
   useEffect(() => {
     loadDocuments();
   }, [loadDocuments]);
 
-  // Poll while any doc is still processing — but give up after POLL_TIMEOUT_MS
-  // so a silently-crashed background ingest doesn't spin forever.
+  // Poll while any doc is in-flight — including async split/page workers —
+  // but give up after POLL_TIMEOUT_MS so a silent failure doesn't spin forever.
   useEffect(() => {
-    const hasProcessing = documents.some((d) => d.status === "processing" || d.status === "pending");
-    if (hasProcessing && !pollTimedOut) {
+    const hasInFlight = documents.some(
+      (d) => needsDocumentPoll(d.status) || needsSplitStatusPoll(d),
+    );
+    if (hasInFlight && !pollTimedOut) {
       if (!pollRef.current) {
         pollStartedAtRef.current = Date.now();
         pollRef.current = setInterval(() => {
-          const startedAt = pollStartedAtRef.current ?? Date.now();
-          if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
-            if (pollRef.current) {
-              clearInterval(pollRef.current);
-              pollRef.current = null;
+          void (async () => {
+            const startedAt = pollStartedAtRef.current ?? Date.now();
+            if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+              if (pollRef.current) {
+                clearInterval(pollRef.current);
+                pollRef.current = null;
+              }
+              setPollTimedOut(true);
+              return;
             }
-            setPollTimedOut(true);
-            return;
-          }
-          loadDocuments(false);
+            const list = await loadDocuments(false);
+            await pollSplitStatus(list);
+            await loadDocuments(false);
+          })();
         }, 4000);
       }
     } else {
@@ -171,18 +248,16 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
         pollRef.current = null;
       }
       pollStartedAtRef.current = null;
-      // Reset the timed-out flag once nothing is processing anymore
-      if (!hasProcessing && pollTimedOut) setPollTimedOut(false);
+      if (!hasInFlight && pollTimedOut) setPollTimedOut(false);
     }
     return () => {
-      // Cleanup on unmount: clear interval so no setState fires on a dead component
       if (pollRef.current) {
         clearInterval(pollRef.current);
         pollRef.current = null;
       }
       pollStartedAtRef.current = null;
     };
-  }, [documents, loadDocuments, pollTimedOut, POLL_TIMEOUT_MS]);
+  }, [documents, loadDocuments, pollSplitStatus, pollTimedOut, POLL_TIMEOUT_MS]);
 
   const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -448,8 +523,10 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
               ) : (
                 documents.flatMap((doc) => {
                   const statusKey = doc.status in STATUS_STYLES ? doc.status : "pending";
-                  const isProcessing = doc.status === "processing";
-                  const isReady = doc.status === "ready" || doc.status === "complete";
+                  const isProcessing = isDocumentProcessing(doc.status)
+                    || doc.split_status === "pending"
+                    || doc.split_status === "processing";
+                  const isReady = isDocumentReady(doc.status);
                   const isExpanded = expandedDocId === doc.id;
                   const insights = pagesByDoc[doc.id];
                   return [
@@ -489,7 +566,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                       <td className="px-4 py-3">
                         <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded border text-[9px] font-bold tracking-widest uppercase ${STATUS_STYLES[statusKey]}`}>
                           {isProcessing && <span className="w-1.5 h-1.5 rounded-full bg-[#00D2FF] animate-pulse" />}
-                          {isProcessing ? "Processing" : doc.status}
+                          {statusLabel(doc.status)}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-right text-gray-500 font-mono text-xs">
@@ -508,7 +585,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                               <span className="text-[10px] uppercase tracking-widest font-mono">Ask</span>
                             </button>
                           )}
-                          {doc.status === "error" && (
+                          {(doc.status === "error" || doc.status === "failed") && (
                             <button
                               onClick={() => {
                                 toast({ title: String("To retry, re-import this file from Drive using the From Drive button."), kind: "info" });
