@@ -3,6 +3,10 @@
     {
       "path": "/api/internal/outbox/process",
       "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/internal/sheets/process",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

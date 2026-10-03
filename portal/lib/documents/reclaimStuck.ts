@@ -166,3 +166,35 @@ export async function reclaimStuckProcessingPages(
     takeoffReclaimed: takeoffRes.error ? 0 : (takeoffRes.data ?? []).length,
   };
 }
+
+/**
+ * Reclaims sheets stuck in `processing_status=processing` after a worker
+ * crash or platform kill left claimed_at set without completion.
+ */
+export async function reclaimStuckProcessingSheets(
+  db: AnyDb,
+  tenantId: string,
+  olderThanMs: number = STUCK_PROCESSING_MS,
+): Promise<number> {
+  const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+  const now = new Date().toISOString();
+
+  const { data, error } = await db
+    .from("sheets")
+    .update({
+      processing_status: "error",
+      claimed_at: null,
+      claimed_by: null,
+      updated_at: now,
+    })
+    .eq("tenant_id", tenantId)
+    .eq("processing_status", "processing")
+    .lt("updated_at", cutoff)
+    .select("id");
+
+  if (error) {
+    console.error("[reclaimStuckProcessingSheets]", error);
+    return 0;
+  }
+  return (data ?? []).length;
+}

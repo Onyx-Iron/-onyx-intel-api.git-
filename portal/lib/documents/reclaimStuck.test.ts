@@ -5,6 +5,7 @@ import {
   STUCK_PENDING_PAGE_MS,
   STUCK_PROCESSING_MS,
   STUCK_QUEUED_MS,
+  reclaimStuckProcessingSheets,
 } from "./reclaimStuck.ts";
 
 describe("reclaimStuck constants", () => {
@@ -21,5 +22,25 @@ describe("reclaimStuck constants", () => {
   it("reclaims stale pending pages on a comparable window", () => {
     assert.ok(STUCK_PENDING_PAGE_MS >= STUCK_PROCESSING_MS);
     assert.ok(STUCK_PENDING_PAGE_MS <= 30 * 60 * 1000);
+  });
+});
+
+describe("reclaimStuckProcessingSheets", () => {
+  it("returns 0 when the update fails", async () => {
+    const db = {
+      from: () => ({
+        update: () => ({
+          eq: () => ({
+            eq: () => ({
+              lt: () => ({
+                select: async () => ({ data: null, error: { message: "boom" } }),
+              }),
+            }),
+          }),
+        }),
+      }),
+    };
+    const count = await reclaimStuckProcessingSheets(db, "tenant-1");
+    assert.equal(count, 0);
   });
 });
