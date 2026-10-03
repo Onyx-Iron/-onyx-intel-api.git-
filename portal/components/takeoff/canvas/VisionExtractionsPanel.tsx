@@ -60,7 +60,7 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
   // stable meta.item_key stored on each row at insert time. Matching by
   // content instead of index is the fix for a real bug found in the
   // milestone-1 validation pass: two independently-ordered arrays
-  // (the cached vision_extractions items vs. a fresh takeoff_items query)
+  // (the cached vision_extracted items vs. a fresh takeoff_items query)
   // could silently misalign, causing Approve/Reject to act on the wrong
   // finding.
   const [takeoffItemsByKey, setTakeoffItemsByKey] = useState<Record<string, TakeoffItemRef>>({});
@@ -245,6 +245,12 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
                   <div className="mt-1 text-[10px] italic text-white/40 line-clamp-1">&ldquo;{it.raw_text}&rdquo;</div>
                 )}
                 <div className="mt-1.5 flex items-center gap-2">
+                  <span
+                    className="rounded-sm border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-200/90"
+                    title="AI origin — estimate impact requires a human Approve seal"
+                  >
+                    Agent
+                  </span>
                   {it.cost_code && (
                     <span className="text-[10px] font-mono text-white/40">{it.cost_code}</span>
                   )}
