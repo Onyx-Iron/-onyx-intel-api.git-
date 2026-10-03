@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { classifyLayer, type LayerClassification } from "@/lib/cad/layer-classify";
 import { projectToCanvas, vectorCanvasFrame } from "@/lib/takeoff/canvas/snap";
 import { shapesInView, type Box } from "@/lib/takeoff/canvas/visible-shapes";
+import { collectSnapPoints } from "@/lib/takeoff/canvas/vector-snap";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -38,12 +39,14 @@ interface Props {
   }) => void;
   /** Called whenever the CAD vector set is (re)loaded — used by cross-verify. */
   onVectorsLoaded?: (descriptions: string[]) => void;
+  /** Screen-space vertices for magnetic snap while drawing on SheetCanvas. */
+  onSnapPointsChange?: (points: Array<{ x: number; y: number }>) => void;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
-export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRatio, onCommitted, onVectorsLoaded }: Props) {
+export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRatio, onCommitted, onVectorsLoaded, onSnapPointsChange }: Props) {
   const [raw, setRaw] = useState<RawVector[]>([]);
   const [enabled, setEnabled] = useState(true);
   const [hoverKey, setHoverKey] = useState<string | null>(null);
@@ -139,6 +142,12 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
       };
     });
   }, [raw, canvasSize]);
+
+  // Publish screen-space vertices so SheetCanvas can magnetically snap draws.
+  useEffect(() => {
+    if (!onSnapPointsChange) return;
+    onSnapPointsChange(collectSnapPoints(rendered.map((v) => ({ points: v.screenPoints }))));
+  }, [rendered, onSnapPointsChange]);
 
   // ── Layer legend ──────────────────────────────────────────────────────────
   const layers = useMemo(() => {

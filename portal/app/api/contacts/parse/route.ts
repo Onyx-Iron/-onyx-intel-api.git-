@@ -1,6 +1,8 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { generateText, NoProviderError, availableProviders } from "@/lib/ai/providers";
+import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -22,8 +24,12 @@ interface ParsedContact {
  */
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
-    const { userId } = await auth();
+    const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
 
     const { text } = await req.json() as { text?: string };
     if (!text?.trim()) return NextResponse.json({ error: "text is required" }, { status: 400 });

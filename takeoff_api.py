@@ -898,12 +898,164 @@ async def extract_from_drive(
         Path(tmp_path).unlink(missing_ok=True)
 
 
+# ── Async Celery / Redis heavy compute ───────────────────────────────────────
+# Sync extract stays interactive. Async path stages blobs in Redis so Celery
+# workers can chew 100–500MB CAD/PDF packages without blocking uvicorn.
+
+_ASYNC_EXTRACT_MAX_BYTES = int(os.getenv("ASYNC_EXTRACT_MAX_BYTES", str(500 * 1024 * 1024)))
+_ASYNC_EXTRACT_ALLOWED = {".pdf", ".dxf", ".dwg", ".ifc", ".xlsx", ".xls"}
+
+
+def _celery_redis_ok() -> bool:
+    try:
+        from worker_tasks.staging import redis_ping
+        return redis_ping()
+    except Exception:  # noqa: BLE001 — health probes must never raise
+        return False
+
+
+@app.post(
+    "/api/takeoff/extract-async",
+    summary="Enqueue CAD/PDF takeoff extraction on the Celery worker pool (non-blocking)",
+    dependencies=[Depends(verify_secret)],
+)
+async def extract_takeoff_async(
+    file: UploadFile | None = File(default=None),
+    source_url: str | None = Query(default=None, description="Optional HTTPS URL the worker downloads"),
+    x_onyx_tenant: str | None = Header(default=None),
+    x_onyx_project: str | None = Header(default=None),
+    x_onyx_secret: str | None = Header(default=None),
+) -> dict:
+    """
+    Queue deterministic extraction on Railway Celery workers.
+
+    Provide either a multipart `file` (staged in Redis) or `source_url` for
+    packages already in object storage. Poll `GET /api/jobs/{job_id}`.
+    Sync `POST /api/takeoff/extract` is unchanged for small interactive jobs.
+    """
+    from worker_tasks.extract import extract_document
+    from worker_tasks.staging import store_job_blob
+
+    if not file and not source_url:
+        raise HTTPException(status_code=400, detail="Provide multipart file or source_url")
+    if file and source_url:
+        raise HTTPException(status_code=400, detail="Provide file or source_url, not both")
+
+    staging_id = str(uuid.uuid4())
+    filename = "remote"
+    content_len = 0
+
+    if file is not None:
+        filename = file.filename or "unknown"
+        ext = Path(filename).suffix.lower()
+        if ext not in _ASYNC_EXTRACT_ALLOWED:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported type '{ext}'. Accepts: {', '.join(sorted(_ASYNC_EXTRACT_ALLOWED))}",
+            )
+        content = await file.read()
+        content_len = len(content)
+        if content_len == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+        if content_len > _ASYNC_EXTRACT_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File exceeds {_ASYNC_EXTRACT_MAX_BYTES // (1024 * 1024)} MB async limit — "
+                    "upload to storage and pass source_url"
+                ),
+            )
+        _enforce_upload_quota(content_len, x_onyx_tenant, x_onyx_secret)
+        store_job_blob(
+            staging_id,
+            content,
+            {
+                "file_name": filename,
+                "tenant_id": _safe_uuid(x_onyx_tenant),
+                "project_id": _safe_uuid(x_onyx_project),
+                "kind": "extract",
+            },
+        )
+        async_result = extract_document.delay(staging_id)
+    else:
+        assert source_url is not None
+        if not (source_url.startswith("https://") or source_url.startswith("http://")):
+            raise HTTPException(status_code=400, detail="source_url must be http(s)")
+        filename = Path(source_url.split("?", 1)[0]).name or "remote"
+        async_result = extract_document.delay(staging_id, source_url=source_url)
+
+    logger.info(
+        "[extract_takeoff_async] queued job=%s staging=%s file=%s bytes=%d",
+        async_result.id, staging_id, filename, content_len,
+    )
+    return {
+        "job_id": async_result.id,
+        "staging_id": staging_id,
+        "status": "queued",
+        "file_name": filename,
+        "poll_url": f"/api/jobs/{async_result.id}",
+        "tenant_id": _safe_uuid(x_onyx_tenant),
+        "project_id": _safe_uuid(x_onyx_project),
+    }
+
+
+@app.post(
+    "/api/earthwork/cutfill-async",
+    summary="Enqueue grid cut/fill on Celery (large TIN-resampled meshes)",
+    dependencies=[Depends(verify_secret)],
+)
+async def cutfill_async(payload: dict) -> dict:
+    """
+    Offload compareGrids-class cut/fill to Railway workers.
+
+    Body: { existing: GridSurface, proposed: GridSurface, project_id?, label? }
+    """
+    from worker_tasks.terrain import cutfill_grids
+
+    if not isinstance(payload.get("existing"), dict) or not isinstance(payload.get("proposed"), dict):
+        raise HTTPException(status_code=400, detail="existing and proposed grid surfaces are required")
+
+    async_result = cutfill_grids.delay(payload)
+    return {
+        "job_id": async_result.id,
+        "status": "queued",
+        "poll_url": f"/api/jobs/{async_result.id}",
+    }
+
+
+@app.get(
+    "/api/jobs/{job_id}",
+    summary="Poll Celery job status / result",
+    dependencies=[Depends(verify_secret)],
+)
+async def get_job(job_id: str) -> dict:
+    from celery.result import AsyncResult
+    from celery_app import celery as celery_app
+
+    result = AsyncResult(job_id, app=celery_app)
+    state = result.state or "PENDING"
+    body: dict = {
+        "job_id": job_id,
+        "status": state.lower(),
+        "ready": result.ready(),
+        "successful": result.successful() if result.ready() else None,
+    }
+    if state == "FAILURE":
+        body["error"] = str(result.result)
+    elif result.successful():
+        body["result"] = result.result
+    elif isinstance(result.info, dict):
+        body["meta"] = result.info
+    return body
+
+
 @app.get("/api/health")
 async def health() -> dict:
+    redis_ok = _celery_redis_ok()
     return {
         "status": "ok",
         "service": "onyx-intel-takeoff-stream",
-        "version": "2.5.0",
+        "version": "2.6.0",
         "origins": ALLOWED_ORIGINS,
         "auth": "enabled" if API_SECRET else "disabled",
         "rate_limiting": {
@@ -916,6 +1068,12 @@ async def health() -> dict:
             "cost_records": len(getattr(_COST_DB, "_sample_cache", {})),
             "mode": getattr(_COST_DB, "mode", "unknown"),
             "regions": ["US_EAST", "US_WEST", "US_MIDWEST", "US_SOUTH", "INTERNATIONAL"],
+        },
+        "celery": {
+            "redis": "ok" if redis_ok else "unavailable",
+            "queues": ["onyx.compute"],
+            "async_extract": "/api/takeoff/extract-async",
+            "async_cutfill": "/api/earthwork/cutfill-async",
         },
     }
 

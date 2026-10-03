@@ -1,9 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { DollarSign, Info } from "lucide-react";
 import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
+import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
+import { useProjectContext } from "@/components/project/ProjectContext";
 
 interface Invoice {
   id: string;
@@ -43,6 +46,7 @@ function currency(n: number | null): string {
 }
 
 export default function GlobalFinancialsPage() {
+  const { activeProjectId, activeProject } = useProjectContext();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [waivers, setWaivers] = useState<LienWaiver[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -84,35 +88,62 @@ export default function GlobalFinancialsPage() {
     return m;
   }, [projects]);
 
+  const filteredInvoices = useMemo(
+    () => filterByActiveProject(invoices, activeProjectId),
+    [invoices, activeProjectId],
+  );
+  const filteredWaivers = useMemo(
+    () => filterByActiveProject(waivers, activeProjectId),
+    [waivers, activeProjectId],
+  );
+
   const totals = useMemo(() => {
-    const withAmount = invoices.filter((i) => i.amount != null);
+    const withAmount = filteredInvoices.filter((i) => i.amount != null);
     const receivable = withAmount.filter((i) => i.direction === "receivable" && i.status !== "paid" && i.status !== "canceled").reduce((s, i) => s + (i.amount ?? 0), 0);
     const payable = withAmount.filter((i) => i.direction === "payable" && i.status !== "paid" && i.status !== "canceled").reduce((s, i) => s + (i.amount ?? 0), 0);
-    const anyRedacted = invoices.some((i) => i.amount == null);
+    const anyRedacted = filteredInvoices.some((i) => i.amount == null);
     return { receivable, payable, anyRedacted };
-  }, [invoices]);
+  }, [filteredInvoices]);
+
+  const openWorkspaceHref = activeProject
+    ? `/dashboard/projects/${activeProject.id}?phase=financials&tab=ar`
+    : "/dashboard/projects";
 
   return (
     <div>
       <PageHero
         eyebrow="Workspace"
         title="Financials"
-        description="Invoices (AR/AP) and lien waivers across all projects"
+        description={
+          activeProject
+            ? `Invoices and lien waivers for ${activeProject.name}`
+            : "Invoices (AR/AP) and lien waivers across all projects"
+        }
         compact
       />
 
       <div className="px-4 py-6 sm:px-6 lg:px-10 lg:py-8">
         {error && <div className="mb-4"><ErrorState message={error} onRetry={load} /></div>}
 
-        <div className="mb-6 flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
-          <Info size={12} className="shrink-0" />
-          <span>
-            Read-only roll-up. Amounts are hidden for roles without financial access. Budget/commitment/actuals tracking
-            beyond invoicing and lien waivers doesn&apos;t exist yet — this shows what&apos;s real, not a placeholder for it.
-          </span>
+        <div className="mb-6 flex flex-wrap items-center gap-3">
+          <div className="flex flex-1 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
+            <Info size={12} className="shrink-0" />
+            <span>
+              Read-only roll-up. Edit invoices from a project&apos;s Financials tab.
+              {activeProject && (
+                <>
+                  {" "}
+                  <Link href={openWorkspaceHref} className="text-[#CCFF00] hover:underline">
+                    Open {activeProject.name} financials
+                  </Link>
+                </>
+              )}
+            </span>
+          </div>
+          <ProjectScopeSelect className="w-56" label="" />
         </div>
 
-        {!loading && !error && invoices.length > 0 && (
+        {!loading && !error && filteredInvoices.length > 0 && (
           <div className="mb-6 grid grid-cols-2 gap-3">
             <div className="rounded-xl border border-white/8 bg-[#111113] p-4">
               <p className="text-2xl font-black leading-none text-white">{totals.anyRedacted ? "—" : currency(totals.receivable)}</p>
@@ -144,7 +175,7 @@ export default function GlobalFinancialsPage() {
                     [...Array(5)].map((_, i) => (
                       <tr key={i}><td colSpan={5} className="px-4 py-3"><div className="h-3 w-2/3 bg-white/5 animate-pulse rounded" /></td></tr>
                     ))
-                  ) : invoices.length === 0 && !error ? (
+                  ) : filteredInvoices.length === 0 && !error ? (
                     <tr>
                       <td colSpan={5}>
                         <div className="py-4">
@@ -153,7 +184,7 @@ export default function GlobalFinancialsPage() {
                       </td>
                     </tr>
                   ) : (
-                    invoices.map((inv) => {
+                    filteredInvoices.map((inv) => {
                       const key = inv.status in INVOICE_STATUS_STYLES ? inv.status : "open";
                       return (
                         <tr key={inv.id} className="hover:bg-white/[0.02] transition-colors">
@@ -174,7 +205,7 @@ export default function GlobalFinancialsPage() {
           </div>
         </section>
 
-        {waivers.length > 0 && (
+        {filteredWaivers.length > 0 && (
           <section>
             <h2 className="mb-3 text-[11px] font-bold uppercase tracking-widest text-white/40">Lien Waivers</h2>
             <div className="rounded-xl border border-white/8 bg-[#0E0F12] overflow-hidden">
@@ -190,7 +221,7 @@ export default function GlobalFinancialsPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/5">
-                    {waivers.map((w) => (
+                    {filteredWaivers.map((w) => (
                       <tr key={w.id} className="hover:bg-white/[0.02] transition-colors">
                         <td className="px-4 py-3 text-white text-xs">{w.vendor_name}</td>
                         <td className="px-4 py-3 text-gray-400 text-xs">{projectNameById.get(w.project_id) ?? w.project_id}</td>

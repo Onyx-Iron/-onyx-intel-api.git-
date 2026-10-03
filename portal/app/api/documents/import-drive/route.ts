@@ -2,9 +2,11 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getAccessToken } from "@/lib/google/oauth";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { buildDocumentRevisionMeta } from "@/lib/documents/revisions";
 import { logEvent } from "@/lib/activity";
+import { auditInsert } from "@/lib/audit";
 import { headerSafe } from "@/lib/http";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
@@ -56,6 +58,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    try {
+      await assertProjectBelongsToTenant(body.project_id, tenantId);
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
+    }
 
     // Resolve access token: prefer the server-stored refresh-token minted token
     // over a client-supplied one — server-stored means the worker can refresh
@@ -70,11 +81,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const db = await createServiceClient();
-
-    // Verify project ownership.
-    const { data: project, error: projErr } = await db
-      .from("projects").select("id").eq("id", body.project_id).eq("tenant_id", tenantId).single();
-    if (projErr || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
 
     const fileName = body.file_name?.trim() || `drive-${body.file_id}.pdf`;
     const documentId = crypto.randomUUID();
@@ -120,6 +126,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       console.error("[import-drive] insert failed", insertErr);
       return NextResponse.json({ error: `[insert] ${insertErr.message}` }, { status: 500 });
     }
+
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "documents",
+      record_id: documentId,
+      new_values: insertRow as unknown as Record<string, unknown>,
+    });
 
     void logEvent({
       projectId: body.project_id,

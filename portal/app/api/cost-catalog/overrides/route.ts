@@ -6,6 +6,7 @@ import {
   authTenantKey,
   authTenantName,
 } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditDelete, auditInsert, auditUpdate } from "@/lib/audit";
 
 export const runtime = "nodejs";
@@ -58,6 +59,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     const t = await tenant();
     if (t instanceof NextResponse) return t;
+    const denied = await requirePermission(t.tenantId, t.userId, "financial", "write");
+    if (denied) return denied;
     const body = (await req.json()) as OverrideBody;
     if (
       typeof body.unit_cost !== "number" ||
@@ -162,6 +165,8 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   try {
     const t = await tenant();
     if (t instanceof NextResponse) return t;
+    const denied = await requirePermission(t.tenantId, t.userId, "financial", "write");
+    if (denied) return denied;
     const id = req.nextUrl.searchParams.get("id");
     if (!id) {
       return NextResponse.json({ error: "id required" }, { status: 400 });

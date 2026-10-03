@@ -2,7 +2,9 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { buildDocumentRevisionMeta } from "@/lib/documents/revisions";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { auditInsert } from "@/lib/audit";
 import { ensureProjectDriveFolder } from "@/lib/google/projectFolder";
 import type { TablesInsert } from "@/lib/supabase/types";
 
@@ -53,11 +55,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    try {
+      await assertProjectBelongsToTenant(project_id, tenantId);
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
+    }
     const db = await createServiceClient();
-
-    const { data: project, error: projErr } = await db
-      .from("projects").select("id").eq("id", project_id).eq("tenant_id", tenantId).single();
-    if (projErr || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
 
     const folder = await ensureProjectDriveFolder(tenantId, userId, project_id);
     if (!folder) {
@@ -111,6 +118,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (insertErr) {
       return NextResponse.json({ error: `[insert] ${insertErr.message}` }, { status: 500 });
     }
+
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "documents",
+      record_id: documentId,
+      new_values: insertRow as unknown as Record<string, unknown>,
+    });
 
     return NextResponse.json({
       document_id: documentId,

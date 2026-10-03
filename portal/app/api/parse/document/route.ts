@@ -11,6 +11,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
 import { parseFile, type ParseHint } from "@/lib/parse";
 
 export const runtime = "nodejs";
@@ -30,6 +31,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       authTenantKey(userId, orgId),
       authTenantName(userId, orgSlug),
     );
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
 
     const hintParam = req.nextUrl.searchParams.get("hint");
     const hint = hintParam && (VALID_HINTS as readonly string[]).includes(hintParam)

@@ -2,6 +2,8 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
+import { auditUpdate } from "@/lib/audit";
 
 export const runtime = "nodejs";
 
@@ -29,11 +31,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
     const db = await createServiceClient();
 
     const { data: doc, error: findErr } = await db
       .from("documents")
-      .select("id, meta")
+      .select("id, meta, drive_file_id")
       .eq("id", document_id).eq("tenant_id", tenantId)
       .single();
     if (findErr || !doc) return NextResponse.json({ error: "Document not found" }, { status: 404 });
@@ -41,15 +45,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const meta = (doc.meta as Record<string, unknown> | null) ?? {};
     const { pending_drive_upload: _pending, ...restMeta } = meta;
     void _pending;
+    const newMeta = { ...restMeta, drive_file_id };
 
     const { error: updateErr } = await db
       .from("documents")
       .update({
         drive_file_id,
-        meta: { ...restMeta, drive_file_id } as never,
+        meta: newMeta as never,
       })
       .eq("id", document_id).eq("tenant_id", tenantId);
     if (updateErr) return NextResponse.json({ error: updateErr.message }, { status: 500 });
+
+    auditUpdate({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "documents",
+      record_id: document_id,
+      old_values: { drive_file_id: doc.drive_file_id, meta: doc.meta } as unknown as Record<string, unknown>,
+      new_values: { drive_file_id, meta: newMeta } as unknown as Record<string, unknown>,
+    });
 
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
