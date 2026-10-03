@@ -14,6 +14,7 @@ import {
   needsSplitStatusPoll,
   statusLabel,
 } from "@/lib/documents/status";
+import { PipelineStage, type PipelineStatus } from "@/components/documents/PipelineStage";
 
 interface ParsedPage {
   page_number: number;
@@ -49,6 +50,11 @@ interface Document {
   file_name: string;
   status: DocStatus;
   split_status?: SplitStatus | null;
+  ocr_status?: PipelineStatus | null;
+  vector_status?: PipelineStatus | null;
+  takeoff_status?: PipelineStatus | null;
+  last_error?: string | null;
+  last_error_step?: string | null;
   doc_type: DocType;
   page_count: number | null;
   uploaded_at: string | null;
@@ -591,6 +597,18 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                           {isProcessing && <span className="w-1.5 h-1.5 rounded-full bg-[#00D2FF] animate-pulse" />}
                           {statusLabel(doc.status)}
                         </span>
+                        {(doc.split_status || doc.ocr_status || doc.takeoff_status) && (
+                          <div className="mt-1.5 flex flex-wrap gap-x-2 gap-y-1">
+                            <PipelineStage label="Split" status={doc.split_status ?? null} />
+                            <PipelineStage label="OCR" status={doc.ocr_status ?? null} />
+                            <PipelineStage label="Takeoff" status={doc.takeoff_status ?? null} />
+                          </div>
+                        )}
+                        {doc.last_error && (
+                          <p className="mt-1 max-w-[14rem] truncate text-[9px] text-[#E50914]" title={doc.last_error}>
+                            {doc.last_error_step ? `${doc.last_error_step}: ` : ""}{doc.last_error}
+                          </p>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-right text-gray-500 font-mono text-xs">
                         {doc.page_count != null ? doc.page_count : "—"}

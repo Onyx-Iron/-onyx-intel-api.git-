@@ -10,6 +10,7 @@ import { auditInsert } from "@/lib/audit";
 import { headerSafe } from "@/lib/http";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
+import { CANONICAL_FAILURE } from "@/lib/documents/status";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
@@ -174,7 +175,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const detail = err instanceof Error ? err.message : String(err);
       await db.from("documents")
         .update({
-          status: "failed",
+          status: CANONICAL_FAILURE,
           last_error: detail.slice(0, 1000),
           last_error_step: "page_split_worker_invoke",
         } as never)

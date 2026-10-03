@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  CANONICAL_FAILURE,
+  CANONICAL_SUCCESS,
+  finalizeAsyncDocumentStatus,
   isInFlightStatus,
   isRetryable,
   isTerminalFailure,
   isTerminalSuccess,
   needsSplitStatusPoll,
+  normalizeStatusForDisplay,
   statusLabel,
 } from "./status.ts";
 
@@ -35,5 +39,16 @@ describe("document status helpers", () => {
   it("treats failed documents as retryable", () => {
     assert.equal(isRetryable("failed"), true);
     assert.equal(isRetryable("complete"), false);
+  });
+
+  it("normalizes legacy async statuses", () => {
+    assert.equal(normalizeStatusForDisplay("done"), CANONICAL_SUCCESS);
+    assert.equal(normalizeStatusForDisplay("failed"), CANONICAL_FAILURE);
+  });
+
+  it("finalizes async document status", () => {
+    assert.equal(finalizeAsyncDocumentStatus({ allFailed: true, partialErrors: false }), CANONICAL_FAILURE);
+    assert.equal(finalizeAsyncDocumentStatus({ allFailed: false, partialErrors: true }), "complete_with_errors");
+    assert.equal(finalizeAsyncDocumentStatus({ allFailed: false, partialErrors: false }), CANONICAL_SUCCESS);
   });
 });
