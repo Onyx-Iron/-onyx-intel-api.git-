@@ -5,6 +5,8 @@ import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { getAccessToken } from "@/lib/google/oauth";
 import { headerSafe } from "@/lib/http";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
+import { auditUpdate } from "@/lib/audit";
 import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 
 export const runtime = "nodejs";
@@ -40,6 +42,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
     const db = await createServiceClient();
 
     const { data: doc, error } = await db
@@ -150,6 +154,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .update({ meta: updatedMeta } as never)
       .eq("id", doc.id)
       .eq("tenant_id", tenantId);
+
+    auditUpdate({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "documents",
+      record_id: doc.id,
+      old_values: { meta } as unknown as Record<string, unknown>,
+      new_values: { meta: updatedMeta } as unknown as Record<string, unknown>,
+    });
 
     return NextResponse.json({ answer, document: doc.file_name, question_id: newQ.id });
   } catch (err: unknown) {

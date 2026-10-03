@@ -1,7 +1,8 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -22,6 +23,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!projectId) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    await assertProjectBelongsToTenant(projectId, tenantId);
 
     const form = await req.formData();
     const file = form.get("file");
@@ -50,6 +54,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const { data: signed } = await db.storage.from(BUCKET).createSignedUrl(path, 60 * 60 * 24 * 7);
     return NextResponse.json({ path, url: signed?.signedUrl ?? null });
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[POST /api/daily-logs/photo] ${msg}` }, { status: 500 });
   }

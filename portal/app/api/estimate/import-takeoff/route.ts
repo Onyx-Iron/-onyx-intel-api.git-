@@ -1,7 +1,13 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import {
+  getOrCreateTenant,
+  authTenantKey,
+  authTenantName,
+  assertProjectBelongsToTenant,
+} from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 
 export const runtime = "nodejs";
 
@@ -20,10 +26,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!body.project_id) return NextResponse.json({ error: "project_id required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "financial", "write");
+    if (denied) return denied;
+    await assertProjectBelongsToTenant(body.project_id, tenantId);
+
     const result = await syncTakeoffToEstimate(tenantId, body.project_id);
 
     return NextResponse.json(result, { status: result.imported > 0 ? 201 : 200 });
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[POST /api/estimate/import-takeoff] ${msg}` }, { status: 500 });
   }

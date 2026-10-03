@@ -2,6 +2,8 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
+import { auditUpdate, auditDelete } from "@/lib/audit";
 
 export const runtime = "nodejs";
 
@@ -18,6 +20,8 @@ export async function PATCH(req: NextRequest, ctx: RouteContext): Promise<NextRe
     const { id } = await ctx.params;
     const body = await req.json() as Record<string, unknown>;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
     const db = await createServiceClient();
 
     const allowed = ["title", "notes", "due_date", "status", "priority", "assignee", "completed_at"];
@@ -42,6 +46,14 @@ export async function PATCH(req: NextRequest, ctx: RouteContext): Promise<NextRe
       return NextResponse.json({ error: "Invalid priority" }, { status: 400 });
     }
 
+    const { data: before } = await db
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .from("todo_items" as any)
+      .select("*")
+      .eq("id", id)
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+
     const { data, error } = await db
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .from("todo_items" as any)
@@ -52,6 +64,16 @@ export async function PATCH(req: NextRequest, ctx: RouteContext): Promise<NextRe
       .single();
 
     if (error) return NextResponse.json({ error: `[PATCH /api/todo-items/${id}] ${error.message}` }, { status: 422 });
+
+    auditUpdate({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "todo_items",
+      record_id: id,
+      old_values: (before ?? null) as unknown as Record<string, unknown> | null,
+      new_values: data as unknown as Record<string, unknown>,
+    });
+
     return NextResponse.json({ item: data });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
@@ -65,11 +87,30 @@ export async function DELETE(_req: NextRequest, ctx: RouteContext): Promise<Next
 
     const { id } = await ctx.params;
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
     const db = await createServiceClient();
+
+    const { data: before } = await db
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .from("todo_items" as any)
+      .select("*")
+      .eq("id", id)
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { error } = await db.from("todo_items" as any).delete().eq("id", id).eq("tenant_id", tenantId);
     if (error) return NextResponse.json({ error: `[DELETE /api/todo-items/${id}] ${error.message}` }, { status: 422 });
+
+    auditDelete({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "todo_items",
+      record_id: id,
+      old_values: (before ?? null) as unknown as Record<string, unknown> | null,
+    });
+
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });

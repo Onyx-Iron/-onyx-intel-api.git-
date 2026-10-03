@@ -2,6 +2,8 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant, assertPageBelongsToProject } from "@/lib/project-controls/server";
+import type { CalibrationPoint, CalibrationUpsertBody } from "@/lib/types/takeoff";
+import { requirePermission } from "@/lib/project-controls/route-guards";
 
 export const runtime = "nodejs";
 
@@ -22,16 +24,7 @@ export const runtime = "nodejs";
  *      points itself; it never trusts a client-submitted factor.
  */
 
-interface Pt { x: number; y: number }
-
-interface UpsertBody {
-  project_id?: string;
-  page_id?: string;
-  point_a?: Pt;
-  point_b?: Pt;
-  known_distance?: number;
-  known_unit?: string;
-}
+type UpsertBody = CalibrationUpsertBody;
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
@@ -64,9 +57,9 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   if (!project_id || !page_id) {
     return NextResponse.json({ error: "project_id and page_id required" }, { status: 400 });
   }
-  const validPoint = (p: unknown): p is Pt => typeof p === "object" && p !== null
-    && typeof (p as Pt).x === "number" && Number.isFinite((p as Pt).x)
-    && typeof (p as Pt).y === "number" && Number.isFinite((p as Pt).y);
+  const validPoint = (p: unknown): p is CalibrationPoint => typeof p === "object" && p !== null
+    && typeof (p as CalibrationPoint).x === "number" && Number.isFinite((p as CalibrationPoint).x)
+    && typeof (p as CalibrationPoint).y === "number" && Number.isFinite((p as CalibrationPoint).y);
   if (!validPoint(point_a) || !validPoint(point_b)) {
     return NextResponse.json({ error: "point_a and point_b (page-space {x,y}) required" }, { status: 400 });
   }
@@ -76,6 +69,8 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   const unit_type = (known_unit ?? "LF").trim().toUpperCase();
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
 
   try {
     await assertProjectBelongsToTenant(project_id, tenantId);

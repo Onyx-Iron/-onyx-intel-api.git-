@@ -1,7 +1,9 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertPageBelongsToProject } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { auditUpdate } from "@/lib/audit";
 
 export const runtime = "nodejs";
 
@@ -56,9 +58,37 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   }
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { error } = await (db as any)
+  const anyDb = db as any;
+
+  const { data: page } = await anyDb
+    .from("document_pages")
+    .select("id, document_id, vectors, vectors_extracted_at")
+    .eq("id", body.page_id)
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  if (!page) return NextResponse.json({ error: "Page not found" }, { status: 404 });
+
+  const { data: doc } = await anyDb
+    .from("documents")
+    .select("project_id")
+    .eq("id", page.document_id)
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  if (!doc?.project_id) return NextResponse.json({ error: "Page document not found" }, { status: 404 });
+
+  try {
+    await assertPageBelongsToProject(body.page_id, doc.project_id, tenantId);
+  } catch (err) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
+    throw err;
+  }
+
+  const { error } = await anyDb
     .from("document_pages")
     .update({
       vectors: body.vectors,
@@ -67,5 +97,15 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     .eq("id", body.page_id)
     .eq("tenant_id", tenantId);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  auditUpdate({
+    tenant_id: tenantId,
+    user_id: userId,
+    table_name: "document_pages",
+    record_id: body.page_id,
+    old_values: { vectors: page.vectors, vectors_extracted_at: page.vectors_extracted_at } as unknown as Record<string, unknown>,
+    new_values: { vectors: body.vectors, count: body.vectors.length } as unknown as Record<string, unknown>,
+  });
+
   return NextResponse.json({ ok: true, count: body.vectors.length });
 }

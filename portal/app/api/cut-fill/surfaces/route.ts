@@ -1,7 +1,9 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { auditInsert } from "@/lib/audit";
 import { computeBounds, type Point3 } from "@/lib/cutfill/sampling";
 import type { Json } from "@/lib/supabase/types";
 
@@ -68,6 +70,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const bounds = computeBounds(cleaned);
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    await assertProjectBelongsToTenant(project_id, tenantId);
     const db = await createServiceClient();
 
     const { data, error } = await db
@@ -87,8 +92,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .single();
 
     if (error) return NextResponse.json({ error: `[POST /api/cut-fill/surfaces] ${error.message}` }, { status: 422 });
+
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "cut_fill_surfaces",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      record_id: (data as any).id,
+      new_values: data as unknown as Record<string, unknown>,
+    });
+
     return NextResponse.json({ surface: data }, { status: 201 });
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[POST /api/cut-fill/surfaces] ${msg}` }, { status: 500 });
   }
