@@ -1,5 +1,6 @@
 import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
 import { recordTakeoffHistoryBatch } from "@/lib/takeoff/history";
+import { provenanceForNewItem } from "@/lib/takeoff/provenance";
 
 export interface CivilMirrorRow {
   label: string;
@@ -33,6 +34,7 @@ export async function mirrorCivilItemsToTakeoff(
   actorUserId?: string | null,
 ): Promise<void> {
   if (rows.length === 0) return;
+  const stamp = provenanceForNewItem({ sourceMethod: "civil_calculator" });
   const payload = rows.map((r) => ({
     tenant_id: tenantId,
     project_id: projectId,
@@ -50,14 +52,19 @@ export async function mirrorCivilItemsToTakeoff(
     // inputs, not an AI guess — implicitly approved, same as manual/
     // deterministic takeoff rows.
     created_by: actorUserId ?? null,
-    review_status: "approved" as const,
-    source_method: "civil_calculator",
+    review_status: stamp.review_status,
+    source_method: stamp.source_method,
+    origin_actor: stamp.origin_actor,
+    origin_method: stamp.origin_method,
+    origin_edited: stamp.origin_edited,
     meta: {
       trade: "Earthwork",
       quantity_basis: null,
       drawing_ref: r.drawing_ref ?? null,
       location_tag: null,
       extraction_method: "civil_calculator",
+      origin_actor: stamp.origin_actor,
+      origin_method: stamp.origin_method,
       civil_source_table: sourceTable,
       civil_source_id: sourceId,
       ...(r.meta ?? {}),
