@@ -27,6 +27,7 @@ export interface ExtractedVector {
   layer: string;                       // synthetic (color + optional text) — feeds classifier
   type: "polyline" | "point";
   points: Array<[number, number]>;     // page-user-unit coordinates (already in pdf.js space)
+  closed?: boolean;
   text_tag?: string;
   color?: string;                      // #RRGGBB
 }
@@ -37,6 +38,42 @@ interface Segment {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+function asCoordList(value: unknown): ArrayLike<number> | null {
+  if (!value) return null;
+  if (Array.isArray(value) || ArrayBuffer.isView(value)) return value as ArrayLike<number>;
+  return null;
+}
+
+/** pdfjs 5 stores DrawOPS inline: 0 move, 1 line, 2 curve, 3 quadratic, 4 close. */
+function decodeDrawOps(data: ArrayLike<number>): { segs: Segment[]; closed: boolean } {
+  const segs: Segment[] = [];
+  let closed = false;
+  for (let i = 0; i < data.length;) {
+    const op = data[i++];
+    if (op === 0) segs.push({ cmd: "M", args: [data[i++], data[i++]] });
+    else if (op === 1) segs.push({ cmd: "L", args: [data[i++], data[i++]] });
+    else if (op === 2) segs.push({ cmd: "C", args: [data[i++], data[i++], data[i++], data[i++], data[i++], data[i++]] });
+    else if (op === 3) segs.push({ cmd: "C", args: [data[i++], data[i++], data[i++], data[i++]] });
+    else if (op === 4) closed = true;
+    else break;
+  }
+  return { segs, closed };
+}
+
+function decodeConstructPath(args: unknown): { segs: Segment[]; closed: boolean; paint: number | null } {
+  if (!Array.isArray(args) || args.length === 0) return { segs: [], closed: false, paint: null };
+  const packed = Array.isArray(args[1]) ? asCoordList(args[1][0]) : null;
+  if (typeof args[0] === "number" && packed) {
+    const decoded = decodeDrawOps(packed);
+    return { ...decoded, paint: args[0] };
+  }
+  if (typeof args[0]?.[Symbol.iterator] === "function") {
+    const coords = asCoordList(args[1]) ?? [];
+    return { segs: decodeCommandStream(args[0], Array.from(coords)), closed: false, paint: null };
+  }
+  return { segs: [], closed: false, paint: null };
+}
+
 function decodeCommandStream(ops: any, argsArr: number[]): Segment[] {
   // Encoded like: [op0, op1, op2, ...] with argsArr flattened per pdfjs docs.
   // We only care about moveTo (M), lineTo (L), curveTo (C), quadratic (Q), and close (Z).
@@ -128,6 +165,48 @@ export async function extractVectorsFromPdfPage(page: any): Promise<ExtractedVec
   const ctmStack: number[][] = [[1, 0, 0, 1, 0, 0]];
   let color = "#000000";
   let path: Segment[] = [];
+  let pathClosed = false;
+
+  const emitPath = (closed: boolean) => {
+    if (path.length < 2) {
+      path = [];
+      pathClosed = false;
+      return;
+    }
+    const ctm = ctmStack[ctmStack.length - 1];
+    const pts: Array<[number, number]> = [];
+    let last: [number, number] | null = null;
+    for (const seg of path) {
+      if (seg.cmd === "M" || seg.cmd === "L") {
+        const [wx, wy] = applyTransform(ctm, seg.args[0], seg.args[1]);
+        if (!last || Math.hypot(wx - last[0], wy - last[1]) > 0.05) {
+          pts.push([wx, wy]);
+          last = [wx, wy];
+        }
+      } else if (seg.cmd === "C") {
+        const [wx, wy] = applyTransform(ctm, seg.args[seg.args.length - 2], seg.args[seg.args.length - 1]);
+        pts.push([wx, wy]);
+        last = [wx, wy];
+      }
+    }
+    if (pts.length >= 2) {
+      let cx = 0, cy = 0;
+      for (const p of pts) { cx += p[0]; cy += p[1]; }
+      cx /= pts.length; cy /= pts.length;
+      const tag = nearestText(cx, cy, tokens, 50);
+      const layer = tag ? `PDF-${tag.text.toUpperCase().replace(/[^\w-]/g, "-")}` : colorHint(color);
+      emitted.push({
+        layer,
+        type: "polyline",
+        points: pts,
+        closed,
+        color,
+        text_tag: tag?.text,
+      });
+    }
+    path = [];
+    pathClosed = false;
+  };
 
   const emitted: ExtractedVector[] = [];
 
@@ -160,48 +239,16 @@ export async function extractVectorsFromPdfPage(page: any): Promise<ExtractedVec
     else if (fn === OP.setFillRGBColor)   color = rgb(args[0] / 255, args[1] / 255, args[2] / 255);
     else if (fn === OP.setStrokeGray)     { const g = args[0]; color = rgb(g, g, g); }
     else if (fn === OP.constructPath) {
-      const [opsInner, argsInner] = args;
-      path = decodeCommandStream(opsInner, argsInner);
+      const decoded = decodeConstructPath(args);
+      path = decoded.segs;
+      pathClosed = decoded.closed;
+      // pdfjs 5 paints inside constructPath. 20 stroke, 21 fill, 22 fill+stroke, 23 even-odd fill.
+      if (decoded.paint === 20 || decoded.paint === 21 || decoded.paint === 22 || decoded.paint === 23) {
+        emitPath(pathClosed || decoded.paint === 21 || decoded.paint === 22 || decoded.paint === 23);
+      }
     }
     else if (fn === OP.stroke || fn === OP.fillStroke) {
-      // Emit the current path as a transformed polyline.
-      if (path.length >= 2) {
-        const ctm = ctmStack[ctmStack.length - 1];
-        const pts: Array<[number, number]> = [];
-        let last: [number, number] | null = null;
-        for (const seg of path) {
-          if (seg.cmd === "M" || seg.cmd === "L") {
-            const [wx, wy] = applyTransform(ctm, seg.args[0], seg.args[1]);
-            if (!last || Math.hypot(wx - last[0], wy - last[1]) > 0.05) {
-              pts.push([wx, wy]);
-              last = [wx, wy];
-            }
-          } else if (seg.cmd === "C") {
-            // approximate curve with its endpoint (last 2 args)
-            const [wx, wy] = applyTransform(ctm, seg.args[seg.args.length - 2], seg.args[seg.args.length - 1]);
-            pts.push([wx, wy]);
-            last = [wx, wy];
-          }
-        }
-        if (pts.length >= 2) {
-          // Centroid for text-association
-          let cx = 0, cy = 0;
-          for (const p of pts) { cx += p[0]; cy += p[1]; }
-          cx /= pts.length; cy /= pts.length;
-
-          const tag = nearestText(cx, cy, tokens, 50); // 50 pt search radius
-          const layer = tag ? `PDF-${tag.text.toUpperCase().replace(/[^\w-]/g, "-")}` : colorHint(color);
-
-          emitted.push({
-            layer,
-            type: "polyline",
-            points: pts,
-            color,
-            text_tag: tag?.text,
-          });
-        }
-      }
-      path = [];
+      emitPath(pathClosed || fn === OP.fillStroke);
     }
     else if (fn === OP.endPath) path = [];
   }

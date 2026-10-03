@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant, assertPageBelongsToProject } from "@/lib/project-controls/server";
 import type { CalibrationPoint, CalibrationUpsertBody } from "@/lib/types/takeoff";
 import { previewRecalibration, recalibrationNeedsConfirm } from "@/lib/takeoff/recalibration";
+import { applyManualScale, type ScaleRegion } from "@/lib/takeoff/stated-scale";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 
 export const runtime = "nodejs";
@@ -45,7 +46,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     .eq("page_id", pageId)
     .maybeSingle();
 
-  return NextResponse.json({ calibration: data ?? null });
+  const { data: regions } = await (db as any)
+    .from("sheet_scale_regions")
+    .select("id, page_id, scale_text, page_space_scale_factor, min_x, min_y, max_x, max_y, covers_page, anchor_x, anchor_y, source, verified, status, active")
+    .eq("tenant_id", tenantId)
+    .eq("page_id", pageId)
+    .eq("active", true);
+
+  return NextResponse.json({ calibration: data ?? null, regions: regions ?? [] });
 }
 
 export async function PUT(req: NextRequest): Promise<NextResponse> {
@@ -159,6 +167,72 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     action: before ? "recalibrated" : "created",
     actor_user_id: userId, before: before ?? null, after: data,
   });
+
+  const midpoint = { x: (point_a.x + point_b.x) / 2, y: (point_a.y + point_b.y) / 2 };
+  const { data: existingRegions } = await anyDb
+    .from("sheet_scale_regions")
+    .select("scale_text, page_space_scale_factor, min_x, min_y, max_x, max_y, covers_page, anchor_x, anchor_y, source, verified")
+    .eq("tenant_id", tenantId)
+    .eq("page_id", page_id)
+    .eq("active", true);
+  const current = ((existingRegions ?? []) as Array<Record<string, unknown>>).flatMap((row) => {
+    const factor = Number(row.page_space_scale_factor);
+    if (!Number.isFinite(factor) || factor <= 0) return [];
+    const minX = Number(row.min_x);
+    const minY = Number(row.min_y);
+    const maxX = Number(row.max_x);
+    const maxY = Number(row.max_y);
+    const hasBounds = [minX, minY, maxX, maxY].every((value) => Number.isFinite(value));
+    const region: ScaleRegion = {
+      scaleText: String(row.scale_text ?? ""),
+      pageSpaceScaleFactor: factor,
+      bounds: hasBounds
+        ? { minX, minY, maxX, maxY }
+        : { minX: 0, minY: 0, maxX: Math.max(point_a.x, point_b.x, 1), maxY: Math.max(point_a.y, point_b.y, 1) },
+      coversPage: row.covers_page === true || !hasBounds,
+      anchorX: Number(row.anchor_x) || midpoint.x,
+      anchorY: Number(row.anchor_y) || midpoint.y,
+      source: row.source === "manual" ? "manual" : "stated_on_sheet",
+      verified: row.verified === true,
+    };
+    return [region];
+  });
+  const pageBox = {
+    width: Math.max(1, ...current.map((region) => region.bounds.maxX), point_a.x, point_b.x),
+    height: Math.max(1, ...current.map((region) => region.bounds.maxY), point_a.y, point_b.y),
+  };
+  const nextRegions = applyManualScale(
+    current,
+    midpoint,
+    pageSpaceScaleFactor,
+    `${known_distance} ${unit_type}`,
+    pageBox,
+  );
+  await anyDb.from("sheet_scale_regions").update({ active: false, updated_at: new Date().toISOString() })
+    .eq("tenant_id", tenantId)
+    .eq("page_id", page_id)
+    .eq("active", true);
+  if (nextRegions.length > 0) {
+    const { error: regionError } = await anyDb.from("sheet_scale_regions").insert(nextRegions.map((region) => ({
+      tenant_id: tenantId,
+      project_id,
+      page_id,
+      scale_text: region.scaleText,
+      page_space_scale_factor: region.pageSpaceScaleFactor,
+      min_x: region.bounds.minX,
+      min_y: region.bounds.minY,
+      max_x: region.bounds.maxX,
+      max_y: region.bounds.maxY,
+      covers_page: region.coversPage,
+      anchor_x: region.anchorX,
+      anchor_y: region.anchorY,
+      source: region.source,
+      verified: region.verified,
+      status: region.verified ? "verified" : "stated",
+      active: true,
+    })));
+    if (regionError) return NextResponse.json({ error: regionError.message }, { status: 500 });
+  }
 
   if (body.apply_to_drafts === true) {
     const draftRows = (drafts ?? []) as Array<{ id: string; geometry: unknown; unit?: string | null; cost_code?: string | null; row_version?: number }>;

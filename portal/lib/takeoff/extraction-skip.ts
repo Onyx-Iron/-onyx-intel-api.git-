@@ -1,3 +1,8 @@
+/** Rows tagged ai_vision are not inserted. Measurement does not use them. */
+export function dropAiVisionRows<T extends { extraction_method?: string | null }>(rows: T[]): T[] {
+  return rows.filter((row) => row.extraction_method !== "ai_vision");
+}
+
 /** Content key matching apply_vision_extraction_takeoff_items. */
 export function visionItemKey(item: { description?: string | null; quantity?: number | null; unit?: string | null }): string {
   const qty = typeof item.quantity === "number" && Number.isFinite(item.quantity) ? item.quantity : 0;

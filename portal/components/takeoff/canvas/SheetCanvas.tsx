@@ -11,6 +11,8 @@ import { utilityRecipeFromRun, wallRecipeLines } from "@/lib/math/scope-recipes"
 import type { RebarSize } from "@/lib/math/assemblies";
 import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
+import { chunkReloadDecision } from "@/lib/takeoff/canvas/chunk-reload";
+import { loadPdfjs } from "@/lib/takeoff/canvas/pdfjs-loader";
 import { CANVAS_HOTKEY_HINT, resolveCanvasHotkey, type CanvasTool } from "@/lib/takeoff/canvas/hotkeys";
 import { displayTakeoffTool } from "@/lib/takeoff/measure-kind";
 import { buildQuantitySummary } from "@/lib/takeoff/canvas/quantity-summary";
@@ -467,12 +469,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     let cancelled = false;
     (async () => {
       try {
-        const pdfjs = await import("pdfjs-dist");
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (pdfjs as any).GlobalWorkerOptions.workerSrc = new URL(
-          "pdfjs-dist/build/pdf.worker.min.mjs",
-          import.meta.url,
-        ).toString();
+        const pdfjs = await loadPdfjs();
         const doc = await cachedPdfDocument(pdfUrl, () => pdfjs.getDocument({ url: pdfUrl }).promise);
         // Split plan sets store one sheet per file. Always paint page 1 of that file.
         const page = await doc.getPage(1);
@@ -494,7 +491,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           setRenderScale(scale);
         }
       } catch (e) {
-        if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
+        if (cancelled) return;
+        if (typeof window !== "undefined" && chunkReloadDecision(e, window.sessionStorage) === "reload") {
+          window.location.reload();
+          return;
+        }
+        setLoadError(e instanceof Error ? e.message : String(e));
       }
     })();
     return () => { cancelled = true; };
@@ -526,12 +528,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     let cancelled = false;
     (async () => {
       try {
-        const pdfjs = await import("pdfjs-dist");
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (pdfjs as any).GlobalWorkerOptions.workerSrc = new URL(
-          "pdfjs-dist/build/pdf.worker.min.mjs",
-          import.meta.url,
-        ).toString();
+        const pdfjs = await loadPdfjs();
         const doc = await cachedPdfDocument(priorUrl, () => pdfjs.getDocument({ url: priorUrl }).promise);
         const page = await doc.getPage(1);
         const viewport = page.getViewport({ scale: renderScale });
@@ -575,12 +572,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           finished = true;
           return;
         }
-        const pdfjs = await import("pdfjs-dist");
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (pdfjs as any).GlobalWorkerOptions.workerSrc = new URL(
-          "pdfjs-dist/build/pdf.worker.min.mjs",
-          import.meta.url,
-        ).toString();
+        const pdfjs = await loadPdfjs();
         const doc = await cachedPdfDocument(pdfUrl, () => pdfjs.getDocument({ url: pdfUrl }).promise);
         const page = await doc.getPage(1);
         const vectors = await extractVectorsFromPdfPage(page);
@@ -2309,8 +2301,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             </div>
           )}
           {loadError && (
-            <div className="absolute inset-0 flex items-center justify-center text-xs text-red-400 p-6 text-center">
-              Couldn&apos;t load the sheet: {loadError}
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-xs text-red-400 p-6 text-center">
+              <p>Couldn&apos;t load the sheet: {loadError}</p>
+              <button
+                type="button"
+                className="rounded border border-white/20 px-3 py-1 text-white/80"
+                onClick={() => window.location.reload()}
+              >
+                Reload sheet
+              </button>
             </div>
           )}
         </div>

@@ -9,6 +9,7 @@ import {
   enqueueRailwayExtractFromStorage,
   shouldEnqueueRailwayExtract,
 } from "@/lib/documents/railwayExtract";
+import { shouldMarkIngestStartError } from "@/lib/documents/ingest-start";
 
 export const runtime = "nodejs";
 
@@ -124,10 +125,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
     }
 
-    // ── PDF / other → ingest (page-split-worker for large plan sets) ───────
+    // Ingest owns processing_started_at. Stamping it here makes the claim
+    // look in-flight, and the 409 that follows was being stored as a failure.
     await db.from("documents").update({
       status: "processing",
-      processing_started_at: new Date().toISOString(),
       last_error: null,
       last_error_step: null,
     }).eq("id", doc.id).eq("tenant_id", tenantId);
@@ -140,7 +141,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       },
       body: JSON.stringify({}),
     }).then(async (res) => {
-      if (res.ok || res.status === 202) return;
+      if (!shouldMarkIngestStartError(res.status)) return;
       const detail = (await res.text().catch(() => "")).slice(0, 500);
       try {
         await db.from("documents").update({

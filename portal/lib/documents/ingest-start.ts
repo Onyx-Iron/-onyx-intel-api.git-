@@ -9,3 +9,10 @@ export function shouldMarkIngestStartError(status: number): boolean {
   if (status === 409) return false;
   return true;
 }
+
+/** Retry the upload-complete call on a dropped connection or a server error. */
+export function shouldRetryUploadComplete(status: number | null, attemptIndex: number, maxAttempts = 3): boolean {
+  if (attemptIndex >= maxAttempts - 1) return false;
+  if (status == null) return true;
+  return status >= 500;
+}

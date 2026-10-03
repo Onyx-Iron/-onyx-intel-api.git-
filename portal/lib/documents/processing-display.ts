@@ -58,12 +58,21 @@ export function processingStage(doc: ProcessingDocument): ProcessingStage {
   if (status === "error" || status === "failed") return "Failed";
   if (status === "complete_with_errors") return "Partial";
   if (status === "complete" || status === "ready" || status === "done") return "Complete";
-  if (status === "queued" || status === "split" || doc.split_status === "pending" || doc.split_status === "processing") {
+  const splitInFlight = status === "queued"
+    || doc.split_status === "pending"
+    || doc.split_status === "processing";
+  if (splitInFlight) {
     if (status === "processing" && (doc.ocr_status === "processing" || doc.ocr_status === "done")) {
       // fall through to page-reading / indexing
     } else if (status !== "processing") {
       return "Splitting";
     }
+  }
+  if (status === "split") {
+    if (doc.vector_status === "processing" || doc.ocr_status === "done" || doc.ocr_status === "partially_completed") {
+      return "Indexing";
+    }
+    return "Reading pages";
   }
   if (status === "processing") {
     if (doc.vector_status === "processing" || doc.ocr_status === "done" || doc.ocr_status === "partially_completed") {
