@@ -24,7 +24,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Header, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 import uvicorn
 
 from takeoff_parser import CSITakeoffStreamProcessor
@@ -172,8 +172,17 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
-    expose_headers=["X-Onyx-Tenant", "X-Onyx-Project"],
+    expose_headers=["X-Onyx-Tenant", "X-Onyx-Project", "Content-Disposition"],
 )
+
+# Brotli (preferred) / gzip for heavy JSON coordinate payloads — must be outer
+# so it wraps CORS responses. Clients send Accept-Encoding: br,gzip.
+try:
+    from services.brotli_middleware import BrotliGzipMiddleware
+
+    app.add_middleware(BrotliGzipMiddleware, minimum_size=512)
+except Exception as _compress_err:  # noqa: BLE001
+    logger.warning("Brotli middleware unavailable: %s", _compress_err)
 
 
 # ── Auth dependency ────────────────────────────────────────────────────────────
@@ -919,6 +928,34 @@ async def civil_trench(body: CivilTrenchRequest = Body(...)) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return result.model_dump()
+
+
+@app.post(
+    "/api/v1/estimate/export-xlsx",
+    summary="Estimate workbook with live Excel formulas (openpyxl)",
+    dependencies=[Depends(verify_secret)],
+)
+async def export_estimate_xlsx(body: dict = Body(...)) -> Response:
+    """
+    Returns an .xlsx where Direct/Overhead/Profit/SOV cells are live formulas
+    (=D4*F4, =SUM(...)) so GCs can audit markups inside Excel.
+    """
+    try:
+        from services.estimate_excel import build_estimate_workbook
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"openpyxl export unavailable: {exc}") from exc
+    try:
+        data = build_estimate_workbook(body)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    name = str(body.get("project_name") or "estimate").replace(" ", "_")[:60]
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{name}_estimate.xlsx"',
+        },
+    )
 
 
 # ── Async Celery / Redis heavy compute ───────────────────────────────────────

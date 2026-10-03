@@ -180,6 +180,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             "     a recompaction depth and offset — otherwise skip it; that spec usually lives",
             "     in the geotechnical report, not the grading plan.",
             "",
+            "Output RAW JSON matching schema only. No prose. Cap at ~8 high-confidence items.",
             "Return STRICT JSON matching this schema (no prose, no markdown fences):",
             "{",
             "  \"page_summary\": \"one-sentence description of what this sheet shows\",",
@@ -209,9 +210,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       ],
     }],
     generationConfig: {
-      temperature: 0.1,
+      // Vision path is schedule/note OCR only — hard-cap output tokens and
+      // zero temperature so the model emits compact RAW JSON, not prose.
+      temperature: 0.0,
       responseMimeType: "application/json",
-      maxOutputTokens: 8192,
+      maxOutputTokens: 300,
     },
   };
 
@@ -236,7 +239,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   } catch {
     return NextResponse.json({ error: "Gemini returned non-JSON", raw: raw.slice(0, 400) }, { status: 502 });
   }
-  const items: VisionItem[] = Array.isArray(parsed.items) ? parsed.items.slice(0, 500).map((it) => ({
+  const items: VisionItem[] = Array.isArray(parsed.items) ? parsed.items.slice(0, 20).map((it) => ({
     description: String(it.description ?? "").slice(0, 400),
     quantity: safeNumber(it.quantity, 0),
     unit: String(it.unit ?? "EA").toUpperCase().slice(0, 12),

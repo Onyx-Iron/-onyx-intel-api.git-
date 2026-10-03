@@ -241,7 +241,7 @@ async function callGemini(base64: string, userText: string) {
           responseMimeType: "application/json",
           responseSchema: geminiSchema(),
           temperature: 0,
-          maxOutputTokens: 16384,
+          maxOutputTokens: 300,
         },
       }),
     },
@@ -272,8 +272,13 @@ async function callAnthropic(base64: string, userText: string) {
     },
     body: JSON.stringify({
       model: ANTHROPIC_MODEL,
-      max_tokens: 8192,
-      system: buildGroundedSystemPrompt(SYSTEM_PROMPT, { requireCitations: true, sourceLabel: "attached drawing PDF" }),
+      // Schedule/OCR path: hard token cap keeps responses RAW JSON only.
+      max_tokens: 300,
+      temperature: 0.0,
+      system: buildGroundedSystemPrompt(
+        "Output RAW JSON matching schema only.\n" + SYSTEM_PROMPT,
+        { requireCitations: true, sourceLabel: "attached drawing PDF" },
+      ),
       tools: [anthropicTool()],
       tool_choice: { type: "tool", name: "emit_takeoff_rows" },
       messages: [{
