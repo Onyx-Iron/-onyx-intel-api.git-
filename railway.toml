@@ -1,0 +1,25 @@
+# Railway takeoff engine — multi-service compute pool
+#
+# Provision in the same Railway project:
+#   1. Redis plugin  → exposes REDIS_URL
+#   2. Service "web" (existing) → start: uvicorn takeoff_api:app --host 0.0.0.0 --port $PORT --workers 2
+#   3. Service "worker" (new, same repo) → start:
+#        celery -A celery_app.celery worker --loglevel=INFO --concurrency=${CELERY_CONCURRENCY:-4} -Q onyx.compute
+#
+# Shared env on web + worker:
+#   REDIS_URL / CELERY_BROKER_URL / CELERY_RESULT_BACKEND
+#   API_SECRET, ALLOWED_ORIGINS, SUPABASE_*, etc.
+#
+# Flow:
+#   Upload DWG/PDF → POST /api/takeoff/extract-async → Redis queue → Celery worker (ezdxf/pdfplumber)
+#   Large grids    → POST /api/earthwork/cutfill-async → Celery terrain task
+#   Poll           → GET  /api/jobs/{job_id}
+#
+# Sync POST /api/takeoff/extract remains for interactive small files.
+
+[build]
+builder = "nixpacks"
+
+[deploy]
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
