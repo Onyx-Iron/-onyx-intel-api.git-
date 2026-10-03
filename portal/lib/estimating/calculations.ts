@@ -119,6 +119,31 @@ export interface ResolvedVersionAmounts {
 }
 
 /**
+ * Applies the version's contingency, overhead, and profit percentages to one
+ * line's direct costs. This is the same cascade a slider change must write
+ * onto every line, so a later export reads the sell price the estimator saw.
+ */
+export function priceItemAtVersionPercentages(
+  item: ItemCalculationInputs,
+  pct: VersionPercentages,
+): ItemCalculationResult & ResolvedVersionAmounts {
+  const indirectCost = n(item.indirectCost);
+  const directPreview =
+    n(item.laborCost) + n(item.materialCost) + n(item.equipmentCost) +
+    n(item.truckingCost) + n(item.subcontractCost) + n(item.disposalCost) +
+    n(item.testingCost) + n(item.otherDirectCost);
+  const derived = applyVersionPercentages(directPreview, indirectCost, pct);
+  const calc = calculateItem({
+    ...item,
+    indirectCost,
+    contingency: derived.contingency,
+    overhead: derived.overhead,
+    profit: derived.profit,
+  });
+  return { ...calc, ...derived };
+}
+
+/**
  * Applies version-level percentages to a direct cost + explicit indirect
  * cost, using the same cascade the legacy Pricing Matrix used (direct ->
  * +contingency -> subtotal -> *(1+overhead%) -> *(1+profit%)), so migrated

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   applyVersionPercentages, calculateEstimateTotals, calculateItem,
-  computeCostBeforeProfit, computeDirectCost, computeMargin, computeMarkup, computeSellingPrice, roundCurrency,
+  computeCostBeforeProfit, computeDirectCost, computeMargin, computeMarkup, computeSellingPrice, priceItemAtVersionPercentages, roundCurrency,
 } from "./calculations";
 
 describe("cost calculations", () => {
@@ -117,6 +117,20 @@ describe("estimate-level roll-up", () => {
       { totalDirectCost: 500, indirectCost: 0, contingency: 0, overhead: 0, profit: 0, totalPrice: 500, isAlternate: true, alternateAccepted: true },
     ]);
     assert.equal(totals.totalPrice, 1500);
+  });
+
+  it("applies version markup to a line's direct cost", () => {
+    const priced = priceItemAtVersionPercentages(
+      { materialCost: 1000, quantity: 10 },
+      { contingencyPct: 5, overheadPct: 10, profitPct: 15 },
+    );
+    assert.equal(priced.totalDirectCost, 1000);
+    assert.equal(priced.contingency, 50);
+    assert.equal(priced.overhead, 105);
+    assert.equal(priced.profit, 173.25);
+    assert.equal(priced.totalPrice, 1328.25);
+    assert.ok(priced.unitPrice != null);
+    assert.ok(Math.abs(priced.unitPrice - priced.totalPrice / 10) < 0.01);
   });
 
   it("an empty item list produces all-zero totals with null markup/margin, not NaN", () => {
