@@ -33,20 +33,26 @@ export function useCanvasRealtime({
   enabled = true,
   onRemoteEvent,
 }: Options) {
+  const active = Boolean(enabled && projectId && pageId);
   const [peers, setPeers] = useState<CanvasPeer[]>([]);
-  const [status, setStatus] = useState<CanvasRealtimeStatus>("off");
+  const [connectionStatus, setConnectionStatus] = useState<
+    Exclude<CanvasRealtimeStatus, "off">
+  >("connecting");
   const channelRef = useRef<RealtimeChannel | null>(null);
   const onRemoteRef = useRef(onRemoteEvent);
-  onRemoteRef.current = onRemoteEvent;
+  // Stable per-mount presence key — lazy useState avoids impure useMemo/refs-during-render.
+  const [senderId] = useState(() =>
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `est-${Math.random().toString(36).slice(2, 10)}`,
+  );
 
-  const senderId = useMemo(() => {
-    if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-      return crypto.randomUUID();
-    }
-    return `est-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  }, []);
+  useEffect(() => {
+    onRemoteRef.current = onRemoteEvent;
+  }, [onRemoteEvent]);
 
   const color = useMemo(() => peerColorForKey(senderId), [senderId]);
+  const status: CanvasRealtimeStatus = active ? connectionStatus : "off";
 
   const broadcast = useCallback(
     (kind: CanvasCollabKind, payload: unknown) => {
@@ -83,10 +89,7 @@ export function useCanvasRealtime({
   );
 
   useEffect(() => {
-    if (!enabled || !projectId || !pageId) {
-      setStatus("off");
-      return;
-    }
+    if (!active) return;
 
     let cancelled = false;
     let channel: RealtimeChannel | null = null;
@@ -94,7 +97,8 @@ export function useCanvasRealtime({
     try {
       const supabase = createBrowserSupabaseClient();
       const topic = canvasChannelName(projectId, pageId);
-      setStatus("connecting");
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset connection phase when (re)joining the channel
+      setConnectionStatus("connecting");
 
       channel = supabase.channel(topic, {
         config: {
@@ -121,7 +125,7 @@ export function useCanvasRealtime({
           if (cancelled) return;
           if (subStatus === "SUBSCRIBED") {
             channelRef.current = channel;
-            setStatus("live");
+            setConnectionStatus("live");
             await channel!.track({
               name: displayName,
               color,
@@ -131,11 +135,11 @@ export function useCanvasRealtime({
             subStatus === "CHANNEL_ERROR" ||
             subStatus === "TIMED_OUT"
           ) {
-            setStatus("error");
+            setConnectionStatus("error");
           }
         });
     } catch {
-      if (!cancelled) setStatus("error");
+      if (!cancelled) setConnectionStatus("error");
     }
 
     return () => {
@@ -145,9 +149,9 @@ export function useCanvasRealtime({
         void createBrowserSupabaseClient().removeChannel(channel);
       }
       setPeers([]);
-      setStatus("off");
+      setConnectionStatus("connecting");
     };
-  }, [color, displayName, enabled, pageId, projectId, senderId]);
+  }, [active, color, displayName, pageId, projectId, senderId]);
 
   return { peers, status, senderId, color, broadcast, trackCursor };
 }

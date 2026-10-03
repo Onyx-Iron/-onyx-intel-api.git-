@@ -544,6 +544,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         const elevation = Number(raw);
         if (Number.isFinite(elevation)) {
           const node: TopoNode = {
+            // eslint-disable-next-line react-hooks/purity
             key: `spot-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             node_type: "spot_elevation",
             points: [p],
