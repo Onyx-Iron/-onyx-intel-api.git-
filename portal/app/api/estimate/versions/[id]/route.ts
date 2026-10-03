@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 import { assertVersionEditable, getServiceDb, loadVersionForTenant, NotFoundError, VersionLockedError } from "@/lib/estimating/versioning";
-import { applyVersionPercentages, calculateEstimateTotals, calculateItem } from "@/lib/estimating/calculations";
+import { applyVersionPercentages, calculateEstimateTotals, calculateItem, priceItemAtVersionPercentages } from "@/lib/estimating/calculations";
 import { recordEstimateAudit, recordEstimateAuditBatch } from "@/lib/estimating/audit";
 
 export const runtime = "nodejs";
@@ -132,16 +132,84 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   // the distinct "show original/proposed/reason, require confirmation"
   // workflow (STEP 7), not every routine slider tweak.
   let effectiveVersion = version;
+  const settingsPatch: Record<string, number> = {};
   if (body.settings) {
-    const patch: Record<string, number> = {};
-    if (typeof body.settings.contingency_pct === "number") patch.contingency_pct = body.settings.contingency_pct;
-    if (typeof body.settings.overhead_pct === "number") patch.overhead_pct = body.settings.overhead_pct;
-    if (typeof body.settings.profit_pct === "number") patch.profit_pct = body.settings.profit_pct;
-    if (Object.keys(patch).length > 0) {
+    if (typeof body.settings.contingency_pct === "number") settingsPatch.contingency_pct = body.settings.contingency_pct;
+    if (typeof body.settings.overhead_pct === "number") settingsPatch.overhead_pct = body.settings.overhead_pct;
+    if (typeof body.settings.profit_pct === "number") settingsPatch.profit_pct = body.settings.profit_pct;
+    if (Object.keys(settingsPatch).length > 0) {
       const { data: updatedVersion, error: vErr } = await db
-        .from("estimate_versions").update(patch).eq("id", id).select("*").single();
+        .from("estimate_versions").update(settingsPatch).eq("id", id).select("*").single();
       if (vErr) return NextResponse.json({ error: vErr.message }, { status: 500 });
       effectiveVersion = { ...effectiveVersion, ...updatedVersion };
+    }
+  }
+
+  const percentages = {
+    contingencyPct: effectiveVersion.contingency_pct ?? 0,
+    overheadPct: effectiveVersion.overhead_pct ?? 0,
+    profitPct: effectiveVersion.profit_pct ?? 0,
+  };
+  const settingsChanged =
+    (settingsPatch.contingency_pct !== undefined && settingsPatch.contingency_pct !== (version.contingency_pct ?? 0)) ||
+    (settingsPatch.overhead_pct !== undefined && settingsPatch.overhead_pct !== (version.overhead_pct ?? 0)) ||
+    (settingsPatch.profit_pct !== undefined && settingsPatch.profit_pct !== (version.profit_pct ?? 0));
+
+  // A slider change used to update only the version row. The on-screen bid
+  // recomputes from those percentages, but Excel, PDF, and CSV read each
+  // line's stored total. Reprice every line that this request does not
+  // already upsert so the downloaded sell price includes the new markup.
+  if (settingsChanged) {
+    const incomingIds = new Set(
+      (body.items ?? []).map((item) => item.id).filter((itemId): itemId is string => typeof itemId === "string" && itemId.length > 0),
+    );
+    const { data: existingForReprice, error: repriceFetchErr } = await db
+      .from("estimate_items")
+      .select("id, quantity, labor_cost, material_cost, equipment_cost, trucking_cost, subcontract_cost, disposal_cost, testing_cost, other_direct_cost, indirect_cost, pricing_status, notes")
+      .eq("estimate_version_id", id)
+      .eq("tenant_id", tenantId);
+    if (repriceFetchErr) return NextResponse.json({ error: repriceFetchErr.message }, { status: 500 });
+
+    const stale = ((existingForReprice ?? []) as Array<Record<string, unknown>>)
+      .filter((row) => {
+        if (incomingIds.has(String(row.id))) return false;
+        // Unpriced, review, and source-removed lines stay out of the sell
+        // price. Repricing them would push markup into proposal totals the
+        // bid screen does not include.
+        const notes = typeof row.notes === "string" ? row.notes : "";
+        if (notes.startsWith("Source removed")) return false;
+        if (row.pricing_status === "unpriced" || row.pricing_status === "review") return false;
+        return true;
+      });
+    const REPRICE_BATCH = 8;
+    for (let i = 0; i < stale.length; i += REPRICE_BATCH) {
+      const batch = stale.slice(i, i + REPRICE_BATCH);
+      const results = await Promise.all(batch.map(async (row) => {
+        const priced = priceItemAtVersionPercentages({
+          quantity: row.quantity as number | null,
+          laborCost: row.labor_cost as number | null,
+          materialCost: row.material_cost as number | null,
+          equipmentCost: row.equipment_cost as number | null,
+          truckingCost: row.trucking_cost as number | null,
+          subcontractCost: row.subcontract_cost as number | null,
+          disposalCost: row.disposal_cost as number | null,
+          testingCost: row.testing_cost as number | null,
+          otherDirectCost: row.other_direct_cost as number | null,
+          indirectCost: row.indirect_cost as number | null,
+        }, percentages);
+        const { error } = await db.from("estimate_items").update({
+          total_direct_cost: priced.totalDirectCost,
+          contingency: priced.contingency,
+          overhead: priced.overhead,
+          profit: priced.profit,
+          total_price: priced.totalPrice,
+          unit_price: priced.unitPrice,
+          updated_by: userId,
+        }).eq("id", row.id).eq("estimate_version_id", id).eq("tenant_id", tenantId);
+        return error;
+      }));
+      const failed = results.find((error) => error);
+      if (failed) return NextResponse.json({ error: failed.message }, { status: 500 });
     }
   }
 
@@ -156,11 +224,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     .eq("estimate_version_id", id);
   const existingById = new Map((existingRows ?? []).map((row: { id: string }) => [row.id, row]));
 
-  const pct = {
-    contingencyPct: effectiveVersion.contingency_pct ?? 0,
-    overheadPct: effectiveVersion.overhead_pct ?? 0,
-    profitPct: effectiveVersion.profit_pct ?? 0,
-  };
+  const pct = percentages;
 
   // Server-side recalculation of every item — the client may send whatever
   // it wants in total_price/unit_price, and it is IGNORED; only the

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { applyXlsxFormulas, buildEstimateFormulaSheet, formulaMatchesServer, sellPrice } from "./estimate-export.ts";
+import { applyXlsxFormulas, buildEstimateCsv, buildEstimateFormulaSheet, formulaMatchesServer, sellPrice, sellUnitRate } from "./estimate-export.ts";
 
 describe("estimate formula export", () => {
   it("writes live line and group formulas instead of pasted totals", () => {
@@ -25,5 +25,25 @@ describe("estimate formula export", () => {
     const check = formulaMatchesServer(10, 12.5);
     assert.equal(check.formula, check.server);
     assert.equal(check.server, 125);
+  });
+
+  it("prices the spreadsheet from the sell total, not the direct unit cost", () => {
+    const line = {
+      description: "Slab",
+      csi_code: "03-30-00",
+      item_type: "material",
+      quantity: 10,
+      uom: "CY",
+      unit_cost: 100,
+      total_price: 1328.25,
+      pricing_status: "priced",
+    };
+    assert.equal(sellUnitRate(line), 132.825);
+    const layout = buildEstimateFormulaSheet([line]);
+    assert.equal(layout.rows[1][6], 132.825);
+    const csv = buildEstimateCsv([line]);
+    assert.match(csv, /132\.825/);
+    assert.match(csv, /1328\.25/);
+    assert.doesNotMatch(csv, /,100,/);
   });
 });

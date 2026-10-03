@@ -37,6 +37,21 @@ export function lineContributesToSellPrice(line: ExportLine): boolean {
   return typeof line.total_price === "number" && Number.isFinite(line.total_price);
 }
 
+/**
+ * Rate used by a quantity × rate formula. Stored `total_price` already
+ * includes contingency, overhead, and profit; `unit_cost` is only the
+ * direct rate, so a formula built from it drops the markup.
+ */
+export function sellUnitRate(line: ExportLine): number | null {
+  if (!lineContributesToSellPrice(line)) return null;
+  const quantity = line.quantity;
+  const total = line.total_price;
+  if (typeof quantity === "number" && Number.isFinite(quantity) && quantity !== 0 && typeof total === "number" && Number.isFinite(total)) {
+    return total / quantity;
+  }
+  return typeof line.unit_cost === "number" && Number.isFinite(line.unit_cost) ? line.unit_cost : null;
+}
+
 export function quantitySourceLabel(line: Pick<ExportLine, "notes" | "drawing_ref" | "location_tag" | "source_takeoff_id" | "pricing_status">): string {
   if (isSourceRemoved(line)) return "Source removed";
   if (line.drawing_ref && line.location_tag) return `${line.drawing_ref} / ${line.location_tag}`;
@@ -109,7 +124,7 @@ export function buildEstimateCsv(lines: ExportLine[], by: EstimateGroupBy = "div
         csvCell(line.description),
         csvCell(line.quantity ?? ""),
         csvCell(line.uom),
-        csvCell(priced ? line.unit_cost ?? "" : ""),
+        csvCell(priced ? sellUnitRate(line) ?? "" : ""),
         csvCell(priced ? line.total_price ?? "" : ""),
         csvCell(quantitySourceLabel(line)),
         csvCell(priced ? "yes" : "no"),
@@ -141,8 +156,7 @@ export function buildEstimateFormulaSheet(lines: ExportLine[], by: EstimateGroup
   for (const group of groupEstimateLines(lines, by)) {
     const firstDataRow = rows.length + 1;
     for (const line of group.lines) {
-      const priced = lineContributesToSellPrice(line);
-      const rate = priced ? (line.unit_cost ?? (line.quantity ? (line.total_price ?? 0) / line.quantity : null)) : null;
+      const rate = sellUnitRate(line);
       rows.push([
         group.label,
         line.csi_code || line.cost_code || "",
@@ -154,7 +168,7 @@ export function buildEstimateFormulaSheet(lines: ExportLine[], by: EstimateGroup
         null,
         quantitySourceLabel(line),
       ]);
-      if (priced && rate != null) formulaRows.push(rows.length);
+      if (rate != null) formulaRows.push(rows.length);
     }
     const lastDataRow = rows.length;
     rows.push([group.label, "", "", `${group.label} subtotal`, null, "", null, null, ""]);
