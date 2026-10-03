@@ -92,10 +92,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         const storagePath = typeof meta.storage_path === "string"
           ? meta.storage_path
           : buildOriginalStoragePath(existing.id, file_name);
-        await db.storage.from(PLANS_UPLOAD_BUCKET).remove([storagePath]);
+        // Keep the stored PDF and the current status until upload-url/complete
+        // verifies the new bytes. Deleting the object and flipping the row to
+        // pending first means a dropped PUT is followed by skip_upload, which
+        // reports success while the plan file is gone.
+        if (typeof meta.storage_path !== "string") {
+          const { error: pathErr } = await db.from("documents").update({
+            checksum,
+            meta: { ...meta, storage_path: storagePath, size: body.size ?? null, content_type },
+          }).eq("id", existing.id).eq("tenant_id", tenantId);
+          if (pathErr) return NextResponse.json({ error: pathErr.message }, { status: 500 });
+        }
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const { data: signed, error: signErr } = await (db.storage.from(PLANS_UPLOAD_BUCKET) as any)
-          .createSignedUploadUrl(storagePath);
+          .createSignedUploadUrl(storagePath, { upsert: true });
         if (signErr || !signed) {
           return NextResponse.json(
             { error: `Could not create upload URL: ${signErr?.message ?? "unknown"}` },
@@ -103,20 +113,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           );
         }
         const parsed = parseSignedUploadPayload(signed as Record<string, unknown>);
-        await db.from("documents").update({
-          status: "pending",
-          file_name,
-          last_error: null,
-          last_error_step: null,
-          checksum,
-          meta: { ...meta, storage_path: storagePath, size: body.size ?? null, content_type, partial_acknowledged: false },
-        }).eq("id", existing.id).eq("tenant_id", tenantId);
         const supabaseUrl = (process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || "").replace(/\/$/, "");
         const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "";
         return NextResponse.json({
           document_id: existing.id,
           reused: true,
           skip_upload: false,
+          upsert: true,
           path: storagePath,
           bucket: PLANS_UPLOAD_BUCKET,
           prefer_tus: typeof body.size === "number" && body.size >= TUS_THRESHOLD_BYTES,
