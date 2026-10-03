@@ -11,6 +11,7 @@ from services.geos_geometry import (
     polygon_intersection_area,
     unary_union_area,
 )
+from services.parallel_dxf import _chunk_ranges, _cpu_workers as _dxf_cpu_workers
 from services.parallel_pdf import _chunk_pages, _cpu_workers
 from services.terrain_numpy import compare_grids_numpy
 
@@ -105,6 +106,71 @@ class ParallelPdfHelperTests(unittest.TestCase):
 
     def test_cpu_workers_at_least_one(self) -> None:
         self.assertGreaterEqual(_cpu_workers(1), 1)
+
+
+class ParallelDxfHelperTests(unittest.TestCase):
+    def test_chunk_ranges_cover_all(self) -> None:
+        ranges = _chunk_ranges(100, 4)
+        self.assertEqual(ranges[0][0], 0)
+        self.assertEqual(ranges[-1][1], 100)
+        covered = sum(b - a for a, b in ranges)
+        self.assertEqual(covered, 100)
+
+    def test_dxf_cpu_workers(self) -> None:
+        self.assertGreaterEqual(_dxf_cpu_workers(2), 1)
+
+    def test_extract_dxf_parallel_on_minimal_drawing(self) -> None:
+        """End-to-end: write a tiny DXF, extract via parallel path (1 worker)."""
+        import tempfile
+        from pathlib import Path
+
+        import ezdxf
+
+        from services.parallel_dxf import extract_dxf_parallel
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        msp.add_line((0, 0), (10, 0), dxfattribs={"layer": "PIPE"})
+        msp.add_lwpolyline(
+            [(0, 0), (10, 0), (10, 5), (0, 5)],
+            close=True,
+            dxfattribs={"layer": "PAD"},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tiny.dxf"
+            doc.saveas(path)
+            result = extract_dxf_parallel(str(path), max_workers=1, min_entities_for_pool=10_000)
+        self.assertEqual(result["source_type"], "dxf")
+        self.assertGreaterEqual(result["coverage"]["rows_extracted"], 2)
+        self.assertEqual(result["coverage"]["geometry_engine"], "geos")
+        self.assertEqual(result["coverage"]["parallel_workers"], 1)
+        uoms = {r["uom"] for r in result["rows"]}
+        self.assertIn("LF", uoms)
+        self.assertIn("SF", uoms)
+
+    def test_extract_dxf_forces_process_pool(self) -> None:
+        """With min_entities_for_pool=1, a multi-entity DXF uses ProcessPool."""
+        import tempfile
+        from pathlib import Path
+
+        import ezdxf
+
+        from services.parallel_dxf import extract_dxf_parallel
+
+        doc = ezdxf.new()
+        doc.header["$INSUNITS"] = 2  # feet
+        msp = doc.modelspace()
+        for i in range(8):
+            msp.add_line((0, i), (10, i), dxfattribs={"layer": "RUNS"})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pool.dxf"
+            doc.saveas(path)
+            result = extract_dxf_parallel(str(path), max_workers=2, min_entities_for_pool=1)
+        self.assertGreaterEqual(result["coverage"]["parallel_workers"], 2)
+        self.assertEqual(result["coverage"]["entity_count"], 8)
+        lf_rows = [r for r in result["rows"] if r["uom"] == "LF"]
+        self.assertEqual(len(lf_rows), 1)
+        self.assertAlmostEqual(lf_rows[0]["total_qty"], 80.0, places=3)
 
 
 if __name__ == "__main__":

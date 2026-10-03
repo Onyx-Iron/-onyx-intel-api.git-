@@ -344,116 +344,23 @@ def _geos():
 
 
 def extract_from_dxf(path: str) -> dict:
-    import ezdxf
-    from ezdxf.math import Vec3
+    """
+    DXF / DXF-encoded DWG geometry extract.
 
-    try:
-        doc = ezdxf.readfile(path)
-    except (ezdxf.DXFStructureError, IOError) as e:
-        # Binary DWG is not DXF — ezdxf can't read it without conversion.
-        raise ValueError(
-            f"Could not read as DXF ({e}). For binary .dwg, export to DXF "
-            f"from your CAD tool (Save As → AutoCAD DXF) and re-upload."
-        )
+    Large modelspaces fan entity index ranges across ProcessPoolExecutor
+    (spawn) via services.parallel_dxf. Closed-polygon areas are GEOS-unioned
+    in the parent so overlaps across chunk boundaries stay correct.
+    """
+    import sys
+    from pathlib import Path
 
-    msp = doc.modelspace()
-    geo = _geos()
+    engine_dir = Path(__file__).resolve().parent / "python-engine"
+    if engine_dir.is_dir() and str(engine_dir) not in sys.path:
+        sys.path.insert(0, str(engine_dir))
 
-    # Aggregate by layer: total polyline/line length, hatch area, block-insert counts.
-    # Closed rings collected per layer so GEOS unary_union can de-dupe overlaps.
-    layer_len: dict[str, float] = {}
-    layer_rings: dict[str, list] = {}
-    layer_area_extra: dict[str, float] = {}  # circles / hatches (already GEOS or native area)
-    block_counts: dict[tuple[str, str], int] = {}  # (layer, block_name) -> count
+    from services.parallel_dxf import extract_dxf_parallel
 
-    def _polyline_length(points: list) -> float:
-        if geo is not None:
-            return geo.polyline_length(points)
-        total = 0.0
-        for a, b in zip(points, points[1:]):
-            total += (Vec3(b) - Vec3(a)).magnitude
-        return total
-
-    for e in msp:
-        layer = getattr(e.dxf, "layer", "0")
-        etype = e.dxftype()
-        try:
-            if etype == "LINE":
-                layer_len[layer] = layer_len.get(layer, 0.0) + (Vec3(e.dxf.end) - Vec3(e.dxf.start)).magnitude
-            elif etype in ("LWPOLYLINE", "POLYLINE"):
-                pts = [p[:3] if len(p) >= 3 else (p[0], p[1], 0.0) for p in e.get_points()] \
-                    if etype == "LWPOLYLINE" else [v.dxf.location for v in e.vertices]
-                layer_len[layer] = layer_len.get(layer, 0.0) + _polyline_length(pts)
-                if getattr(e, "closed", False) or getattr(e.dxf, "flags", 0) & 1:
-                    layer_rings.setdefault(layer, []).append(pts)
-            elif etype == "CIRCLE":
-                if geo is not None:
-                    layer_area_extra[layer] = layer_area_extra.get(layer, 0.0) + geo.circle_area(e.dxf.radius)
-                else:
-                    import math
-                    layer_area_extra[layer] = layer_area_extra.get(layer, 0.0) + math.pi * e.dxf.radius ** 2
-            elif etype == "HATCH":
-                layer_area_extra[layer] = layer_area_extra.get(layer, 0.0) + abs(getattr(e, "area", 0.0) or 0.0)
-            elif etype == "INSERT":
-                key = (layer, e.dxf.name)
-                block_counts[key] = block_counts.get(key, 0) + 1
-        except Exception:
-            continue  # never let one malformed entity kill the takeoff
-
-    # GEOS unary_union per layer — overlapping closed polys count once.
-    layer_area: dict[str, float] = dict(layer_area_extra)
-    for layer, rings in layer_rings.items():
-        if geo is not None and len(rings) > 1:
-            area = geo.unary_union_area(rings)
-        else:
-            area = sum(_polygon_area(r) for r in rings)
-        layer_area[layer] = layer_area.get(layer, 0.0) + area
-
-    units = _dxf_units(doc)
-    to_feet = _dxf_unit_to_feet_factor(doc)
-    rows: list[dict] = []
-
-    for layer, length in sorted(layer_len.items()):
-        length_ft = length * to_feet
-        if length_ft <= 0:
-            continue
-        rows.append(_row(
-            description=f"{layer} — linear run",
-            qty=length_ft,
-            basis=f"Sum of LINE/POLYLINE geometry on layer '{layer}' ({units}, converted to LF)",
-            uom="LF", location_tag=layer,
-        ))
-    for layer, area in sorted(layer_area.items()):
-        area_sf = area * (to_feet ** 2)
-        if area_sf <= 0:
-            continue
-        basis_engine = "GEOS unary_union" if geo is not None else "shoelace sum"
-        rows.append(_row(
-            description=f"{layer} — area",
-            qty=area_sf,
-            basis=f"{basis_engine} closed-polygon/hatch area on layer '{layer}' ({units}² → SF)",
-            uom="SF", location_tag=layer,
-        ))
-    for (layer, block_name), count in sorted(block_counts.items()):
-        rows.append(_row(
-            description=f"{block_name} ({layer})",
-            qty=count, basis=f"Count of '{block_name}' block inserts on layer '{layer}'",
-            uom="EA", location_tag=layer,
-        ))
-
-    return {
-        "source_type": "dxf",
-        "rows": rows,
-        "coverage": {
-            "layers_with_length": len(layer_len),
-            "layers_with_area": len(layer_area),
-            "block_types": len(block_counts),
-            "rows_extracted": len(rows),
-            "drawing_units": units,
-            "geometry_engine": "geos" if geo is not None else "shoelace",
-        },
-        "ai_candidate_pages": [],
-    }
+    return extract_dxf_parallel(path)
 
 
 def _polygon_area(points: list) -> float:

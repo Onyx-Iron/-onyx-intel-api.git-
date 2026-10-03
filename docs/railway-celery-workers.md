@@ -9,6 +9,7 @@ CAD/PDF extracts and large cut/fill grids — without serverless timeouts.
 ```
 [ Upload DWG / PDF ] ──► FastAPI (web) ──► Redis Queue ──► Celery worker (×N cores)
                                                           ├── ProcessPool PDF pages (spawn)
+                                                          ├── ProcessPool DXF entities (spawn)
                                                           ├── ezdxf + Shapely/GEOS areas
                                                           └── NumPy vectorized cut/fill
 ```
@@ -18,6 +19,7 @@ CAD/PDF extracts and large cut/fill grids — without serverless timeouts.
 | Layer | Mechanism |
 |-------|-----------|
 | Multi-page PDF | `ProcessPoolExecutor` (`spawn`) in `services.parallel_pdf` — page chunks across cores; set `PDF_EXTRACT_WORKERS` |
+| Large DXF modelspace | `ProcessPoolExecutor` (`spawn`) in `services.parallel_dxf` — entity index chunks; set `DXF_EXTRACT_WORKERS` |
 | Cross-job queue | Celery + Redis (unchanged) |
 | Polygon / trench buffers | Shapely 2 → GEOS C (`services.geos_geometry`) |
 | Cut/fill grids | NumPy corner-slice mean + masked sums (`services.terrain_numpy`) |
