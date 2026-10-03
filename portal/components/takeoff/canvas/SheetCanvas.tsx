@@ -8,7 +8,10 @@ import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-page";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { pointsToPageSpace, pointsToScreenSpace, samePoints, toPageSpace, translateStoredPoints } from "@/lib/takeoff/canvas/coordinates";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
+import { rasterizePdfOffThread } from "@/lib/takeoff/canvas/pdf-raster";
 import { matchingSheetBitmap, rememberSheetBitmap, sheetRenderScale } from "@/lib/takeoff/canvas/sheet-bitmap-cache";
+import { buildSnapIndex, nearestSnap } from "@/lib/takeoff/canvas/snap-index";
+import { triangleFillPath } from "@/lib/takeoff/canvas/tessellate";
 import { markPageVectorScanDone, pageVectorScanDone } from "@/lib/takeoff/canvas/vector-scan-cache";
 import { useConfirm } from "@/components/common/ConfirmDialog";
 
@@ -180,7 +183,8 @@ const ShapeGlyph = memo(function ShapeGlyph({
   }
   return (
     <g className={cursorClass} onClick={onClick} onMouseDown={onMouseDown}>
-      <path d={d} fill={`${color}44`} stroke={color} strokeWidth={selected ? 3 : 2} />
+      <path d={triangleFillPath(pts)} fill={`${color}44`} stroke="none" />
+      <path d={d} fill="none" stroke={color} strokeWidth={selected ? 3 : 2} />
     </g>
   );
 });
@@ -256,10 +260,12 @@ const SavedMarkup = memo(function SavedMarkup({
         );
       })}
       {areaBounds.map((bound) => {
-        const d = displayPoints(bound.points, bound.coordinateSpace, renderScale).map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z";
+        const pts = displayPoints(bound.points, bound.coordinateSpace, renderScale);
+        const d = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z";
         return (
           <g key={bound.key}>
-            <path d={d} fill="#f9731633" stroke="#f97316" strokeWidth={2} />
+            <path d={triangleFillPath(pts)} fill="#f9731633" stroke="none" />
+            <path d={d} fill="none" stroke="#f97316" strokeWidth={2} />
           </g>
         );
       })}
@@ -475,16 +481,42 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         const scale = sheetRenderScale(containerWidth, viewport1.width);
         if (!cached) {
           const viewport = page.getViewport({ scale });
-          cvs.width = viewport.width;
-          cvs.height = viewport.height;
-          await page.render({ canvas: cvs, canvasContext: ctx, viewport }).promise;
-          if (!cancelled) {
-            setRenderSize({ w: viewport.width, h: viewport.height });
-            setRenderScale(scale);
+          let paintedOffThread = false;
+          try {
+            const raster = await rasterizePdfOffThread(pdfUrl, containerWidth);
+            if (!cancelled) {
+              cvs.width = raster.width;
+              cvs.height = raster.height;
+              ctx.drawImage(raster.bitmap, 0, 0);
+              setRenderSize({ w: raster.width, h: raster.height });
+              setRenderScale(raster.scale);
+              if (typeof createImageBitmap === "function") {
+                const bitmap = await createImageBitmap(cvs);
+                rememberSheetBitmap(pageId, {
+                  pageWidth: raster.pageWidth,
+                  pageHeight: raster.pageHeight,
+                  scale: raster.scale,
+                  bitmap,
+                });
+              }
+              raster.bitmap.close?.();
+              paintedOffThread = true;
+            }
+          } catch (rasterErr) {
+            console.warn("[SheetCanvas] offscreen PDF raster failed; painting on the main thread", rasterErr);
           }
-          if (typeof createImageBitmap === "function") {
-            const bitmap = await createImageBitmap(cvs);
-            rememberSheetBitmap(pageId, { pageWidth: viewport1.width, pageHeight: viewport1.height, scale, bitmap });
+          if (!paintedOffThread && !cancelled) {
+            cvs.width = viewport.width;
+            cvs.height = viewport.height;
+            await page.render({ canvas: cvs, canvasContext: ctx, viewport }).promise;
+            if (!cancelled) {
+              setRenderSize({ w: viewport.width, h: viewport.height });
+              setRenderScale(scale);
+            }
+            if (typeof createImageBitmap === "function") {
+              const bitmap = await createImageBitmap(cvs);
+              rememberSheetBitmap(pageId, { pageWidth: viewport1.width, pageHeight: viewport1.height, scale, bitmap });
+            }
           }
         }
 
@@ -578,6 +610,20 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     for (let i = 1; i < pts.length; i++) s += pixelDistance(pts[i - 1], pts[i]);
     return s;
   };
+  const [snapCursor, setSnapCursor] = useState<Pt | null>(null);
+  const snapIndex = useMemo(() => {
+    const points: Pt[] = [];
+    for (const shape of shapes) points.push(...displayPoints(shape.points, shape.coordinateSpace, renderScale));
+    for (const run of utilityRuns) points.push(...displayPoints(run.points, run.coordinateSpace, renderScale));
+    for (const node of topoNodes) points.push(...displayPoints(node.points, node.coordinateSpace, renderScale));
+    for (const bound of areaBounds) points.push(...displayPoints(bound.points, bound.coordinateSpace, renderScale));
+    return buildSnapIndex(points);
+  }, [shapes, utilityRuns, topoNodes, areaBounds, renderScale]);
+  const snapDrawingPoint = useCallback((point: Pt): Pt => {
+    if (tool === "pan") return point;
+    return nearestSnap(snapIndex, point.x, point.y, 12) ?? point;
+  }, [snapIndex, tool]);
+
   const polygonArea = (pts: Pt[]) => {
     if (pts.length < 3) return 0;
     let s = 0;
@@ -600,7 +646,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // ── Click handling ────────────────────────────────────────────────────────
   const onCanvasClick: React.MouseEventHandler<SVGSVGElement> = (e) => {
     if (!renderSize) return;
-    const p = toLocal(e.clientX, e.clientY, e.currentTarget);
+    const p = snapDrawingPoint(toLocal(e.clientX, e.clientY, e.currentTarget));
 
     if (tool === "calibrate") {
       const next = [...calibPts, p];
@@ -1378,6 +1424,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               className={`absolute inset-0 select-none ${tool === "pan" ? "cursor-grab" : "cursor-crosshair"}`}
               onClick={onCanvasClick}
               onDoubleClick={finishDraft}
+              onMouseMove={(event) => {
+                if (tool === "pan" || !renderSize) {
+                  setSnapCursor(null);
+                  return;
+                }
+                const local = toLocal(event.clientX, event.clientY, event.currentTarget);
+                setSnapCursor(nearestSnap(snapIndex, local.x, local.y, 12));
+              }}
+              onMouseLeave={() => setSnapCursor(null)}
             >
               <SavedMarkup
                 shapes={shapes}
@@ -1423,9 +1478,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               {/* Draft (in-progress) area bounds polygon */}
               {tool === "civil_area_bounds" && areaDraftPts.length > 0 && (
                 <g>
+                  {areaDraftPts.length >= 3 && (
+                    <path d={triangleFillPath(areaDraftPts)} fill="#f9731622" stroke="none" />
+                  )}
                   <path
                     d={areaDraftPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + (areaDraftPts.length >= 3 ? " Z" : "")}
-                    stroke="#f97316" strokeWidth={2} strokeDasharray="6 4" fill="#f9731622"
+                    stroke="#f97316" strokeWidth={2} strokeDasharray="6 4" fill="none"
                   />
                   {areaDraftPts.map((p, i) => (
                     <circle key={i} cx={p.x} cy={p.y} r={3} fill="#fff" stroke="#f97316" strokeWidth={1.5} />
@@ -1436,17 +1494,24 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               {/* Draft (in-progress) polyline / polygon */}
               {draftPoints.length > 0 && (
                 <g>
+                  {tool === "area" && draftPoints.length >= 3 && (
+                    <path d={triangleFillPath(draftPoints)} fill="#f9731633" stroke="none" />
+                  )}
                   <path
                     d={draftPoints.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + (tool === "area" && draftPoints.length >= 3 ? " Z" : "")}
                     stroke={tool === "area" ? "#f97316" : "#00D2FF"}
                     strokeWidth={2}
                     strokeDasharray="6 4"
-                    fill={tool === "area" ? "#f9731633" : "none"}
+                    fill="none"
                   />
                   {draftPoints.map((p, i) => (
                     <circle key={i} cx={p.x} cy={p.y} r={3} fill="#fff" stroke="#000" strokeWidth={1} />
                   ))}
                 </g>
+              )}
+
+              {snapCursor && (
+                <circle cx={snapCursor.x} cy={snapCursor.y} r={12} fill="none" stroke="#CCFF00" strokeWidth={1} />
               )}
 
               {/* Calibration guide */}
