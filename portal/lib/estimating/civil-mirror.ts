@@ -7,6 +7,7 @@ export interface CivilMirrorRow {
   quantity: number;
   unit: string;
   drawing_ref?: string | null;
+  meta?: Record<string, unknown>;
 }
 
 /**
@@ -59,6 +60,7 @@ export async function mirrorCivilItemsToTakeoff(
       extraction_method: "civil_calculator",
       civil_source_table: sourceTable,
       civil_source_id: sourceId,
+      ...(r.meta ?? {}),
     },
   }));
   const { data: inserted, error } = await db.from("takeoff_items").insert(payload).select("id");
