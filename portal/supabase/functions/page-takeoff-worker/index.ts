@@ -225,7 +225,7 @@ Deno.serve(async (req) => {
       });
     }
 
-    // ── 4. Done ──────────────────────────────────────────────────────────────
+    // ── 4. Done ───────────────────────────────────────────────────────────────
     await db.from("document_pages")
       .update({ takeoff_status: "done", updated_at: new Date().toISOString() })
       .eq("id", body.page_id)

@@ -4845,6 +4845,9 @@ export type Database = {
           id: string
           label: string | null
           meta: Json
+          origin_actor: string | null
+          origin_edited: boolean
+          origin_method: string | null
           page: number
           points: Json | null
           project_id: string
@@ -4886,6 +4889,9 @@ export type Database = {
           id?: string
           label?: string | null
           meta?: Json
+          origin_actor?: string | null
+          origin_edited?: boolean
+          origin_method?: string | null
           page: number
           points?: Json | null
           project_id: string
@@ -4927,6 +4933,9 @@ export type Database = {
           id?: string
           label?: string | null
           meta?: Json
+          origin_actor?: string | null
+          origin_edited?: boolean
+          origin_method?: string | null
           page?: number
           points?: Json | null
           project_id?: string

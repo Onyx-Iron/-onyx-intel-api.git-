@@ -23,7 +23,7 @@
 ### Peer license summary
 
 | Peer | License | Use in Onyx |
-|---|---|
+|---|---|---|
 | [Kentucky-ai/opentakeoff](https://github.com/Kentucky-ai/opentakeoff) | Apache-2.0 | Patterns + optional attributed reuse of small helpers |
 | [buildvisionai/construction-calculators](https://github.com/buildvisionai/construction-calculators) | MIT | Safe to depend on npm/PyPI or reimplement |
 | [DynMEP/YOLOplan](https://github.com/DynMEP/YOLOplan) | Check LICENSE before vendoring | Ideas for symbol detection; verify before code reuse |

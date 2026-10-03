@@ -60,7 +60,7 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
   // stable meta.item_key stored on each row at insert time. Matching by
   // content instead of index is the fix for a real bug found in the
   // milestone-1 validation pass: two independently-ordered arrays
-  // (the cached vision_extracted items vs. a fresh takeoff_items query)
+  // (the cached vision_extractions items vs. a fresh takeoff_items query)
   // could silently misalign, causing Approve/Reject to act on the wrong
   // finding.
   const [takeoffItemsByKey, setTakeoffItemsByKey] = useState<Record<string, TakeoffItemRef>>({});
