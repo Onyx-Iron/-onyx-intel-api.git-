@@ -253,9 +253,106 @@ export async function POST(
     const meta = (doc.meta ?? {}) as Record<string, unknown>;
     const driveFileId = doc.drive_file_id ?? (meta.drive_file_id as string | undefined);
     const storagePath = typeof meta.storage_path === "string" ? meta.storage_path : null;
+    const fileSizeHint = typeof meta.size === "number" ? meta.size : null;
+    const projectIdForSplit = doc.project_id as string | null;
+    const originalPath = storagePath ?? `originals/${docId}.pdf`;
+    const storageBucket =
+      meta.storage === "supabase"
+        ? "project-documents"
+        : typeof meta.storage === "string" && meta.storage !== "drive"
+          ? meta.storage
+          : PLANS_BUCKET;
 
     if (!driveFileId && !storagePath) {
       return NextResponse.json({ error: "Document has no source (no drive_file_id or storage_path)" }, { status: 400 });
+    }
+
+    const queueLargeDriveSplit = async (): Promise<NextResponse> => {
+      const driveToken = accessToken ?? await getAccessToken(tenantId, userId);
+      if (!driveToken) {
+        return NextResponse.json({
+          error: "Google Drive is not connected. Connect Google in Settings.",
+          code: "NEED_GOOGLE",
+        }, { status: 412 });
+      }
+      if (!projectIdForSplit) {
+        return NextResponse.json({ error: "Document has no project_id for page split" }, { status: 400 });
+      }
+      await db.from("documents").update({
+        status: "processing",
+        split_status: "pending",
+        processing_started_at: new Date().toISOString(),
+        last_error: null,
+        last_error_step: null,
+        meta: { ...meta, storage_path: originalPath, storage: "plans-bucket" },
+      }).eq("id", docId).eq("tenant_id", tenantId);
+      try {
+        await invokePageSplitWorker({
+          document_id: docId,
+          tenant_id: resolvedTenantId,
+          project_id: projectIdForSplit,
+          drive_file_id: driveFileId!,
+          original_path: originalPath,
+          access_token: driveToken,
+          user_id: userId,
+        });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        await markError(detail, "page_split_worker_invoke");
+        return NextResponse.json({ error: detail }, { status: 502 });
+      }
+      return NextResponse.json({
+        ok: true,
+        queued: true,
+        reason: "large_plan_set",
+        bytes: fileSizeHint ?? null,
+      }, { status: 202 });
+    };
+
+    const queueLargeLocalSplit = async (bytes: number): Promise<NextResponse> => {
+      if (!projectIdForSplit || !storagePath) {
+        const message = "Plan set is too large for synchronous ingest but has no storage path for page split.";
+        await markError(message, "split");
+        return NextResponse.json({ error: message }, { status: 409 });
+      }
+      await db.from("documents").update({
+        status: "processing",
+        split_status: "pending",
+        processing_started_at: new Date().toISOString(),
+        last_error: null,
+        last_error_step: null,
+      }).eq("id", docId).eq("tenant_id", tenantId);
+      try {
+        await invokePageSplitWorker({
+          document_id: docId,
+          tenant_id: resolvedTenantId,
+          project_id: projectIdForSplit,
+          original_path: storagePath,
+          user_id: userId,
+          is_local_upload: true,
+        });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        await markError(detail, "page_split_worker_invoke");
+        return NextResponse.json({ error: detail }, { status: 502 });
+      }
+      return NextResponse.json({
+        ok: true,
+        queued: true,
+        reason: "large_plan_set",
+        bytes,
+      }, { status: 202 });
+    };
+
+    // Large Drive uploads: skip downloading the full PDF on Vercel — hand off to
+    // page-split-worker (same path as /api/documents/import-drive).
+    if (
+      driveFileId
+      && projectIdForSplit
+      && fileSizeHint !== null
+      && fileSizeHint >= ASYNC_SPLIT_BYTES
+    ) {
+      return queueLargeDriveSplit();
     }
 
     // 1. Download PDF from Drive or Supabase Storage
@@ -281,7 +378,7 @@ export async function POST(
     } else {
       // Local file stored in Supabase Storage
       const { data: signed, error: signErr } = await db.storage
-        .from(PLANS_BUCKET)
+        .from(storageBucket)
         .createSignedUrl(storagePath!, 300);
       if (signErr || !signed?.signedUrl) {
         await markError(signErr?.message ?? "Could not access stored file", "download");
@@ -295,32 +392,14 @@ export async function POST(
       pdfBytes = Buffer.from(await storageRes.arrayBuffer());
     }
 
-    const projectIdForSplit = doc.project_id as string | null;
     if (pdfBytes.length >= ASYNC_SPLIT_BYTES) {
-      if (storagePath && projectIdForSplit) {
-        await db.from("documents").update({
-          status: "processing",
-          split_status: "pending",
-          processing_started_at: new Date().toISOString(),
-          last_error: null,
-          last_error_step: null,
-        }).eq("id", docId).eq("tenant_id", tenantId);
-        await invokePageSplitWorker({
-          document_id: docId,
-          tenant_id: resolvedTenantId,
-          project_id: projectIdForSplit,
-          original_path: storagePath,
-          user_id: userId,
-          is_local_upload: true,
-        });
-        return NextResponse.json({
-          ok: true,
-          queued: true,
-          reason: "large_plan_set",
-          bytes: pdfBytes.length,
-        }, { status: 202 });
+      if (driveFileId && projectIdForSplit) {
+        return queueLargeDriveSplit();
       }
-      const message = "Plan set is too large for synchronous ingest. Upload it through takeoff so it can be split by page.";
+      if (storagePath && projectIdForSplit) {
+        return queueLargeLocalSplit(pdfBytes.length);
+      }
+      const message = "Plan set is too large for synchronous ingest and could not be queued for page split.";
       await markError(message, "split");
       return NextResponse.json({ error: message }, { status: 409 });
     }

@@ -246,8 +246,10 @@ async function insertDriveRow(args: {
     .maybeSingle();
   if (existing) return { id: existing.id, deduped: true };
 
+  const documentId = crypto.randomUUID();
+  const originalPath = `originals/${documentId}.pdf`;
   const insertRow: TablesInsert<"documents"> = {
-    id: crypto.randomUUID(),
+    id: documentId,
     tenant_id: tenantId,
     project_id: projectId,
     file_name: fileName,
@@ -258,7 +260,8 @@ async function insertDriveRow(args: {
       source: "google_drive",
       drive_file_id: driveFileId,
       size: size ?? null,
-      storage: "drive",
+      storage: "plans-bucket",
+      storage_path: originalPath,
       content_type: mimeType,
     }),
   };
@@ -296,7 +299,7 @@ function fireIngest(req: NextRequest, docId: string): void {
         status: "error",
         last_error: `Ingest failed to start (${res.status}): ${detail}`.slice(0, 2000),
         last_error_step: "ingest_start",
-      }).eq("id", docId).eq("status", "processing");
+      }).eq("id", docId).in("status", ["processing", "pending"]);
     } catch (err) {
       console.error("[fireIngest] failed to mark document error", err);
     }
@@ -309,7 +312,7 @@ function fireIngest(req: NextRequest, docId: string): void {
         status: "error",
         last_error: `Ingest request failed to start: ${err instanceof Error ? err.message : String(err)}`.slice(0, 2000),
         last_error_step: "ingest_start",
-      }).eq("id", docId).eq("status", "processing");
+      }).eq("id", docId).in("status", ["processing", "pending"]);
     } catch (markErr) {
       console.error("[fireIngest] failed to mark document error", markErr);
     }

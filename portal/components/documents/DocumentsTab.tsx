@@ -242,7 +242,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
       const driveFile = await uploadRes.json() as { id?: string };
       const driveFileId = driveFile.id;
       if (!driveFileId) {
-        toast({ title: String("Drive upload completed but did not return a file ID. Please try again."), kind: "success" });
+        toast({ title: String("Drive upload completed but did not return a file ID. Please try again."), kind: "error" });
         return;
       }
 
