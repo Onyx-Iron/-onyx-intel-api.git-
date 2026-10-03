@@ -81,6 +81,9 @@ export default function GlobalCivilIntelligencePage() {
   const openWorkspaceHref = activeProject
     ? `/dashboard/projects/${activeProject.id}?phase=takeoff&tab=cutfill`
     : "/dashboard/projects";
+  const massHaulHref = activeProject
+    ? `/dashboard/projects/${activeProject.id}/civil-earthwork`
+    : null;
 
   return (
     <div>
@@ -109,6 +112,14 @@ export default function GlobalCivilIntelligencePage() {
                   <Link href={openWorkspaceHref} className="text-[#CCFF00] hover:underline">
                     Open {activeProject.name} cut/fill
                   </Link>
+                  {massHaulHref && (
+                    <>
+                      {" · "}
+                      <Link href={massHaulHref} className="text-[#CCFF00] hover:underline">
+                        Mass haul matrix
+                      </Link>
+                    </>
+                  )}
                 </>
               )}
             </span>

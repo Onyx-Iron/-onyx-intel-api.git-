@@ -322,10 +322,18 @@ export default function ProjectControlsTab({ projectId }: { projectId: string })
     ]);
 
     const [rfiData, submittalData, changeOrderData] = await Promise.all([
-      rfiRes.json() as Promise<{ items?: RfiItem[] }>,
-      submittalRes.json() as Promise<{ items?: SubmittalItem[] }>,
-      changeOrderRes.json() as Promise<{ items?: ChangeOrderItem[] }>,
+      rfiRes.json() as Promise<{ items?: RfiItem[]; error?: string; code?: string }>,
+      submittalRes.json() as Promise<{ items?: SubmittalItem[]; error?: string; code?: string }>,
+      changeOrderRes.json() as Promise<{ items?: ChangeOrderItem[]; error?: string; code?: string }>,
     ]);
+
+    const unavailable = [rfiData, submittalData, changeOrderData]
+      .filter((d) => d.code === "FEATURE_UNAVAILABLE" || (!d.items && d.error))
+      .map((d) => d.error)
+      .filter((msg): msg is string => typeof msg === "string");
+    // Deduplicate identical FEATURE_UNAVAILABLE messages across the three endpoints.
+    const uniqueUnavailable = Array.from(new Set(unavailable));
+    setErrorMsg(uniqueUnavailable.length > 0 ? uniqueUnavailable.join(" ") : null);
 
     setRfis(rfiData.items ?? []);
     setSubmittals(submittalData.items ?? []);

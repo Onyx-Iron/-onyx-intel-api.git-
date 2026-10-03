@@ -77,12 +77,39 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
     try {
       const res = await fetch("/api/cost-catalog/overrides", { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const rows: CostOverride[] = Array.isArray(data?.overrides)
-        ? data.overrides
-        : Array.isArray(data)
-          ? data
+      const data = await res.json() as { items?: unknown[]; overrides?: unknown[] };
+      const raw: unknown[] = Array.isArray(data?.items)
+        ? data.items
+        : Array.isArray(data?.overrides)
+          ? data.overrides
           : [];
+      const rows: CostOverride[] = raw.map((entry) => {
+        const r = entry as {
+          id: string;
+          region_code?: string | null;
+          unit_cost: number;
+          labor_cost?: number | null;
+          material_cost?: number | null;
+          equipment_cost?: number | null;
+          notes?: string | null;
+          cost_codes?: { csi_code?: string; description?: string | null; uom?: string | null } | null;
+          csi_code?: string;
+          description?: string | null;
+          unit?: string | null;
+        };
+        return {
+          id: r.id,
+          csi_code: r.cost_codes?.csi_code ?? r.csi_code ?? "",
+          description: r.cost_codes?.description ?? r.description ?? null,
+          region_code: r.region_code ?? null,
+          unit: r.cost_codes?.uom ?? r.unit ?? null,
+          unit_cost: r.unit_cost,
+          labor_cost: r.labor_cost ?? null,
+          material_cost: r.material_cost ?? null,
+          equipment_cost: r.equipment_cost ?? null,
+          notes: r.notes ?? null,
+        };
+      });
       setItems(rows);
       // Fetch national reference prices for vs. National column
       const codes = Array.from(new Set(rows.map((r) => r.csi_code))).filter(Boolean);
@@ -234,11 +261,11 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
 
     setSaving(true);
     try {
+      // API upserts on (tenant, cost_code, region) — POST covers create + edit.
+      // There is no /overrides/[id] PATCH route.
       const payload = {
-        csi_code: form.csi_code.trim(),
-        description: form.description.trim() || null,
+        cost_code: form.csi_code.trim(),
         region_code: form.region_code.trim() || null,
-        unit: form.unit.trim() || null,
         unit_cost: unitCost,
         labor_cost: parseNum(form.labor_cost),
         material_cost: parseNum(form.material_cost),
@@ -246,14 +273,11 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
         notes: form.notes.trim() || null,
       };
       const isEdit = !!form.id;
-      const res = await fetch(
-        isEdit ? `/api/cost-catalog/overrides/${form.id}` : "/api/cost-catalog/overrides",
-        {
-          method: isEdit ? "PATCH" : "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        },
-      );
+      const res = await fetch("/api/cost-catalog/overrides", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(body.error || `HTTP ${res.status}`);
@@ -281,9 +305,10 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
     });
     if (!ok) return;
     try {
-      const res = await fetch(`/api/cost-catalog/overrides/${row.id}`, {
-        method: "DELETE",
-      });
+      const res = await fetch(
+        `/api/cost-catalog/overrides?id=${encodeURIComponent(row.id)}`,
+        { method: "DELETE" },
+      );
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(body.error || `HTTP ${res.status}`);

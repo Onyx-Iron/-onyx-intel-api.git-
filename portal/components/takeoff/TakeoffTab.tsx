@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { getGoogleToken } from "@/lib/google/clientAuth";
 
 import { useToast } from "@/components/common/Toast";
@@ -368,16 +369,33 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
   // ── Async page-split polling (large uploads routed off the sync stream) ──
   const [asyncPages, setAsyncPages] = useState<{ total: number; done: number; error: number }>({ total: 0, done: 0, error: 0 });
   const pollTimerRef = useRef<number | null>(null);
+  const pollStartedAtRef = useRef<number | null>(null);
+  const POLL_TIMEOUT_MS = 5 * 60 * 1000;
 
   // ── Saved items from DB ──
   const [savedItems, setSavedItems] = useState<SavedItem[]>([]);
+  const [savedTotal, setSavedTotal] = useState(0);
+  const [savedPage, setSavedPage] = useState(1);
+  const [savedHasMore, setSavedHasMore] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  const loadSavedItems = useCallback(() => {
-    fetch(`/api/takeoff/items?project_id=${encodeURIComponent(projectId)}`)
+  const loadSavedItems = useCallback((page = 1) => {
+    fetch(`/api/takeoff/items?project_id=${encodeURIComponent(projectId)}&page=${page}&limit=200`)
       .then((r) => r.json())
-      .then((d: { items?: SavedItem[] }) => setSavedItems(d.items ?? []))
-      .catch(() => setSavedItems([]));
+      .then((d: { items?: SavedItem[]; pagination?: { total?: number; hasMore?: boolean } }) => {
+        const incoming = d.items ?? [];
+        setSavedItems((prev) => {
+          if (page === 1) return incoming;
+          const seen = new Set(prev.map((item) => item.id));
+          return [...prev, ...incoming.filter((item) => !seen.has(item.id))];
+        });
+        setSavedTotal(d.pagination?.total ?? incoming.length);
+        setSavedHasMore(Boolean(d.pagination?.hasMore));
+        setSavedPage(page);
+      })
+      .catch(() => {
+        if (page === 1) setSavedItems([]);
+      });
   }, [projectId]);
 
   const deleteSavedItem = useCallback(async (id: string) => {
@@ -531,6 +549,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
   const reset = () => {
     abortRef.current?.abort();
     if (pollTimerRef.current != null) { window.clearTimeout(pollTimerRef.current); pollTimerRef.current = null; }
+    pollStartedAtRef.current = null;
     setPhase("idle"); setRows([]); setProgress(0); setStatusMsg("");
     setTotalRows(0); setAuditStatus(null); setFailedRows(0); setFileName("");
     setSourceType(null); setCoverage(null); setAiPages([]); setAiRunning(false);
@@ -546,14 +565,24 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     setPhase("processing_async");
     setStatusMsg(`Queued for background processing — ${docName}`);
     setProgress(0);
+    pollStartedAtRef.current = Date.now();
 
     const tick = async () => {
       if (abortRef.current?.signal.aborted) return;
+      const startedAt = pollStartedAtRef.current ?? Date.now();
+      if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        setPhase("error");
+        setStatusMsg(
+          `Background processing timed out after ${Math.round(POLL_TIMEOUT_MS / 60_000)} minutes — check the document list or retry.`,
+        );
+        return;
+      }
       try {
         const res = await fetch(`/api/takeoff/split-status?document_id=${encodeURIComponent(documentId)}`, { cache: "no-store" });
         const data = await res.json().catch(() => ({})) as {
           pages_total?: number; pages_done?: number; pages_error?: number;
           finished?: boolean; document_status?: string; items?: SavedTakeoffItem[];
+          page_errors?: Array<{ page_number: number; error: string | null }>;
         };
         if (!res.ok) {
           setPhase("error"); setStatusMsg("Lost track of background processing — check the document list."); return;
@@ -591,12 +620,16 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
           setTotalRows(extracted.length);
           setProgress(100);
           setAuditStatus(extracted.length > 0 ? "VERIFIED_SUCCESS" : "PARTIAL_WITH_ERRORS");
+          const pageErrCount = data.page_errors?.length ?? errorCount;
+          const docFailed = data.document_status === "failed" || data.document_status === "error";
           setStatusMsg(
-            data.document_status === "failed"
+            docFailed
               ? `Background processing failed for ${docName}.`
-              : `Complete — ${extracted.length} line items from ${docName}`,
+              : pageErrCount > 0
+                ? `Complete with ${pageErrCount} page error(s) — ${extracted.length} line items from ${docName}`
+                : `Complete — ${extracted.length} line items from ${docName}`,
           );
-          setPhase(data.document_status === "failed" && extracted.length === 0 ? "error" : "done");
+          setPhase(docFailed && extracted.length === 0 ? "error" : "done");
           // Rows are already persisted by page-takeoff-worker directly —
           // just refresh the saved-items list, don't re-POST them.
           setSaveStatus("saved");
@@ -609,7 +642,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
       pollTimerRef.current = window.setTimeout(tick, 2500);
     };
     void tick();
-  }, [loadSavedItems]);
+  }, [loadSavedItems, POLL_TIMEOUT_MS]);
 
   // ── Deterministic extraction (PDF tables / DXF / IFC / XLSX) ──
   //
@@ -947,7 +980,15 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
     return (
       <div className="max-w-2xl mx-auto py-4">
         <div className="mb-6">
-          <h2 className="text-xs font-bold text-white uppercase tracking-widest">Takeoff Extraction</h2>
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-xs font-bold text-white uppercase tracking-widest">Takeoff Extraction</h2>
+            <Link
+              href={`/dashboard/projects/${projectId}/takeoff/canvas`}
+              className="text-[10px] uppercase tracking-widest font-mono text-[#CCFF00] hover:underline"
+            >
+              Open sheet canvas
+            </Link>
+          </div>
           <p className="text-[11px] text-gray-600 mt-1">
             Upload a PDF schedule, DXF/DWG or IFC model, or XLSX. Quantities are extracted
             deterministically — exact geometry and table data, CSI-coded, at zero per-document cost.
@@ -991,7 +1032,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
               <div className="flex items-center gap-2">
                 <span className="w-1.5 h-1.5 rounded-full bg-[#CCFF00]" />
                 <span className="text-[11px] uppercase tracking-widest text-gray-400">Saved Takeoff Items</span>
-                <span className="text-[10px] text-gray-600 font-mono">({savedItems.length})</span>
+                <span className="text-[10px] text-gray-600 font-mono">({savedTotal || savedItems.length})</span>
               </div>
             </div>
             <div className="overflow-x-auto">
@@ -1037,6 +1078,17 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
                 </tbody>
               </table>
             </div>
+            {savedHasMore && (
+              <div className="flex justify-center border-t border-white/5 py-3">
+                <button
+                  type="button"
+                  onClick={() => loadSavedItems(savedPage + 1)}
+                  className="text-[10px] uppercase tracking-widest font-mono text-gray-500 hover:text-[#CCFF00]"
+                >
+                  Load more items
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

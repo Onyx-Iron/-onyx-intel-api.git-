@@ -8,6 +8,34 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+interface ParsedPageRow {
+  page_number: number;
+  summary: string;
+  key_terms: string[];
+}
+
+function mapSyncPage(extractedText: string | null, pageNumber: number): ParsedPageRow {
+  const text = extractedText ?? "";
+  const [summary, keyTermsLine] = text.split("\n");
+  const keyTerms = keyTermsLine
+    ? keyTermsLine.replace(/^Key terms:\s*/i, "").split(",").map((t) => t.trim()).filter(Boolean)
+    : [];
+  return {
+    page_number: pageNumber,
+    summary: summary ?? "",
+    key_terms: keyTerms,
+  };
+}
+
+function mapAsyncPage(ocrText: string | null, pageNumber: number): ParsedPageRow {
+  const text = (ocrText ?? "").trim();
+  if (!text) {
+    return { page_number: pageNumber, summary: "", key_terms: [] };
+  }
+  const summary = text.length > 500 ? `${text.slice(0, 497)}…` : text;
+  return { page_number: pageNumber, summary, key_terms: [] };
+}
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -30,7 +58,9 @@ export async function GET(
       return NextResponse.json({ error: "Document not found" }, { status: 404 });
     }
 
-    const { data: pages, error: pagesErr } = await db
+    // Sync Gemini ingest writes `pages`; async page-split writes `document_pages`.
+    // Prefer sync rows when present, otherwise surface OCR text from the async path.
+    const { data: syncPages, error: pagesErr } = await db
       .from("pages")
       .select("page_number, extracted_text")
       .eq("document_id", documentId)
@@ -38,6 +68,28 @@ export async function GET(
       .order("page_number", { ascending: true });
     if (pagesErr) {
       return NextResponse.json({ error: pagesErr.message }, { status: 500 });
+    }
+
+    let parsedPages: ParsedPageRow[] = (syncPages ?? []).map((p) =>
+      mapSyncPage(p.extracted_text, p.page_number),
+    );
+
+    // Fallback: async page-split pipeline writes OCR to document_pages instead
+    // of the sync ingest `pages` table.
+    if (parsedPages.length === 0) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data: asyncPages, error: asyncErr } = await (db as any)
+        .from("document_pages")
+        .select("page_number, ocr_text, status")
+        .eq("document_id", documentId)
+        .eq("tenant_id", tenantId)
+        .order("page_number", { ascending: true });
+      if (asyncErr) {
+        return NextResponse.json({ error: asyncErr.message }, { status: 500 });
+      }
+      parsedPages = ((asyncPages ?? []) as Array<{ page_number: number; ocr_text: string | null; status: string }>)
+        .filter((p) => p.status === "done" || (p.ocr_text ?? "").trim().length > 0)
+        .map((p) => mapAsyncPage(p.ocr_text, p.page_number));
     }
 
     const meta = (doc.meta ?? {}) as Record<string, unknown>;
@@ -51,7 +103,6 @@ export async function GET(
           }))
       : [];
 
-    // Surface human-readable classification meta saved by other ingest pipelines
     const classification: Record<string, string> = {};
     const META_KEYS_OF_INTEREST: Record<string, string> = {
       title: "Title",
@@ -70,18 +121,7 @@ export async function GET(
 
     return NextResponse.json({
       document: doc,
-      pages: (pages ?? []).map((p) => {
-        const text = p.extracted_text ?? "";
-        const [summary, keyTermsLine] = text.split("\n");
-        const keyTerms = keyTermsLine
-          ? keyTermsLine.replace(/^Key terms:\s*/i, "").split(",").map((t) => t.trim()).filter(Boolean)
-          : [];
-        return {
-          page_number: p.page_number,
-          summary: summary ?? "",
-          key_terms: keyTerms,
-        };
-      }),
+      pages: parsedPages,
       questions,
       classification,
     });

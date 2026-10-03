@@ -6,9 +6,20 @@ import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
 import { useProjectContext } from "@/components/project/ProjectContext";
+import { PipelineStage, type PipelineStatus } from "@/components/documents/PipelineStage";
+import { statusLabel } from "@/lib/documents/status";
 
-type DocStatus = "pending" | "processing" | "complete" | "error";
-type PipelineStatus = "pending" | "processing" | "done" | "error" | "partially_completed" | "skipped";
+type DocStatus =
+  | "pending"
+  | "queued"
+  | "processing"
+  | "split"
+  | "ready"
+  | "complete"
+  | "done"
+  | "complete_with_errors"
+  | "error"
+  | "failed";
 
 interface ProcessingSummary {
   pages_total: number;
@@ -21,7 +32,7 @@ interface ProcessingSummary {
 interface Document {
   id: string;
   file_name: string;
-  status: DocStatus;
+  status: DocStatus | string;
   pages: number | null;
   page_count: number | null;
   uploaded_at: string | null;
@@ -35,31 +46,18 @@ interface Document {
   meta?: { processing_summary?: ProcessingSummary } | null;
 }
 
-const STATUS_STYLES: Record<DocStatus, string> = {
+const STATUS_STYLES: Record<string, string> = {
   pending:    "bg-white/5 text-gray-500 border-white/10",
+  queued:     "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
   processing: "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
+  split:      "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
+  ready:      "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
   complete:   "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
+  done:       "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
+  complete_with_errors: "bg-[#F5A623]/10 text-[#F5A623] border-[#F5A623]/20",
   error:      "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
+  failed:     "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
 };
-
-const PIPELINE_DOT: Record<PipelineStatus, string> = {
-  pending: "bg-white/15",
-  processing: "bg-[#00D2FF] animate-pulse",
-  done: "bg-[#CCFF00]",
-  error: "bg-[#E50914]",
-  partially_completed: "bg-[#F5A623]",
-  skipped: "bg-white/10",
-};
-
-function PipelineStage({ label, status }: { label: string; status: PipelineStatus | null }) {
-  const key = (status ?? "pending") as PipelineStatus;
-  return (
-    <span className="inline-flex items-center gap-1" title={`${label}: ${status ?? "pending"}`}>
-      <span className={`h-1.5 w-1.5 rounded-full ${PIPELINE_DOT[key] ?? "bg-white/15"}`} />
-      <span className="text-[9px] uppercase tracking-wider text-white/35">{label}</span>
-    </span>
-  );
-}
 
 function fmt(d: string | null): string {
   if (!d) return "—";
@@ -186,7 +184,7 @@ export default function DocumentsPage() {
                       </td>
                       <td className="px-4 py-3">
                         <span className={`inline-flex items-center px-2 py-0.5 rounded border text-[9px] font-bold tracking-widest uppercase ${STATUS_STYLES[statusKey]}`} aria-label={`Status: ${doc.status}`}>
-                          {doc.status}
+                          {statusLabel(doc.status)}
                         </span>
                         {doc.last_error && (
                           <p className="mt-1 max-w-[16rem] truncate text-[9px] text-[#E50914]" title={doc.last_error}>

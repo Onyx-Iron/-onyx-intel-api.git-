@@ -3,6 +3,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { reclaimStuckProcessingPages } from "@/lib/documents/reclaimStuck";
+import {
+  finalizeAsyncDocumentStatus,
+  isTerminalFailure,
+  isTerminalSuccess,
+} from "@/lib/documents/status";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,7 +20,7 @@ export const dynamic = "force-dynamic";
  * from `document_pages.takeoff_status` — NOT `status`, which belongs to the
  * separate OCR/embedding worker and would race with this if conflated.
  *
- * Also finalizes `documents.status` to "done"/"failed" once every split page
+ * Also finalizes `documents.status` to "complete"/"error" once every split page
  * has a terminal takeoff_status — neither Edge Function has a "this was the
  * last page" signal on its own, so recomputing it here on each poll (an
  * idempotent, side-effect-safe check) is the simplest correct place for it.
@@ -68,7 +73,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       pages_total: 0,
       pages_done: 0,
       pages_error: 0,
-      finished: docRow.status === "error" || docRow.status === "failed",
+      finished: isTerminalFailure(docRow.status),
       error: docRow.last_error ?? null,
     });
   }
@@ -78,15 +83,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // complete_with_errors whenever any page failed but others succeeded.
   if (
     settled === total
-    && docRow.status !== "done"
-    && docRow.status !== "failed"
+    && !isTerminalSuccess(docRow.status)
+    && !isTerminalFailure(docRow.status)
     && docRow.status !== "complete_with_errors"
   ) {
-    const finalStatus = errored === total
-      ? "failed"
-      : errored > 0
-        ? "complete_with_errors"
-        : "done";
+    const finalStatus = finalizeAsyncDocumentStatus({
+      allFailed: errored === total,
+      partialErrors: errored > 0 && errored < total,
+    });
     const prevMeta = (docRow.meta && typeof docRow.meta === "object")
       ? docRow.meta as Record<string, unknown>
       : {};

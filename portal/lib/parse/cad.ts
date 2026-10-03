@@ -5,10 +5,9 @@
  */
 import { currentUser } from "@clerk/nextjs/server";
 import type { ParseResult, ParseContext } from "./index";
-import { headerSafe } from "@/lib/http";
-import { pythonApiHeaders } from "@/lib/python-api";
+import { pythonApiBaseUrl, pythonApiHeaders } from "@/lib/python-api";
 
-const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
+const PYTHON_API_URL = pythonApiBaseUrl();
 
 interface UpstreamGeom {
   layers?: string[];

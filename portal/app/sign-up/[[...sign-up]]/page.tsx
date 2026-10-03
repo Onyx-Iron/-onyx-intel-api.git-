@@ -1,6 +1,7 @@
 import { SignUp } from "@clerk/nextjs";
+import { getAppOrigin } from "@/lib/appUrl";
 
-const appOrigin = process.env.NEXT_PUBLIC_APP_URL || "https://app.onyx-iron.com";
+const appOrigin = getAppOrigin();
 const signInUrl = `${appOrigin}/sign-in`;
 const fallbackRedirectUrl = `${appOrigin}/dashboard`;
 

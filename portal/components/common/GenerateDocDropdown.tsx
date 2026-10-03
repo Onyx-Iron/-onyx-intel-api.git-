@@ -17,7 +17,8 @@ type Status = "idle" | "generating" | "done" | "error";
 /**
  * One dropdown to generate any of the 9 supported doc types.
  * Designed for the post-upload flow: pick a type → generate → result is saved
- * to /api/generated-docs and surfaced under the project's AI Docs tab.
+ * to /api/generated-docs. When no onGenerated handler is provided, the result
+ * opens in an inline preview (there is no separate AI Docs tab).
  *
  * sourceDocumentId optionally passes a just-uploaded document's id so the
  * generator uses its parsed pages as grounding context.
@@ -33,6 +34,7 @@ export default function GenerateDocDropdown({
   const [status, setStatus] = useState<Status>("idle");
   const [statusMsg, setStatusMsg] = useState<string>("");
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [preview, setPreview] = useState<{ title: string; content: string } | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -83,6 +85,9 @@ export default function GenerateDocDropdown({
         return;
       }
       onGenerated?.(body.doc);
+      if (!onGenerated) {
+        setPreview({ title: body.doc.title, content: body.doc.content });
+      }
       setStatus("done");
       setStatusMsg(`Saved: ${body.doc.title}`);
       setOpen(false);
@@ -149,6 +154,35 @@ export default function GenerateDocDropdown({
           {status === "error" && <AlertCircle size={12} className="text-red-400" />}
           {status === "generating" && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#CCFF00]" />}
           <span className={status === "error" ? "text-red-400" : "text-white/70"}>{statusMsg}</span>
+        </div>
+      )}
+
+      {preview && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label={preview.title}
+          onClick={() => setPreview(null)}
+        >
+          <div
+            className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-white/10 bg-[#0E0F12] shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+              <p className="truncate text-sm font-semibold text-white">{preview.title}</p>
+              <button
+                type="button"
+                onClick={() => setPreview(null)}
+                className="rounded border border-white/15 px-2 py-1 text-[10px] font-bold uppercase tracking-widest text-white/60 hover:bg-white/5 hover:text-white"
+              >
+                Close
+              </button>
+            </div>
+            <pre className="flex-1 overflow-auto whitespace-pre-wrap px-4 py-4 text-[12px] leading-relaxed text-white/75">
+              {preview.content}
+            </pre>
+          </div>
         </div>
       )}
     </div>

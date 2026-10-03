@@ -1,8 +1,7 @@
 /**
- * Marks documents / pages stuck in `processing` as `error` so users can retry.
- * Vercel may kill ingest/page workers at maxDuration without running catch;
- * listing documents and polling split-status are cheap places to reclaim
- * those orphans opportunistically.
+ * Marks documents / pages stuck in processing as error so users can retry.
+ * Vercel/Edge kills leave orphans without catch handlers; list + split-status
+ * polls reclaim them opportunistically.
  */
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -11,13 +10,25 @@ type AnyDb = any;
 /** Default: 10 minutes — well above normal ingest, below "forgotten forever". */
 export const STUCK_PROCESSING_MS = 10 * 60 * 1000;
 
+/** Queued docs with no worker progress after this are treated as abandoned. */
+export const STUCK_QUEUED_MS = 15 * 60 * 1000;
+
+/** Pending pages that never got a processor claim after this are abandoned. */
+export const STUCK_PENDING_PAGE_MS = 15 * 60 * 1000;
+
 export async function reclaimStuckProcessingDocuments(
   db: AnyDb,
   tenantId: string,
   olderThanMs: number = STUCK_PROCESSING_MS,
 ): Promise<number> {
   const cutoff = new Date(Date.now() - olderThanMs).toISOString();
-  const { data, error } = await db
+
+  // Prefer processing_started_at so long Drive uploads that only later enter
+  // processing aren't falsely reclaimed based on uploaded_at alone.
+  // Do NOT reclaim status="split" here — kick time is often >10m before OCR
+  // finishes on large plans. Stuck pages are reclaimed separately; OCR
+  // finalize then rolls the parent to complete / complete_with_errors / error.
+  const { data: byStart, error: startErr } = await db
     .from("documents")
     .update({
       status: "error",
@@ -26,28 +37,79 @@ export async function reclaimStuckProcessingDocuments(
     })
     .eq("tenant_id", tenantId)
     .eq("status", "processing")
+    .not("processing_started_at", "is", null)
+    .lt("processing_started_at", cutoff)
+    .select("id");
+
+  if (startErr) console.error("[reclaimStuckProcessingDocuments:started]", startErr);
+
+  // Fallback: processing rows that never got processing_started_at set.
+  const { data: byUpload, error: uploadErr } = await db
+    .from("documents")
+    .update({
+      status: "error",
+      last_error: "Processing timed out or was interrupted. Retry ingest to continue.",
+      last_error_step: "stuck_processing_reclaim",
+    })
+    .eq("tenant_id", tenantId)
+    .eq("status", "processing")
+    .is("processing_started_at", null)
     .lt("uploaded_at", cutoff)
     .select("id");
-  if (error) {
-    console.error("[reclaimStuckProcessingDocuments]", error);
-    return 0;
-  }
-  return (data ?? []).length;
+
+  if (uploadErr) console.error("[reclaimStuckProcessingDocuments:uploaded]", uploadErr);
+
+  // Stale queued / pending — use kick time (processing_started_at) so a Retry
+  // on an old upload isn't immediately reclaimed via the original uploaded_at.
+  const queuedCutoff = new Date(Date.now() - STUCK_QUEUED_MS).toISOString();
+  const { data: queuedByKick, error: queuedKickErr } = await db
+    .from("documents")
+    .update({
+      status: "error",
+      last_error: "Upload was queued but processing never started. Retry ingest or re-upload.",
+      last_error_step: "stuck_queued_reclaim",
+    })
+    .eq("tenant_id", tenantId)
+    .in("status", ["queued", "pending"])
+    .not("processing_started_at", "is", null)
+    .lt("processing_started_at", queuedCutoff)
+    .select("id");
+
+  if (queuedKickErr) console.error("[reclaimStuckProcessingDocuments:queuedKick]", queuedKickErr);
+
+  const { data: queuedByUpload, error: queuedUploadErr } = await db
+    .from("documents")
+    .update({
+      status: "error",
+      last_error: "Upload was queued but processing never started. Retry ingest or re-upload.",
+      last_error_step: "stuck_queued_reclaim",
+    })
+    .eq("tenant_id", tenantId)
+    .in("status", ["queued", "pending"])
+    .is("processing_started_at", null)
+    .lt("uploaded_at", queuedCutoff)
+    .select("id");
+
+  if (queuedUploadErr) console.error("[reclaimStuckProcessingDocuments:queuedUpload]", queuedUploadErr);
+
+  return (byStart?.length ?? 0)
+    + (byUpload?.length ?? 0)
+    + (queuedByKick?.length ?? 0)
+    + (queuedByUpload?.length ?? 0);
 }
 
 /**
- * Reclaims document_pages stuck in OCR (`status=processing`) or takeoff
- * (`takeoff_status=processing`). Page workers set these mid-flight and only
- * mark error in catch — a platform kill leaves pages stuck forever unless
- * something opportunistic reclaims them.
+ * Reclaims document_pages stuck in OCR (`status=processing` / stale `pending`)
+ * or takeoff (`takeoff_status=processing`).
  */
 export async function reclaimStuckProcessingPages(
   db: AnyDb,
   tenantId: string,
   olderThanMs: number = STUCK_PROCESSING_MS,
   documentId?: string,
-): Promise<{ statusReclaimed: number; takeoffReclaimed: number }> {
+): Promise<{ statusReclaimed: number; takeoffReclaimed: number; pendingReclaimed: number }> {
   const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+  const pendingCutoff = new Date(Date.now() - STUCK_PENDING_PAGE_MS).toISOString();
   const now = new Date().toISOString();
 
   let statusQ = db
@@ -62,6 +124,20 @@ export async function reclaimStuckProcessingPages(
     .lt("updated_at", cutoff);
   if (documentId) statusQ = statusQ.eq("document_id", documentId);
 
+  // Fire-and-forget fan-out can fail to reach page-processor — reclaim stale
+  // pending pages so finalize / Retry can surface them.
+  let pendingQ = db
+    .from("document_pages")
+    .update({
+      status: "error",
+      error: "Page was never claimed by a processor. Retry ingest to continue.",
+      updated_at: now,
+    })
+    .eq("tenant_id", tenantId)
+    .eq("status", "pending")
+    .lt("updated_at", pendingCutoff);
+  if (documentId) pendingQ = pendingQ.eq("document_id", documentId);
+
   let takeoffQ = db
     .from("document_pages")
     .update({
@@ -74,16 +150,19 @@ export async function reclaimStuckProcessingPages(
     .lt("updated_at", cutoff);
   if (documentId) takeoffQ = takeoffQ.eq("document_id", documentId);
 
-  const [statusRes, takeoffRes] = await Promise.all([
+  const [statusRes, pendingRes, takeoffRes] = await Promise.all([
     statusQ.select("id"),
+    pendingQ.select("id"),
     takeoffQ.select("id"),
   ]);
 
   if (statusRes.error) console.error("[reclaimStuckProcessingPages:status]", statusRes.error);
+  if (pendingRes.error) console.error("[reclaimStuckProcessingPages:pending]", pendingRes.error);
   if (takeoffRes.error) console.error("[reclaimStuckProcessingPages:takeoff]", takeoffRes.error);
 
   return {
     statusReclaimed: statusRes.error ? 0 : (statusRes.data ?? []).length,
+    pendingReclaimed: pendingRes.error ? 0 : (pendingRes.data ?? []).length,
     takeoffReclaimed: takeoffRes.error ? 0 : (takeoffRes.data ?? []).length,
   };
 }

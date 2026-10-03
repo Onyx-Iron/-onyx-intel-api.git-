@@ -982,18 +982,21 @@ export type Database = {
         Row: {
           csi_division: string | null
           last_value: number | null
+          pct_change_90d: number | null
           series_id: string
           updated_at: string | null
         }
         Insert: {
           csi_division?: string | null
           last_value?: number | null
+          pct_change_90d?: number | null
           series_id: string
           updated_at?: string | null
         }
         Update: {
           csi_division?: string | null
           last_value?: number | null
+          pct_change_90d?: number | null
           series_id?: string
           updated_at?: string | null
         }
@@ -4851,6 +4854,9 @@ export type Database = {
           id: string
           label: string | null
           meta: Json
+          origin_actor: string | null
+          origin_edited: boolean
+          origin_method: string | null
           page: number
           points: Json | null
           project_id: string
@@ -4892,6 +4898,9 @@ export type Database = {
           id?: string
           label?: string | null
           meta?: Json
+          origin_actor?: string | null
+          origin_edited?: boolean
+          origin_method?: string | null
           page: number
           points?: Json | null
           project_id: string
@@ -4933,6 +4942,9 @@ export type Database = {
           id?: string
           label?: string | null
           meta?: Json
+          origin_actor?: string | null
+          origin_edited?: boolean
+          origin_method?: string | null
           page?: number
           points?: Json | null
           project_id?: string

@@ -9,6 +9,8 @@ export interface PageSplitPayloadBase {
 export type PageSplitPayload =
   | (PageSplitPayloadBase & {
       is_local_upload: true;
+      /** Bucket that already holds original_path. Defaults to plans-bucket in the worker. */
+      source_bucket?: string;
     })
   | (PageSplitPayloadBase & {
       drive_file_id: string;
@@ -27,19 +29,49 @@ function getWorkerConfig(): { url: string; serviceKey: string } {
   };
 }
 
-export async function invokePageSplitWorker(payload: PageSplitPayload): Promise<void> {
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+function retryDelayMs(attempt: number): number {
+  return 500 * 2 ** (attempt - 1);
+}
+
+export async function invokePageSplitWorker(
+  payload: PageSplitPayload,
+  maxAttempts = 3,
+): Promise<void> {
   const { url, serviceKey } = getWorkerConfig();
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${serviceKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  let lastError: Error | null = null;
 
-  if (res.ok) return;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${serviceKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt === maxAttempts) throw lastError;
+      await new Promise((r) => setTimeout(r, retryDelayMs(attempt)));
+      continue;
+    }
 
-  const detail = await res.text().catch(() => res.statusText);
-  throw new Error(`page-split-worker ${res.status}: ${detail.slice(0, 300)}`);
+    if (res.ok) return;
+
+    const detail = await res.text().catch(() => res.statusText);
+    const err = new Error(`page-split-worker ${res.status}: ${detail.slice(0, 300)}`);
+    if (!isRetryableStatus(res.status)) throw err;
+
+    lastError = err;
+    if (attempt === maxAttempts) throw lastError;
+    await new Promise((r) => setTimeout(r, retryDelayMs(attempt)));
+  }
+
+  throw lastError ?? new Error("page-split-worker invoke failed");
 }

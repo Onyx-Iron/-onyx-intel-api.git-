@@ -8,7 +8,16 @@ import { logEvent } from "@/lib/activity";
 import { requireEnv } from "@/lib/env";
 import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
-import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
+import { fetchDriveFileSize } from "@/lib/google/driveFile";
+import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
+import { looksLikePdf, publishSheetPages } from "@/lib/documents/sheet-pages";
+import {
+  PLANS_BUCKET,
+  ASYNC_SPLIT_BYTES,
+  shouldAsyncSplitPdf,
+  queueDriveDocumentForPageSplit,
+  queueLocalDocumentForPageSplit,
+} from "@/lib/documents/queuePageSplit";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
@@ -16,10 +25,11 @@ export const maxDuration = 300;
 
 const EMBED_MODEL = "text-embedding-004";
 const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
-const PLANS_BUCKET = "plans-bucket";
-const ASYNC_SPLIT_BYTES = 3.5 * 1024 * 1024;
 /** Leave headroom under Vercel maxDuration=300 so we can write error status before kill. */
 const INGEST_BUDGET_MS = 270_000;
+/** Skip duplicate fire-and-forget ingest while another run is in-flight. */
+const CONCURRENT_INGEST_MS = INGEST_BUDGET_MS;
+const TERMINAL_STATUSES = new Set(["complete", "ready", "done"]);
 
 function geminiApiKey(): string {
   return requireEnv("GEMINI_API_KEY");
@@ -225,12 +235,42 @@ export async function POST(
       throw err;
     }
 
-    // Claim the work unit so a concurrent retry / sweeper can see progress.
-    await db.from("documents").update({
+    const { data: doc, error: docErr } = await db
+      .from("documents")
+      .select("id, file_name, project_id, drive_file_id, meta, status, processing_started_at")
+      .eq("id", docId)
+      .eq("tenant_id", resolvedTenantId)
+      .single();
+    if (docErr || !doc) {
+      return NextResponse.json({ error: "Document not found" }, { status: 404 });
+    }
+
+    if (TERMINAL_STATUSES.has(doc.status)) {
+      return NextResponse.json({ ok: true, skipped: true, reason: "already_complete" });
+    }
+
+    const priorStartedAt = doc.processing_started_at as string | null;
+    const activeIngest = doc.status === "processing"
+      && priorStartedAt
+      && Date.now() - new Date(priorStartedAt).getTime() < CONCURRENT_INGEST_MS;
+    if (activeIngest) {
+      return NextResponse.json({ ok: true, skipped: true, reason: "already_processing" }, { status: 409 });
+    }
+
+    // Optimistic claim — only one concurrent ingest should pass this update.
+    let claimQuery = db.from("documents").update({
       status: "processing",
+      processing_started_at: new Date().toISOString(),
       last_error: null,
       last_error_step: null,
     }).eq("id", docId).eq("tenant_id", resolvedTenantId);
+    claimQuery = priorStartedAt
+      ? claimQuery.eq("processing_started_at", priorStartedAt)
+      : claimQuery.is("processing_started_at", null);
+    const { data: claimed } = await claimQuery.select("id").maybeSingle();
+    if (!claimed) {
+      return NextResponse.json({ ok: true, skipped: true, reason: "concurrent_claim" }, { status: 409 });
+    }
 
     await logDocumentProcessingEvent({
       tenantId: resolvedTenantId,
@@ -240,32 +280,93 @@ export async function POST(
       worker: "portal:documents-ingest",
     });
 
-    const { data: doc, error: docErr } = await db
-      .from("documents")
-      .select("id, file_name, project_id, drive_file_id, meta")
-      .eq("id", docId)
-      .eq("tenant_id", tenantId)
-      .single();
-    if (docErr || !doc) {
-      return NextResponse.json({ error: "Document not found" }, { status: 404 });
-    }
-
     const meta = (doc.meta ?? {}) as Record<string, unknown>;
     const driveFileId = doc.drive_file_id ?? (meta.drive_file_id as string | undefined);
     const storagePath = typeof meta.storage_path === "string" ? meta.storage_path : null;
+    let fileSizeHint = typeof meta.size === "number" ? meta.size : null;
+    const projectIdForSplit = doc.project_id as string | null;
+    const storageBucket = resolveDocumentStorageBucket(meta);
 
     if (!driveFileId && !storagePath) {
-      return NextResponse.json({ error: "Document has no source (no drive_file_id or storage_path)" }, { status: 400 });
+      const message = "Document has no source (no drive_file_id or storage_path)";
+      await markError(message, "source");
+      return NextResponse.json({ error: message }, { status: 400 });
     }
+
+    // Resolve Drive file size before downloading when meta.size is missing.
+    if (driveFileId && fileSizeHint === null) {
+      const driveToken = accessToken ?? await getAccessToken(resolvedTenantId, userId);
+      if (driveToken) {
+        const resolvedSize = await fetchDriveFileSize(driveFileId, driveToken);
+        if (resolvedSize != null) {
+          fileSizeHint = resolvedSize;
+          await db.from("documents").update({
+            meta: { ...meta, size: resolvedSize },
+          }).eq("id", docId).eq("tenant_id", resolvedTenantId);
+        }
+      }
+    }
+
+    const fileName = typeof doc.file_name === "string" ? doc.file_name : "";
+    const contentType = typeof meta.content_type === "string" ? meta.content_type : null;
+    const pdfDocument = looksLikePdf(fileName, contentType);
+
+    // Plan PDFs that need async split: never download into this Vercel function.
+    // Drive → page-split-worker (streams from Drive); local → after()-kicked split.
+    if (projectIdForSplit && shouldAsyncSplitPdf(fileName, fileSizeHint)) {
+      if (driveFileId) {
+        const queued = await queueDriveDocumentForPageSplit({
+          tenantId: resolvedTenantId,
+          userId,
+          projectId: projectIdForSplit,
+          driveFileId,
+          fileName,
+          mimeType: contentType ?? "application/pdf",
+          sizeBytes: fileSizeHint,
+          rekickIfStuck: true,
+        });
+        if (!queued.ok) {
+          await markError(queued.error, "split");
+          return NextResponse.json({ error: queued.error, code: queued.code }, { status: queued.status });
+        }
+        return NextResponse.json({
+          ok: true,
+          queued: queued.queued,
+          reason: "large_plan_set_drive",
+          document_id: queued.documentId,
+          status: queued.status,
+          bytes: fileSizeHint,
+        }, { status: queued.queued ? 202 : 200 });
+      }
+      if (storagePath) {
+        await queueLocalDocumentForPageSplit({
+          tenantId: resolvedTenantId,
+          userId,
+          projectId: projectIdForSplit,
+          documentId: docId,
+          originalPath: storagePath,
+        });
+        return NextResponse.json({
+          ok: true,
+          queued: true,
+          reason: "large_plan_set_local",
+          bytes: fileSizeHint,
+        }, { status: 202 });
+      }
+    }
+
+    await assertWithinBudget("pre_download");
 
     // 1. Download PDF from Drive or Supabase Storage
     let pdfBytes: Buffer;
 
     if (driveFileId) {
-      const driveToken = accessToken ?? await getAccessToken(tenantId, userId);
+      const driveToken = accessToken ?? await getAccessToken(resolvedTenantId, userId);
       if (!driveToken) {
+        const message = "Google Drive is not connected. Connect Google in Settings.";
+        await markError(message, "drive_auth");
         return NextResponse.json({
-          error: "Google Drive is not connected. Connect Google in Settings.",
+          error: message,
           code: "NEED_GOOGLE",
         }, { status: 412 });
       }
@@ -281,7 +382,7 @@ export async function POST(
     } else {
       // Local file stored in Supabase Storage
       const { data: signed, error: signErr } = await db.storage
-        .from(PLANS_BUCKET)
+        .from(storageBucket)
         .createSignedUrl(storagePath!, 300);
       if (signErr || !signed?.signedUrl) {
         await markError(signErr?.message ?? "Could not access stored file", "download");
@@ -295,49 +396,100 @@ export async function POST(
       pdfBytes = Buffer.from(await storageRes.arrayBuffer());
     }
 
-    const projectIdForSplit = doc.project_id as string | null;
-    if (pdfBytes.length >= ASYNC_SPLIT_BYTES) {
-      if (storagePath && projectIdForSplit) {
-        await db.from("documents").update({
-          status: "processing",
-          split_status: "pending",
-          processing_started_at: new Date().toISOString(),
-          last_error: null,
-          last_error_step: null,
-        }).eq("id", docId).eq("tenant_id", tenantId);
-        await invokePageSplitWorker({
-          document_id: docId,
-          tenant_id: resolvedTenantId,
-          project_id: projectIdForSplit,
-          original_path: storagePath,
-          user_id: userId,
-          is_local_upload: true,
+    await assertWithinBudget("download");
+
+    // Late size discovery: meta.size was missing/wrong but file is actually large.
+    if (projectIdForSplit && pdfBytes.length >= ASYNC_SPLIT_BYTES) {
+      if (storagePath) {
+        await queueLocalDocumentForPageSplit({
+          tenantId: resolvedTenantId,
+          userId,
+          projectId: projectIdForSplit,
+          documentId: docId,
+          originalPath: storagePath,
         });
         return NextResponse.json({
           ok: true,
           queued: true,
-          reason: "large_plan_set",
+          reason: "large_plan_set_discovered",
           bytes: pdfBytes.length,
         }, { status: 202 });
       }
-      const message = "Plan set is too large for synchronous ingest. Upload it through takeoff so it can be split by page.";
+      if (driveFileId) {
+        // Stage bytes to plans-bucket then split locally — avoids re-download with a stale token.
+        const stagedPath = `originals/${docId}.pdf`;
+        const { error: upErr } = await db.storage
+          .from(PLANS_BUCKET)
+          .upload(stagedPath, pdfBytes, { contentType: "application/pdf", upsert: true });
+        if (upErr) {
+          await markError(`Could not stage large Drive PDF: ${upErr.message}`, "split");
+          return NextResponse.json({ error: upErr.message }, { status: 500 });
+        }
+        await db.from("documents").update({
+          meta: { ...meta, storage: PLANS_BUCKET, storage_path: stagedPath, size: pdfBytes.length },
+        }).eq("id", docId).eq("tenant_id", resolvedTenantId);
+        await queueLocalDocumentForPageSplit({
+          tenantId: resolvedTenantId,
+          userId,
+          projectId: projectIdForSplit,
+          documentId: docId,
+          originalPath: stagedPath,
+        });
+        return NextResponse.json({
+          ok: true,
+          queued: true,
+          reason: "large_plan_set_staged",
+          bytes: pdfBytes.length,
+        }, { status: 202 });
+      }
+      const message = "Plan set is too large for synchronous ingest and could not be queued for page split.";
       await markError(message, "split");
       return NextResponse.json({ error: message }, { status: 409 });
     }
 
-    await db.from("documents").update({
-      status: "processing",
-      processing_started_at: new Date().toISOString(),
-    }).eq("id", docId).eq("tenant_id", tenantId);
+    if (pdfDocument && projectIdForSplit) {
+      await assertWithinBudget("sheet_pages");
+      await publishSheetPages({
+        async countExisting(documentId, tenantId) {
+          const { count, error } = await db
+            .from("document_pages")
+            .select("id", { count: "exact", head: true })
+            .eq("document_id", documentId)
+            .eq("tenant_id", tenantId);
+          if (error) throw new Error(`document_pages count failed: ${error.message}`);
+          return count ?? 0;
+        },
+        async uploadPage(storagePathForPage, bytes) {
+          const { error } = await db.storage.from(PLANS_BUCKET).upload(storagePathForPage, bytes, {
+            contentType: "application/pdf",
+            upsert: true,
+          });
+          if (error) throw new Error(`sheet upload failed: ${error.message}`);
+        },
+        async insertPages(rows) {
+          const { error } = await db.from("document_pages").upsert(rows, {
+            onConflict: "document_id,page_number",
+          });
+          if (error) throw new Error(`document_pages upsert failed: ${error.message}`);
+        },
+      }, {
+        tenantId: resolvedTenantId,
+        documentId: docId,
+        pdfBytes,
+      });
+    }
 
     // 2. Upload to Gemini Files API
+    await assertWithinBudget("gemini_upload");
     const { uri: fileUri, name: gName } = await uploadToGeminiFiles(pdfBytes, doc.file_name);
     geminiName = gName;
 
     // 3. Wait for ACTIVE
+    await assertWithinBudget("gemini_active");
     await waitForActive(geminiName);
 
     // 4. Extract text + classify
+    await assertWithinBudget("extraction");
     const extractRes = await fetchGemini(
       `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${geminiApiKey()}`,
       {
@@ -381,7 +533,7 @@ export async function POST(
       doc_type: docType,
       page_count: pageCount,
       meta: { ...meta, title: extraction.title ?? null, gemini_file_uri: fileUri },
-    }).eq("id", docId).eq("tenant_id", tenantId);
+    }).eq("id", docId).eq("tenant_id", resolvedTenantId);
 
     // 6. Insert pages
     if (pages.length > 0) {
@@ -412,6 +564,7 @@ export async function POST(
     // Prefer a partial flush + 504 over throwing so completed embeds are kept.
     const EMBED_BATCH = 16;
     for (let i = 0; i < pending.length; i += EMBED_BATCH) {
+      await assertWithinBudget("embedding");
       if (Date.now() - startedAt > INGEST_BUDGET_MS) {
         if (chunkRows.length > 0) {
           const { error: partialErr } = await db.from("chunks").insert(chunkRows);
@@ -459,7 +612,7 @@ export async function POST(
             updated_at: new Date().toISOString(),
           },
         },
-      }).eq("id", docId).eq("tenant_id", tenantId);
+      }).eq("id", docId).eq("tenant_id", resolvedTenantId);
     }
 
     if (chunkRows.length > 0) {
@@ -471,7 +624,7 @@ export async function POST(
     await db.from("documents").update({
       status: "complete",
       processed_at: new Date().toISOString(),
-    }).eq("id", docId).eq("tenant_id", tenantId);
+    }).eq("id", docId).eq("tenant_id", resolvedTenantId);
 
     // 9. Cleanup Gemini file (best effort)
     await deleteGeminiFile(geminiName);
@@ -487,7 +640,7 @@ export async function POST(
 
     void logEvent({
       projectId: projectId,
-      tenantId,
+      tenantId: resolvedTenantId,
       userId,
       entityType: "document",
       entityId: docId,

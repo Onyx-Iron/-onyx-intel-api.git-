@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import Link from "next/link";
 import { calculateAssemblyQuantities, type RebarSize, REBAR_UNIT_WEIGHT_LBS_PER_FT } from "@/lib/math/assemblies";
 
@@ -69,6 +70,10 @@ const UNIT_COL_LABELS: Record<UnitKey, string> = {
   disposal_unit:      "Disposal $/u",
 };
 
+/** Fixed row height keeps the virtualizer stable at 60 FPS for 1,000+ line items. */
+const ESTIMATE_ROW_HEIGHT_PX = 36;
+const ESTIMATE_MATRIX_COL_COUNT = 13;
+
 // Converts an authoritative estimate_items row (cost-category dollar totals)
 // into the grid's editable per-unit-rate shape. Division is exact (not
 // rounded) so a round-trip load -> save reproduces the same dollar totals.
@@ -116,6 +121,19 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     changed: { key: string; quantityDelta: number | null; totalDelta: number | null; right: { description?: string | null } }[];
   } | null>(null);
   const saveTimer = useRef<number | null>(null);
+  const rowsRef = useRef(rows);
+  const settingsRef = useRef(settings);
+  const savingRef = useRef(false);
+  rowsRef.current = rows;
+  settingsRef.current = settings;
+  const gridScrollRef = useRef<HTMLDivElement>(null);
+
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => gridScrollRef.current,
+    estimateSize: () => ESTIMATE_ROW_HEIGHT_PX,
+    overscan: 12,
+  });
 
   const pricingRestricted = role != null && RESTRICTED_ROLES.has(role);
   const locked = versionStatus === "approved" || versionStatus === "superseded" || versionStatus === "void";
@@ -387,27 +405,34 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     setRows((prev) => prev.filter((_, i) => i !== idx));
   }
 
-  const scheduleAutoSave = useCallback(() => {
-    if (locked) return;
-    if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => { void saveAll(); }, 900);
-  }, [locked]);
-
   // Converts a row's edited per-unit rates back into cost-category dollar
   // totals for the authoritative estimate_items shape. contingency/overhead/
   // profit are intentionally omitted — the server derives them from the
   // version's percentages (the sliders below), never trusted from here.
-  async function saveAll(includeSettings = true) {
-    if (saving || locked || !versionId) return;
-    const dirty = rows.filter((r) => r._dirty);
+  // Reads the latest rows through a ref so a debounced save is not stuck on
+  // the render that scheduled it, and merges the PATCH result in place so
+  // typing does not refetch and reset the whole matrix.
+  const saveAll = useCallback(async (includeSettings = true) => {
+    if (savingRef.current || locked || !versionId) return;
+    const currentRows = rowsRef.current;
+    const dirty = currentRows.filter((r) => r._dirty).map((r) => (
+      r.id ? r : { ...r, id: crypto.randomUUID() }
+    ));
     if (dirty.length === 0 && !includeSettings) return;
+    if (dirty.some((r, i) => r.id !== currentRows.filter((row) => row._dirty)[i]?.id)) {
+      setRows((prev) => prev.map((row) => {
+        const match = dirty.find((saved) => saved._local && saved._local === row._local && !row.id);
+        return match?.id ? { ...row, id: match.id } : row;
+      }));
+    }
+    savingRef.current = true;
     setSaving(true);
     try {
       const res = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          items: dirty.map((r, i) => ({
+          items: dirty.map((r) => ({
             id: r.id,
             cost_code: r.cost_code || null,
             description: r.description,
@@ -420,18 +445,44 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
             trucking_cost: r.quantity * r.trucking_unit,
             disposal_cost: r.quantity * r.disposal_unit,
             notes: r.notes,
-            sort_order: i,
+            sort_order: r.sort_order,
           })),
-          settings: includeSettings ? settings : undefined,
+          settings: includeSettings ? settingsRef.current : undefined,
         }),
       });
-      if (res.ok) {
-        await load(); // reload to pick up server-assigned IDs + recalculated totals
-      }
+      if (!res.ok) return;
+      const saved = await res.json() as { items?: Parameters<typeof itemToRow>[0][] };
+      const savedById = new Map((saved.items ?? []).map((item) => [item.id, item]));
+      setRows((prev) => prev.map((row) => {
+        if (!row.id || !savedById.has(row.id)) return row;
+        const sent = dirty.find((item) => item.id === row.id);
+        if (!sent) return row;
+        const unchanged =
+          row.quantity === sent.quantity &&
+          row.cost_code === sent.cost_code &&
+          row.description === sent.description &&
+          row.unit === sent.unit &&
+          row.notes === sent.notes &&
+          row.labor_unit === sent.labor_unit &&
+          row.material_unit === sent.material_unit &&
+          row.equipment_unit === sent.equipment_unit &&
+          row.subcontractor_unit === sent.subcontractor_unit &&
+          row.trucking_unit === sent.trucking_unit &&
+          row.disposal_unit === sent.disposal_unit;
+        if (!unchanged) return { ...row, _dirty: true };
+        return { ...itemToRow(savedById.get(row.id)!, row.sort_order), _local: row._local, _dirty: false };
+      }));
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
-  }
+  }, [locked, versionId]);
+
+  const scheduleAutoSave = useCallback(() => {
+    if (locked) return;
+    if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => { void saveAll(); }, 900);
+  }, [locked, saveAll]);
 
   function updateSetting(key: keyof FinancialSettings, value: number) {
     if (pricingRestricted || locked) return; // markup sliders are locked for these roles / locked versions
@@ -600,8 +651,8 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         )}
       </div>
 
-      {/* Grid */}
-      <div className="flex-1 overflow-auto">
+      {/* Grid — virtualized tbody keeps DOM node count bounded for large estimates */}
+      <div ref={gridScrollRef} className="flex-1 overflow-auto">
         {loading ? (
           <div className="p-10 text-center text-sm text-white/40">Loading estimate…</div>
         ) : rows.length === 0 ? (
@@ -628,39 +679,67 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i) => {
-                const direct = rowDirect(r);
+              {(() => {
+                const virtualRows = rowVirtualizer.getVirtualItems();
+                const paddingTop = virtualRows.length > 0 ? virtualRows[0].start : 0;
+                const paddingBottom = virtualRows.length > 0
+                  ? rowVirtualizer.getTotalSize() - virtualRows[virtualRows.length - 1].end
+                  : 0;
                 return (
-                  <tr key={r.id ?? r._local} className={`hover:bg-white/[0.02] ${r._dirty ? "bg-[#CCFF00]/[0.03]" : ""}`}>
-                    <td className="border-b border-white/5 px-2 py-1 text-[10px] font-mono text-white/40">{i + 1}</td>
-                    <td className="border-b border-white/5 px-1 py-1">
-                      <input value={r.cost_code} onChange={(e) => updateRow(i, { cost_code: e.target.value })} placeholder="NN-NN-NN" className="w-full bg-transparent px-1 py-1 text-[11px] font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
-                    </td>
-                    <td className="border-b border-white/5 px-1 py-1">
-                      <input value={r.description} onChange={(e) => updateRow(i, { description: e.target.value })} className="w-full bg-transparent px-1 py-1 text-xs focus:outline-none focus:bg-white/[0.05] rounded" />
-                    </td>
-                    <td className="border-b border-white/5 px-1 py-1">
-                      <input type="number" step="0.01" value={r.quantity} onChange={(e) => updateRow(i, { quantity: Number(e.target.value) })} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
-                    </td>
-                    <td className="border-b border-white/5 px-1 py-1">
-                      <input value={r.unit} onChange={(e) => updateRow(i, { unit: e.target.value })} className="w-full bg-transparent px-1 py-1 text-[11px] font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
-                    </td>
-                    {UNIT_COL_KEYS.map((k) => (
-                      <td key={k} className="border-b border-white/5 px-1 py-1">
-                        {pricingRestricted ? (
-                          <span className="block w-full px-1 py-1 text-xs text-right font-mono text-white/20 select-none" aria-hidden="true">••••</span>
-                        ) : (
-                          <input type="number" step="0.01" value={r[k]} onChange={(e) => updateRow(i, { [k]: Number(e.target.value) } as Partial<EstimateRow>)} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
-                        )}
-                      </td>
-                    ))}
-                    <td className="border-b border-white/5 px-2 py-1 text-right text-xs font-mono text-white">{pricingRestricted ? "••••" : `$${fmt(direct)}`}</td>
-                    <td className="border-b border-white/5 px-1 py-1 text-center">
-                      <button type="button" onClick={() => removeRow(i)} className="text-white/30 hover:text-red-400 text-xs">✕</button>
-                    </td>
-                  </tr>
+                  <>
+                    {paddingTop > 0 && (
+                      <tr aria-hidden="true">
+                        <td colSpan={ESTIMATE_MATRIX_COL_COUNT} style={{ height: paddingTop, padding: 0, border: 0 }} />
+                      </tr>
+                    )}
+                    {virtualRows.map((virtualRow) => {
+                      const i = virtualRow.index;
+                      const r = rows[i];
+                      const direct = rowDirect(r);
+                      return (
+                        <tr
+                          key={r.id ?? r._local}
+                          data-index={virtualRow.index}
+                          className={`hover:bg-white/[0.02] ${r._dirty ? "bg-[#CCFF00]/[0.03]" : ""}`}
+                          style={{ height: ESTIMATE_ROW_HEIGHT_PX }}
+                        >
+                          <td className="border-b border-white/5 px-2 py-1 text-[10px] font-mono text-white/40">{i + 1}</td>
+                          <td className="border-b border-white/5 px-1 py-1">
+                            <input value={r.cost_code} onChange={(e) => updateRow(i, { cost_code: e.target.value })} placeholder="NN-NN-NN" className="w-full bg-transparent px-1 py-1 text-[11px] font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
+                          </td>
+                          <td className="border-b border-white/5 px-1 py-1">
+                            <input value={r.description} onChange={(e) => updateRow(i, { description: e.target.value })} className="w-full bg-transparent px-1 py-1 text-xs focus:outline-none focus:bg-white/[0.05] rounded" />
+                          </td>
+                          <td className="border-b border-white/5 px-1 py-1">
+                            <input type="number" step="0.01" value={r.quantity} onChange={(e) => updateRow(i, { quantity: Number(e.target.value) })} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
+                          </td>
+                          <td className="border-b border-white/5 px-1 py-1">
+                            <input value={r.unit} onChange={(e) => updateRow(i, { unit: e.target.value })} className="w-full bg-transparent px-1 py-1 text-[11px] font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
+                          </td>
+                          {UNIT_COL_KEYS.map((k) => (
+                            <td key={k} className="border-b border-white/5 px-1 py-1">
+                              {pricingRestricted ? (
+                                <span className="block w-full px-1 py-1 text-xs text-right font-mono text-white/20 select-none" aria-hidden="true">••••</span>
+                              ) : (
+                                <input type="number" step="0.01" value={r[k]} onChange={(e) => updateRow(i, { [k]: Number(e.target.value) } as Partial<EstimateRow>)} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
+                              )}
+                            </td>
+                          ))}
+                          <td className="border-b border-white/5 px-2 py-1 text-right text-xs font-mono text-white">{pricingRestricted ? "••••" : `$${fmt(direct)}`}</td>
+                          <td className="border-b border-white/5 px-1 py-1 text-center">
+                            <button type="button" onClick={() => removeRow(i)} className="text-white/30 hover:text-red-400 text-xs">✕</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {paddingBottom > 0 && (
+                      <tr aria-hidden="true">
+                        <td colSpan={ESTIMATE_MATRIX_COL_COUNT} style={{ height: paddingBottom, padding: 0, border: 0 }} />
+                      </tr>
+                    )}
+                  </>
                 );
-              })}
+              })()}
             </tbody>
           </table>
         )}

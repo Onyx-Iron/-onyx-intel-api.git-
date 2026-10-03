@@ -1,25 +1,20 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { headerSafe } from "@/lib/http";
 import { getAccessToken } from "@/lib/google/oauth";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
-import { pythonApiHeaders } from "@/lib/python-api";
-import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
-import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
+import { pythonApiBaseUrl, pythonApiHeaders } from "@/lib/python-api";
+import { CANONICAL_FAILURE, CANONICAL_SUCCESS } from "@/lib/documents/status";
+import {
+  ASYNC_SPLIT_BYTES,
+  queueDriveDocumentForPageSplit,
+  queueLocalDocumentForPageSplit,
+} from "@/lib/documents/queuePageSplit";
 
-const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
+const PYTHON_API_URL = pythonApiBaseUrl();
 // Aligned with the Supabase Edge Functions — see `page-split-worker/index.ts`.
 const BUCKET = "plans-bucket";
-
-// Files at or above this size get routed through the async page-split
-// pipeline instead of the synchronous Railway stream — the same 300s
-// maxDuration ceiling that protects small files becomes a silent-failure
-// risk once a plan set gets into the tens of megabytes (confirmed: a 55MB
-// upload was retried 4 times and never produced a single takeoff row,
-// because the stream disconnects mid-transfer with no server-side error).
-const ASYNC_THRESHOLD_BYTES = 3.5 * 1024 * 1024;
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -70,103 +65,43 @@ export async function POST(req: NextRequest): Promise<Response> {
     const fileSize = typeof meta.size === "number" ? meta.size : null;
     const isPdf = doc.file_name.toLowerCase().endsWith(".pdf");
 
-    // ── Large PDF → async page-split pipeline ────────────────────────────────
-    // Applies whether the original lives in Supabase Storage (older local
-    // uploads) or Google Drive (current default for new local uploads — see
-    // /api/takeoff/drive-upload-session) — both feed page-split-worker,
-    // just with a different fetch source for the original bytes.
-    const isLargePdf = isPdf && fileSize != null && fileSize >= ASYNC_THRESHOLD_BYTES;
+    // ── Large PDF → async page-split pipeline (shared queue helper) ──────────
+    // Missing size is treated as large — safer than silent mid-stream death
+    // on the sync Railway path when meta.size was never recorded.
+    const isLargePdf = isPdf && (fileSize == null || fileSize >= ASYNC_SPLIT_BYTES);
     if (isLargePdf && (storagePath || driveFileId)) {
-      await db.from("documents")
-        .update({ status: "queued", updated_at: new Date().toISOString() } as never)
-        .eq("id", document_id).eq("tenant_id", tenantId);
-
       if (driveFileId) {
-        const gToken = await getAccessToken(tenantId, userId);
-        if (!gToken) {
-          return NextResponse.json({
-            error: "This plan is in Google Drive, but Google is not connected for this workspace yet. Connect Google or reopen the file from Drive.",
-            code: "NEED_GOOGLE",
-          }, { status: 412 });
+        const queued = await queueDriveDocumentForPageSplit({
+          tenantId,
+          userId,
+          projectId: project_id,
+          driveFileId,
+          fileName: doc.file_name,
+          mimeType: typeof meta.content_type === "string" ? meta.content_type : "application/pdf",
+          sizeBytes: fileSize,
+          rekickIfStuck: true,
+        });
+        if (!queued.ok) {
+          return NextResponse.json(
+            { error: queued.error, code: queued.code },
+            { status: queued.status },
+          );
         }
-        void invokePageSplitWorker({
-          document_id,
-          tenant_id: tenantId,
-          project_id,
-          original_path: `originals/${document_id}.pdf`,
-          drive_file_id: driveFileId,
-          access_token: gToken,
-          user_id: userId,
-        }).then(async () => {
-          await logDocumentProcessingEvent({
-            tenantId,
-            projectId: project_id,
-            documentId: document_id,
-            step: "split",
-            status: "started",
-            worker: "portal:from-document",
-          });
-        }).catch(async (err) => {
-          console.error("[from-document] page-split-worker invoke failed", err);
-          const detail = err instanceof Error ? err.message : String(err);
-          await db.from("documents")
-            .update({
-              status: "failed",
-              last_error: detail.slice(0, 1000),
-              last_error_step: "page_split_worker_invoke",
-            } as never)
-            .eq("id", document_id).eq("tenant_id", tenantId);
-          await logDocumentProcessingEvent({
-            tenantId,
-            projectId: project_id,
-            documentId: document_id,
-            step: "split",
-            status: "failed",
-            worker: "portal:from-document",
-            errorCode: "worker_invoke_failed",
-            errorMessage: detail,
-          });
-        });
-      } else {
-        void invokePageSplitWorker({
-          document_id,
-          tenant_id: tenantId,
-          project_id,
-          original_path: storagePath!,
-          is_local_upload: true,
-          user_id: userId,
-        }).then(async () => {
-          await logDocumentProcessingEvent({
-            tenantId,
-            projectId: project_id,
-            documentId: document_id,
-            step: "split",
-            status: "started",
-            worker: "portal:from-document",
-          });
-        }).catch(async (err) => {
-          console.error("[from-document] page-split-worker invoke failed", err);
-          const detail = err instanceof Error ? err.message : String(err);
-          await db.from("documents")
-            .update({
-              status: "failed",
-              last_error: detail.slice(0, 1000),
-              last_error_step: "page_split_worker_invoke",
-            } as never)
-            .eq("id", document_id).eq("tenant_id", tenantId);
-          await logDocumentProcessingEvent({
-            tenantId,
-            projectId: project_id,
-            documentId: document_id,
-            step: "split",
-            status: "failed",
-            worker: "portal:from-document",
-            errorCode: "worker_invoke_failed",
-            errorMessage: detail,
-          });
-        });
+        return NextResponse.json({
+          status: "queued",
+          async: true,
+          document_id: queued.documentId,
+          queued: queued.queued,
+        }, { status: 202 });
       }
 
+      await queueLocalDocumentForPageSplit({
+        tenantId,
+        userId,
+        projectId: project_id,
+        documentId: document_id,
+        originalPath: storagePath!,
+      });
       return NextResponse.json({ status: "queued", async: true, document_id }, { status: 202 });
     }
 
@@ -244,14 +179,14 @@ export async function POST(req: NextRequest): Promise<Response> {
       if (settled) return;
       settled = true;
       await db.from("documents")
-        .update({ status: "done", processed_at: new Date().toISOString() } as never)
+        .update({ status: CANONICAL_SUCCESS, processed_at: new Date().toISOString() } as never)
         .eq("id", document_id).eq("tenant_id", tenantId);
     };
     const markFailed = async () => {
       if (settled) return;
       settled = true;
       await db.from("documents")
-        .update({ status: "failed" } as never)
+        .update({ status: CANONICAL_FAILURE } as never)
         .eq("id", document_id).eq("tenant_id", tenantId);
     };
 

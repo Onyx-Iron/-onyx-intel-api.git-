@@ -1,11 +1,21 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { FolderOpen, FileText, X, RefreshCw, Sparkles, Send, Upload, ChevronDown, ChevronRight } from "lucide-react";
 import GoogleDrivePicker from "./GoogleDrivePicker";
 import GenerateDocDropdown from "@/components/common/GenerateDocDropdown";
 
 import { useToast } from "@/components/common/Toast";
+import { uploadDocumentDirect } from "@/lib/documents/browser-upload";
+import {
+  isInFlightStatus,
+  isRetryable,
+  isTerminalSuccess,
+  needsSplitStatusPoll,
+  statusLabel,
+} from "@/lib/documents/status";
+import { PipelineStage, type PipelineStatus } from "@/components/documents/PipelineStage";
 
 interface ParsedPage {
   page_number: number;
@@ -20,7 +30,19 @@ interface SavedQuestion {
   asked_at: string;
 }
 
-type DocStatus = "pending" | "processing" | "ready" | "complete" | "error";
+type DocStatus =
+  | "pending"
+  | "processing"
+  | "split"
+  | "queued"
+  | "ready"
+  | "complete"
+  | "done"
+  | "failed"
+  | "complete_with_errors"
+  | "error";
+
+type SplitStatus = "pending" | "processing" | "done" | "error" | "skipped";
 
 type DocType = "drawing" | "spec" | "rfi" | "submittal" | "other" | null;
 
@@ -28,6 +50,12 @@ interface Document {
   id: string;
   file_name: string;
   status: DocStatus;
+  split_status?: SplitStatus | null;
+  ocr_status?: PipelineStatus | null;
+  vector_status?: PipelineStatus | null;
+  takeoff_status?: PipelineStatus | null;
+  last_error?: string | null;
+  last_error_step?: string | null;
   doc_type: DocType;
   page_count: number | null;
   uploaded_at: string | null;
@@ -36,11 +64,16 @@ interface Document {
 }
 
 const STATUS_STYLES: Record<string, string> = {
-  pending:    "bg-white/5 text-gray-500 border-white/10",
-  processing: "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
-  ready:      "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
-  complete:   "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
-  error:      "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
+  pending:               "bg-white/5 text-gray-500 border-white/10",
+  processing:            "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
+  split:                 "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
+  queued:                "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
+  ready:                 "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
+  complete:              "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
+  done:                  "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
+  complete_with_errors:  "bg-[#F5A623]/10 text-[#F5A623] border-[#F5A623]/20",
+  error:                 "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
+  failed:                "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
 };
 
 const DOC_TYPE_STYLES: Record<string, string> = {
@@ -64,6 +97,12 @@ function FileIcon({ name }: { name: string }) {
 function fmt(d: string | null): string {
   if (!d) return "—";
   return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function documentHasAskableSource(doc: Document): boolean {
+  if (!doc.file_name.toLowerCase().endsWith(".pdf")) return false;
+  const m = doc.meta ?? {};
+  return !!(m.storage_path || m.drive_file_id);
 }
 
 function SkeletonRows() {
@@ -93,6 +132,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   const [answer, setAnswer] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
   const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
+  const [retryingDocId, setRetryingDocId] = useState<string | null>(null);
   const [expandedDocId, setExpandedDocId] = useState<string | null>(null);
   const [pagesByDoc, setPagesByDoc] = useState<Record<string, { loading: boolean; pages: ParsedPage[]; questions: SavedQuestion[]; classification?: Record<string, string>; error?: string }>>({});
 
@@ -129,40 +169,80 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     if (!pagesByDoc[docId]) await loadInsights(docId);
   }, [expandedDocId, pagesByDoc, loadInsights]);
 
-  const loadDocuments = useCallback((showLoading = true) => {
-    if (showLoading) setLoading(true);
-    fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}`)
-      .then((r) => r.json())
-      .then((d: unknown) => {
-        const data = d as { documents?: Document[] };
-        setDocuments(data.documents ?? []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+  const pollSplitStatus = useCallback(async (docs: Document[]) => {
+    const asyncDocs = docs.filter(needsSplitStatusPoll);
+    await Promise.all(
+      asyncDocs.map(async (doc) => {
+        try {
+          await fetch(
+            `/api/takeoff/split-status?document_id=${encodeURIComponent(doc.id)}`,
+            { cache: "no-store" },
+          );
+        } catch {
+          /* best effort — list refresh picks up finalized status */
+        }
+      }),
+    );
+  }, []);
+
+  const [docsPage, setDocsPage] = useState(1);
+  const [docsHasMore, setDocsHasMore] = useState(false);
+
+  const loadDocuments = useCallback(async (showLoading = true, page = 1): Promise<Document[]> => {
+    if (showLoading && page === 1) setLoading(true);
+    try {
+      const r = await fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}&page=${page}&limit=200`);
+      const d = await r.json() as { documents?: Document[]; pagination?: { hasMore?: boolean } };
+      const incoming = d.documents ?? [];
+      let next = incoming;
+      setDocuments((prev) => {
+        if (page === 1) {
+          const incomingIds = new Set(incoming.map((doc) => doc.id));
+          next = [...incoming, ...prev.filter((doc) => !incomingIds.has(doc.id))];
+          return next;
+        }
+        const seen = new Set(prev.map((doc) => doc.id));
+        next = [...prev, ...incoming.filter((doc) => !seen.has(doc.id))];
+        return next;
+      });
+      setDocsHasMore(Boolean(d.pagination?.hasMore));
+      setDocsPage(page);
+      setLoading(false);
+      return next;
+    } catch {
+      setLoading(false);
+      return [];
+    }
   }, [projectId]);
 
   useEffect(() => {
     loadDocuments();
   }, [loadDocuments]);
 
-  // Poll while any doc is still processing — but give up after POLL_TIMEOUT_MS
-  // so a silently-crashed background ingest doesn't spin forever.
+  // Poll while any doc is in-flight — including async split/page workers —
+  // but give up after POLL_TIMEOUT_MS so a silent failure doesn't spin forever.
   useEffect(() => {
-    const hasProcessing = documents.some((d) => d.status === "processing" || d.status === "pending");
-    if (hasProcessing && !pollTimedOut) {
+    const hasInFlight = documents.some(
+      (d) => isInFlightStatus(d.status) || needsSplitStatusPoll(d),
+    );
+    if (hasInFlight && !pollTimedOut) {
       if (!pollRef.current) {
         pollStartedAtRef.current = Date.now();
         pollRef.current = setInterval(() => {
-          const startedAt = pollStartedAtRef.current ?? Date.now();
-          if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
-            if (pollRef.current) {
-              clearInterval(pollRef.current);
-              pollRef.current = null;
+          void (async () => {
+            const startedAt = pollStartedAtRef.current ?? Date.now();
+            if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+              if (pollRef.current) {
+                clearInterval(pollRef.current);
+                pollRef.current = null;
+              }
+              setPollTimedOut(true);
+              return;
             }
-            setPollTimedOut(true);
-            return;
-          }
-          loadDocuments(false);
+            const list = await loadDocuments(false);
+            await pollSplitStatus(list);
+            await loadDocuments(false);
+          })();
         }, 4000);
       }
     } else {
@@ -171,18 +251,16 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
         pollRef.current = null;
       }
       pollStartedAtRef.current = null;
-      // Reset the timed-out flag once nothing is processing anymore
-      if (!hasProcessing && pollTimedOut) setPollTimedOut(false);
+      if (!hasInFlight && pollTimedOut) setPollTimedOut(false);
     }
     return () => {
-      // Cleanup on unmount: clear interval so no setState fires on a dead component
       if (pollRef.current) {
         clearInterval(pollRef.current);
         pollRef.current = null;
       }
       pollStartedAtRef.current = null;
     };
-  }, [documents, loadDocuments, pollTimedOut, POLL_TIMEOUT_MS]);
+  }, [documents, loadDocuments, pollSplitStatus, pollTimedOut, POLL_TIMEOUT_MS]);
 
   const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -190,82 +268,20 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     e.target.value = "";
     setUploading(true);
     try {
-      // Step 1: ask the unified upload endpoint for a Drive resumable upload URL
-      const sessionRes = await fetch("/api/documents/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ storage_type: "drive", file_name: file.name, content_type: file.type || "application/octet-stream", project_id: projectId }),
-      });
-      const sessionData = await sessionRes.json() as { upload_url?: string; error?: string; code?: string };
-      if (!sessionRes.ok) {
-        if (sessionData.code === "NEED_GOOGLE") {
-          toast({ title: String("Google Drive is not connected.\n\nClick \"From Drive\" to connect Google, then try uploading again."), kind: "error" });
-        } else {
-          toast({ title: String(sessionData.error ?? "Could not start upload"), kind: "error" });
-        }
-        return;
-      }
-
-      // Step 2: upload file bytes directly to Google Drive (bypasses Vercel + Supabase size limits)
-      // Use an AbortController-backed timeout so a hung PUT doesn't leave the UI
-      // stuck on "Uploading…" forever (e.g. Drive token expired between session
-      // create and the PUT — Drive sometimes hangs the connection instead of 401-ing fast).
-      const PUT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — large PDFs are slow on flaky links
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), PUT_TIMEOUT_MS);
-      let uploadRes: Response;
-      try {
-        uploadRes = await fetch(sessionData.upload_url!, {
-          method: "PUT",
-          headers: { "Content-Type": file.type || "application/octet-stream" },
-          body: file,
-          signal: ctrl.signal,
-        });
-      } catch (err) {
-        if ((err as { name?: string }).name === "AbortError") {
-          toast({ title: String(`Upload to Google Drive timed out after ${Math.round(PUT_TIMEOUT_MS / 60000)} minutes. The Google sign-in may have expired — click "From Drive" to reconnect Google, then try again.`), kind: "error" });
-          return;
-        }
-        throw err;
-      } finally {
-        clearTimeout(timer);
-      }
-      if (!uploadRes.ok) {
-        const detail = await uploadRes.text().catch(() => "");
-        if (uploadRes.status === 401 || uploadRes.status === 403) {
-          toast({ title: String(`Google Drive rejected the upload (${uploadRes.status}). Your Google sign-in likely expired between starting and finishing the upload. Click "From Drive" to reconnect Google, then try again.\n\n${detail.slice(0, 200)}`), kind: "error" });
-        } else {
-          toast({ title: String(`Upload to Google Drive failed (${uploadRes.status}): ${detail.slice(0, 200)}`), kind: "error" });
-        }
-        return;
-      }
-      const driveFile = await uploadRes.json() as { id?: string };
-      const driveFileId = driveFile.id;
-      if (!driveFileId) {
-        toast({ title: String("Drive upload completed but did not return a file ID. Please try again."), kind: "success" });
-        return;
-      }
-
-      // Step 3: register the document row via the unified endpoint
-      // (the server auto-fires ingest — no separate call needed)
-      const regRes = await fetch("/api/documents/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ storage_type: "drive", project_id: projectId, file_name: file.name, drive_file_id: driveFileId, mime_type: file.type, size: file.size }),
-      });
-      if (!regRes.ok) {
-        const d = await regRes.json().catch(() => ({})) as { error?: string };
-        toast({ title: String(d.error ?? "Registration failed"), kind: "error" });
-        return;
-      }
-
-      loadDocuments();
+      // Direct-to-Supabase signed PUT / TUS — no Google Drive required; bytes
+      // never touch Vercel's 4.5MB limit. Large PDFs complete via
+      // upload-url/complete → ingest → page-split-worker. "From Drive" stays
+      // the Drive import path.
+      await uploadDocumentDirect(file, projectId);
+      toast({ title: String(`Uploaded ${file.name}`), kind: "info" });
+      setPollTimedOut(false);
+      await loadDocuments(false);
     } catch (err) {
       toast({ title: String(`Upload failed: ${err instanceof Error ? err.message : String(err)}`), kind: "error" });
     } finally {
       setUploading(false);
     }
-  }, [projectId, loadDocuments]);
+  }, [projectId, loadDocuments, toast]);
 
   const handleDriveFiles = useCallback(async (
     driveFiles: { id: string; name: string; mimeType: string; sizeBytes?: number }[],
@@ -310,7 +326,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     } finally {
       setDriveImporting(false);
     }
-  }, [projectId, loadDocuments]);
+  }, [projectId, loadDocuments, toast]);
 
   const openAsk = (doc: Document) => {
     setAskDoc({ id: doc.id, name: doc.file_name });
@@ -353,11 +369,60 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     }
   }, [askDoc]);
 
-  const canAsk = (doc: Document) => {
-    if (!doc.file_name.toLowerCase().endsWith(".pdf")) return false;
-    const m = doc.meta ?? {};
-    return !!(m.storage_path || m.drive_file_id);
-  };
+  const retryIngest = useCallback(async (doc: Document) => {
+    if (retryingDocId) return;
+    if (!documentHasAskableSource(doc)) {
+      toast({ title: String("No stored file to retry — re-upload this document."), kind: "error" });
+      return;
+    }
+    setRetryingDocId(doc.id);
+    try {
+      const res = await fetch(`/api/documents/${encodeURIComponent(doc.id)}/ingest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({})) as {
+        error?: string;
+        skipped?: boolean;
+        reason?: string;
+        queued?: boolean;
+      };
+      if (!res.ok && res.status !== 409 && res.status !== 202) {
+        toast({ title: String(data.error ?? `Retry failed (${res.status})`), kind: "error" });
+        return;
+      }
+      if (data.skipped && data.reason === "already_complete") {
+        toast({ title: String("Document is already processed."), kind: "info" });
+      } else if (
+        data.skipped
+        && (data.reason === "already_processing" || data.reason === "concurrent_claim")
+      ) {
+        toast({ title: String("Document is already being processed."), kind: "info" });
+      } else if (res.status === 409 && data.skipped) {
+        toast({ title: String("Document is already being processed."), kind: "info" });
+      } else {
+        toast({
+          title: data.queued
+            ? `${doc.file_name} re-queued for page-split.`
+            : `${doc.file_name} ingest restarted.`,
+          kind: "success",
+        });
+        // Optimistically flip so polling resumes immediately.
+        setDocuments((prev) => prev.map((d) => (
+          d.id === doc.id
+            ? { ...d, status: data.queued ? "queued" : "processing", last_error: null, last_error_step: null }
+            : d
+        )));
+      }
+      setPollTimedOut(false);
+      await loadDocuments(false);
+    } catch (err) {
+      toast({ title: String(`Retry failed: ${err instanceof Error ? err.message : String(err)}`), kind: "error" });
+    } finally {
+      setRetryingDocId(null);
+    }
+  }, [retryingDocId, loadDocuments, toast]);
 
   return (
     <div className="space-y-3">
@@ -448,8 +513,10 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
               ) : (
                 documents.flatMap((doc) => {
                   const statusKey = doc.status in STATUS_STYLES ? doc.status : "pending";
-                  const isProcessing = doc.status === "processing";
-                  const isReady = doc.status === "ready" || doc.status === "complete";
+                  const isProcessing = isInFlightStatus(doc.status)
+                    || doc.split_status === "pending"
+                    || doc.split_status === "processing";
+                  const isReady = isTerminalSuccess(doc.status);
                   const isExpanded = expandedDocId === doc.id;
                   const insights = pagesByDoc[doc.id];
                   return [
@@ -489,8 +556,20 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                       <td className="px-4 py-3">
                         <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded border text-[9px] font-bold tracking-widest uppercase ${STATUS_STYLES[statusKey]}`}>
                           {isProcessing && <span className="w-1.5 h-1.5 rounded-full bg-[#00D2FF] animate-pulse" />}
-                          {isProcessing ? "Processing" : doc.status}
+                          {statusLabel(doc.status)}
                         </span>
+                        {(doc.split_status || doc.ocr_status || doc.takeoff_status) && (
+                          <div className="mt-1.5 flex flex-wrap gap-x-2 gap-y-1">
+                            <PipelineStage label="Split" status={doc.split_status ?? null} />
+                            <PipelineStage label="OCR" status={doc.ocr_status ?? null} />
+                            <PipelineStage label="Takeoff" status={doc.takeoff_status ?? null} />
+                          </div>
+                        )}
+                        {doc.last_error && (
+                          <p className="mt-1 max-w-[14rem] truncate text-[9px] text-[#E50914]" title={doc.last_error}>
+                            {doc.last_error_step ? `${doc.last_error_step}: ` : ""}{doc.last_error}
+                          </p>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-right text-gray-500 font-mono text-xs">
                         {doc.page_count != null ? doc.page_count : "—"}
@@ -498,7 +577,15 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                       <td className="px-4 py-3 text-gray-600 text-[11px]">{fmt(doc.uploaded_at)}</td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-3">
-                          {canAsk(doc) && (
+                          {doc.file_name.toLowerCase().endsWith(".pdf") && (
+                            <Link
+                              href={`/dashboard/projects/${projectId}/takeoff/canvas?document_id=${encodeURIComponent(doc.id)}`}
+                              className="text-[10px] uppercase tracking-widest font-mono text-gray-600 hover:text-[#CCFF00] transition-colors"
+                            >
+                              Canvas
+                            </Link>
+                          )}
+                          {documentHasAskableSource(doc) && (
                             <button
                               onClick={() => openAsk(doc)}
                               className="flex items-center gap-1.5 text-gray-600 hover:text-[#CCFF00] transition-colors"
@@ -508,16 +595,17 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                               <span className="text-[10px] uppercase tracking-widest font-mono">Ask</span>
                             </button>
                           )}
-                          {doc.status === "error" && (
+                          {(isRetryable(doc.status) || (pollTimedOut && isProcessing)) && (
                             <button
-                              onClick={() => {
-                                toast({ title: String("To retry, re-import this file from Drive using the From Drive button."), kind: "info" });
-                              }}
-                              className="flex items-center gap-1.5 text-gray-600 hover:text-[#00D2FF] transition-colors"
-                              title="Retry"
+                              onClick={() => void retryIngest(doc)}
+                              disabled={retryingDocId === doc.id}
+                              className="flex items-center gap-1.5 text-gray-600 hover:text-[#00D2FF] transition-colors disabled:opacity-40"
+                              title="Retry ingest / page-split"
                             >
-                              <RefreshCw size={12} />
-                              <span className="text-[10px] uppercase tracking-widest font-mono">Retry</span>
+                              <RefreshCw size={12} className={retryingDocId === doc.id ? "animate-spin" : undefined} />
+                              <span className="text-[10px] uppercase tracking-widest font-mono">
+                                {retryingDocId === doc.id ? "Retrying…" : "Retry"}
+                              </span>
                             </button>
                           )}
                           <button
@@ -609,7 +697,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                                 <div key={p.page_number} className="rounded-lg border border-white/8 bg-[#0E0F12] p-3">
                                   <div className="flex items-center justify-between mb-1.5">
                                     <span className="text-[9px] font-bold uppercase tracking-widest text-[#CCFF00]">Page {p.page_number}</span>
-                                    {canAsk(doc) && (
+                                    {documentHasAskableSource(doc) && (
                                       <button
                                         onClick={() => openAsk(doc)}
                                         className="text-[9px] uppercase tracking-widest text-gray-600 hover:text-[#CCFF00] transition-colors"
@@ -640,6 +728,17 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
               )}
             </tbody>
           </table>
+          {docsHasMore && (
+            <div className="flex justify-center border-t border-white/5 py-3">
+              <button
+                type="button"
+                onClick={() => { void loadDocuments(false, docsPage + 1); }}
+                className="text-[10px] uppercase tracking-widest font-mono text-gray-500 hover:text-[#CCFF00]"
+              >
+                Load more documents
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
