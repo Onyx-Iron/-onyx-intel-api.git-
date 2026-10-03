@@ -152,6 +152,8 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   }, []);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollStartedAtRef = useRef<number | null>(null);
+  const documentsRef = useRef(documents);
+  documentsRef.current = documents;
   const [pollTimedOut, setPollTimedOut] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -239,8 +241,9 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
               setPollTimedOut(true);
               return;
             }
-            const list = await loadDocuments(false);
-            await pollSplitStatus(list);
+            // Kick async split/page workers, then one list refresh.
+            // Avoid load→poll→load (two full document fetches per tick).
+            await pollSplitStatus(documents);
             await loadDocuments(false);
           })();
         }, 4000);

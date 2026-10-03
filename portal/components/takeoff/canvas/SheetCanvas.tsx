@@ -16,8 +16,11 @@ import {
   DEFAULT_SNAP_THRESHOLD_PX,
   type VectorPoint,
 } from "@/lib/takeoff/canvas/vector-snap";
+import { boxFromXY, cullByView, type Box } from "@/lib/takeoff/canvas/visible-shapes";
 import { takeoffQueryKeys, useSheetCalibration, type CadVectorRecord } from "@/lib/takeoff/queries";
 import type { SnapResult } from "@/lib/takeoff/canvas/snap-algorithm";
+
+const OVERLAY_VIEW_PAD_PX = 48;
 
 const CAD_VECTORS_STALE_MS = Infinity;
 
@@ -200,7 +203,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const { data: calibration = null } = useSheetCalibration(pageId);
   const wrapRef   = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlaySvgRef = useRef<SVGSVGElement>(null);
   const priorCanvasRef = useRef<HTMLCanvasElement>(null);
+  const [overlayView, setOverlayView] = useState<Box | null>(null);
   const [priorUrl, setPriorUrl] = useState<string | null>(null);
   const [priorLabel, setPriorLabel] = useState<string | null>(null);
   const [showPrior, setShowPrior] = useState(false);
@@ -639,6 +644,90 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
     return calibration?.scale_ratio ?? 1;
   }, [calibration, renderScale]);
+
+  // Track the SVG portion intersecting the window so measurement overlays can
+  // skip off-screen DOM nodes (same approach as CADVectorLayer).
+  useEffect(() => {
+    if (!renderSize) return;
+    const update = () => {
+      const el = overlaySvgRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const sx = renderSize.w / rect.width;
+      const sy = renderSize.h / rect.height;
+      const left = Math.max(0, -rect.left);
+      const top = Math.max(0, -rect.top);
+      const right = Math.min(rect.width, window.innerWidth - rect.left);
+      const bottom = Math.min(rect.height, window.innerHeight - rect.top);
+      setOverlayView({
+        minX: left * sx,
+        minY: top * sy,
+        maxX: Math.max(left, right) * sx,
+        maxY: Math.max(top, bottom) * sy,
+      });
+    };
+    update();
+    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+    };
+  }, [renderSize]);
+
+  const overlayKeepKeys = useMemo(() => {
+    const keys = new Set<string>();
+    if (selectedKey) keys.add(selectedKey);
+    if (dragState?.key) keys.add(dragState.key);
+    for (const s of shapes) if (!s.saved) keys.add(s.key);
+    for (const u of utilityRuns) if (!u.saved) keys.add(u.key);
+    for (const w of wallRuns) if (!w.saved) keys.add(w.key);
+    for (const n of topoNodes) if (!n.saved) keys.add(n.key);
+    for (const a of areaBounds) if (!a.saved) keys.add(a.key);
+    return keys;
+  }, [selectedKey, dragState?.key, shapes, utilityRuns, wallRuns, topoNodes, areaBounds]);
+
+  const visibleShapes = useMemo(() => {
+    const annotated = shapes.map((s) => ({
+      ...s,
+      bbox: boxFromXY(toDisplayPoints(s.points, s.coordinateSpace)),
+    }));
+    return cullByView(annotated, overlayView, { pad: OVERLAY_VIEW_PAD_PX, keepKeys: overlayKeepKeys });
+  }, [shapes, overlayView, overlayKeepKeys, toDisplayPoints]);
+
+  const visibleUtilityRuns = useMemo(() => {
+    const annotated = utilityRuns.map((u) => ({
+      ...u,
+      bbox: boxFromXY(toDisplayPoints(u.points, u.coordinateSpace)),
+    }));
+    return cullByView(annotated, overlayView, { pad: OVERLAY_VIEW_PAD_PX, keepKeys: overlayKeepKeys });
+  }, [utilityRuns, overlayView, overlayKeepKeys, toDisplayPoints]);
+
+  const visibleWallRuns = useMemo(() => {
+    const annotated = wallRuns.map((w) => ({
+      ...w,
+      bbox: boxFromXY(toDisplayPoints(w.points, w.coordinateSpace)),
+    }));
+    return cullByView(annotated, overlayView, { pad: OVERLAY_VIEW_PAD_PX, keepKeys: overlayKeepKeys });
+  }, [wallRuns, overlayView, overlayKeepKeys, toDisplayPoints]);
+
+  const visibleTopoNodes = useMemo(() => {
+    const annotated = topoNodes.map((n) => ({
+      ...n,
+      bbox: boxFromXY(toDisplayPoints(n.points, n.coordinateSpace)),
+    }));
+    return cullByView(annotated, overlayView, { pad: OVERLAY_VIEW_PAD_PX, keepKeys: overlayKeepKeys });
+  }, [topoNodes, overlayView, overlayKeepKeys, toDisplayPoints]);
+
+  const visibleAreaBounds = useMemo(() => {
+    const annotated = areaBounds.map((a) => ({
+      ...a,
+      bbox: boxFromXY(toDisplayPoints(a.points, a.coordinateSpace)),
+    }));
+    return cullByView(annotated, overlayView, { pad: OVERLAY_VIEW_PAD_PX, keepKeys: overlayKeepKeys });
+  }, [areaBounds, overlayView, overlayKeepKeys, toDisplayPoints]);
+
   const pixelDistance = (a: Pt, b: Pt) => Math.hypot(b.x - a.x, b.y - a.y);
   const totalLen = (pts: Pt[]) => {
     let s = 0;
@@ -1539,6 +1628,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           />
           {renderSize && (
             <svg
+              ref={overlaySvgRef}
               width={renderSize.w}
               height={renderSize.h}
               viewBox={`0 0 ${renderSize.w} ${renderSize.h}`}
@@ -1548,8 +1638,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               onMouseLeave={onCanvasMouseLeave}
               onDoubleClick={finishDraft}
             >
-              {/* Committed shapes */}
-              {shapes.map((s) => {
+              {/* Committed shapes (viewport-culled) */}
+              {visibleShapes.map((s) => {
                 const isSel = s.key === selectedKey;
                 const color = s.tool === "count" ? "#CCFF00" : s.tool === "length" ? "#00D2FF" : "#f97316";
                 const sPts = toDisplayPoints(s.points, s.coordinateSpace);
@@ -1579,8 +1669,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 );
               })}
 
-              {/* Committed utility pipe runs */}
-              {utilityRuns.map((u) => {
+              {/* Committed utility pipe runs (viewport-culled) */}
+              {visibleUtilityRuns.map((u) => {
                 const uPts = toDisplayPoints(u.points, u.coordinateSpace);
                 const d = uPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
                 return (
@@ -1593,7 +1683,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 );
               })}
 
-              {wallRuns.map((w) => {
+              {visibleWallRuns.map((w) => {
                 const wPts = toDisplayPoints(w.points, w.coordinateSpace);
                 const d = wPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
                 return (
@@ -1622,8 +1712,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 </g>
               )}
 
-              {/* Committed topo nodes (contours + spot elevations) */}
-              {topoNodes.map((n) => {
+              {/* Committed topo nodes (contours + spot elevations, viewport-culled) */}
+              {visibleTopoNodes.map((n) => {
                 const nPts = toDisplayPoints(n.points, n.coordinateSpace);
                 if (n.node_type === "spot_elevation") {
                   const p = nPts[0];
@@ -1659,8 +1749,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 </g>
               )}
 
-              {/* Committed area bounds polygons */}
-              {areaBounds.map((a) => {
+              {/* Committed area bounds polygons (viewport-culled) */}
+              {visibleAreaBounds.map((a) => {
                 const d = toDisplayPoints(a.points, a.coordinateSpace).map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z";
                 return (
                   <g key={a.key}>
