@@ -451,10 +451,18 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         }),
       });
       if (!res.ok) return;
-      const saved = await res.json() as { items?: Parameters<typeof itemToRow>[0][] };
+      // Merge server rows in place — avoid a full matrix reload flash.
+      // Skip rows the user edited again while the request was in flight.
+      const saved = await res.json() as {
+        items?: Parameters<typeof itemToRow>[0][];
+        version?: { overhead_pct?: number; profit_pct?: number; contingency_pct?: number; status?: string };
+      };
       const savedById = new Map((saved.items ?? []).map((item) => [item.id, item]));
       setRows((prev) => prev.map((row) => {
-        if (!row.id || !savedById.has(row.id)) return row;
+        if (!row.id || !savedById.has(row.id)) {
+          // New rows matched by dirty order when server assigned ids.
+          return row;
+        }
         const sent = dirty.find((item) => item.id === row.id);
         if (!sent) return row;
         const unchanged =
@@ -472,6 +480,29 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         if (!unchanged) return { ...row, _dirty: true };
         return { ...itemToRow(savedById.get(row.id)!, row.sort_order), _local: row._local, _dirty: false };
       }));
+      // Also assign server ids to newly created dirty rows (no prior id).
+      if ((saved.items ?? []).some((item) => !dirty.some((d) => d.id === item.id))) {
+        let newIdx = 0;
+        const newItems = (saved.items ?? []).filter((item) => !dirty.some((d) => d.id === item.id));
+        setRows((prev) => prev.map((row) => {
+          if (row.id || !row._dirty) return row;
+          const server = newItems[newIdx++];
+          if (!server) return { ...row, _dirty: false };
+          return { ...itemToRow(server, row.sort_order), _local: row._local, _dirty: false };
+        }));
+      }
+      if (saved.version) {
+        if (typeof saved.version.overhead_pct === "number"
+          || typeof saved.version.profit_pct === "number"
+          || typeof saved.version.contingency_pct === "number") {
+          setSettings((s) => ({
+            overhead_pct: saved.version!.overhead_pct ?? s.overhead_pct,
+            profit_pct: saved.version!.profit_pct ?? s.profit_pct,
+            contingency_pct: saved.version!.contingency_pct ?? s.contingency_pct,
+          }));
+        }
+        if (typeof saved.version.status === "string") setVersionStatus(saved.version.status);
+      }
     } finally {
       savingRef.current = false;
       setSaving(false);

@@ -59,6 +59,34 @@ export function projectToCanvas(x: number, y: number, frame: VectorCanvasFrame):
   };
 }
 
+/** Inverse of projectToCanvas — screen pixel → drawing/world units. */
+export function unprojectFromCanvas(x: number, y: number, frame: VectorCanvasFrame): SnapPoint {
+  const scale = frame.scale || 1;
+  return {
+    x: frame.minX + (x - frame.pad) / scale,
+    y: frame.minY + (frame.canvasH - frame.pad - y) / scale,
+  };
+}
+
+/**
+ * Map a screen-space view rectangle into world units for culling before
+ * projection. Y is flipped the same way projectToCanvas flips it, so the
+ * returned box keeps minY ≤ maxY in world space.
+ */
+export function screenViewToWorld(
+  view: { minX: number; minY: number; maxX: number; maxY: number },
+  frame: VectorCanvasFrame,
+): { minX: number; minY: number; maxX: number; maxY: number } {
+  const a = unprojectFromCanvas(view.minX, view.minY, frame);
+  const b = unprojectFromCanvas(view.maxX, view.maxY, frame);
+  return {
+    minX: Math.min(a.x, b.x),
+    minY: Math.min(a.y, b.y),
+    maxX: Math.max(a.x, b.x),
+    maxY: Math.max(a.y, b.y),
+  };
+}
+
 export function canvasEndpoints(vectors: VectorPolyline[], canvas: { w: number; h: number }): SnapPoint[] {
   const frame = vectorCanvasFrame(vectors, canvas);
   if (!frame) return [];

@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { canvasEndpoints, nearestEndpoint, projectToCanvas, SNAP_TOLERANCE_PX, vectorCanvasFrame } from "./snap.ts";
+import {
+  canvasEndpoints,
+  nearestEndpoint,
+  projectToCanvas,
+  screenViewToWorld,
+  SNAP_TOLERANCE_PX,
+  unprojectFromCanvas,
+  vectorCanvasFrame,
+} from "./snap.ts";
 
 describe("vector endpoint snap", () => {
   const vectors = [
@@ -18,6 +26,19 @@ describe("vector endpoint snap", () => {
     assert.equal(origin.y, 100);
     assert.equal(corner.x, 180);
     assert.equal(corner.y, 20);
+  });
+
+  it("round-trips project/unproject and maps screen views to world", () => {
+    const frame = vectorCanvasFrame(vectors, { w: 220, h: 120 });
+    assert.ok(frame);
+    const world = unprojectFromCanvas(20, 100, frame!);
+    assert.ok(Math.abs(world.x - 0) < 1e-9);
+    assert.ok(Math.abs(world.y - 0) < 1e-9);
+    const viewWorld = screenViewToWorld({ minX: 20, minY: 20, maxX: 180, maxY: 100 }, frame!);
+    assert.ok(viewWorld.minX <= 0 + 1e-9);
+    assert.ok(viewWorld.maxX >= 10 - 1e-9);
+    assert.ok(viewWorld.minY <= 0 + 1e-9);
+    assert.ok(viewWorld.maxY >= 5 - 1e-9);
   });
 
   it("snaps a nearby click to the closest endpoint and ignores a far click", () => {

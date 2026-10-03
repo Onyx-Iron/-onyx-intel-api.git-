@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { shapesInView, type Box } from "./visible-shapes.ts";
+import { shapesInView, worldBoxFromPoints, type Box } from "./visible-shapes.ts";
 
 function boxes(count: number): Array<{ id: number; bbox: Box }> {
   return Array.from({ length: count }, (_, id) => ({
@@ -14,6 +14,12 @@ describe("sheet shape culling", () => {
   it("keeps only boxes that meet the view", () => {
     const kept = shapesInView(boxes(10), { minX: 0, minY: 0, maxX: 30, maxY: 20 });
     assert.deepEqual(kept.map((shape) => shape.id), [0, 1]);
+  });
+
+  it("builds a world bbox from polyline points", () => {
+    const box = worldBoxFromPoints([[2, 5], [8, 1], [3, 9]]);
+    assert.deepEqual(box, { minX: 2, minY: 1, maxX: 8, maxY: 9 });
+    assert.equal(worldBoxFromPoints([]), null);
   });
 
   it("filters 100, 500, and 2000 boxes inside a frame budget", () => {
