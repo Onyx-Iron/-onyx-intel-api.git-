@@ -15,8 +15,27 @@ create extension if not exists pgtap with schema extensions;
 select plan(8);
 
 -- Temporary grants so SET ROLE authenticated can exercise RLS (rolled back).
+-- EXECUTE on current_tenant_id is also required: tenants.self_select and
+-- many tenant_isolation_* policies invoke it (see 20261006000000 migration).
 grant select on public.tenants, public.projects, public.takeoff_items, public.estimate_items
   to authenticated;
+grant execute on function public.current_tenant_id() to authenticated;
+
+-- #region agent log
+-- Runtime evidence for grant/RLS hypotheses (appears in `supabase test db` logs).
+do $$
+declare
+  can_exec boolean;
+  tenants_sel boolean;
+begin
+  select has_function_privilege('authenticated', 'public.current_tenant_id()', 'execute')
+    into can_exec;
+  select has_table_privilege('authenticated', 'public.tenants', 'select')
+    into tenants_sel;
+  raise notice 'debug_pgtap hypothesisId=A/D can_exec_current_tenant_id=% tenants_select=%',
+    can_exec, tenants_sel;
+end $$;
+-- #endregion
 
 -- Fixed UUIDs for stable assertions.
 select set_config('test.tenant_a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', true);
@@ -102,6 +121,16 @@ select is(
 -- Impersonate tenant A via GUC used by tenant_isolation_* ALL policies.
 set local role authenticated;
 select set_config('app.clerk_org_id', 'org_pgtap_a', true);
+
+-- #region agent log
+do $$
+begin
+  raise notice 'debug_pgtap hypothesisId=A role=% clerk_org=% current_tenant_id=%',
+    current_user,
+    current_setting('app.clerk_org_id', true),
+    public.current_tenant_id()::text;
+end $$;
+-- #endregion
 
 select is(
   (select count(*)::int from public.projects
