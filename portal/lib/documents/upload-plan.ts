@@ -1,6 +1,10 @@
 export const PLANS_BUCKET = "plans-bucket";
 export const LEGACY_DOCUMENT_BUCKET = "project-documents";
 export const PAGE_SPLIT_BYTES = 3.5 * 1024 * 1024;
+export const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
+
+/** Where a document should be processed. PDFs go to the page-split worker. */
+export type IngestRoute = "split-drive" | "split-storage" | "inline" | "reupload";
 
 const STORAGE_BUCKETS = new Set([PLANS_BUCKET, LEGACY_DOCUMENT_BUCKET]);
 
@@ -32,18 +36,33 @@ export function mimeTypeForFile(fileName: string, contentType?: string | null): 
   }
 }
 
+export function fileLivesInPlansBucket(storage: string | null, storagePath: string | null): boolean {
+  if (!storagePath) return false;
+  return storage === PLANS_BUCKET || storagePath.startsWith("originals/");
+}
+
 /**
- * Large PDFs must go to the page-split worker. Downloading them inside the
- * Vercel ingest request hits the body and time limits, then used to return 409
- * after the upload had already succeeded.
+ * PDFs are split in the background worker, which already owns per-page OCR,
+ * embeddings, and takeoff. Vercel only keeps the short path for images and
+ * for a small legacy object that never made it into plans-bucket.
  */
-export function shouldQueuePageSplit(input: {
+export function chooseIngestRoute(input: {
   fileName: string;
   sizeBytes: number | null;
-  hasSource: boolean;
-}): boolean {
-  if (!input.hasSource) return false;
-  if (!input.fileName.toLowerCase().endsWith(".pdf")) return false;
-  if (input.sizeBytes == null || !Number.isFinite(input.sizeBytes)) return false;
-  return input.sizeBytes >= PAGE_SPLIT_BYTES;
+  driveFileId?: string | null;
+  storagePath?: string | null;
+  storage?: string | null;
+}): IngestRoute {
+  if (!input.fileName.toLowerCase().endsWith(".pdf")) return "inline";
+  if (input.driveFileId) return "split-drive";
+  if (fileLivesInPlansBucket(input.storage ?? null, input.storagePath ?? null)) return "split-storage";
+  if (
+    input.storagePath
+    && input.sizeBytes != null
+    && Number.isFinite(input.sizeBytes)
+    && input.sizeBytes < PAGE_SPLIT_BYTES
+  ) {
+    return "inline";
+  }
+  return "reupload";
 }

@@ -10,7 +10,7 @@ import { DOCUMENT_EMBED_MODEL, DOCUMENT_EXTRACT_MODEL, EMBEDDING_DIMENSIONS, liv
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import { pagesStillNeedingChunks } from "@/lib/documents/ingest-resume";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
-import { documentStorageBuckets, mimeTypeForFile, PAGE_SPLIT_BYTES, PLANS_BUCKET, shouldQueuePageSplit } from "@/lib/documents/upload-plan";
+import { chooseIngestRoute, documentStorageBuckets, mimeTypeForFile } from "@/lib/documents/upload-plan";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
@@ -152,17 +152,6 @@ async function embedText(text: string): Promise<number[]> {
   return values;
 }
 
-async function driveFileSize(driveFileId: string, token: string): Promise<number | null> {
-  const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveFileId)}?fields=size`,
-    { headers: { Authorization: `Bearer ${token}` } },
-  );
-  if (!res.ok) return null;
-  const data = (await res.json()) as { size?: string };
-  const size = data.size ? Number(data.size) : NaN;
-  return Number.isFinite(size) ? size : null;
-}
-
 async function downloadStoredFile(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   db: any,
@@ -273,71 +262,73 @@ export async function POST(
       return NextResponse.json({ ok: true, resumed: true, already_complete: true });
     }
 
-    let pagesToEmbed: GeminiPage[] = resumePages;
-    let docType = "other";
-    let pageCount = storedGeminiPages.length;
-    if (resumePages.length === 0) {
-    const projectIdForSplit = doc.project_id as string | null;
-    const metaSize = typeof meta.size === "number" ? meta.size : null;
-    const driveTokenForSize = driveFileId ? (accessToken ?? await getAccessToken(tenantId, userId)) : null;
-    const sizeBytes = metaSize ?? (driveFileId && driveTokenForSize ? await driveFileSize(driveFileId, driveTokenForSize) : null);
-    const storedInPlans = meta.storage === PLANS_BUCKET || (typeof storagePath === "string" && storagePath.startsWith("originals/"));
-    const isPdf = doc.file_name.toLowerCase().endsWith(".pdf");
-    const queueSplit = projectIdForSplit && (
-      shouldQueuePageSplit({
-        fileName: doc.file_name,
-        sizeBytes,
-        hasSource: Boolean(driveFileId || (storagePath && storedInPlans)),
-      })
-      || (isPdf && Boolean(driveFileId) && sizeBytes == null)
-    );
-    if (queueSplit) {
-      await db.from("documents").update({
-        status: "processing",
-        split_status: "pending",
-        processing_started_at: new Date().toISOString(),
-        last_error: null,
-        last_error_step: null,
-      }).eq("id", docId).eq("tenant_id", tenantId);
-      if (driveFileId) {
-        if (!driveTokenForSize) {
+    const ingestRoute = chooseIngestRoute({
+      fileName: doc.file_name,
+      sizeBytes: typeof meta.size === "number" ? meta.size : null,
+      driveFileId,
+      storagePath,
+      storage: typeof meta.storage === "string" ? meta.storage : null,
+    });
+    if (ingestRoute === "reupload") {
+      const message = "This plan set is not stored where the page splitter can read it. Upload it again.";
+      await markError(message, "split");
+      return NextResponse.json({ error: message }, { status: 409 });
+    }
+    if (ingestRoute === "split-drive" || ingestRoute === "split-storage") {
+      const projectIdForSplit = doc.project_id as string | null;
+      if (!projectIdForSplit) {
+        return NextResponse.json({ error: "Document is not attached to a project" }, { status: 400 });
+      }
+      let splitPayload: Parameters<typeof invokePageSplitWorker>[0];
+      if (ingestRoute === "split-drive") {
+        const driveToken = accessToken ?? await getAccessToken(resolvedTenantId, userId);
+        if (!driveToken || !driveFileId) {
           return NextResponse.json({
             error: "Google Drive is not connected. Connect Google in Settings.",
             code: "NEED_GOOGLE",
           }, { status: 412 });
         }
-        await invokePageSplitWorker({
+        splitPayload = {
           document_id: docId,
           tenant_id: resolvedTenantId,
           project_id: projectIdForSplit,
           original_path: `originals/${docId}.pdf`,
           drive_file_id: driveFileId,
-          access_token: driveTokenForSize,
+          access_token: driveToken,
           user_id: userId,
-        });
+        };
       } else {
-        await invokePageSplitWorker({
+        splitPayload = {
           document_id: docId,
           tenant_id: resolvedTenantId,
           project_id: projectIdForSplit,
           original_path: storagePath!,
           user_id: userId,
           is_local_upload: true,
-        });
+        };
       }
-      return NextResponse.json({
-        ok: true,
-        queued: true,
-        reason: "large_plan_set",
-        bytes: sizeBytes,
-      }, { status: 202 });
+      await db.from("documents").update({
+        status: "queued",
+        split_status: "pending",
+        last_error: null,
+        last_error_step: null,
+      }).eq("id", docId).eq("tenant_id", tenantId);
+      void invokePageSplitWorker(splitPayload).catch(async (err) => {
+        const detail = err instanceof Error ? err.message : String(err);
+        await markError(detail, "page_split_worker_invoke");
+      });
+      return NextResponse.json({ ok: true, queued: true, route: ingestRoute }, { status: 202 });
     }
 
-    // 1. Download the file from Drive or Supabase Storage
+    let pagesToEmbed: GeminiPage[] = resumePages;
+    let docType = "other";
+    let pageCount = storedGeminiPages.length;
+    if (resumePages.length === 0) {
+    // Images and small legacy files. PDFs in Drive or plans-bucket already returned above.
     let pdfBytes: Buffer;
 
     if (driveFileId) {
-      const driveToken = driveTokenForSize ?? accessToken ?? await getAccessToken(tenantId, userId);
+      const driveToken = accessToken ?? await getAccessToken(resolvedTenantId, userId);
       if (!driveToken) {
         return NextResponse.json({
           error: "Google Drive is not connected. Connect Google in Settings.",
@@ -360,60 +351,6 @@ export async function POST(
         return NextResponse.json({ error: downloaded.error }, { status: 500 });
       }
       pdfBytes = downloaded.bytes;
-    }
-
-    const downloadedTooLarge = doc.file_name.toLowerCase().endsWith(".pdf") && pdfBytes.length >= PAGE_SPLIT_BYTES;
-    if (downloadedTooLarge && projectIdForSplit && driveFileId && driveTokenForSize) {
-      await db.from("documents").update({
-        status: "processing",
-        split_status: "pending",
-        processing_started_at: new Date().toISOString(),
-        last_error: null,
-        last_error_step: null,
-      }).eq("id", docId).eq("tenant_id", tenantId);
-      await invokePageSplitWorker({
-        document_id: docId,
-        tenant_id: resolvedTenantId,
-        project_id: projectIdForSplit,
-        original_path: `originals/${docId}.pdf`,
-        drive_file_id: driveFileId,
-        access_token: driveTokenForSize,
-        user_id: userId,
-      });
-      return NextResponse.json({
-        ok: true,
-        queued: true,
-        reason: "large_plan_set",
-        bytes: pdfBytes.length,
-      }, { status: 202 });
-    }
-    if (shouldQueuePageSplit({ fileName: doc.file_name, sizeBytes: pdfBytes.length, hasSource: Boolean(projectIdForSplit && storagePath && storedInPlans) })) {
-      await db.from("documents").update({
-        status: "processing",
-        split_status: "pending",
-        processing_started_at: new Date().toISOString(),
-        last_error: null,
-        last_error_step: null,
-      }).eq("id", docId).eq("tenant_id", tenantId);
-      await invokePageSplitWorker({
-        document_id: docId,
-        tenant_id: resolvedTenantId,
-        project_id: projectIdForSplit!,
-        original_path: storagePath!,
-        user_id: userId,
-        is_local_upload: true,
-      });
-      return NextResponse.json({
-        ok: true,
-        queued: true,
-        reason: "large_plan_set",
-        bytes: pdfBytes.length,
-      }, { status: 202 });
-    }
-    if (downloadedTooLarge && !storedInPlans) {
-      const message = "This plan set is stored outside plans-bucket, so it cannot be split in the background. Upload it again.";
-      await markError(message, "split");
-      return NextResponse.json({ error: message }, { status: 409 });
     }
 
     await db.from("documents").update({

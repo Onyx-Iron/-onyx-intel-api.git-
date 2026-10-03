@@ -195,50 +195,71 @@ Deno.serve(async (req) => {
     }
 
     if (pageRows.length > 0) {
+      // Replace any previous split so a retry does not collide on (document_id, page_number).
+      const { error: delErr } = await db.from("document_pages")
+        .delete()
+        .eq("document_id", body.document_id)
+        .eq("tenant_id", body.tenant_id);
+      if (delErr) throw new Error(`clear document_pages: ${delErr.message}`);
       const { error: insErr } = await db.from("document_pages").insert(pageRows);
       if (insErr) throw new Error(`insert document_pages: ${insErr.message}`);
     }
 
-    // ── 6. Fan out: fire-and-forget each page to page-processor (OCR/embed
-    // for search) AND page-takeoff-worker (real CSI takeoff rows) ───────────
+    // ── 6. Fan out in small batches. A 200-page set used to open 400
+    // sockets at once, and a non-2xx response was counted as success. ──────
     const base = SUPABASE_URL.replace(/\/$/, "");
     const processorUrl = `${base}/functions/v1/page-processor`;
     const takeoffWorkerUrl = `${base}/functions/v1/page-takeoff-worker`;
-    const fanoutResults = await Promise.allSettled(pageRows.flatMap((p) => [
-      fetch(processorUrl, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+    const jobs = pageRows.flatMap((p) => [
+      {
+        url: processorUrl,
+        payload: {
           page_id: p.id,
           document_id: p.document_id,
           tenant_id: p.tenant_id,
           page_number: p.page_number,
           storage_path: p.storage_path,
-        }),
-      }),
-      fetch(takeoffWorkerUrl, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
-          "Content-Type": "application/json",
         },
-        body: JSON.stringify({
+      },
+      {
+        url: takeoffWorkerUrl,
+        payload: {
           page_id: p.id,
           document_id: p.document_id,
           tenant_id: p.tenant_id,
           project_id: body.project_id,
           page_number: p.page_number,
           storage_path: p.storage_path,
-        }),
-      }),
-    ]));
-    const fanoutFailures = fanoutResults.filter((r) => r.status === "rejected").length;
-    if (fanoutFailures > 0) {
-      await recordEvent("failed", `fan-out rejected for ${fanoutFailures} page jobs`);
-    }
+        },
+      },
+    ]);
+    const fanout = (async () => {
+      let fanoutFailures = 0;
+      for (let i = 0; i < jobs.length; i += 8) {
+        const batch = jobs.slice(i, i + 8);
+        const results = await Promise.allSettled(batch.map(async (job) => {
+          const res = await fetch(job.url, {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(job.payload),
+          });
+          if (!res.ok) {
+            const detail = (await res.text().catch(() => "")).slice(0, 120);
+            throw new Error(`${res.status} ${detail}`);
+          }
+        }));
+        fanoutFailures += results.filter((r) => r.status === "rejected").length;
+      }
+      if (fanoutFailures > 0) {
+        await recordEvent("failed", `fan-out rejected for ${fanoutFailures} page jobs`);
+      }
+    })();
+    const runtime = (globalThis as { EdgeRuntime?: { waitUntil: (promise: Promise<unknown>) => void } }).EdgeRuntime;
+    if (runtime?.waitUntil) runtime.waitUntil(fanout);
+    else void fanout.catch((err) => console.error("[page-split] fan-out", err));
 
     // Mark documents.status="split" — pages are now the unit of work.
     await db.from("documents")

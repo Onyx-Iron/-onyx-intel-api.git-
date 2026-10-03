@@ -2,35 +2,44 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  chooseIngestRoute,
   documentStorageBuckets,
   mimeTypeForFile,
   originalStoragePath,
   PAGE_SPLIT_BYTES,
-  shouldQueuePageSplit,
 } from "./upload-plan.ts";
 
 describe("document upload plan", () => {
-  it("queues a large PDF that already has a source and leaves small files on the direct ingest path", () => {
-    assert.equal(shouldQueuePageSplit({
+  it("sends every plans-bucket or Drive PDF to the splitter and keeps images inline", () => {
+    assert.equal(chooseIngestRoute({
       fileName: "plans.pdf",
-      sizeBytes: PAGE_SPLIT_BYTES,
-      hasSource: true,
-    }), true);
-    assert.equal(shouldQueuePageSplit({
-      fileName: "sheet.pdf",
-      sizeBytes: PAGE_SPLIT_BYTES - 1,
-      hasSource: true,
-    }), false);
-    assert.equal(shouldQueuePageSplit({
-      fileName: "photo.jpg",
-      sizeBytes: PAGE_SPLIT_BYTES * 2,
-      hasSource: true,
-    }), false);
-    assert.equal(shouldQueuePageSplit({
+      sizeBytes: 12_000,
+      storage: "plans-bucket",
+      storagePath: "originals/doc.pdf",
+    }), "split-storage");
+    assert.equal(chooseIngestRoute({
       fileName: "plans.pdf",
       sizeBytes: null,
-      hasSource: true,
-    }), false);
+      driveFileId: "drive-1",
+    }), "split-drive");
+    assert.equal(chooseIngestRoute({
+      fileName: "photo.jpg",
+      sizeBytes: PAGE_SPLIT_BYTES * 2,
+      storage: "plans-bucket",
+      storagePath: "originals/doc.jpg",
+    }), "inline");
+    assert.equal(chooseIngestRoute({
+      fileName: "old.pdf",
+      sizeBytes: PAGE_SPLIT_BYTES - 1,
+      storage: "project-documents",
+      storagePath: "tenant/project/old.pdf",
+    }), "inline");
+    assert.equal(chooseIngestRoute({
+      fileName: "old.pdf",
+      sizeBytes: PAGE_SPLIT_BYTES,
+      storage: "project-documents",
+      storagePath: "tenant/project/old.pdf",
+    }), "reupload");
   });
 
   it("stores PDFs where the page-split worker already looks", () => {
