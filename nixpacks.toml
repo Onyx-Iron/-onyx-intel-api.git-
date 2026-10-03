@@ -1,10 +1,12 @@
 [phases.setup]
-nixPkgs = ["python312", "python312Packages.pip"]
+nixPkgs = ["python312"]
 
 [phases.install]
-# Use `python -m pip` — Nixpacks/Railpack images often lack a bare `pip` on PATH
-# (production builds were failing with exit 127).
+# Nixpacks runs `nix-collect-garbage -d` after setup, which can remove the
+# python312Packages.pip store path. Bootstrap pip via ensurepip, then install.
 cmds = [
+  "python -m ensurepip --upgrade",
+  "python -m pip install --upgrade pip",
   "python -m pip install -r requirements.txt",
   "python -m pip install -r requirements-docling.txt",
 ]
