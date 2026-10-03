@@ -16,7 +16,7 @@ COPY requirements.txt requirements-docling.txt ./
 # pull multi-GB CUDA wheels onto the Railway image.
 RUN pip install --no-cache-dir -r requirements.txt \
  && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
- && pip install --no-cache-dir -r requirements-docling.txt
+ && pip install --no-cache-dir -r requirements-docling.txt && pip install --no-cache-dir "transformers>=4.42.0,<5"
 
 COPY . .
 
