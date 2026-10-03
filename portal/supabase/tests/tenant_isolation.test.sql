@@ -15,8 +15,13 @@ create extension if not exists pgtap with schema extensions;
 select plan(8);
 
 -- Temporary grants so SET ROLE authenticated can exercise RLS (rolled back).
+-- Table SELECTs were revoked in 20260803191017; EXECUTE on current_tenant_id()
+-- was also revoked there, but older permissive policies still call it — without
+-- this grant, SELECT fails with "permission denied for function" before the
+-- app.clerk_org_id ALL policies can authorize the row.
 grant select on public.tenants, public.projects, public.takeoff_items, public.estimate_items
   to authenticated;
+grant execute on function public.current_tenant_id() to authenticated;
 
 -- Fixed UUIDs for stable assertions.
 select set_config('test.tenant_a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', true);
