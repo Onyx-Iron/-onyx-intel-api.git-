@@ -17,6 +17,10 @@ const isPublicRoute = createRouteMatcher([
   // are never present. Without this, auth.protect() 307s/401s before the
   // route's own secret check runs.
   "/api/internal/outbox/process",
+  // Sheet-index cron (vercel.json). Same secret auth as the outbox worker.
+  // Without this entry, Clerk auth.protect() runs before the route's secret
+  // check and the scheduled claim never starts.
+  "/api/internal/sheets/process",
   // Paddle billing webhooks verify their own signature; no Clerk session.
   "/api/billing/webhook",
 ]);
