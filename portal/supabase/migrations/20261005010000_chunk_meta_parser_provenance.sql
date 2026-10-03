@@ -19,7 +19,10 @@ create index if not exists idx_document_chunks_meta_parser
 create index if not exists idx_chunks_meta_parser
   on public.chunks ((meta->>'parser_id'));
 
-create or replace function public.match_document_chunks(
+-- CREATE OR REPLACE cannot change RETURNS TABLE shape (42P13). Drop first.
+drop function if exists public.match_document_chunks(vector, uuid, text, integer);
+
+create function public.match_document_chunks(
   query_embedding vector,
   match_tenant_id uuid,
   match_document_id text,
