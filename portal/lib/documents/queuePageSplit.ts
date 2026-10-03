@@ -207,6 +207,9 @@ export async function queueLocalDocumentForPageSplit(args: QueueLocalArgs): Prom
   await anyDb.from("documents").update({
     status: "queued",
     split_status: "pending",
+    ocr_status: "pending",
+    vector_status: "pending",
+    takeoff_status: "pending",
     processing_started_at: new Date().toISOString(),
     last_error: null,
     last_error_step: null,
@@ -262,6 +265,9 @@ async function kickPageSplit(args: {
   await db.from("documents").update({
     status: "queued",
     split_status: "pending",
+    ocr_status: "pending",
+    vector_status: "pending",
+    takeoff_status: "pending",
     processing_started_at: new Date().toISOString(),
     last_error: null,
     last_error_step: null,

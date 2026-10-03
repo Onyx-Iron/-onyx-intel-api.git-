@@ -455,7 +455,12 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
       }
       if (data.skipped && data.reason === "already_complete") {
         toast({ title: String("Document is already processed."), kind: "info" });
-      } else if (data.skipped && data.reason === "already_processing") {
+      } else if (
+        data.skipped
+        && (data.reason === "already_processing" || data.reason === "concurrent_claim")
+      ) {
+        toast({ title: String("Document is already being processed."), kind: "info" });
+      } else if (res.status === 409 && data.skipped) {
         toast({ title: String("Document is already being processed."), kind: "info" });
       } else {
         toast({

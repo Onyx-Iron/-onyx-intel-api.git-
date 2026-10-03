@@ -25,7 +25,9 @@ export async function reclaimStuckProcessingDocuments(
 
   // Prefer processing_started_at so long Drive uploads that only later enter
   // processing aren't falsely reclaimed based on uploaded_at alone.
-  // Include "split" (Tier 2/3 async path) alongside "processing".
+  // Do NOT reclaim status="split" here — kick time is often >10m before OCR
+  // finishes on large plans. Stuck pages are reclaimed separately; OCR
+  // finalize then rolls the parent to complete / complete_with_errors / error.
   const { data: byStart, error: startErr } = await db
     .from("documents")
     .update({
@@ -34,14 +36,14 @@ export async function reclaimStuckProcessingDocuments(
       last_error_step: "stuck_processing_reclaim",
     })
     .eq("tenant_id", tenantId)
-    .in("status", ["processing", "split"])
+    .eq("status", "processing")
     .not("processing_started_at", "is", null)
     .lt("processing_started_at", cutoff)
     .select("id");
 
   if (startErr) console.error("[reclaimStuckProcessingDocuments:started]", startErr);
 
-  // Fallback: processing/split rows that never got processing_started_at set.
+  // Fallback: processing rows that never got processing_started_at set.
   const { data: byUpload, error: uploadErr } = await db
     .from("documents")
     .update({
@@ -50,7 +52,7 @@ export async function reclaimStuckProcessingDocuments(
       last_error_step: "stuck_processing_reclaim",
     })
     .eq("tenant_id", tenantId)
-    .in("status", ["processing", "split"])
+    .eq("status", "processing")
     .is("processing_started_at", null)
     .lt("uploaded_at", cutoff)
     .select("id");
