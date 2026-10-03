@@ -175,11 +175,15 @@ interface Props {
 // ─────────────────────────────────────────────────────────────────────────────
 type SnapWorkerResponse = { type: "snap-result"; id: number; result: SnapResult };
 
-export default function SheetCanvas({ projectId, projectName, pageId, pageNumber }: Props) {
+export default function SheetCanvas({ projectId, projectName, pageId, pageNumber, documentId }: Props) {
   const queryClient = useQueryClient();
   const { data: calibration = null } = useSheetCalibration(pageId);
   const wrapRef   = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const priorCanvasRef = useRef<HTMLCanvasElement>(null);
+  const [priorUrl, setPriorUrl] = useState<string | null>(null);
+  const [priorLabel, setPriorLabel] = useState<string | null>(null);
+  const [showPrior, setShowPrior] = useState(false);
   const snapWorkerRef = useRef<Worker | null>(null);
   const snapRequestIdRef = useRef(0);
   const latestSnapRef = useRef<SnapResult | null>(null);
@@ -428,6 +432,55 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     })();
     return () => { cancelled = true; };
   }, [pdfUrl, pageId]);
+
+  useEffect(() => {
+    if (!documentId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/takeoff/canvas/prior-revision?document_id=${encodeURIComponent(documentId)}&page_number=${pageNumber}`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) return;
+        const data = await res.json() as { url?: string | null; revision_token?: string | null; file_name?: string | null };
+        if (cancelled || !data.url) return;
+        setPriorUrl(data.url);
+        setPriorLabel(data.revision_token ? `Rev ${data.revision_token}` : (data.file_name ?? "Prior"));
+      } catch {
+        /* overlay is optional */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [documentId, pageNumber]);
+
+  useEffect(() => {
+    if (!showPrior || !priorUrl || renderScale <= 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const pdfjs = await import("pdfjs-dist");
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (pdfjs as any).GlobalWorkerOptions.workerSrc = new URL(
+          "pdfjs-dist/build/pdf.worker.min.mjs",
+          import.meta.url,
+        ).toString();
+        const doc = await cachedPdfDocument(priorUrl, () => pdfjs.getDocument({ url: priorUrl }).promise);
+        const page = await doc.getPage(1);
+        const viewport = page.getViewport({ scale: renderScale });
+        const cvs = priorCanvasRef.current;
+        if (!cvs || cancelled) return;
+        cvs.width = viewport.width;
+        cvs.height = viewport.height;
+        const ctx = cvs.getContext("2d");
+        if (!ctx) return;
+        await page.render({ canvas: cvs, canvasContext: ctx, viewport }).promise;
+      } catch (e) {
+        console.warn("[SheetCanvas] prior revision overlay skipped:", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [showPrior, priorUrl, renderScale, pageId]);
 
   // Vector extraction waits until a civil tool needs the CAD overlay.
   const vectorExtractKey = useRef<string | null>(null);
@@ -1320,6 +1373,20 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           </div>
 
           <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono text-white/40">
+            {priorUrl && (
+              <button
+                type="button"
+                onClick={() => setShowPrior((on) => !on)}
+                className={`rounded-full border px-2 py-0.5 normal-case tracking-normal ${
+                  showPrior
+                    ? "border-red-400/70 bg-red-500/20 text-red-200"
+                    : "border-white/10 text-white/60 hover:text-white hover:bg-white/[0.06]"
+                }`}
+                title="Ghost the previous revision of this sheet in red"
+              >
+                {showPrior ? `Hide ${priorLabel ?? "prior"}` : `Ghost ${priorLabel ?? "prior rev"}`}
+              </button>
+            )}
             {calibration ? (
               <>
                 {calibration.status === "verified" ? (
@@ -1415,6 +1482,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         {/* PDF + overlay */}
         <div className="relative mx-auto my-4 w-max">
           <canvas ref={canvasRef} className="block rounded-md shadow-2xl" />
+          <canvas
+            ref={priorCanvasRef}
+            aria-hidden={!showPrior}
+            className={`pointer-events-none absolute left-0 top-0 rounded-md mix-blend-multiply ${showPrior ? "opacity-55" : "hidden"}`}
+            style={showPrior ? { filter: "sepia(1) saturate(8) hue-rotate(-30deg)" } : undefined}
+          />
           {renderSize && (
             <svg
               width={renderSize.w}

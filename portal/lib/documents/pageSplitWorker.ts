@@ -9,6 +9,8 @@ export interface PageSplitPayloadBase {
 export type PageSplitPayload =
   | (PageSplitPayloadBase & {
       is_local_upload: true;
+      /** Bucket that already holds original_path. Defaults to plans-bucket in the worker. */
+      source_bucket?: string;
     })
   | (PageSplitPayloadBase & {
       drive_file_id: string;

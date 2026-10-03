@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { FolderOpen, FileText, X, RefreshCw, Sparkles, Send, Upload, ChevronDown, ChevronRight } from "lucide-react";
 import GoogleDrivePicker from "./GoogleDrivePicker";
 import GenerateDocDropdown from "@/components/common/GenerateDocDropdown";
@@ -183,15 +184,30 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     );
   }, []);
 
-  const loadDocuments = useCallback(async (showLoading = true): Promise<Document[]> => {
-    if (showLoading) setLoading(true);
+  const [docsPage, setDocsPage] = useState(1);
+  const [docsHasMore, setDocsHasMore] = useState(false);
+
+  const loadDocuments = useCallback(async (showLoading = true, page = 1): Promise<Document[]> => {
+    if (showLoading && page === 1) setLoading(true);
     try {
-      const r = await fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}`);
-      const d = await r.json() as { documents?: Document[] };
-      const list = d.documents ?? [];
-      setDocuments(list);
+      const r = await fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}&page=${page}&limit=200`);
+      const d = await r.json() as { documents?: Document[]; pagination?: { hasMore?: boolean } };
+      const incoming = d.documents ?? [];
+      let next = incoming;
+      setDocuments((prev) => {
+        if (page === 1) {
+          const incomingIds = new Set(incoming.map((doc) => doc.id));
+          next = [...incoming, ...prev.filter((doc) => !incomingIds.has(doc.id))];
+          return next;
+        }
+        const seen = new Set(prev.map((doc) => doc.id));
+        next = [...prev, ...incoming.filter((doc) => !seen.has(doc.id))];
+        return next;
+      });
+      setDocsHasMore(Boolean(d.pagination?.hasMore));
+      setDocsPage(page);
       setLoading(false);
-      return list;
+      return next;
     } catch {
       setLoading(false);
       return [];
@@ -600,6 +616,14 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                       <td className="px-4 py-3 text-gray-600 text-[11px]">{fmt(doc.uploaded_at)}</td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-3">
+                          {doc.file_name.toLowerCase().endsWith(".pdf") && (
+                            <Link
+                              href={`/dashboard/projects/${projectId}/takeoff/canvas?document_id=${encodeURIComponent(doc.id)}`}
+                              className="text-[10px] uppercase tracking-widest font-mono text-gray-600 hover:text-[#CCFF00] transition-colors"
+                            >
+                              Canvas
+                            </Link>
+                          )}
                           {documentHasAskableSource(doc) && (
                             <button
                               onClick={() => openAsk(doc)}
@@ -741,6 +765,17 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
               )}
             </tbody>
           </table>
+          {docsHasMore && (
+            <div className="flex justify-center border-t border-white/5 py-3">
+              <button
+                type="button"
+                onClick={() => { void loadDocuments(false, docsPage + 1); }}
+                className="text-[10px] uppercase tracking-widest font-mono text-gray-500 hover:text-[#CCFF00]"
+              >
+                Load more documents
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
