@@ -1,7 +1,7 @@
 """Onyx Intel — CSI Takeoff Stream API (loader).
 
-Implementation is stored gzip+base64 in `_takeoff_api_payload.py` so GitHub MCP
-can push the full module; this loader expands it at import time.
+Implementation bytes are stored gzip+base64 across `_takeoff_api_payload.frag{0..3}`
+so GitHub MCP can push them under size limits; this loader expands at import time.
 """
 from __future__ import annotations
 
@@ -12,11 +12,14 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-from _takeoff_api_payload import PAYLOAD_B64
+_root = Path(__file__).resolve().parent
+_PAYLOAD_B64 = "".join(
+    (_root / f"_takeoff_api_payload.frag{i}").read_text().rstrip("\n") for i in range(4)
+)
 
-_code = gzip.decompress(base64.b64decode(PAYLOAD_B64)).decode("utf-8")
+_code = gzip.decompress(base64.b64decode(_PAYLOAD_B64)).decode("utf-8")
 _mod = ModuleType("_takeoff_api_impl")
-_mod.__file__ = str(Path(__file__).with_name("_takeoff_api_impl.py"))
+_mod.__file__ = str(_root / "_takeoff_api_impl.py")
 sys.modules["_takeoff_api_impl"] = _mod
 exec(compile(_code, _mod.__file__, "exec"), _mod.__dict__)
 
