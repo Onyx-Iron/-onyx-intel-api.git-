@@ -125,6 +125,10 @@ BEGIN
 END;
 $function$;
 
+-- Drop the pre-filter 6-arg overload so PostgREST/RPC resolve to this signature
+-- (new filter args default to NULL). Keep the 4-arg legacy used in the ELSE branch.
+DROP FUNCTION IF EXISTS public.match_chunks(vector, uuid, uuid, text, integer, integer);
+
 ALTER FUNCTION public.match_chunks(vector, uuid, uuid, text, integer, integer, text[], text[])
   SET search_path = public, extensions;
 
