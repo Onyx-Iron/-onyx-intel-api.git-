@@ -1,13 +1,12 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
-import { headerSafe } from "@/lib/http";
-import { pythonApiHeaders } from "@/lib/python-api";
+import { pythonApiBaseUrl, pythonApiHeaders } from "@/lib/python-api";
 import { civilTrenchRequestSchema } from "@/lib/validation";
 import type { CivilTrenchResult } from "@/lib/types/takeoff";
 
 export const runtime = "nodejs";
 
-const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://127.0.0.1:5050";
+const PYTHON_API_URL = pythonApiBaseUrl();
 
 /**
  * POST /api/v1/math/civil-trench

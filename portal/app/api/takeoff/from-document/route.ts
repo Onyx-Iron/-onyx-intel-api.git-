@@ -1,18 +1,17 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { headerSafe } from "@/lib/http";
 import { getAccessToken } from "@/lib/google/oauth";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
-import { pythonApiHeaders } from "@/lib/python-api";
+import { pythonApiBaseUrl, pythonApiHeaders } from "@/lib/python-api";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import { CANONICAL_FAILURE, CANONICAL_SUCCESS } from "@/lib/documents/status";
 import { fetchDriveFileSize } from "@/lib/google/driveFile";
 
-const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
+const PYTHON_API_URL = pythonApiBaseUrl();
 // Aligned with the Supabase Edge Functions — see `page-split-worker/index.ts`.
 const BUCKET = "plans-bucket";
 
