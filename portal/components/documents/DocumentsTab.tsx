@@ -616,7 +616,9 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                               <span className="text-[10px] uppercase tracking-widest font-mono">Ask</span>
                             </button>
                           )}
-                          {(isErrorStatus(String(doc.status)) || (pollTimedOut && inFlight)) && (
+                          {(isErrorStatus(String(doc.status))
+                            || doc.status === "complete_with_errors"
+                            || (pollTimedOut && inFlight)) && (
                             <button
                               onClick={() => void retryIngest(doc)}
                               disabled={retryingDocId === doc.id}

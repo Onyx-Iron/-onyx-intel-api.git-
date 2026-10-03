@@ -77,15 +77,12 @@ export async function queueDriveDocumentForPageSplit(args: QueueDriveArgs): Prom
     .maybeSingle();
 
   if (existing?.id) {
-    // Terminal success — don't re-split a healthy doc on re-import.
-    const terminalOk = ["complete", "ready", "done", "complete_with_errors"].includes(
-      String(existing.status),
-    );
-    // Retry / re-import must re-kick stuck OR in-flight orphaned states
-    // (processing/split) — previously only error/queued were rekicked, so
-    // Retry after poll-timeout was a no-op.
-    const needsRekick = !terminalOk && [
+    // Healthy terminals — skip re-split on casual re-import. Partial /
+    // failed / in-flight states are always re-kickable on Retry.
+    const skipRekick = ["complete", "ready", "done"].includes(String(existing.status));
+    const needsRekick = !skipRekick && [
       "error", "failed", "queued", "pending", "processing", "split",
+      "complete_with_errors",
     ].includes(String(existing.status));
     if (rekickIfStuck && needsRekick) {
       await kickPageSplit({
@@ -142,10 +139,8 @@ export async function queueDriveDocumentForPageSplit(args: QueueDriveArgs): Prom
       .eq("drive_file_id", driveFileId)
       .maybeSingle();
     if (raced?.id) {
-      const terminalOk = ["complete", "ready", "done", "complete_with_errors"].includes(
-        String(raced.status),
-      );
-      if (rekickIfStuck && !terminalOk) {
+      const skipRekick = ["complete", "ready", "done"].includes(String(raced.status));
+      if (rekickIfStuck && !skipRekick) {
         await kickPageSplit({
           db: anyDb,
           documentId: raced.id,
