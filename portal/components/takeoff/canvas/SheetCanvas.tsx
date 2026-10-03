@@ -9,6 +9,11 @@ import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
 import { CANVAS_HOTKEY_HINT, resolveCanvasHotkey, type CanvasTool } from "@/lib/takeoff/canvas/hotkeys";
+import {
+  DEFAULT_SNAP_THRESHOLD_PX,
+  getNearestVectorPoint,
+  type VectorPoint,
+} from "@/lib/takeoff/canvas/vector-snap";
 
 // Coordinate-space tag carried alongside each committed item (professional-
 // manual-takeoff milestone, PERMANENT RULE 1/2). 'page_space' points are
@@ -27,6 +32,18 @@ type CoordinateSpace = "page_space" | "legacy_pixel";
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 type Tool = CanvasTool;
+
+/** Tools where cursor magnetic-snap to CAD/PDF vector vertices is useful. */
+const SNAP_TOOLS: ReadonlySet<Tool> = new Set([
+  "calibrate",
+  "count",
+  "length",
+  "area",
+  "utility_pipe",
+  "spot_elevation",
+  "contour_line",
+  "civil_area_bounds",
+]);
 
 interface Pt { x: number; y: number }
 
@@ -166,6 +183,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // runs/topo nodes/area bounds, is deferred — see REMAINING_RISKS.md.
   const [dragState, setDragState] = useState<{ key: string; startClient: Pt; originalPoints: Pt[]; originalRowVersion: number } | null>(null);
   const [vectorDescriptions, setVectorDescriptions] = useState<string[]>([]);
+  const [snapPoints, setSnapPoints] = useState<VectorPoint[]>([]);
+  const [snapTarget, setSnapTarget] = useState<{ point: VectorPoint; distance: number } | null>(null);
   const [utilityRuns, setUtilityRuns] = useState<UtilityRun[]>([]);
   const [utilityDraftPts, setUtilityDraftPts] = useState<Pt[]>([]);
   const [utilityModalPts, setUtilityModalPts] = useState<Pt[] | null>(null); // non-null while the input overlay is open
@@ -339,7 +358,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // Vector extraction waits until a civil tool needs the CAD overlay.
   const vectorExtractKey = useRef<string | null>(null);
   useEffect(() => {
-    const vectorTools = new Set<Tool>(["utility_pipe", "contour_line", "spot_elevation", "civil_area_bounds"]);
+    const vectorTools = new Set<Tool>([
+      "utility_pipe",
+      "contour_line",
+      "spot_elevation",
+      "civil_area_bounds",
+      "length",
+      "area",
+      "count",
+    ]);
     if (!pdfUrl || !vectorTools.has(tool)) return;
     const key = `${pdfUrl}:${pageId}`;
     if (vectorExtractKey.current === key) return;
@@ -394,6 +421,22 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     };
   }, [renderSize]);
 
+  const resolveSnapPoint = useCallback((cursor: Pt): Pt => {
+    if (!SNAP_TOOLS.has(tool) || snapPoints.length === 0) return cursor;
+    const result = getNearestVectorPoint(cursor, snapPoints, DEFAULT_SNAP_THRESHOLD_PX);
+    return result.snapped ? result.point : cursor;
+  }, [tool, snapPoints]);
+
+  const onCanvasMouseMove: React.MouseEventHandler<SVGSVGElement> = useCallback((e) => {
+    if (!SNAP_TOOLS.has(tool) || snapPoints.length === 0) {
+      setSnapTarget(null);
+      return;
+    }
+    const cursor = toLocal(e.clientX, e.clientY, e.currentTarget);
+    const result = getNearestVectorPoint(cursor, snapPoints, DEFAULT_SNAP_THRESHOLD_PX);
+    setSnapTarget(result.snapped ? { point: result.point, distance: result.distance } : null);
+  }, [tool, snapPoints, toLocal]);
+
   // ── Geometry helpers ──────────────────────────────────────────────────────
   // `scale` is real-world-units per CURRENT-RENDER pixel — every existing
   // `pixelDistance(...) * scale` / `polygonArea(...) * scale * scale` call
@@ -441,7 +484,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // ── Click handling ────────────────────────────────────────────────────────
   const onCanvasClick: React.MouseEventHandler<SVGSVGElement> = (e) => {
     if (!renderSize) return;
-    const p = toLocal(e.clientX, e.clientY, e.currentTarget);
+    const raw = toLocal(e.clientX, e.clientY, e.currentTarget);
+    const p = resolveSnapPoint(raw);
 
     if (tool === "calibrate") {
       const next = [...calibPts, p];
@@ -1236,6 +1280,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               className={`absolute inset-0 select-none ${tool === "pan" ? "cursor-grab" : "cursor-crosshair"}`}
               onClick={onCanvasClick}
               onDoubleClick={finishDraft}
+              onMouseMove={onCanvasMouseMove}
+              onMouseLeave={() => setSnapTarget(null)}
             >
               {/* Committed shapes */}
               {shapes.map((s) => {
@@ -1382,6 +1428,29 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   ))}
                 </g>
               )}
+
+              {/* Magnetic snap target — green ring when cursor locks to a vector vertex */}
+              {SNAP_TOOLS.has(tool) && snapTarget && (
+                <g pointerEvents="none">
+                  <circle
+                    cx={snapTarget.point.x}
+                    cy={snapTarget.point.y}
+                    r={10}
+                    fill="none"
+                    stroke="#22c55e"
+                    strokeWidth={2}
+                    opacity={0.95}
+                  />
+                  <circle
+                    cx={snapTarget.point.x}
+                    cy={snapTarget.point.y}
+                    r={3}
+                    fill="#22c55e"
+                    stroke="#052e16"
+                    strokeWidth={1}
+                  />
+                </g>
+              )}
             </svg>
           )}
 
@@ -1392,6 +1461,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             canvasSize={renderSize}
             scaleRatio={scale}
             onVectorsLoaded={setVectorDescriptions}
+            onSnapPointsChange={setSnapPoints}
             onCommitted={(m) => {
               // Mirror an approved CAD vector into the local shapes dock so
               // estimators see it immediately without needing to reload.
