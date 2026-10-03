@@ -16,7 +16,7 @@ export const MODEL_OPTIONS: Record<Provider, ReadonlyArray<{ id: string; label: 
   gemini: [
     { id: "gemini-2.5-pro",   label: "Gemini 2.5 Pro",   hint: "Highest quality · slower" },
     { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", hint: "Fast · lower cost" },
-    { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash", hint: "Cheapest" },
+    { id: "gemini-3.6-flash", label: "Gemini 3.6 Flash", hint: "Current default" },
   ],
   openai: [
     { id: "gpt-4o",           label: "GPT-4o",           hint: "Balanced" },

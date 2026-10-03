@@ -50,6 +50,14 @@ export async function fetchGemini(
   throw new Error(summarizeError(lastError) || `${label} failed`);
 }
 
+/** Final answer text. Gemini 3 can return thought parts ahead of the JSON. */
+export function geminiAnswerText(parts: Array<{ text?: string; thought?: boolean }> | undefined): string {
+  return (parts ?? [])
+    .filter((part) => part.thought !== true && typeof part.text === "string" && part.text.length > 0)
+    .map((part) => part.text)
+    .join("");
+}
+
 export async function readGeminiError(response: Response, label: string): Promise<never> {
   const detail = (await response.text().catch(() => response.statusText)).slice(0, 300);
   throw new Error(`${label} failed (${response.status}): ${detail}`);

@@ -1,6 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { buildDocumentRevisionMeta } from "@/lib/documents/revisions";
+import { mimeTypeForFile, originalStoragePath, PLANS_BUCKET } from "@/lib/documents/upload-plan";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { getAccessTokenWithReason } from "@/lib/google/oauth";
@@ -9,8 +10,6 @@ import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
-
-const BUCKET = "project-documents";
 
 /**
  * Unified document upload entry point.
@@ -60,19 +59,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         .from("projects").select("id").eq("id", project_id).eq("tenant_id", tenantId).single();
       if (projErr || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
 
-      const safeName = file.name.replace(/[^\w.\-]+/g, "_");
-      const storagePath = `${tenantId}/${project_id}/${Date.now()}-${safeName}`;
+      const documentId = crypto.randomUUID();
+      const storagePath = originalStoragePath(documentId, file.name);
+      const contentType = mimeTypeForFile(file.name, file.type);
       const bytes = Buffer.from(await file.arrayBuffer());
 
       const { error: uploadErr } = await db.storage
-        .from(BUCKET)
-        .upload(storagePath, bytes, { contentType: file.type || "application/octet-stream", upsert: false });
+        .from(PLANS_BUCKET)
+        .upload(storagePath, bytes, { contentType, upsert: false });
       if (uploadErr) {
         return NextResponse.json({ error: `Storage upload failed: ${uploadErr.message}` }, { status: 500 });
       }
 
       const insertRow: TablesInsert<"documents"> = {
-        id: crypto.randomUUID(),
+        id: documentId,
         tenant_id: tenantId,
         project_id,
         file_name: file.name,
@@ -80,10 +80,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         uploaded_at: new Date().toISOString(),
         meta: buildDocumentRevisionMeta(file.name, {
           source: "local_upload",
-          storage: "supabase",
+          storage: PLANS_BUCKET,
           storage_path: storagePath,
           size: bytes.length,
-          content_type: file.type || "application/octet-stream",
+          content_type: contentType,
         }),
       };
       const { data: doc, error } = await db
@@ -99,7 +99,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         entityId: doc.id,
         action: "uploaded",
         title: `Document uploaded: ${file.name}`,
-        meta: { size: bytes.length, content_type: file.type || "application/octet-stream" },
+        meta: { size: bytes.length, content_type: contentType },
       });
 
       return NextResponse.json({
@@ -126,10 +126,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const { project_id, file_name, drive_file_id } = body;
-    const content_type = body.content_type ?? body.mime_type ?? "application/octet-stream";
     if (!project_id || !file_name) {
       return NextResponse.json({ error: "project_id and file_name required" }, { status: 400 });
     }
+    const content_type = mimeTypeForFile(file_name, body.content_type ?? body.mime_type);
 
     const { data: project, error: projErr } = await db
       .from("projects").select("id").eq("id", project_id).eq("tenant_id", tenantId).single();
@@ -178,6 +178,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
           "X-Upload-Content-Type": content_type,
+          ...(typeof body.size === "number" && Number.isFinite(body.size)
+            ? { "X-Upload-Content-Length": String(body.size) }
+            : {}),
         },
         body: JSON.stringify({ name: file_name }),
       },

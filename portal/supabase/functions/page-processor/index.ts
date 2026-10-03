@@ -11,7 +11,7 @@
 //      `display_name` field — Gemini's REST schema doesn't accept it and
 //      rejects the whole request if present.
 //   3. Chunk the extracted text (~1200 chars, 200-char overlap).
-//   4. Embed each chunk with text-embedding-004.
+//   4. Embed each chunk with gemini-embedding-2 at 768 dimensions.
 //   5. Insert into `document_chunks` with page_id + page_number.
 //   6. Update `document_pages.status="done"` and stash `ocr_text`.
 //
@@ -19,7 +19,7 @@
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GEMINI_API_KEY,
 //   PLANS_BUCKET (default "plans-bucket"),
 //   GEMINI_TEXT_MODEL  (default "gemini-2.5-pro"),
-//   GEMINI_EMBED_MODEL (default "text-embedding-004").
+//   GEMINI_EMBED_MODEL (default "gemini-embedding-2"; text-embedding-004 is ignored).
 
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
@@ -29,7 +29,11 @@ const SERVICE_ROLE_KEY   = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GEMINI_API_KEY     = Deno.env.get("GEMINI_API_KEY")!;
 const PLANS_BUCKET       = Deno.env.get("PLANS_BUCKET") ?? "plans-bucket";
 const TEXT_MODEL         = Deno.env.get("GEMINI_TEXT_MODEL") ?? "gemini-2.5-pro";
-const EMBED_MODEL        = Deno.env.get("GEMINI_EMBED_MODEL") ?? "text-embedding-004";
+const RETIRED_EMBED_MODELS = new Set(["text-embedding-004"]);
+const configuredEmbed = Deno.env.get("GEMINI_EMBED_MODEL")?.trim();
+const EMBED_MODEL = !configuredEmbed || RETIRED_EMBED_MODELS.has(configuredEmbed)
+  ? "gemini-embedding-2"
+  : configuredEmbed;
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -151,7 +155,7 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ ok: true, page_id: body.page_id, chunks: 0 }), { status: 200 });
     }
 
-    // ── 4. Embed (batched — text-embedding-004 supports batch mode) ─────────
+    // ── 4. Embed (batched — gemini-embedding-2 supports batch mode) ─────────
     await recordEvent("embedding", "started");
     const embeddings = await embedBatch(chunks);
 
@@ -242,10 +246,14 @@ async function embedBatch(inputs: string[]): Promise<Array<number[] | null>> {
     },
   );
   if (!res.ok) {
-    console.warn(`[embed] batchEmbedContents ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
-    return inputs.map(() => null);
+    const detail = (await res.text().catch(() => "")).slice(0, 200);
+    throw new Error(`embed batchEmbedContents ${res.status}: ${detail}`);
   }
   const json = await res.json();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (json.embeddings ?? []).map((e: any) => (Array.isArray(e?.values) ? e.values : null));
+  const vectors = (json.embeddings ?? []).map((e: any) => (Array.isArray(e?.values) ? e.values as number[] : null));
+  if (vectors.length !== inputs.length || vectors.some((values: number[] | null) => !values || values.length !== 768)) {
+    throw new Error(`Embedding model ${EMBED_MODEL} did not return 768-dimension vectors`);
+  }
+  return vectors;
 }

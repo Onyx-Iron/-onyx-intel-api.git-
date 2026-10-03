@@ -7,6 +7,7 @@ import { headerSafe } from "@/lib/http";
 import { logEvent } from "@/lib/activity";
 import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { generateText, availableProviders, NoProviderError, type Provider } from "@/lib/ai/providers";
+import { DOCUMENT_EMBED_MODEL, DOCUMENT_EXTRACT_MODEL, EMBEDDING_DIMENSIONS, liveModel } from "@/lib/ai/live-model";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -19,9 +20,9 @@ export const maxDuration = 120;
 // =============================================================================
 
 const GEMINI_API_KEY = headerSafe(process.env.GEMINI_API_KEY);
-const EMBED_MODEL = "text-embedding-004";
+const EMBED_MODEL = liveModel(process.env.GEMINI_EMBED_MODEL, DOCUMENT_EMBED_MODEL);
 const CHAT_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-pro";
-const SUMMARY_MODEL = process.env.GEMINI_DIGEST_MODEL ?? "gemini-2.0-flash";
+const SUMMARY_MODEL = liveModel(process.env.GEMINI_DIGEST_MODEL, DOCUMENT_EXTRACT_MODEL);
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 const HISTORY_WINDOW = 12;
@@ -151,12 +152,17 @@ async function embedText(text: string): Promise<number[]> {
       body: JSON.stringify({
         content: { parts: [{ text }] },
         taskType: "RETRIEVAL_QUERY",
+        outputDimensionality: EMBEDDING_DIMENSIONS,
       }),
     },
   );
   if (!res.ok) throw new Error(`Embed failed (${res.status})`);
   const data = await res.json() as { embedding: { values: number[] } };
-  return data.embedding.values;
+  const values = data.embedding?.values ?? [];
+  if (values.length !== EMBEDDING_DIMENSIONS) {
+    throw new Error(`Embedding model ${EMBED_MODEL} returned ${values.length} dimensions; expected ${EMBEDDING_DIMENSIONS}`);
+  }
+  return values;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

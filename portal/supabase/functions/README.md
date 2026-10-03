@@ -21,7 +21,7 @@ Two functions power the Drive → page-split → per-page RAG pipeline:
      GEMINI_API_KEY="AQ...your-billing-key" \
      PLANS_BUCKET="plans-bucket" \
      GEMINI_TEXT_MODEL="gemini-2.5-pro" \
-     GEMINI_EMBED_MODEL="text-embedding-004"
+     GEMINI_EMBED_MODEL="gemini-embedding-2"
    ```
 
    `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are auto-injected by the

@@ -38,6 +38,7 @@ export default function ProjectUploadButton({
               storage_type: "drive",
               file_name: file.name,
               content_type: file.type || "application/octet-stream",
+              size: file.size,
               project_id: projectId,
             }),
           });
