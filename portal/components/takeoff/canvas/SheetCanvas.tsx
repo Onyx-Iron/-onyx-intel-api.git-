@@ -14,6 +14,7 @@ import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
 import { CANVAS_HOTKEY_HINT, resolveCanvasHotkey, type CanvasTool } from "@/lib/takeoff/canvas/hotkeys";
 import { buildQuantitySummary } from "@/lib/takeoff/canvas/quantity-summary";
 import { CommandStack } from "@/lib/takeoff/canvas/command-stack";
+import { PersistedGeometryRevision } from "@/lib/takeoff/canvas/persisted-geometry-revision";
 import TakeoffLayersPanel from "./TakeoffLayersPanel";
 import PlaceAssemblyPanel from "./PlaceAssemblyPanel";
 import {
@@ -1389,24 +1390,38 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     setShapes((prev) => prev.map((x) => (x.key === drag.key
       ? { ...x, row_version: body.manual_takeoff.row_version, quantity: body.quantity, saved: true }
       : x)));
+    const revision = new PersistedGeometryRevision({
+      id: s.id,
+      rowVersion: body.manual_takeoff.row_version,
+      unit: s.unit,
+      costCode: s.cost_code || null,
+      label: s.label,
+      assemblyKey: s.assembly_key,
+      before: {
+        points: drag.originalPoints,
+        quantity: recomputeShapeQuantity(s.tool, drag.originalPoints, s.coordinateSpace),
+      },
+      after: { points: s.points, quantity: body.quantity },
+    });
+    const applyRevision = async (patch: ReturnType<PersistedGeometryRevision["undoBody"]>, points: Pt[]) => {
+      const undoRes = await fetch("/api/takeoff/canvas/manual", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (!undoRes.ok) return;
+      const undoBody = await undoRes.json() as { manual_takeoff: { row_version: number }; quantity: number };
+      revision.accept(undoBody.manual_takeoff.row_version);
+      setShapes((prev) => prev.map((x) => (x.key === drag.key
+        ? { ...x, points, row_version: undoBody.manual_takeoff.row_version, quantity: undoBody.quantity, saved: true }
+        : x)));
+      setCommandTick((t) => t + 1);
+    };
     commandStackRef.current.record({
       id: `vtx-${s.id}-${Date.now()}`,
       label: "Edit vertex",
-      undo: async () => {
-        setShapes((prev) => prev.map((x) => {
-          if (x.key !== drag.key) return x;
-          const q = recomputeShapeQuantity(x.tool, drag.originalPoints, x.coordinateSpace);
-          return { ...x, points: drag.originalPoints, quantity: q };
-        }));
-        setCommandTick((t) => t + 1);
-      },
-      redo: async () => {
-        setShapes((prev) => prev.map((x) => {
-          if (x.key !== drag.key) return x;
-          return { ...x, points: s.points, quantity: body.quantity };
-        }));
-        setCommandTick((t) => t + 1);
-      },
+      undo: () => applyRevision(revision.undoBody(), revision.undoBody().geometry.points),
+      redo: () => applyRevision(revision.redoBody(), revision.redoBody().geometry.points),
     });
     setCommandTick((t) => t + 1);
   }, [shapes, recomputeShapeQuantity]);
