@@ -3,6 +3,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import VersionDiffPanel from "@/components/estimate/VersionDiffPanel";
+import { buildLiveWorkbook } from "@/lib/estimating/live-workbook";
 import { embeddedCurrentVersion, itemToRow, mergeSavedRows, type LoadedEstimateVersion, type MatrixRow, type SavedMatrixItem } from "@/lib/estimating/matrix-rows";
 import { calculateAssemblyQuantities, type RebarSize, REBAR_UNIT_WEIGHT_LBS_PER_FT } from "@/lib/math/assemblies";
 
@@ -394,62 +395,18 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   const exportProposal = useCallback(async () => {
     const XLSX = await import("xlsx");
     const wb = XLSX.utils.book_new();
-
-    // Sheet 1: Client Proposal (grouped by cost code prefix)
-    const grouped: Record<string, { desc: string; quantity: number; unit: string; direct: number }[]> = {};
-    for (const r of rows) {
-      const key = r.cost_code || "UNCODED";
-      const bucket = grouped[key] ?? (grouped[key] = []);
-      bucket.push({ desc: r.description || key, quantity: r.quantity, unit: r.unit, direct: rowDirect(r) });
-    }
-
-    const proposalRows: (string | number)[][] = [
-      [`Proposal · ${projectName}`],
-      [new Date().toLocaleDateString()],
-      [],
-      ["Cost Code", "Description", "Qty", "Unit", "Direct Cost"],
-    ];
-    for (const [code, items] of Object.entries(grouped)) {
-      const sub = items.reduce((s, i) => s + i.direct, 0);
-      for (const it of items) proposalRows.push([code, it.desc, it.quantity, it.unit, round(it.direct)]);
-      proposalRows.push(["", `— subtotal ${code} —`, "", "", round(sub)]);
-    }
-    proposalRows.push([], ["Direct Cost Total", "", "", "", round(totals.direct)]);
-    proposalRows.push([`Contingency (${settings.contingency_pct}%)`, "", "", "", round(totals.contingency)]);
-    proposalRows.push(["Subtotal", "", "", "", round(totals.subtotal)]);
-    proposalRows.push([`Overhead (${settings.overhead_pct}%)`, "", "", "", round(totals.withOverhead - totals.subtotal)]);
-    proposalRows.push([`Profit (${settings.profit_pct}%)`, "", "", "", round(totals.finalBid - totals.withOverhead)]);
-    proposalRows.push(["FINAL BID", "", "", "", round(totals.finalBid)]);
-
-    const wsProposal = XLSX.utils.aoa_to_sheet(proposalRows);
-    wsProposal["!cols"] = [{ wch: 14 }, { wch: 40 }, { wch: 10 }, { wch: 8 }, { wch: 14 }];
+    const live = buildLiveWorkbook(projectName, rows, settings);
+    const wsProposal = XLSX.utils.aoa_to_sheet(live.proposal);
+    wsProposal["!cols"] = [{ wch: 22 }, { wch: 18 }];
     XLSX.utils.book_append_sheet(wb, wsProposal, "Proposal");
-
-    // Sheet 2: Schedule of Values
-    const sovRows: (string | number)[][] = [
-      [`Schedule of Values · ${projectName}`], [new Date().toLocaleDateString()], [],
-      ["Item #", "Cost Code", "Description", "Qty", "Unit", "Labor", "Material", "Equipment", "Sub", "Trucking", "Disposal", "Direct", "Overhead", "Profit", "SOV Value"],
-    ];
-    rows.forEach((r, i) => {
-      const direct = rowDirect(r);
-      const ovh = direct * (settings.overhead_pct / 100);
-      const pft = (direct + ovh) * (settings.profit_pct / 100);
-      sovRows.push([
-        i + 1, r.cost_code || "", r.description || "", r.quantity, r.unit,
-        round(r.quantity * r.labor_unit), round(r.quantity * r.material_unit),
-        round(r.quantity * r.equipment_unit), round(r.quantity * r.subcontractor_unit),
-        round(r.quantity * r.trucking_unit), round(r.quantity * r.disposal_unit),
-        round(direct), round(ovh), round(pft), round(direct + ovh + pft),
-      ]);
-    });
-    sovRows.push([]);
-    sovRows.push(["", "", "TOTAL", "", "", "", "", "", "", "", "", round(totals.direct), round(totals.withOverhead - totals.subtotal), round(totals.finalBid - totals.withOverhead), round(totals.finalBid)]);
-    const wsSov = XLSX.utils.aoa_to_sheet(sovRows);
-    wsSov["!cols"] = [{ wch: 6 }, { wch: 12 }, { wch: 36 }, ...Array(12).fill({ wch: 12 })];
+    const wsSov = XLSX.utils.aoa_to_sheet(live.schedule);
+    wsSov["!cols"] = [{ wch: 8 }, { wch: 14 }, { wch: 36 }, ...Array(15).fill({ wch: 14 })];
     XLSX.utils.book_append_sheet(wb, wsSov, "Schedule of Values");
+    const wsSettings = XLSX.utils.aoa_to_sheet(live.settings);
+    XLSX.utils.book_append_sheet(wb, wsSettings, "Settings");
 
     XLSX.writeFile(wb, `${projectName.replace(/[^\w-]+/g, "_")}_estimate_${Date.now()}.xlsx`);
-  }, [projectName, rows, settings, totals, rowDirect]);
+  }, [projectName, rows, settings]);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -741,7 +698,6 @@ const EstimateMatrixRow = memo(function EstimateMatrixRow({
 function fmt(v: number): string {
   return new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v);
 }
-function round(v: number): number { return Math.round(v * 100) / 100; }
 function numericOr(v: unknown, d: number): number {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : d;
