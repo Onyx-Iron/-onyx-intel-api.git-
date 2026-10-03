@@ -106,9 +106,14 @@ select is(
   'superuser sees both takeoff_items'
 );
 
--- Impersonate tenant A via GUC used by tenant_isolation_* ALL policies.
+-- Impersonate tenant A.
+-- - app.clerk_org_id feeds the recovered ALL policies
+-- - request.jwt.claims.org_id feeds current_tenant_id() (per-command policies
+--   and tenants.self_select). Without the JWT claim, tenants RLS hides every
+--   row from the clerk_org subquery and authenticated sees nothing.
 set local role authenticated;
 select set_config('app.clerk_org_id', 'org_pgtap_a', true);
+select set_config('request.jwt.claims', '{"org_id":"org_pgtap_a"}', true);
 
 select is(
   (select count(*)::int from public.projects
@@ -140,6 +145,7 @@ select is(
 
 -- Switch to tenant B — must not see A.
 select set_config('app.clerk_org_id', 'org_pgtap_b', true);
+select set_config('request.jwt.claims', '{"org_id":"org_pgtap_b"}', true);
 
 select is(
   (select count(*)::int from public.projects
