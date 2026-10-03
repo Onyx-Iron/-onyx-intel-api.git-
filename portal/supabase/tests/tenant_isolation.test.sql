@@ -18,6 +18,9 @@ select plan(8);
 grant select on public.tenants, public.projects, public.takeoff_items, public.estimate_items
   to authenticated;
 
+-- RLS policies call current_tenant_id(); production revokes EXECUTE from authenticated.
+grant execute on function public.current_tenant_id() to authenticated;
+
 -- Fixed UUIDs for stable assertions.
 select set_config('test.tenant_a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', true);
 select set_config('test.tenant_b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', true);
