@@ -13,6 +13,8 @@ const ALLOWLIST = new Set([
   "cost-catalog/ingest/oce/route.ts",
   "public/procurement-request/[id]/route.ts",
   "internal/outbox/process/route.ts",
+  // Cross-tenant claim queue (claim_unparsed_sheets) — same pattern as outbox.
+  "internal/sheets/process/route.ts",
 ]);
 
 function walk(dir: string): string[] {
