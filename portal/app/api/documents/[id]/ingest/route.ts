@@ -10,6 +10,7 @@ import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import { fetchDriveFileSize } from "@/lib/google/driveFile";
 import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
+import { ingestTreatsAsInFlight } from "@/lib/documents/ingest-start";
 import { looksLikePdf, publishSheetPages } from "@/lib/documents/sheet-pages";
 import {
   PLANS_BUCKET,
@@ -27,8 +28,6 @@ const EMBED_MODEL = "text-embedding-004";
 const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
 /** Leave headroom under Vercel maxDuration=300 so we can write error status before kill. */
 const INGEST_BUDGET_MS = 270_000;
-/** Skip duplicate fire-and-forget ingest while another run is in-flight. */
-const CONCURRENT_INGEST_MS = INGEST_BUDGET_MS;
 const TERMINAL_STATUSES = new Set(["complete", "ready", "done"]);
 
 function geminiApiKey(): string {
@@ -250,10 +249,7 @@ export async function POST(
     }
 
     const priorStartedAt = doc.processing_started_at as string | null;
-    const activeIngest = doc.status === "processing"
-      && priorStartedAt
-      && Date.now() - new Date(priorStartedAt).getTime() < CONCURRENT_INGEST_MS;
-    if (activeIngest) {
+    if (ingestTreatsAsInFlight(doc.status, priorStartedAt)) {
       return NextResponse.json({ ok: true, skipped: true, reason: "already_processing" }, { status: 409 });
     }
 
