@@ -67,8 +67,8 @@ export async function PATCH(req: NextRequest, ctx: RouteContext): Promise<NextRe
       user_id: userId,
       table_name: TABLE,
       record_id: id,
-      old_values: (before ?? null) as Record<string, unknown> | null,
-      new_values: data as Record<string, unknown>,
+      old_values: (before ?? null) as unknown as Record<string, unknown> | null,
+      new_values: data as unknown as Record<string, unknown>,
     });
 
     return NextResponse.json({ item: data });
@@ -118,7 +118,7 @@ export async function DELETE(req: NextRequest, ctx: RouteContext): Promise<NextR
       user_id: userId,
       table_name: TABLE,
       record_id: id,
-      old_values: (before ?? null) as Record<string, unknown> | null,
+      old_values: (before ?? null) as unknown as Record<string, unknown> | null,
     });
 
     return NextResponse.json({ success: true });

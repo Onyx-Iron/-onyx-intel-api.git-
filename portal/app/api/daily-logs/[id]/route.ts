@@ -46,8 +46,8 @@ export async function PUT(req: NextRequest, ctx: RouteContext): Promise<NextResp
       user_id: userId,
       table_name: "daily_logs",
       record_id: id,
-      old_values: (before ?? null) as Record<string, unknown> | null,
-      new_values: data as Record<string, unknown>,
+      old_values: (before ?? null) as unknown as Record<string, unknown> | null,
+      new_values: data as unknown as Record<string, unknown>,
     });
 
     return NextResponse.json({ log: data });
@@ -88,7 +88,7 @@ export async function DELETE(_req: NextRequest, ctx: RouteContext): Promise<Next
       user_id: userId,
       table_name: "daily_logs",
       record_id: id,
-      old_values: (row ?? null) as Record<string, unknown> | null,
+      old_values: (row ?? null) as unknown as Record<string, unknown> | null,
     });
 
     return NextResponse.json({ success: true });

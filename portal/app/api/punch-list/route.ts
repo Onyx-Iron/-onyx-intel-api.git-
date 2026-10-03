@@ -106,7 +106,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       table_name: "punch_list_items",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       record_id: (data as any).id,
-      new_values: data as Record<string, unknown>,
+      new_values: data as unknown as Record<string, unknown>,
     });
 
     void logEvent({
