@@ -17,6 +17,10 @@ select plan(8);
 -- Temporary grants so SET ROLE authenticated can exercise RLS (rolled back).
 grant select on public.tenants, public.projects, public.takeoff_items, public.estimate_items
   to authenticated;
+-- RLS policies on some tables still invoke current_tenant_id(); production
+-- revokes this from authenticated (service-role-only app), but pgTAP must
+-- exercise policies as authenticated inside this transaction.
+grant execute on function public.current_tenant_id() to authenticated;
 
 -- Fixed UUIDs for stable assertions.
 select set_config('test.tenant_a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', true);

@@ -214,6 +214,11 @@ Deno.serve(async (req) => {
         .eq("document_id", body.document_id)
         .eq("tenant_id", body.tenant_id);
       if (delErr) throw new Error(`clear document_pages: ${delErr.message}`);
+      const { error: delSheetsErr } = await db.from("sheets")
+        .delete()
+        .eq("document_id", body.document_id)
+        .eq("tenant_id", body.tenant_id);
+      if (delSheetsErr) console.warn("[page-split] clear sheets failed:", delSheetsErr.message);
       const { error: insErr } = await db.from("document_pages").insert(pageRows);
       if (insErr) throw new Error(`insert document_pages: ${insErr.message}`);
 

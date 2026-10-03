@@ -163,3 +163,32 @@ $$;
 
 revoke all on function public.refresh_sheet_index_status(text) from public;
 grant execute on function public.refresh_sheet_index_status(text) to service_role;
+
+-- ── 6. pg_cron sweep for sheet-index worker (Vercel Hobby allows one daily cron) ──
+
+create extension if not exists pg_cron;
+create extension if not exists pg_net schema extensions;
+
+do $$
+begin
+  perform cron.unschedule('sheet-index-worker-minutely');
+exception when others then
+  null;
+end $$;
+
+select cron.schedule(
+  'sheet-index-worker-minutely',
+  '* * * * *',
+  $$
+  select net.http_post(
+    url := 'https://app.onyx-iron.com/api/internal/sheets/process',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-worker-secret', (
+        select decrypted_secret from vault.decrypted_secrets where name = 'internal_worker_secret'
+      )
+    ),
+    body := '{"batch_size":20}'::jsonb
+  ) as request_id;
+  $$
+);
