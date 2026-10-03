@@ -12,6 +12,11 @@ const isPublicRoute = createRouteMatcher([
   "/public/bids(.*)",
   "/api/public/(.*)",
   "/api/procurement/bids",
+  // Server-to-server outbox trigger (Vercel Cron + pg_net). Authenticates via
+  // Authorization: Bearer $CRON_SECRET or x-worker-secret — Clerk sessions
+  // are never present. Without this, auth.protect() 307s to /sign-in and
+  // cron responses look like HTML 200s.
+  "/api/internal/outbox/process",
 ]);
 
 export default clerkMiddleware(async (auth, request) => {
