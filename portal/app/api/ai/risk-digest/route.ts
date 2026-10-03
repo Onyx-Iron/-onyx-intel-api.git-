@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { headerSafe } from "@/lib/http";
 import { logEvent } from "@/lib/activity";
+import { DOCUMENT_EXTRACT_MODEL, liveModel } from "@/lib/ai/live-model";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -11,7 +12,7 @@ export const maxDuration = 60;
 const GEMINI_API_KEY = headerSafe(process.env.GEMINI_API_KEY);
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 // Use flash for batch generation — faster and cheaper
-const DIGEST_MODEL = process.env.GEMINI_DIGEST_MODEL ?? "gemini-2.0-flash";
+const DIGEST_MODEL = liveModel(process.env.GEMINI_DIGEST_MODEL, DOCUMENT_EXTRACT_MODEL);
 
 interface DigestResult {
   risk_level: "low" | "medium" | "high" | "critical";

@@ -5,9 +5,10 @@
  */
 import type { ParseResult, ParseContext, ParseEntity } from "./index";
 import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
+import { DOCUMENT_EXTRACT_MODEL, liveModel } from "@/lib/ai/live-model";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
-const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
+const EXTRACT_MODEL = liveModel(process.env.GEMINI_EXTRACT_MODEL, DOCUMENT_EXTRACT_MODEL);
 
 const HINT_FOCUS: Record<string, string> = {
   takeoff:   "quantities, materials, dimensions, areas, CSI codes, sheet numbers",

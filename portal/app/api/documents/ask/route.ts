@@ -6,14 +6,13 @@ import { getAccessToken } from "@/lib/google/oauth";
 import { headerSafe } from "@/lib/http";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { checkAiRateLimit } from "@/lib/ai/rate-limit";
+import { documentStorageBuckets } from "@/lib/documents/upload-plan";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
 const GEMINI_API_KEY = headerSafe(process.env.GEMINI_API_KEY);
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-pro";
-const BUCKET = "project-documents";
-
 const SYSTEM =
   "You are a construction document assistant. Answer the user's question using ONLY the attached " +
   "document. Quote specific sections, sheet numbers, or values where possible. If the answer is not " +
@@ -81,8 +80,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       if (!doc.file_name.toLowerCase().endsWith(".pdf")) {
         return NextResponse.json({ error: "Document Q&A currently supports PDF files only." }, { status: 422 });
       }
-      const { data: fileData, error: dlErr } = await db.storage.from(BUCKET).download(storagePath);
-      if (dlErr || !fileData) return NextResponse.json({ error: `Could not load file: ${dlErr?.message}` }, { status: 502 });
+      let fileData: Blob | null = null;
+      let dlMessage = "Could not load file";
+      for (const bucket of documentStorageBuckets(meta)) {
+        const { data, error: dlErr } = await db.storage.from(bucket).download(storagePath);
+        if (data) {
+          fileData = data;
+          break;
+        }
+        dlMessage = dlErr?.message ?? dlMessage;
+      }
+      if (!fileData) return NextResponse.json({ error: `Could not load file: ${dlMessage}` }, { status: 502 });
       bytes = Buffer.from(await fileData.arrayBuffer());
       contentType = "application/pdf";
     } else if (driveFileId) {

@@ -20,7 +20,7 @@ interface SavedQuestion {
   asked_at: string;
 }
 
-type DocStatus = "pending" | "processing" | "ready" | "complete" | "error";
+type DocStatus = "pending" | "processing" | "queued" | "split" | "ready" | "complete" | "done" | "error" | "failed" | "duplicate";
 
 type DocType = "drawing" | "spec" | "rfi" | "submittal" | "other" | null;
 
@@ -32,15 +32,25 @@ interface Document {
   page_count: number | null;
   uploaded_at: string | null;
   processed_at: string | null;
+  last_error: string | null;
   meta: Record<string, unknown> | null;
 }
+
+const IN_PROGRESS_STATUSES = new Set(["pending", "processing", "queued", "split"]);
+const READY_STATUSES = new Set(["ready", "complete", "done", "split"]);
+const ERROR_STATUSES = new Set(["error", "failed"]);
 
 const STATUS_STYLES: Record<string, string> = {
   pending:    "bg-white/5 text-gray-500 border-white/10",
   processing: "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
+  queued:     "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
+  split:      "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
   ready:      "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
   complete:   "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
+  done:       "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
   error:      "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
+  failed:     "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
+  duplicate:  "bg-white/5 text-gray-500 border-white/10",
 };
 
 const DOC_TYPE_STYLES: Record<string, string> = {
@@ -148,7 +158,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   // Poll while any doc is still processing — but give up after POLL_TIMEOUT_MS
   // so a silently-crashed background ingest doesn't spin forever.
   useEffect(() => {
-    const hasProcessing = documents.some((d) => d.status === "processing" || d.status === "pending");
+    const hasProcessing = documents.some((d) => IN_PROGRESS_STATUSES.has(d.status));
     if (hasProcessing && !pollTimedOut) {
       if (!pollRef.current) {
         pollStartedAtRef.current = Date.now();
@@ -194,7 +204,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
       const sessionRes = await fetch("/api/documents/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ storage_type: "drive", file_name: file.name, content_type: file.type || "application/octet-stream", project_id: projectId }),
+        body: JSON.stringify({ storage_type: "drive", file_name: file.name, content_type: file.type || "application/octet-stream", size: file.size, project_id: projectId }),
       });
       const sessionData = await sessionRes.json() as { upload_url?: string; error?: string; code?: string };
       if (!sessionRes.ok) {
@@ -242,7 +252,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
       const driveFile = await uploadRes.json() as { id?: string };
       const driveFileId = driveFile.id;
       if (!driveFileId) {
-        toast({ title: String("Drive upload completed but did not return a file ID. Please try again."), kind: "success" });
+        toast({ title: String("Drive upload completed but did not return a file ID. Please try again."), kind: "error" });
         return;
       }
 
@@ -353,6 +363,24 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     }
   }, [askDoc]);
 
+  const retryIngest = useCallback(async (id: string) => {
+    try {
+      const res = await fetch(`/api/documents/${encodeURIComponent(id)}/ingest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const data = await res.json().catch(() => ({})) as { error?: string };
+      if (!res.ok) {
+        toast({ title: String(data.error ?? "Retry failed"), kind: "error" });
+        return;
+      }
+      loadDocuments(false);
+    } catch (err) {
+      toast({ title: String(err instanceof Error ? err.message : String(err)), kind: "error" });
+    }
+  }, [loadDocuments, toast]);
+
   const canAsk = (doc: Document) => {
     if (!doc.file_name.toLowerCase().endsWith(".pdf")) return false;
     const m = doc.meta ?? {};
@@ -447,9 +475,9 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                 </tr>
               ) : (
                 documents.flatMap((doc) => {
-                  const statusKey = doc.status in STATUS_STYLES ? doc.status : "pending";
-                  const isProcessing = doc.status === "processing";
-                  const isReady = doc.status === "ready" || doc.status === "complete";
+                  const statusKey = doc.status in STATUS_STYLES ? doc.status : ERROR_STATUSES.has(doc.status) ? "error" : "pending";
+                  const isProcessing = IN_PROGRESS_STATUSES.has(doc.status);
+                  const isReady = READY_STATUSES.has(doc.status);
                   const isExpanded = expandedDocId === doc.id;
                   const insights = pagesByDoc[doc.id];
                   return [
@@ -489,8 +517,13 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                       <td className="px-4 py-3">
                         <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded border text-[9px] font-bold tracking-widest uppercase ${STATUS_STYLES[statusKey]}`}>
                           {isProcessing && <span className="w-1.5 h-1.5 rounded-full bg-[#00D2FF] animate-pulse" />}
-                          {isProcessing ? "Processing" : doc.status}
+                          {isProcessing ? "Processing" : doc.status === "failed" ? "error" : doc.status}
                         </span>
+                        {ERROR_STATUSES.has(doc.status) && doc.last_error && (
+                          <span className="mt-1 block max-w-[180px] truncate text-[9px] text-[#E50914]" title={doc.last_error}>
+                            {doc.last_error}
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-right text-gray-500 font-mono text-xs">
                         {doc.page_count != null ? doc.page_count : "—"}
@@ -508,11 +541,9 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                               <span className="text-[10px] uppercase tracking-widest font-mono">Ask</span>
                             </button>
                           )}
-                          {doc.status === "error" && (
+                          {ERROR_STATUSES.has(doc.status) && (
                             <button
-                              onClick={() => {
-                                toast({ title: String("To retry, re-import this file from Drive using the From Drive button."), kind: "info" });
-                              }}
+                              onClick={() => { void retryIngest(doc.id); }}
                               className="flex items-center gap-1.5 text-gray-600 hover:text-[#00D2FF] transition-colors"
                               title="Retry"
                             >
