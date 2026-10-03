@@ -187,6 +187,13 @@ Deno.serve(async (req) => {
     if (rows.length === 0) {
       throw new Error("no chunks with embeddings to insert");
     }
+    // Reprocessing a page (status was error/pending) must replace chunks.
+    // Insert-only left the previous OCR text in search results.
+    const { error: clearErr } = await db.from("document_chunks")
+      .delete()
+      .eq("page_id", body.page_id)
+      .eq("tenant_id", body.tenant_id);
+    if (clearErr) throw new Error(`clear document_chunks: ${clearErr.message}`);
     const { error: insErr } = await db.from("document_chunks").insert(rows);
     if (insErr) throw new Error(`insert chunks: ${insErr.message}`);
 

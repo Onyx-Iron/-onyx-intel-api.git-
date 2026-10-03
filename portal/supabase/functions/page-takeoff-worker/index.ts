@@ -139,6 +139,31 @@ Deno.serve(async (req) => {
   try {
     if (!PYTHON_API_URL) throw new Error("PYTHON_API_URL is not configured for this function");
 
+    // A split retry re-invokes this worker for the same document_pages id.
+    // Inserting again would copy every quantity into the takeoff (and, when
+    // the re-extract fingerprint differs, into the estimate).
+    const { count: existingTakeoffCount, error: existingTakeoffErr } = await db
+      .from("takeoff_items")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", body.tenant_id)
+      .eq("sheet_id", body.page_id);
+    if (existingTakeoffErr) throw new Error(`load takeoff_items: ${existingTakeoffErr.message}`);
+
+    if ((existingTakeoffCount ?? 0) > 0) {
+      await db.from("document_pages")
+        .update({ takeoff_status: "done", updated_at: new Date().toISOString() })
+        .eq("id", body.page_id)
+        .eq("tenant_id", body.tenant_id);
+      await recordEvent("succeeded", "takeoff already recorded for this page");
+      await refreshDocumentSummary();
+      return new Response(JSON.stringify({
+        ok: true,
+        page_id: body.page_id,
+        rows: 0,
+        skipped: "already_extracted",
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+
     // ── 1. Download the single-page PDF ─────────────────────────────────────
     const dl = await db.storage.from(PLANS_BUCKET).download(body.storage_path);
     if (dl.error || !dl.data) throw new Error(`storage download: ${dl.error?.message ?? "empty"}`);
