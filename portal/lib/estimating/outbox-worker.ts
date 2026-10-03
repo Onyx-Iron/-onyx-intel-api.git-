@@ -15,6 +15,7 @@
 // still-mutable DRAFT version (an approved/superseded version is never
 // touched — immutability holds regardless of what happens to its source).
 import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
+import { collectDeletedMirrorIds, filterDraftEstimateItemIds } from "@/lib/estimating/delete-reconcile";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyDb = any;
@@ -74,6 +75,7 @@ export async function processOutboxBatch(
   const events = (claimed ?? []) as Array<{
     id: string; tenant_id: string; project_id: string; manual_takeoff_id: string | null;
     event_type: "upsert" | "delete" | "project_sync"; attempts: number;
+    payload?: { mirror_id?: string | null; mirror_retained?: boolean } | null;
   }>;
   result.claimed = events.length;
 
@@ -131,7 +133,13 @@ export async function processOutboxBatch(
       if (!event.manual_takeoff_id) {
         throw new Error("delete outbox event missing manual_takeoff_id");
       }
-      await reconcileDeletedTakeoffEstimateItems(db, event.tenant_id, event.project_id, event.manual_takeoff_id);
+      await reconcileDeletedTakeoffEstimateItems(
+        db,
+        event.tenant_id,
+        event.project_id,
+        event.manual_takeoff_id,
+        event.payload?.mirror_id ?? null,
+      );
       await markComplete(event);
     } catch (err) {
       await markFailed(event, err);
@@ -155,42 +163,42 @@ async function reconcileDeletedTakeoffEstimateItems(
   tenantId: string,
   projectId: string,
   manualTakeoffId: string,
+  payloadMirrorId: string | null = null,
 ): Promise<void> {
-  // The mirror row itself is already hard-deleted by soft_delete_manual_takeoff_tx
-  // by the time this runs — estimate_items.source_takeoff_id pointed at that
-  // (now-gone) mirror id, which we don't have anymore directly, so we
-  // recover it from the takeoff_item_history 'deleted' snapshot, scoped to
-  // THIS manual takeoff via its own before-image (mirror rows carry
-  // source_manual_takeoff_id) — narrower than scanning every deleted mirror
-  // tenant-wide, and correct even if two different manual takeoffs happen
-  // to be soft-deleted around the same time.
+  // Prefer outbox payload.mirror_id (covers hard-deleted AND retained mirrors).
+  // Fall back to history 'deleted' snapshots and any still-living mirror row
+  // keyed by source_manual_takeoff_id (retained-for-locked-estimate case).
   const { data: historyRows } = await db
     .from("takeoff_item_history")
     .select("takeoff_item_id")
     .eq("tenant_id", tenantId)
     .eq("action", "deleted")
     .contains("before", { source_manual_takeoff_id: manualTakeoffId });
-  const deletedMirrorIds = new Set(
-    (historyRows ?? [])
-      .filter((h: { takeoff_item_id: string }) => Boolean(h.takeoff_item_id))
-      .map((h: { takeoff_item_id: string }) => h.takeoff_item_id),
-  );
-  if (deletedMirrorIds.size === 0) return;
+  const { data: retainedMirrors } = await db
+    .from("takeoff_items")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("source_manual_takeoff_id", manualTakeoffId);
+
+  const deletedMirrorIds = collectDeletedMirrorIds({
+    payloadMirrorId,
+    historyTakeoffItemIds: (historyRows ?? []).map((h: { takeoff_item_id: string }) => h.takeoff_item_id),
+    retainedMirrorIds: (retainedMirrors ?? []).map((r: { id: string }) => r.id),
+  });
+  if (deletedMirrorIds.length === 0) return;
 
   const { data: linkedItems } = await db
     .from("estimate_items")
     .select("id, estimate_version_id, source_takeoff_id")
     .eq("tenant_id", tenantId)
     .eq("project_id", projectId)
-    .in("source_takeoff_id", [...deletedMirrorIds]);
+    .in("source_takeoff_id", deletedMirrorIds);
   if (!linkedItems || linkedItems.length === 0) return;
 
   const versionIds = [...new Set(linkedItems.map((i: { estimate_version_id: string }) => i.estimate_version_id))];
   const { data: versions } = await db.from("estimate_versions").select("id, status").in("id", versionIds);
-  const draftVersionIds = new Set((versions ?? []).filter((v: { status: string }) => v.status === "draft" || v.status === "review").map((v: { id: string }) => v.id));
+  const toRemoveIds = filterDraftEstimateItemIds(linkedItems, versions ?? []);
+  if (toRemoveIds.length === 0) return;
 
-  const toRemove = linkedItems.filter((i: { estimate_version_id: string }) => draftVersionIds.has(i.estimate_version_id));
-  if (toRemove.length === 0) return;
-
-  await db.from("estimate_items").delete().in("id", toRemove.map((i: { id: string }) => i.id));
+  await db.from("estimate_items").delete().in("id", toRemoveIds);
 }
