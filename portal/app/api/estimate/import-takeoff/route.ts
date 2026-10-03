@@ -21,6 +21,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const result = await syncTakeoffToEstimate(tenantId, body.project_id);
+    if (result.writeError) {
+      return NextResponse.json({ ...result, error: result.writeError }, { status: 500 });
+    }
 
     return NextResponse.json(result, { status: result.imported > 0 ? 201 : 200 });
   } catch (err: unknown) {

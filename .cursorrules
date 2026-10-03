@@ -1,0 +1,11 @@
+# ONYX-IRON CURSOR ENGINE RULES
+
+1. MATH ISOLATION: All scale, geometry, and financial calculations MUST be routed through deterministic code or PostgreSQL. Never write math in LLM prompts. Geometry and scale live in `portal/lib/takeoff/canvas/quantity.ts`. Estimate money lives in `portal/lib/estimating/calculations.ts` and in PostgreSQL functions such as `project_money_totals`. Do not add a second formula in a prompt, a React component, or a new `deterministic_math.py` until that module exists and the callers above are moved with it.
+
+2. CANVAS INTEGRITY: Canvas quantities in `portal/components/takeoff/canvas/SheetCanvas.tsx` MUST use `portal/lib/takeoff/canvas/quantity.ts` for pixel-to-feet conversions. Do not convert page pixels to feet inline in the component.
+
+3. TYPE SYNCHRONIZATION: When a Python request or response shape changes, update the portal code that calls it in the same change. Portal contracts live next to their callers under `portal/lib/`. Do not generate a parallel `python-engine/` tree or `portal/lib/types/` stubs that nothing imports.
+
+4. DEFENSIVE INGESTION: File split and upload workers must wrap binary reads in try/catch. A corrupt or unreadable file fails that file and is recorded. It must not crash the worker or the rest of the batch.
+
+5. OUTBOX: If an estimate sync save fails in the background outbox queue, roll back that attempt's estimate writes and mark the event failed so it can retry. The canvas save that already committed stays saved.

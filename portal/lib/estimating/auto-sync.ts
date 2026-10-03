@@ -30,6 +30,34 @@ export interface AutoSyncResult {
   pendingReview: number;
   estimateId: string;
   versionId: string;
+  /**
+   * Set when a read or insert failed. `imported` stays 0 so existing callers
+   * do not treat the attempt as a successful import. The outbox worker uses
+   * this to roll back `insertedIds` and retry, instead of completing the event.
+   */
+  writeError?: string;
+  /** Ids inserted by this call. Present on success and on a failed insert that still returned ids. */
+  insertedIds?: string[];
+}
+
+function syncWriteError(
+  estimateId: string,
+  versionId: string,
+  writeError: string,
+  extra: { skipped?: number; pendingReview?: number; insertedIds?: string[] } = {},
+): AutoSyncResult {
+  return {
+    imported: 0,
+    skipped: extra.skipped ?? 0,
+    priced: 0,
+    unpriced: 0,
+    review: 0,
+    pendingReview: extra.pendingReview ?? 0,
+    estimateId,
+    versionId,
+    writeError,
+    insertedIds: extra.insertedIds ?? [],
+  };
 }
 
 export async function syncTakeoffToEstimate(
@@ -70,9 +98,10 @@ export async function syncTakeoffToEstimate(
       .single(),
   ]);
 
-  if (takeoff.error || catalog.error) {
-    console.error("[syncTakeoffToEstimate]", takeoff.error ?? catalog.error);
-    return { imported: 0, skipped: 0, priced: 0, unpriced: 0, review: 0, pendingReview: 0, estimateId, versionId };
+  if (takeoff.error || catalog.error || versionIds.error) {
+    const err = takeoff.error ?? catalog.error ?? versionIds.error;
+    console.error("[syncTakeoffToEstimate]", err);
+    return syncWriteError(estimateId, versionId, err?.message ?? "failed to read takeoff for estimate sync");
   }
 
   // Dedup is scoped across every version belonging to this ONE estimate
@@ -86,7 +115,7 @@ export async function syncTakeoffToEstimate(
     .in("estimate_version_id", (versionIds.data ?? []).map((v: { id: string }) => v.id));
   if (existingErr) {
     console.error("[syncTakeoffToEstimate]", existingErr);
-    return { imported: 0, skipped: 0, priced: 0, unpriced: 0, review: 0, pendingReview: 0, estimateId, versionId };
+    return syncWriteError(estimateId, versionId, existingErr.message ?? "failed to read existing estimate items");
   }
 
   const distinctCodes = [...new Set(
@@ -136,7 +165,17 @@ export async function syncTakeoffToEstimate(
   const pendingReview = result.blockedByReview;
 
   if (result.rows.length === 0) {
-    return { imported: 0, skipped: result.skipped, priced, unpriced, review, pendingReview, estimateId, versionId };
+    return { imported: 0, skipped: result.skipped, priced, unpriced, review, pendingReview, estimateId, versionId, insertedIds: [] };
+  }
+
+  if (versionRow.error) {
+    console.error("[syncTakeoffToEstimate]", versionRow.error);
+    return syncWriteError(
+      estimateId,
+      versionId,
+      versionRow.error.message ?? "failed to read estimate version",
+      { skipped: result.skipped, pendingReview },
+    );
   }
 
   const pct = {
@@ -199,9 +238,16 @@ export async function syncTakeoffToEstimate(
   });
 
   const { data, error } = await anyDb.from("estimate_items").insert(payload).select("id");
+  const insertedIds = ((data ?? []) as Array<{ id?: string | null }>)
+    .map((row) => row.id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
   if (error) {
     console.error("[syncTakeoffToEstimate] insert failed", error);
-    return { imported: 0, skipped: result.skipped, priced: 0, unpriced: 0, review: 0, pendingReview, estimateId, versionId };
+    return syncWriteError(estimateId, versionId, error.message ?? "estimate item insert failed", {
+      skipped: result.skipped,
+      pendingReview,
+      insertedIds,
+    });
   }
-  return { imported: data?.length ?? 0, skipped: result.skipped, priced, unpriced, review, pendingReview, estimateId, versionId };
+  return { imported: data?.length ?? 0, skipped: result.skipped, priced, unpriced, review, pendingReview, estimateId, versionId, insertedIds };
 }
