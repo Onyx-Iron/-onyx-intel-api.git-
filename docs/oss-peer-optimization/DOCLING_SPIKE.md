@@ -19,10 +19,15 @@
 ## Enable on a worker + Edge
 
 **Railway (Docling package):**
-```bash
-pip install -r requirements.txt -r requirements-docling.txt
-export ENABLE_DOCLING=1
-```
+
+`nixpacks.toml` installs `requirements-docling.txt` on deploy. Then set the
+runtime flag in Railway → Variables:
+
+| Variable | Value |
+|---|---|
+| `ENABLE_DOCLING` | `1` |
+
+Redeploy the web service after changing either the build file or the variable.
 
 **Supabase Edge `page-processor` secrets:**
 ```
