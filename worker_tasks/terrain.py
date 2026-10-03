@@ -3,18 +3,36 @@
 from __future__ import annotations
 
 import logging
+import sys
+from pathlib import Path
 from typing import Any
 
 from celery_app import celery
 
 logger = logging.getLogger(__name__)
 
+_ENGINE_DIR = Path(__file__).resolve().parents[1] / "python-engine"
+if _ENGINE_DIR.is_dir() and str(_ENGINE_DIR) not in sys.path:
+    sys.path.insert(0, str(_ENGINE_DIR))
+
 
 def compare_grids(existing: dict[str, Any], proposed: dict[str, Any]) -> dict[str, Any]:
     """
     Port of portal/lib/math/earthwork.ts compareGrids — Bank Cubic Yards via
     bilinear cell averaging on a shared rectangular grid.
+
+    Hot path uses NumPy vectorized corner slices (GEOS-free matrix math). Falls
+    back to a pure-Python nested loop only if NumPy is unavailable.
     """
+    try:
+        from services.terrain_numpy import compare_grids_numpy
+
+        result = compare_grids_numpy(existing, proposed)
+        result["worker"] = "celery-numpy"
+        return result
+    except ImportError:
+        logger.warning("numpy unavailable — using pure-Python compare_grids fallback")
+
     if existing.get("grid_size") != proposed.get("grid_size"):
         raise ValueError(
             f"grid mismatch: existing={existing.get('grid_size')} proposed={proposed.get('grid_size')}"
