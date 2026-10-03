@@ -404,6 +404,9 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     XLSX.utils.book_append_sheet(wb, wsSov, "Schedule of Values");
     const wsSettings = XLSX.utils.aoa_to_sheet(live.settings);
     XLSX.utils.book_append_sheet(wb, wsSettings, "Settings");
+    const wsPrices = XLSX.utils.aoa_to_sheet(live.unitPrices);
+    wsPrices["!cols"] = [{ wch: 8 }, { wch: 36 }, { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 14 }];
+    XLSX.utils.book_append_sheet(wb, wsPrices, "Unit Prices");
 
     XLSX.writeFile(wb, `${projectName.replace(/[^\w-]+/g, "_")}_estimate_${Date.now()}.xlsx`);
   }, [projectName, rows, settings]);

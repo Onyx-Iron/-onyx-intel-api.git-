@@ -54,8 +54,7 @@ export function calculatePerimeter(points: Point[], pageSpaceScaleFactor: number
   return applyWasteAndMultiplier(realWorldPerimeter, opts);
 }
 
-/** Shoelace-formula polygon area, in real-world units squared. */
-export function calculatePolygonArea(points: Point[], pageSpaceScaleFactor: number, opts?: WasteAndMultiplier): number {
+function rawPolygonArea(points: Point[], pageSpaceScaleFactor: number): number {
   if (points.length < 3) return 0;
   let sum = 0;
   for (let i = 0; i < points.length; i++) {
@@ -63,9 +62,23 @@ export function calculatePolygonArea(points: Point[], pageSpaceScaleFactor: numb
     const b = points[(i + 1) % points.length];
     sum += a.x * b.y - b.x * a.y;
   }
-  const pageSpaceArea = Math.abs(sum) / 2;
-  const realWorldArea = pageSpaceArea * pageSpaceScaleFactor * pageSpaceScaleFactor;
-  return applyWasteAndMultiplier(realWorldArea, opts);
+  return (Math.abs(sum) / 2) * pageSpaceScaleFactor * pageSpaceScaleFactor;
+}
+
+/** Shoelace-formula polygon area, in real-world units squared. */
+export function calculatePolygonArea(points: Point[], pageSpaceScaleFactor: number, opts?: WasteAndMultiplier): number {
+  return applyWasteAndMultiplier(rawPolygonArea(points, pageSpaceScaleFactor), opts);
+}
+
+/** Outer area minus hole rings. With no holes this matches calculatePolygonArea. */
+export function calculateNetPolygonArea(
+  points: Point[],
+  pageSpaceScaleFactor: number,
+  holes: Point[][] = [],
+  opts?: WasteAndMultiplier,
+): number {
+  const holeArea = holes.reduce((sum, hole) => sum + rawPolygonArea(hole, pageSpaceScaleFactor), 0);
+  return applyWasteAndMultiplier(Math.max(0, rawPolygonArea(points, pageSpaceScaleFactor) - holeArea), opts);
 }
 
 /** Rectangle area from two opposite corners, in real-world units squared. */

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  calculateLinearLength, calculatePerimeter, calculatePolygonArea,
+  calculateLinearLength, calculatePerimeter, calculatePolygonArea, calculateNetPolygonArea,
   calculateRectangleArea, calculateCircleArea, calculateCount,
   calculateAreaVolume, calculateBoxVolume, calculateSlopeAdjustedLength,
   convertLinearUnit,
@@ -54,6 +54,15 @@ describe("calculatePolygonArea", () => {
   });
   it("returns 0 for fewer than 3 points", () => {
     assert.equal(calculatePolygonArea([{ x: 0, y: 0 }, { x: 1, y: 1 }], 1), 0);
+  });
+});
+
+describe("calculateNetPolygonArea", () => {
+  it("subtracts a hole and matches the gross area when there are none", () => {
+    const outer = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }];
+    const hole = [{ x: 2, y: 2 }, { x: 4, y: 2 }, { x: 4, y: 4 }, { x: 2, y: 4 }];
+    assert.equal(calculateNetPolygonArea(outer, 1), 100);
+    assert.equal(calculateNetPolygonArea(outer, 1, [hole]), 96);
   });
 });
 
