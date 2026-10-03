@@ -163,6 +163,9 @@ describe("destination search", () => {
 
     const priceBook = filterDestinations(all, "price book");
     assert.equal(priceBook[0]?.href, "/dashboard/price-book");
+
+    const bids = filterDestinations(all, "bid board");
+    assert.equal(bids[0]?.href, "/dashboard/preconstruction");
   });
 
   it("keeps project section ids aligned with the workspace tabs", () => {

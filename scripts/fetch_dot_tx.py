@@ -33,12 +33,30 @@ from typing import Any
 
 import requests
 
-TXDOT_ITEM_TO_CSI = {
-    "247": "31-23-23",
-    "340": "32-12-16",
-    "432": "31-37-00",
-    "464": "33-41-00",
-}
+def _load_item_to_csi(state: str) -> dict[str, str]:
+    """Load scripts/dot_item_to_csi.csv for state, falling back to built-ins."""
+    fallback = {
+        "247": "31-23-23",
+        "340": "32-12-16",
+        "432": "31-37-00",
+        "464": "33-41-00",
+    }
+    csv_path = Path(__file__).resolve().parent / "dot_item_to_csi.csv"
+    if not csv_path.is_file():
+        return fallback
+    mapping = dict(fallback)
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            if (row.get("state") or "").strip().upper() != state:
+                continue
+            prefix = (row.get("item_prefix") or "").strip()
+            csi = (row.get("csi_code") or "").strip()
+            if prefix and csi:
+                mapping[prefix] = csi
+    return mapping
+
+
+TXDOT_ITEM_TO_CSI = _load_item_to_csi("TX")
 
 SAMPLE_BID_TAB = {
     "source": "txdot_bidtab",

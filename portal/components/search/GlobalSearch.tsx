@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Search, X, Folder, FileText, Users, Sparkles, Loader2, CornerDownLeft } from "lucide-react";
+import { Search, X, Folder, FileText, Users, Sparkles, Loader2, CornerDownLeft, Layers } from "lucide-react";
 import { useOptionalProjectContext } from "@/components/project/ProjectContext";
 import {
   filterDestinations,
@@ -11,7 +11,7 @@ import {
   type Destination,
 } from "@/lib/navigation/destinations";
 
-type SearchKind = "project" | "document" | "contact" | "generated_document";
+type SearchKind = "project" | "document" | "contact" | "generated_document" | "bid_opportunity" | "campaign" | "takeoff";
 
 type SearchResult = {
   kind: SearchKind;
@@ -31,9 +31,12 @@ const KIND_META: Record<
   { label: string; icon: typeof Folder; order: number }
 > = {
   project: { label: "Projects", icon: Folder, order: 1 },
-  document: { label: "Documents", icon: FileText, order: 2 },
-  contact: { label: "Contacts", icon: Users, order: 3 },
-  generated_document: { label: "Generated reports", icon: Sparkles, order: 4 },
+  bid_opportunity: { label: "Bids", icon: Sparkles, order: 2 },
+  takeoff: { label: "Takeoffs", icon: Layers, order: 3 },
+  document: { label: "Documents", icon: FileText, order: 4 },
+  contact: { label: "Contacts", icon: Users, order: 5 },
+  campaign: { label: "Campaigns", icon: Sparkles, order: 6 },
+  generated_document: { label: "Generated reports", icon: Sparkles, order: 7 },
 };
 
 function hrefFor(r: SearchResult): string {
@@ -46,9 +49,15 @@ function hrefFor(r: SearchResult): string {
         : "/dashboard/documents";
     case "contact":
       return "/dashboard/contacts";
+    case "bid_opportunity":
+      return "/dashboard/preconstruction";
+    case "campaign":
+      return "/dashboard/marketing";
+    case "takeoff":
+      return r.project_id
+        ? `/dashboard/projects/${r.project_id}/takeoff/canvas`
+        : "/dashboard";
     case "generated_document":
-      // There is no /dashboard/generated-docs page — land on the project
-      // overview (or Reports roll-up) where generated docs are surfaced.
       return r.project_id
         ? `/dashboard/projects/${r.project_id}?phase=overview&tab=summary`
         : "/dashboard/reports";

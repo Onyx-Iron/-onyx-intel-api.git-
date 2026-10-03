@@ -2,6 +2,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 import ProjectAdWrapper from "./ProjectAdWrapper";
+import PresenceSettingsPanel from "./PresenceSettingsPanel";
+import { useToast } from "@/components/common/Toast";
+
+type MarketingTab = "profiles" | "organic" | "seo" | "paid";
 
 interface Campaign {
   id: string;
@@ -24,11 +28,15 @@ const PLATFORM_LABEL: Record<string, string> = { google_ads: "Google Ads", meta:
 const PLATFORM_COLOR: Record<string, string> = { google_ads: "#4285F4", meta: "#0668E1" };
 
 export default function MarketingCommandCenter() {
+  const [tab, setTab] = useState<MarketingTab>("profiles");
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [leads, setLeads] = useState<Lead[]>([]);
   const [platformsConfigured, setPlatformsConfigured] = useState<{ google_ads: boolean; meta: boolean }>({ google_ads: false, meta: false });
   const [loading, setLoading] = useState(true);
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [organicCopy, setOrganicCopy] = useState("");
+  const [publishing, setPublishing] = useState(false);
+  const { toast } = useToast();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -65,25 +73,102 @@ export default function MarketingCommandCenter() {
   }));
   const maxSpend = Math.max(...spendByPlatform.map((p) => p.spend), 1);
 
+  const publishOrganic = async () => {
+    if (!organicCopy.trim()) return;
+    if (!confirm("Publish this organic post to selected channels?")) return;
+    setPublishing(true);
+    try {
+      const res = await fetch("/api/presence/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          confirm: true,
+          copy: organicCopy,
+          channels: ["linkedin_share", "meta"],
+        }),
+      });
+      const data = await res.json() as { error?: string; linkedin_share_url?: string };
+      if (!res.ok) throw new Error(data.error ?? "Publish failed");
+      if (data.linkedin_share_url) window.open(data.linkedin_share_url, "_blank");
+      toast({ title: "Post recorded", kind: "success" });
+      setOrganicCopy("");
+    } catch (e) {
+      toast({ title: String(e instanceof Error ? e.message : e), kind: "error" });
+    } finally {
+      setPublishing(false);
+    }
+  };
+
   return (
     <div className="max-w-6xl mx-auto py-6 px-4">
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h2 className="text-xs font-bold text-white uppercase tracking-widest">Marketing Command Center</h2>
-          <p className="text-[11px] text-gray-500">Field-to-funnel: project wins into live localized lead generation</p>
+          <p className="text-[11px] text-gray-500">Profiles, organic presence, free SEO/LLMO, and optional paid ads</p>
         </div>
-        <button
-          type="button"
-          onClick={() => setWizardOpen(true)}
-          className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85"
-        >
-          Launch Campaign from Project
-        </button>
+        {tab === "paid" && (
+          <button
+            type="button"
+            onClick={() => setWizardOpen(true)}
+            className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85"
+          >
+            Launch Campaign from Project
+          </button>
+        )}
       </div>
 
+      <div className="mb-6 flex flex-wrap gap-2">
+        {([
+          ["profiles", "Profiles"],
+          ["organic", "Organic"],
+          ["seo", "SEO / LLMO"],
+          ["paid", "Paid ads"],
+        ] as const).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setTab(id)}
+            className={`rounded-full px-3 py-1.5 text-[11px] font-semibold uppercase tracking-widest ${
+              tab === id ? "bg-[#CCFF00] text-black" : "bg-white/5 text-white/50 hover:text-white"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "profiles" && <PresenceSettingsPanel />}
+
+      {tab === "organic" && (
+        <div className="space-y-3 rounded-xl border border-white/10 bg-[#0E0F12] p-4">
+          <p className="text-xs text-white/45">
+            Publish wins to Meta/GBP when connected. LinkedIn uses share-intent until org posting is approved.
+          </p>
+          <textarea
+            value={organicCopy}
+            onChange={(e) => setOrganicCopy(e.target.value)}
+            rows={4}
+            placeholder="We just wrapped Highland Elementary — on time and under budget…"
+            className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
+          />
+          <button
+            type="button"
+            disabled={publishing || !organicCopy.trim()}
+            onClick={() => void publishOrganic()}
+            className="rounded-lg bg-[#CCFF00] px-4 py-2 text-sm font-semibold text-black disabled:opacity-50"
+          >
+            {publishing ? "Publishing…" : "Approve & publish"}
+          </button>
+        </div>
+      )}
+
+      {tab === "seo" && <PresenceSettingsPanel />}
+
+      {tab === "paid" && (
+        <>
       {!platformsConfigured.google_ads && !platformsConfigured.meta && (
         <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-900/10 px-4 py-2 text-[11px] text-amber-400">
-          Neither Google Ads nor Meta is configured yet — campaigns will save as drafts until API credentials are added to your environment.
+          Paid ads require ad budget. Campaigns save as drafts until Google Ads / Meta API credentials are configured.
         </div>
       )}
 
@@ -158,6 +243,8 @@ export default function MarketingCommandCenter() {
 
       {wizardOpen && (
         <ProjectAdWrapper onClose={() => setWizardOpen(false)} onDone={async () => { setWizardOpen(false); await load(); }} />
+      )}
+        </>
       )}
     </div>
   );

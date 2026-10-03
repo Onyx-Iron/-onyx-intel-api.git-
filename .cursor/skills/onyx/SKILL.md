@@ -26,7 +26,7 @@ Project screens use `/dashboard/projects/{id}?phase={slug}&tab={id}`. Slugs and 
 | Field | `field` | `daily-log`, `weekly-log`, `todo`, `staff` |
 | Closeout | `closeout` | `punchlist`, `co`, `final-docs` |
 
-Company pages: Home, Projects, Reports, AI Workforce (`/dashboard/agents/pending`), Project Management, Takeoff, Estimating, Documents, Contacts, Price Book, Procurement, Financials, Civil Intelligence, Marketing, and Settings (team, billing, cost overrides).
+Company pages: Home, Projects, Bid Board (`/dashboard/preconstruction`), Reports, AI Workforce (`/dashboard/agents/pending`), Project Management, Takeoff, Estimating, Documents, Contacts, Price Book, Procurement, Financials, Civil Intelligence, Marketing, and Settings (connections, team, billing, cost overrides).
 
 ## AI project skills
 

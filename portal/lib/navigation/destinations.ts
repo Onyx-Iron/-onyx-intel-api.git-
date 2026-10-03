@@ -14,6 +14,7 @@ export interface Destination {
 export const WORKSPACE_DESTINATIONS: Destination[] = [
   { id: "home", label: "Home", hint: "Command center", href: "/dashboard", group: "Workspace", keywords: "dashboard overview ai" },
   { id: "projects", label: "Projects", hint: "Create and open jobs", href: "/dashboard/projects", group: "Workspace", keywords: "jobs new project" },
+  { id: "bid-board", label: "Bid Board", hint: "Preconstruction opportunities", href: "/dashboard/preconstruction", group: "Workspace", keywords: "bids sam preconstruction opportunities" },
   { id: "reports", label: "Reports", hint: "Status summaries", href: "/dashboard/reports", group: "Workspace", keywords: "status report export" },
   { id: "ai", label: "AI Workforce", hint: "Approvals and agent runs", href: "/dashboard/agents/pending", group: "Workspace", keywords: "agents approval risk scout" },
   { id: "pm", label: "Project Management", hint: "Open items across jobs", href: "/dashboard/project-management", group: "Workspace", keywords: "rfi submittal punch schedule rollup" },
@@ -26,6 +27,7 @@ export const WORKSPACE_DESTINATIONS: Destination[] = [
   { id: "financials", label: "Financials", hint: "Invoices and lien waivers", href: "/dashboard/financials", group: "Workspace", keywords: "ar ap billing" },
   { id: "civil", label: "Civil Intelligence", hint: "Cut and fill volumes", href: "/dashboard/civil-intelligence", group: "Workspace", keywords: "earthwork mass haul" },
   { id: "marketing", label: "Marketing", hint: "Campaigns and leads", href: "/dashboard/marketing", group: "Workspace", keywords: "ads leads" },
+  { id: "connections", label: "Connections", hint: "Cloud and account links", href: "/dashboard/settings/connections", group: "Settings", keywords: "oauth google drive dropbox connections" },
   { id: "team", label: "Team", hint: "Seats and invites", href: "/dashboard/settings/team", group: "Settings", keywords: "members users admin" },
   { id: "billing", label: "Billing", hint: "Plan and credits", href: "/dashboard/settings/billing", group: "Settings", keywords: "subscription paddle plan" },
   { id: "cost-overrides", label: "Cost Overrides", hint: "Company pricing adjustments", href: "/dashboard/settings/cost-overrides", group: "Settings", keywords: "markup rates" },

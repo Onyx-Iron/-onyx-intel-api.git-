@@ -10,16 +10,16 @@ Where to find their data:
   • Data:   `/seed/cost_catalogues/*.json` (regional catalogues)
   • Docs:   https://openconstructionerp.org/docs/cost-database
 
-TODO (data-engineering follow-up):
-  • Clone the repo / pull the latest seed JSON in CI
-  • Map OCE's internal codes → CSI MasterFormat (their codes don't map 1:1)
-  • Apply regional conversion rules (OCE has UK/EU/US splits)
-  • Skip duplicates already present from BLS/DOT sources
+Optional full import:
+  • Set OCE_SEED_PATH to a JSON file of OCE catalogue rows
+    (array of objects with csi_code/trade/description/uom/costs, or
+     { "items": [...] }). When present, those rows are mapped → CSI and
+     merged with the embedded 50-item US seed (deduped by csi+description).
+  • Map OCE's internal codes → CSI MasterFormat (best-effort via csi_code)
+  • Skip duplicates already present from BLS/DOT sources at ingest time
 
-For now this script POSTs a small embedded sample of 50 items spanning
-Divisions 03 (Concrete), 04 (Masonry), 05 (Metals), 06 (Wood), 09 (Finishes),
-22 (Plumbing), 23 (HVAC), and 26 (Electrical) — enough to give the catalog
-something to resolve against on day 1.
+Without OCE_SEED_PATH this script POSTs the embedded 50-item sample spanning
+Divisions 03–06, 09, 22, 23, and 26.
 
 Env:
     ONYX_PORTAL_URL   — portal base URL
@@ -127,6 +127,59 @@ def portal_url() -> str:
     return (os.environ.get("ONYX_PORTAL_URL") or "http://localhost:3000").rstrip("/")
 
 
+def _normalize_oce_row(raw: dict[str, Any]) -> dict[str, Any] | None:
+    csi = str(raw.get("csi_code") or raw.get("code") or raw.get("masterformat") or "").strip()
+    desc = str(raw.get("description") or raw.get("name") or "").strip()
+    if not csi or not desc:
+        return None
+    uom = str(raw.get("uom") or raw.get("unit") or "EA").strip() or "EA"
+    trade = str(raw.get("trade") or raw.get("category") or "General").strip() or "General"
+    base = float(raw.get("base_unit_cost") or raw.get("unit_cost") or raw.get("price") or 0)
+    labor = float(raw.get("labor_cost") or raw.get("labor") or 0)
+    mat = float(raw.get("material_cost") or raw.get("material") or 0)
+    equip = float(raw.get("equipment_cost") or raw.get("equipment") or 0)
+    return {
+        "csi_code": csi,
+        "trade": trade,
+        "description": desc,
+        "uom": uom,
+        "region": str(raw.get("region") or "US_EAST"),
+        "base_unit_cost": base,
+        "labor_cost": labor,
+        "material_cost": mat,
+        "equipment_cost": equip,
+        "source_database": "oce_seed",
+    }
+
+
+def load_external_oce_items(path: str) -> list[dict[str, Any]]:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    rows = data["items"] if isinstance(data, dict) and isinstance(data.get("items"), list) else data
+    if not isinstance(rows, list):
+        raise ValueError("OCE seed file must be a JSON array or {items:[...]}")
+    out: list[dict[str, Any]] = []
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        item = _normalize_oce_row(raw)
+        if item:
+            out.append(item)
+    return out
+
+
+def merge_items(base: list[dict[str, Any]], extra: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    merged: list[dict[str, Any]] = []
+    for item in [*base, *extra]:
+        key = f"{item['csi_code']}|{item['description']}".lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
+
 def post_to_ingest(payload: dict[str, Any]) -> requests.Response:
     url = f"{portal_url()}/api/cost-catalog/ingest/seed"
     token = os.environ.get("ONYX_INGEST_TOKEN", "")
@@ -144,12 +197,23 @@ def post_to_ingest(payload: dict[str, Any]) -> requests.Response:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Seed cost catalog with OpenConstructionERP sample")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--oce-path",
+        default=os.environ.get("OCE_SEED_PATH", ""),
+        help="Optional path to full OCE catalogue JSON (or set OCE_SEED_PATH)",
+    )
     args = parser.parse_args()
+
+    items = list(SEED_ITEMS)
+    if args.oce_path:
+        external = load_external_oce_items(args.oce_path)
+        items = merge_items(items, external)
+        print(f"[oce] loaded {len(external)} external rows → {len(items)} after merge", file=sys.stderr)
 
     payload = {
         "source": "openconstructionerp_seed",
         "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "items": SEED_ITEMS,
+        "items": items,
     }
 
     if args.dry_run:

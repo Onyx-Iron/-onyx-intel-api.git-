@@ -7,6 +7,7 @@
 import { generateText } from "@/lib/ai/providers";
 import { getControlDb, type ControlDb } from "@/lib/project-controls/server";
 import { createServiceClient } from "@/lib/supabase/server";
+import { fetchSiteForecast } from "@/lib/site/openMeteo";
 import type { Json } from "@/lib/supabase/types";
 
 export interface RiskFinding {
@@ -52,13 +53,14 @@ export async function buildProjectSnapshot(tenantId: string, projectId: string) 
   const db = await getControlDb();
   const today = new Date().toISOString().slice(0, 10);
 
-  const [rfis, submittals, schedule, punch, invoices, permits] = await Promise.all([
+  const [rfis, submittals, schedule, punch, invoices, permits, projectRow] = await Promise.all([
     safeFrom<Record<string, unknown>>(db, "rfi_items", tenantId, projectId),
     safeFrom<Record<string, unknown>>(db, "submittal_items", tenantId, projectId),
     safeFrom<Record<string, unknown>>(db, "schedule_tasks", tenantId, projectId),
     safeFrom<Record<string, unknown>>(db, "punch_list_items", tenantId, projectId),
     safeFrom<Record<string, unknown>>(db, "invoices", tenantId, projectId),
     safeFrom<Record<string, unknown>>(db, "permit_items", tenantId, projectId),
+    db.from<Record<string, unknown>>("projects").select("latitude,longitude,city,state").eq("tenant_id", tenantId).eq("id", projectId).limit(1),
   ]);
 
   const openRfis = rfis.filter((r) => (r.status as string) !== "closed");
@@ -88,6 +90,38 @@ export async function buildProjectSnapshot(tenantId: string, projectId: string) 
 
   const pendingPermits = permits.filter((p) => (p.status as string) !== "approved");
 
+  let weather: {
+    source: string;
+    delay_risk_days: number;
+    next_delay_dates: string[];
+    location: string | null;
+  } | null = null;
+  const projRows = (Array.isArray(projectRow.data) ? projectRow.data : projectRow.data ? [projectRow.data] : []) as Array<{
+    latitude?: number | null; longitude?: number | null; city?: string | null; state?: string | null;
+  }>;
+  const proj = projRows[0] ?? null;
+  const lat = proj?.latitude;
+  const lon = proj?.longitude;
+  if (typeof lat === "number" && typeof lon === "number" && Number.isFinite(lat) && Number.isFinite(lon)) {
+    try {
+      const forecast = await fetchSiteForecast(lat, lon, 7);
+      const delayDays = forecast.filter((d) => d.delayRisk);
+      weather = {
+        source: "open-meteo",
+        delay_risk_days: delayDays.length,
+        next_delay_dates: delayDays.map((d) => d.date).slice(0, 5),
+        location: [proj?.city, proj?.state].filter(Boolean).join(", ") || null,
+      };
+    } catch {
+      weather = {
+        source: "open-meteo",
+        delay_risk_days: 0,
+        next_delay_dates: [],
+        location: [proj?.city, proj?.state].filter(Boolean).join(", ") || null,
+      };
+    }
+  }
+
   return {
     rfis_open: openRfis.length,
     rfis_oldest_open_created_at: oldestOpenRfi ?? null,
@@ -105,6 +139,7 @@ export async function buildProjectSnapshot(tenantId: string, projectId: string) 
       .map((t) => t.title ?? t.name ?? "")
       .filter(Boolean)
       .slice(0, 10),
+    weather,
   };
 }
 
