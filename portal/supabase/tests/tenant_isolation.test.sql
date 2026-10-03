@@ -16,12 +16,21 @@ select plan(8);
 
 -- Temporary grants so SET ROLE authenticated can exercise RLS (rolled back).
 -- Table SELECTs were revoked in 20260803191017; EXECUTE on current_tenant_id()
--- was also revoked there, but older permissive policies still call it — without
--- this grant, SELECT fails with "permission denied for function" before the
--- app.clerk_org_id ALL policies can authorize the row.
+-- was also revoked there then re-granted selectively — older select policies
+-- still call current_tenant_id(), and the ALL policies resolve tenant via a
+-- subquery on public.tenants that is itself RLS-gated by self_select.
 grant select on public.tenants, public.projects, public.takeoff_items, public.estimate_items
   to authenticated;
 grant execute on function public.current_tenant_id() to authenticated;
+
+-- Allow the ALL-policy tenants subquery to resolve clerk_org_id without a JWT.
+-- self_select alone requires id = current_tenant_id(), which is circular when
+-- the only claim available is the GUC (current_tenant_id is SECURITY DEFINER
+-- and fine for direct calls, but the inline subquery is not).
+drop policy if exists pgtap_tenants_by_clerk_org on public.tenants;
+create policy pgtap_tenants_by_clerk_org on public.tenants
+  for select to authenticated
+  using (clerk_org_id = current_setting('app.clerk_org_id', true));
 
 -- Fixed UUIDs for stable assertions.
 select set_config('test.tenant_a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', true);
