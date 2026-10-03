@@ -111,7 +111,7 @@ Deno.serve(async (req) => {
 
   // Mark the document as processing right away so the UI can reflect status.
   await db.from("documents")
-    .update({ status: "processing" })
+    .update({ status: "processing", split_status: "processing" })
     .eq("id", body.document_id)
     .eq("tenant_id", body.tenant_id);
   await recordEvent("started");
@@ -215,6 +215,7 @@ Deno.serve(async (req) => {
           page_id: p.id,
           document_id: p.document_id,
           tenant_id: p.tenant_id,
+          project_id: body.project_id,
           page_number: p.page_number,
           storage_path: p.storage_path,
         }),
@@ -263,6 +264,7 @@ Deno.serve(async (req) => {
     await db.from("documents")
       .update({
         status: "split",
+        split_status: "done",
         page_count: pageCount,
         meta: {
           ...prevMeta,

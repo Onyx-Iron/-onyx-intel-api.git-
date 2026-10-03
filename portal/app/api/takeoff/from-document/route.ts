@@ -8,6 +8,7 @@ import { requirePermission, ownershipDenied } from "@/lib/project-controls/route
 import { pythonApiHeaders } from "@/lib/python-api";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
+import { CANONICAL_FAILURE, CANONICAL_SUCCESS } from "@/lib/documents/status";
 import { fetchDriveFileSize } from "@/lib/google/driveFile";
 
 const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
@@ -125,7 +126,7 @@ export async function POST(req: NextRequest): Promise<Response> {
           const detail = err instanceof Error ? err.message : String(err);
           await db.from("documents")
             .update({
-              status: "failed",
+              status: CANONICAL_FAILURE,
               last_error: detail.slice(0, 1000),
               last_error_step: "page_split_worker_invoke",
             } as never)
@@ -135,7 +136,7 @@ export async function POST(req: NextRequest): Promise<Response> {
             projectId: project_id,
             documentId: document_id,
             step: "split",
-            status: "failed",
+              status: CANONICAL_FAILURE,
             worker: "portal:from-document",
             errorCode: "worker_invoke_failed",
             errorMessage: detail,
@@ -163,7 +164,7 @@ export async function POST(req: NextRequest): Promise<Response> {
           const detail = err instanceof Error ? err.message : String(err);
           await db.from("documents")
             .update({
-              status: "failed",
+              status: CANONICAL_FAILURE,
               last_error: detail.slice(0, 1000),
               last_error_step: "page_split_worker_invoke",
             } as never)
@@ -173,7 +174,7 @@ export async function POST(req: NextRequest): Promise<Response> {
             projectId: project_id,
             documentId: document_id,
             step: "split",
-            status: "failed",
+              status: CANONICAL_FAILURE,
             worker: "portal:from-document",
             errorCode: "worker_invoke_failed",
             errorMessage: detail,
@@ -258,14 +259,14 @@ export async function POST(req: NextRequest): Promise<Response> {
       if (settled) return;
       settled = true;
       await db.from("documents")
-        .update({ status: "done", processed_at: new Date().toISOString() } as never)
+        .update({ status: CANONICAL_SUCCESS, processed_at: new Date().toISOString() } as never)
         .eq("id", document_id).eq("tenant_id", tenantId);
     };
     const markFailed = async () => {
       if (settled) return;
       settled = true;
       await db.from("documents")
-        .update({ status: "failed" } as never)
+        .update({ status: CANONICAL_FAILURE } as never)
         .eq("id", document_id).eq("tenant_id", tenantId);
     };
 
