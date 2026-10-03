@@ -243,7 +243,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
             }
             // Kick async split/page workers, then one list refresh.
             // Avoid load→poll→load (two full document fetches per tick).
-            await pollSplitStatus(documents);
+            await pollSplitStatus(documentsRef.current);
             await loadDocuments(false);
           })();
         }, 4000);
