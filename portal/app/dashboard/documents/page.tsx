@@ -9,7 +9,17 @@ import { useProjectContext } from "@/components/project/ProjectContext";
 import { PipelineStage, type PipelineStatus } from "@/components/documents/PipelineStage";
 import { statusLabel } from "@/lib/documents/status";
 
-type DocStatus = "pending" | "processing" | "complete" | "error" | "done" | "failed" | "complete_with_errors";
+type DocStatus =
+  | "pending"
+  | "queued"
+  | "processing"
+  | "split"
+  | "ready"
+  | "complete"
+  | "done"
+  | "complete_with_errors"
+  | "error"
+  | "failed";
 
 interface ProcessingSummary {
   pages_total: number;
@@ -22,7 +32,7 @@ interface ProcessingSummary {
 interface Document {
   id: string;
   file_name: string;
-  status: DocStatus;
+  status: DocStatus | string;
   pages: number | null;
   page_count: number | null;
   uploaded_at: string | null;
@@ -38,7 +48,10 @@ interface Document {
 
 const STATUS_STYLES: Record<string, string> = {
   pending:    "bg-white/5 text-gray-500 border-white/10",
+  queued:     "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
   processing: "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
+  split:      "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
+  ready:      "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
   complete:   "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
   done:       "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
   complete_with_errors: "bg-[#F5A623]/10 text-[#F5A623] border-[#F5A623]/20",

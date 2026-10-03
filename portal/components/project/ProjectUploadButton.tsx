@@ -4,6 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import { Upload } from "lucide-react";
 
 import { useToast } from "@/components/common/Toast";
+import { uploadDocumentDirect } from "@/lib/documents/browser-upload";
 
 interface ProjectUploadButtonProps {
   projectId: string;
@@ -14,8 +15,8 @@ interface ProjectUploadButtonProps {
 
 /**
  * Project-header "Upload Plans" control.
- * Uploads straight to Supabase (multipart) so local files never depend on
- * Google Drive being connected. Drive import stays on Documents → From Drive.
+ * Direct-to-Supabase signed PUT / TUS — local files never depend on Google
+ * Drive. Drive import stays on Documents → From Drive.
  */
 export default function ProjectUploadButton({
   projectId,
@@ -25,6 +26,7 @@ export default function ProjectUploadButton({
 }: ProjectUploadButtonProps) {
   const { toast } = useToast();
   const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const onChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -32,25 +34,16 @@ export default function ProjectUploadButton({
     if (files.length === 0) return;
     e.target.value = "";
     setUploading(true);
+    setProgress(0);
     const failures: string[] = [];
     let uploaded = 0;
     try {
       for (const file of files) {
         try {
-          const form = new FormData();
-          form.append("file", file);
-          form.append("project_id", projectId);
-          form.append("storage_type", "supabase");
-
-          const res = await fetch("/api/documents/upload", {
-            method: "POST",
-            body: form,
+          setProgress(0);
+          await uploadDocumentDirect(file, projectId, {
+            onProgress: (p) => setProgress(p.percent),
           });
-          if (!res.ok) {
-            const d = await res.json().catch(() => ({})) as { error?: string };
-            failures.push(`${file.name}: ${d.error ?? "upload failed"}`);
-            continue;
-          }
           uploaded += 1;
         } catch (err) {
           failures.push(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
@@ -60,10 +53,18 @@ export default function ProjectUploadButton({
       if (failures.length > 0) {
         toast({ title: String(`Some files could not be uploaded:\n\n${failures.join("\n")}`), kind: "error" });
       } else if (uploaded > 0) {
-        toast({ title: String(uploaded === 1 ? "Plan uploaded." : `${uploaded} plans uploaded.`), kind: "info" });
+        toast({
+          title: String(
+            uploaded === 1
+              ? "Plan uploaded — page-split / ingest is running in the background."
+              : `${uploaded} plans uploaded — processing continues in the background.`,
+          ),
+          kind: "success",
+        });
       }
     } finally {
       setUploading(false);
+      setProgress(null);
     }
   }, [projectId, onUploaded, toast]);
 
@@ -90,7 +91,9 @@ export default function ProjectUploadButton({
         className={cls}
       >
         <Upload size={13} />
-        {uploading ? "Uploading…" : label}
+        {uploading
+          ? (progress != null ? `Uploading ${progress}%` : "Uploading…")
+          : label}
       </button>
     </>
   );

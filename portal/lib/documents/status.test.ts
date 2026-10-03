@@ -36,8 +36,10 @@ describe("document status helpers", () => {
     assert.equal(needsSplitStatusPoll({ status: "processing", split_status: "pending" }), true);
   });
 
-  it("treats failed documents as retryable", () => {
+  it("treats failed and partial documents as retryable", () => {
     assert.equal(isRetryable("failed"), true);
+    assert.equal(isRetryable("error"), true);
+    assert.equal(isRetryable("complete_with_errors"), true);
     assert.equal(isRetryable("complete"), false);
   });
 
