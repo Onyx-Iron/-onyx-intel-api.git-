@@ -35,6 +35,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { PDFDocument } from "https://esm.sh/pdf-lib@1.17.1";
+import { reconcileDocumentPages, reconcileSheets } from "../_shared/split-reconcile.ts";
 
 const SUPABASE_URL       = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY   = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -158,15 +159,11 @@ Deno.serve(async (req) => {
       .eq("id", body.document_id)
       .eq("tenant_id", body.tenant_id);
 
-    // ── 4-5. Burst + insert document_pages ───────────────────────────────────
-    const pageRows: Array<{
-      id: string; tenant_id: string; document_id: string; page_number: number;
-      storage_path: string; status: string;
-    }> = [];
-
+    // ── 4-5. Burst + reconcile document_pages ───────────────────────────────
     // pdf-lib doesn't stream; iterate sequentially. For huge decks (500+ pages)
     // we may want to batch these uploads later, but for typical 20-200 page
     // plansets this is well within the 150s Edge Function ceiling.
+    const uploadedPageNumbers: number[] = [];
     let failedUploads = 0;
     for (let i = 0; i < pageCount; i++) {
       const single = await PDFDocument.create();
@@ -188,17 +185,10 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      pageRows.push({
-        id: crypto.randomUUID(),
-        tenant_id: body.tenant_id,
-        document_id: body.document_id,
-        page_number: pageNumber,
-        storage_path: storagePath,
-        status: "pending",
-      });
+      uploadedPageNumbers.push(pageNumber);
     }
 
-    if (pageRows.length === 0) {
+    if (uploadedPageNumbers.length === 0) {
       throw new Error(
         pageCount === 0
           ? "PDF has zero pages"
@@ -206,28 +196,103 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Retry / rekick can re-run split for the same document — clear prior
-    // page rows so UNIQUE(document_id, page_number) doesn't fail the job.
-    {
+    // Retry / rekick must keep existing document_pages ids. Deleting them
+    // cascade-deletes sheet_calibrations and detaches manual takeoffs, and
+    // the sheets FK null-out then lets a second sheet row be inserted.
+    const { data: existingPageRows, error: existingPageErr } = await db
+      .from("document_pages")
+      .select("id, page_number, status, takeoff_status")
+      .eq("document_id", body.document_id)
+      .eq("tenant_id", body.tenant_id);
+    if (existingPageErr) throw new Error(`load document_pages: ${existingPageErr.message}`);
+
+    const pagePlan = reconcileDocumentPages({
+      existing: existingPageRows ?? [],
+      uploadedPageNumbers,
+      pageCount,
+      tenantId: body.tenant_id,
+      documentId: body.document_id,
+      newId: () => crypto.randomUUID(),
+    });
+
+    if (pagePlan.deleteIds.length > 0) {
       const { error: delErr } = await db.from("document_pages")
         .delete()
+        .in("id", pagePlan.deleteIds)
+        .eq("tenant_id", body.tenant_id);
+      if (delErr) throw new Error(`delete surplus document_pages: ${delErr.message}`);
+    }
+
+    const pageInserts = pagePlan.pages.filter((page) => page.insert);
+    if (pageInserts.length > 0) {
+      const { error: insErr } = await db.from("document_pages").insert(pageInserts.map((page) => ({
+        id: page.id,
+        tenant_id: page.tenant_id,
+        document_id: page.document_id,
+        page_number: page.page_number,
+        storage_path: page.storage_path,
+        status: "pending",
+      })));
+      if (insErr) throw new Error(`insert document_pages: ${insErr.message}`);
+    }
+
+    const ocrResets = pagePlan.pages.filter((page) => !page.insert && page.enqueueOcr);
+    for (const page of ocrResets) {
+      const { error: resetErr } = await db.from("document_pages")
+        .update({
+          status: "pending",
+          error: null,
+          storage_path: page.storage_path,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", page.id)
+        .eq("tenant_id", body.tenant_id);
+      if (resetErr) throw new Error(`reset document_page ${page.page_number}: ${resetErr.message}`);
+    }
+
+    const pageRows = pagePlan.pages;
+    {
+      const { data: existingSheets, error: existingSheetErr } = await db
+        .from("sheets")
+        .select("id, document_page_id, page_number")
         .eq("document_id", body.document_id)
         .eq("tenant_id", body.tenant_id);
-      if (delErr) throw new Error(`clear document_pages: ${delErr.message}`);
-      const { error: insErr } = await db.from("document_pages").insert(pageRows);
-      if (insErr) throw new Error(`insert document_pages: ${insErr.message}`);
-
-      const sheetRows = pageRows.map((p) => ({
-        tenant_id: p.tenant_id,
-        project_id: body.project_id,
-        document_id: p.document_id,
-        document_page_id: p.id,
-        page_number: p.page_number,
-        processing_status: "pending",
-      }));
-      const { error: sheetErr } = await db.from("sheets").insert(sheetRows);
-      if (sheetErr) console.warn("[page-split] insert sheets failed:", sheetErr.message);
-      else {
+      if (existingSheetErr) {
+        console.warn("[page-split] load sheets failed:", existingSheetErr.message);
+      } else {
+        const sheetPlan = reconcileSheets({
+          existing: existingSheets ?? [],
+          pages: pageRows.map((page) => ({
+            id: page.id,
+            page_number: page.page_number,
+            tenant_id: page.tenant_id,
+            document_id: page.document_id,
+            project_id: body.project_id,
+          })),
+          pageCount,
+        });
+        if (sheetPlan.deleteIds.length > 0) {
+          const { error: sheetDelErr } = await db.from("sheets")
+            .delete()
+            .in("id", sheetPlan.deleteIds)
+            .eq("tenant_id", body.tenant_id);
+          if (sheetDelErr) console.warn("[page-split] delete surplus sheets failed:", sheetDelErr.message);
+        }
+        for (const update of sheetPlan.updates) {
+          const { error: sheetUpErr } = await db.from("sheets")
+            .update({
+              document_page_id: update.document_page_id,
+              page_number: update.page_number,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", update.id)
+            .eq("tenant_id", body.tenant_id);
+          if (sheetUpErr) console.warn("[page-split] relink sheet failed:", sheetUpErr.message);
+        }
+        if (sheetPlan.inserts.length > 0) {
+          const { error: sheetErr } = await db.from("sheets").insert(sheetPlan.inserts);
+          if (sheetErr) console.warn("[page-split] insert sheets failed:", sheetErr.message);
+        }
         const { error: sheetStatusErr } = await db.rpc("refresh_sheet_index_status", {
           p_document_id: body.document_id,
         });
@@ -242,39 +307,30 @@ Deno.serve(async (req) => {
     const base = SUPABASE_URL.replace(/\/$/, "");
     const processorUrl = `${base}/functions/v1/page-processor`;
     const takeoffWorkerUrl = `${base}/functions/v1/page-takeoff-worker`;
-    const fanoutJobs = pageRows.length * 2;
-    const fanout = Promise.allSettled(pageRows.flatMap((p) => [
-      fetch(processorUrl, {
+    const fanoutTargets = pageRows.flatMap((p) => {
+      const jobs: Array<{ url: string; label: string }> = [];
+      if (p.enqueueOcr) jobs.push({ url: processorUrl, label: "processor" });
+      if (p.enqueueTakeoff) jobs.push({ url: takeoffWorkerUrl, label: "takeoff" });
+      return jobs.map((job) => ({ ...job, page: p }));
+    });
+    const fanoutJobs = fanoutTargets.length;
+    const fanout = Promise.allSettled(fanoutTargets.map(({ url, label, page }) =>
+      fetch(url, {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          page_id: p.id,
-          document_id: p.document_id,
-          tenant_id: p.tenant_id,
+          page_id: page.id,
+          document_id: page.document_id,
+          tenant_id: page.tenant_id,
           project_id: body.project_id,
-          page_number: p.page_number,
-          storage_path: p.storage_path,
+          page_number: page.page_number,
+          storage_path: page.storage_path,
         }),
-      }).catch((err) => console.warn(`[page-split] processor enqueue failed page ${p.page_number}`, err)),
-      fetch(takeoffWorkerUrl, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          page_id: p.id,
-          document_id: p.document_id,
-          tenant_id: p.tenant_id,
-          project_id: body.project_id,
-          page_number: p.page_number,
-          storage_path: p.storage_path,
-        }),
-      }).catch((err) => console.warn(`[page-split] takeoff enqueue failed page ${p.page_number}`, err)),
-    ]));
+      }).catch((err) => console.warn(`[page-split] ${label} enqueue failed page ${page.page_number}`, err)),
+    ));
     // EdgeRuntime is injected by the Supabase Edge runtime.
     // deno-lint-ignore no-explicit-any
     const edgeWaitUntil = (globalThis as any).EdgeRuntime?.waitUntil as
@@ -305,7 +361,7 @@ Deno.serve(async (req) => {
         meta: {
           ...prevMeta,
           processing_summary: {
-            pages_enqueued: pageRows.length,
+            pages_enqueued: pageRows.filter((page) => page.enqueueOcr || page.enqueueTakeoff).length,
             fanout_jobs: fanoutJobs,
             fanout_mode: "fire_and_forget",
             failed_uploads: failedUploads,
@@ -328,13 +384,14 @@ Deno.serve(async (req) => {
       p_document_id: body.document_id,
     });
     if (summaryErr) console.warn("[page-split] summary refresh failed", summaryErr.message);
-    await recordEvent("succeeded", `split ok; ${pageRows.length} pages enqueued`);
+    const enqueuedPages = pageRows.filter((page) => page.enqueueOcr || page.enqueueTakeoff).length;
+    await recordEvent("succeeded", `split ok; ${enqueuedPages} pages enqueued`);
 
     return new Response(JSON.stringify({
       ok: true,
       document_id: body.document_id,
       page_count: pageCount,
-      pages_enqueued: pageRows.length,
+      pages_enqueued: enqueuedPages,
       fanout_jobs: fanoutJobs,
       elapsed_ms: Date.now() - started,
     }), { status: 200, headers: { "Content-Type": "application/json" } });
