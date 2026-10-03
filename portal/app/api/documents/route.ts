@@ -7,7 +7,7 @@ import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { auditDelete } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
-import { reclaimStuckProcessingDocuments, reclaimStuckProcessingPages } from "@/lib/documents/reclaimStuck";
+import { reclaimStuckProcessingDocuments, reclaimStuckProcessingPages, reclaimStuckProcessingSheets } from "@/lib/documents/reclaimStuck";
 import { finalizeDocumentsFromOcr } from "@/lib/documents/finalizeDocument";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
@@ -29,6 +29,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     );
     await reclaimStuckProcessingPages(db, tenantId).catch((err) =>
       console.error("[GET /api/documents] stuck page reclaim failed", err),
+    );
+    await reclaimStuckProcessingSheets(db, tenantId).catch((err) =>
+      console.error("[GET /api/documents] stuck sheet reclaim failed", err),
     );
     await finalizeDocumentsFromOcr(db, tenantId).catch((err) =>
       console.error("[GET /api/documents] OCR finalize failed", err),
