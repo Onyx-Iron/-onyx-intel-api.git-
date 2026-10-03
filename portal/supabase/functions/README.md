@@ -1,11 +1,12 @@
 # Onyx Intel — Supabase Edge Functions
 
-Two functions power the Drive → page-split → per-page RAG pipeline:
+Three functions power the Drive / local upload → page-split → OCR + takeoff pipeline:
 
-| Function             | Trigger                                            | Purpose                                                        |
-| -------------------- | -------------------------------------------------- | -------------------------------------------------------------- |
-| `page-split-worker`  | `POST /api/documents/import-drive` (portal)        | Stream Drive → Storage → pdf-lib split → insert `document_pages` |
-| `page-processor`     | Fan-out from `page-split-worker` (one per page)    | Gemini 1.5 Flash extract → chunk → embed → `document_chunks`     |
+| Function               | Trigger                                            | Purpose                                                        |
+| ---------------------- | -------------------------------------------------- | -------------------------------------------------------------- |
+| `page-split-worker`    | Portal `queuePageSplit` / import-drive / from-document | Stream Drive or read Storage → pdf-lib split → insert `document_pages` → fan-out |
+| `page-processor`       | Fan-out from `page-split-worker` (one per page)    | Gemini extract → chunk → embed → `document_chunks`             |
+| `page-takeoff-worker`  | Fan-out from `page-split-worker` (one per page)    | CSI takeoff extraction per page → estimate rows                |
 
 ## Prerequisites
 
@@ -35,9 +36,10 @@ From the `portal/` directory:
 # One-time: link the local project to the Supabase project
 supabase link --project-ref vvnigrbdsipriufhrwbs
 
-# Deploy both functions
+# Deploy all page-pipeline functions
 supabase functions deploy page-split-worker
 supabase functions deploy page-processor
+supabase functions deploy page-takeoff-worker
 ```
 
 ## Verify
@@ -67,15 +69,18 @@ supabase functions deploy page-processor
 
 ## Design notes
 
-- **Fire-and-forget fan-out.** `page-split-worker` fires each page to
-  `page-processor` with `Promise.allSettled` — one failing page doesn't
-  block the others.
+- **Durable fan-out.** `page-split-worker` enqueues each page to
+  `page-processor` and `page-takeoff-worker`, then uses Edge `waitUntil`
+  so cold isolates don't drop kicks when the HTTP response returns.
 - **No `display_name`.** Payloads to Gemini's `generateContent` REST
   endpoint deliberately omit `display_name` — it exists only in the Files
   API and the inlineData shape rejects it.
-- **Idempotent.** Re-invoking `page-split-worker` on the same `document_id`
-  upserts the original PDF and re-inserts pages (blocked by the
-  `(document_id, page_number)` unique index — safe no-op).
+- **Idempotent rekick.** Re-invoking `page-split-worker` clears prior
+  `document_pages` for the document, then re-inserts — safe for Retry /
+  partial (`complete_with_errors`) recovery.
 - **Grounded chunks.** Every `document_chunks` row carries `page_id` +
   `page_number` so the AI chat's RAG retriever can cite "page 42 of the
   arch set" instead of "somewhere in that PDF".
+- **OCR finalize.** Portal `GET /api/documents` rolls settled page OCR
+  into `documents.status` (`complete` / `complete_with_errors` / `error`)
+  so the Documents UI does not spin forever on `split`.

@@ -58,6 +58,8 @@ export async function GET(
       return NextResponse.json({ error: "Document not found" }, { status: 404 });
     }
 
+    // Sync Gemini ingest writes `pages`; async page-split writes `document_pages`.
+    // Prefer sync rows when present, otherwise surface OCR text from the async path.
     const { data: syncPages, error: pagesErr } = await db
       .from("pages")
       .select("page_number, extracted_text")
@@ -101,7 +103,6 @@ export async function GET(
           }))
       : [];
 
-    // Surface human-readable classification meta saved by other ingest pipelines
     const classification: Record<string, string> = {};
     const META_KEYS_OF_INTEREST: Record<string, string> = {
       title: "Title",

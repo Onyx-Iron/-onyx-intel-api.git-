@@ -45,6 +45,15 @@ export default function ProjectUploadButton({
       onUploaded?.();
       if (failures.length > 0) {
         toast({ title: String(`Some files could not be uploaded:\n\n${failures.join("\n")}`), kind: "error" });
+      } else if (files.length > 0) {
+        toast({
+          title: String(
+            files.length === 1
+              ? "Plan uploaded — page-split / ingest is running in the background."
+              : `${files.length} plans uploaded — processing continues in the background.`,
+          ),
+          kind: "success",
+        });
       }
     } finally {
       setUploading(false);
