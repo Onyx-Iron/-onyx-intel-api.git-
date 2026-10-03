@@ -111,6 +111,44 @@ function packed(rows: unknown[], href: string, extra?: Record<string, unknown>) 
   return { count: rows.length, rows, open_in_app: href, ...extra };
 }
 
+const ESTIMATE_ROLLUP_PAGE = 1000;
+const ESTIMATE_ROLLUP_MAX_ROWS = 50_000;
+
+async function rollupEstimateTotals(
+  db: Db,
+  ctx: SkillContext,
+  versionIds: string[],
+): Promise<Map<string, { total_price: number; item_count: number }>> {
+  const totals = new Map<string, { total_price: number; item_count: number }>();
+  let seen = 0;
+  for (let offset = 0; ; offset += ESTIMATE_ROLLUP_PAGE) {
+    const { data, error } = await db
+      .from("estimate_items")
+      .select("estimate_version_id, total_price")
+      .eq("tenant_id", ctx.tenantId)
+      .eq("project_id", ctx.projectId)
+      .in("estimate_version_id", versionIds)
+      .order("id", { ascending: true })
+      .range(offset, offset + ESTIMATE_ROLLUP_PAGE - 1);
+    if (error) {
+      throw new Error(typeof error.message === "string" && error.message ? error.message : "Could not read estimate items.");
+    }
+    const page = (data ?? []) as Array<{ estimate_version_id?: unknown; total_price?: unknown }>;
+    for (const item of page) {
+      const versionId = String(item.estimate_version_id ?? "");
+      const current = totals.get(versionId) ?? { total_price: 0, item_count: 0 };
+      current.total_price += Number(item.total_price ?? 0);
+      current.item_count += 1;
+      totals.set(versionId, current);
+    }
+    seen += page.length;
+    if (page.length < ESTIMATE_ROLLUP_PAGE) return totals;
+    if (seen >= ESTIMATE_ROLLUP_MAX_ROWS) {
+      throw new Error("Estimate is too large to total completely.");
+    }
+  }
+}
+
 const CSI_NAMES: Record<string, string> = {
   "01": "general requirements",
   "02": "existing conditions site demolition",
@@ -521,21 +559,13 @@ export async function executeProjectSkill(
       const estimates = (data ?? []) as Array<Record<string, unknown>>;
       if (estimates.length === 0) return empty("No estimates on this project.", href);
       const versionIds = estimates.map((row) => row.current_version_id).filter((id): id is string => typeof id === "string");
-      const totals = new Map<string, { total_price: number; item_count: number }>();
+      let totals = new Map<string, { total_price: number; item_count: number }>();
       if (versionIds.length > 0 && ctx.canReadFinancial) {
-        const itemsResult = await db
-          .from("estimate_items")
-          .select("estimate_version_id, total_price")
-          .eq("tenant_id", ctx.tenantId)
-          .eq("project_id", ctx.projectId)
-          .in("estimate_version_id", versionIds)
-          .limit(500);
-        for (const item of itemsResult.data ?? []) {
-          const versionId = String(item.estimate_version_id ?? "");
-          const current = totals.get(versionId) ?? { total_price: 0, item_count: 0 };
-          current.total_price += Number(item.total_price ?? 0);
-          current.item_count += 1;
-          totals.set(versionId, current);
+        try {
+          totals = await rollupEstimateTotals(db, ctx, versionIds);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return { error: clip(message) ?? "Could not total the estimate.", open_in_app: href };
         }
       }
       const rows = estimates.map((row) => {
