@@ -97,6 +97,42 @@ Deno.serve(async (req) => {
     if (error) console.warn("[page-processor] summary refresh failed", error.message);
   }
 
+  // The documents UI and project chat read `pages` / `chunks`. The splitter
+  // writes `document_pages` / `document_chunks`. Copy each finished sheet
+  // into both so one pipeline feeds insights and search.
+  async function mirrorSearchCopies(text: string, parts: string[], vectors: Array<number[] | null>): Promise<void> {
+    const { error: pageErr } = await db.from("pages").upsert({
+      document_id: body.document_id,
+      tenant_id: body.tenant_id,
+      page_number: body.page_number,
+      extracted_text: text || null,
+    }, { onConflict: "document_id,page_number" });
+    if (pageErr) throw new Error(`mirror pages: ${pageErr.message}`);
+    await db.from("chunks").delete()
+      .eq("document_id", body.document_id)
+      .eq("tenant_id", body.tenant_id)
+      .eq("page_number", body.page_number);
+    if (parts.length === 0) return;
+    const { data: docRow, error: docErr } = await db.from("documents")
+      .select("project_id")
+      .eq("id", body.document_id)
+      .eq("tenant_id", body.tenant_id)
+      .maybeSingle();
+    if (docErr) throw new Error(`mirror project: ${docErr.message}`);
+    if (!docRow?.project_id) return;
+    const mirrored = parts.map((content, i) => ({
+      id: crypto.randomUUID(),
+      tenant_id: body.tenant_id,
+      document_id: body.document_id,
+      project_id: docRow.project_id,
+      page_number: body.page_number,
+      content,
+      embedding: vectors[i] ? `[${vectors[i]!.join(",")}]` : null,
+    }));
+    const { error: chunkErr } = await db.from("chunks").insert(mirrored);
+    if (chunkErr) throw new Error(`mirror chunks: ${chunkErr.message}`);
+  }
+
   await db.from("document_pages")
     .update({ status: "processing" })
     .eq("id", body.page_id)
@@ -139,6 +175,7 @@ Deno.serve(async (req) => {
     const genJson = await genRes.json();
     const text: string = (genJson.candidates?.[0]?.content?.parts ?? [])
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .filter((p: any) => p?.thought !== true)
       .map((p: any) => p.text ?? "")
       .join("")
       .trim();
@@ -146,6 +183,7 @@ Deno.serve(async (req) => {
     // ── 3. Chunk ────────────────────────────────────────────────────────────
     const chunks = chunkText(text, 1200, 200);
     if (chunks.length === 0) {
+      await mirrorSearchCopies(text, [], []);
       await db.from("document_pages")
         .update({ status: "done", ocr_text: text || null, updated_at: new Date().toISOString() })
         .eq("id", body.page_id);
@@ -159,7 +197,8 @@ Deno.serve(async (req) => {
     await recordEvent("embedding", "started");
     const embeddings = await embedBatch(chunks);
 
-    // ── 5. Insert chunks ────────────────────────────────────────────────────
+    // ── 5. Insert chunks, replacing any earlier attempt for this page ────────
+    await db.from("document_chunks").delete().eq("page_id", body.page_id).eq("tenant_id", body.tenant_id);
     const rows = chunks.map((content, i) => ({
       id: crypto.randomUUID(),
       tenant_id: body.tenant_id,
@@ -172,6 +211,7 @@ Deno.serve(async (req) => {
     }));
     const { error: insErr } = await db.from("document_chunks").insert(rows);
     if (insErr) throw new Error(`insert chunks: ${insErr.message}`);
+    await mirrorSearchCopies(text, chunks, embeddings);
 
     // ── 6. Done ─────────────────────────────────────────────────────────────
     await db.from("document_pages")

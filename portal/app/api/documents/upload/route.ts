@@ -1,7 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { buildDocumentRevisionMeta } from "@/lib/documents/revisions";
-import { mimeTypeForFile, originalStoragePath, PLANS_BUCKET } from "@/lib/documents/upload-plan";
+import { MAX_UPLOAD_BYTES, mimeTypeForFile, originalStoragePath, PLANS_BUCKET } from "@/lib/documents/upload-plan";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { getAccessTokenWithReason } from "@/lib/google/oauth";
@@ -109,7 +109,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     // ---------- Drive branch ----------
     const body = await req.json() as {
-      storage_type?: "drive" | "supabase";
+      storage_type?: "drive" | "storage" | "supabase";
       project_id?: string;
       file_name?: string;
       content_type?: string;
@@ -118,18 +118,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       drive_file_id?: string;
     };
     const storage_type = body.storage_type ?? "drive";
+    const { project_id, file_name, drive_file_id } = body;
+    if (!project_id || !file_name) {
+      return NextResponse.json({ error: "project_id and file_name required" }, { status: 400 });
+    }
+    const content_type = mimeTypeForFile(file_name, body.content_type ?? body.mime_type);
+
+    if (storage_type === "storage") {
+      return startStorageUpload({
+        db,
+        tenantId,
+        userId,
+        projectId: project_id,
+        fileName: file_name,
+        contentType: content_type,
+        size: body.size ?? null,
+      });
+    }
     if (storage_type !== "drive") {
       return NextResponse.json(
         { error: `Unsupported storage_type "${storage_type}" for JSON request` },
         { status: 400 },
       );
     }
-
-    const { project_id, file_name, drive_file_id } = body;
-    if (!project_id || !file_name) {
-      return NextResponse.json({ error: "project_id and file_name required" }, { status: 400 });
-    }
-    const content_type = mimeTypeForFile(file_name, body.content_type ?? body.mime_type);
 
     const { data: project, error: projErr } = await db
       .from("projects").select("id").eq("id", project_id).eq("tenant_id", tenantId).single();
@@ -204,6 +215,75 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 }
 
 // ---------- helpers ----------
+
+async function startStorageUpload(args: {
+  db: Awaited<ReturnType<typeof createServiceClient>>;
+  tenantId: string;
+  userId: string;
+  projectId: string;
+  fileName: string;
+  contentType: string;
+  size: number | null;
+}): Promise<NextResponse> {
+  const { db, tenantId, userId, projectId, fileName, contentType, size } = args;
+  if (size != null && size > MAX_UPLOAD_BYTES) {
+    return NextResponse.json({ error: "File exceeds the 1GB limit. Split the drawing set and retry." }, { status: 413 });
+  }
+  const { data: project, error: projErr } = await db
+    .from("projects").select("id").eq("id", projectId).eq("tenant_id", tenantId).single();
+  if (projErr || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
+
+  const documentId = crypto.randomUUID();
+  const storagePath = originalStoragePath(documentId, fileName);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: signed, error: signErr } = await (db.storage.from(PLANS_BUCKET) as any).createSignedUploadUrl(storagePath);
+  if (signErr || !signed) {
+    return NextResponse.json(
+      { error: `Could not create upload URL: ${signErr?.message ?? "unknown"}` },
+      { status: 500 },
+    );
+  }
+
+  const insertRow: TablesInsert<"documents"> = {
+    id: documentId,
+    tenant_id: tenantId,
+    project_id: projectId,
+    file_name: fileName,
+    status: "queued",
+    uploaded_at: new Date().toISOString(),
+    meta: buildDocumentRevisionMeta(fileName, {
+      source: "local_upload",
+      storage: PLANS_BUCKET,
+      storage_path: storagePath,
+      size,
+      content_type: contentType,
+    }),
+  };
+  const { data: doc, error } = await db.from("documents").insert(insertRow).select("id").single();
+  if (error || !doc) return NextResponse.json({ error: `[insert] ${error?.message}` }, { status: 500 });
+
+  void logEvent({
+    projectId,
+    tenantId,
+    userId,
+    entityType: "document",
+    entityId: doc.id,
+    action: "queued",
+    title: `Document upload started: ${fileName}`,
+    meta: { size, content_type: contentType, storage: PLANS_BUCKET },
+  });
+
+  return NextResponse.json({
+    document_id: doc.id,
+    upload: {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      url: (signed as any).signedUrl ?? (signed as any).signedURL ?? (signed as any).url,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      token: (signed as any).token,
+      path: storagePath,
+    },
+  });
+}
 
 async function insertDriveRow(args: {
   db: Awaited<ReturnType<typeof createServiceClient>>;

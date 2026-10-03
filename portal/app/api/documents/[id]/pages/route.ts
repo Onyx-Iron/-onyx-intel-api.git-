@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { mergeInsightPages } from "@/lib/documents/insight-pages";
 
 // Always read fresh — Insights panel is refreshed after every new Q&A answer
 // and the cache must reflect the latest meta.questions immediately.
@@ -30,14 +31,23 @@ export async function GET(
       return NextResponse.json({ error: "Document not found" }, { status: 404 });
     }
 
-    const { data: pages, error: pagesErr } = await db
-      .from("pages")
-      .select("page_number, extracted_text")
-      .eq("document_id", documentId)
-      .eq("tenant_id", tenantId)
-      .order("page_number", { ascending: true });
+    const [{ data: pages, error: pagesErr }, { data: sheetPages, error: sheetErr }] = await Promise.all([
+      db.from("pages")
+        .select("page_number, extracted_text")
+        .eq("document_id", documentId)
+        .eq("tenant_id", tenantId)
+        .order("page_number", { ascending: true }),
+      db.from("document_pages")
+        .select("page_number, ocr_text")
+        .eq("document_id", documentId)
+        .eq("tenant_id", tenantId)
+        .order("page_number", { ascending: true }),
+    ]);
     if (pagesErr) {
       return NextResponse.json({ error: pagesErr.message }, { status: 500 });
+    }
+    if (sheetErr) {
+      return NextResponse.json({ error: sheetErr.message }, { status: 500 });
     }
 
     const meta = (doc.meta ?? {}) as Record<string, unknown>;
@@ -70,18 +80,7 @@ export async function GET(
 
     return NextResponse.json({
       document: doc,
-      pages: (pages ?? []).map((p) => {
-        const text = p.extracted_text ?? "";
-        const [summary, keyTermsLine] = text.split("\n");
-        const keyTerms = keyTermsLine
-          ? keyTermsLine.replace(/^Key terms:\s*/i, "").split(",").map((t) => t.trim()).filter(Boolean)
-          : [];
-        return {
-          page_number: p.page_number,
-          summary: summary ?? "",
-          key_terms: keyTerms,
-        };
-      }),
+      pages: mergeInsightPages(pages ?? [], sheetPages ?? []),
       questions,
       classification,
     });
