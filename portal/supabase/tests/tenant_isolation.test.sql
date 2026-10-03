@@ -16,9 +16,11 @@ select plan(8);
 
 -- Temporary grants so SET ROLE authenticated can exercise RLS (rolled back).
 -- Table SELECTs were revoked in 20260803191017; EXECUTE on current_tenant_id()
--- was also revoked there then re-granted selectively — older select policies
--- still call current_tenant_id(), and the ALL policies resolve tenant via a
--- subquery on public.tenants that is itself RLS-gated by self_select.
+-- was also revoked there then restored in 20261006000000 — older select
+-- policies still call current_tenant_id(), and the ALL policies resolve
+-- tenant via a subquery on public.tenants that is itself RLS-gated by
+-- self_select. Keep session grants so this suite stays green even if that
+-- migration is not yet applied on an older local stack.
 grant select on public.tenants, public.projects, public.takeoff_items, public.estimate_items
   to authenticated;
 grant execute on function public.current_tenant_id() to authenticated;
@@ -113,9 +115,14 @@ select is(
   'superuser sees both takeoff_items'
 );
 
--- Impersonate tenant A via GUC used by tenant_isolation_* ALL policies.
+-- Impersonate tenant A.
+-- - app.clerk_org_id feeds the recovered ALL policies and (via
+--   20261006000001) current_tenant_id() GUC fallback
+-- - request.jwt.claims.org_id feeds the classic JWT path for
+--   current_tenant_id() / tenants.self_select
 set local role authenticated;
 select set_config('app.clerk_org_id', 'org_pgtap_a', true);
+select set_config('request.jwt.claims', '{"org_id":"org_pgtap_a"}', true);
 
 select is(
   (select count(*)::int from public.projects
@@ -147,6 +154,7 @@ select is(
 
 -- Switch to tenant B — must not see A.
 select set_config('app.clerk_org_id', 'org_pgtap_b', true);
+select set_config('request.jwt.claims', '{"org_id":"org_pgtap_b"}', true);
 
 select is(
   (select count(*)::int from public.projects

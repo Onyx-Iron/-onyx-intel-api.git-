@@ -13,8 +13,7 @@ const ALLOWLIST = new Set([
   "cost-catalog/ingest/oce/route.ts",
   "public/procurement-request/[id]/route.ts",
   "internal/outbox/process/route.ts",
-  // Cross-tenant sheet worker: claims queued sheets then scopes each job by
-  // the sheet's own tenant_id inside processSheetBatch (same pattern as outbox).
+  // Cron/worker: claims sheets via RPC that already scopes by tenant_id.
   "internal/sheets/process/route.ts",
 ]);
 

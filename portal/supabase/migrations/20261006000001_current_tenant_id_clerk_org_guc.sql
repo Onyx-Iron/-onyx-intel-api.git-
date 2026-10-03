@@ -8,9 +8,8 @@
 -- SECURITY DEFINER + search_path=public: the tenants lookup bypasses RLS on
 -- tenants (exact same privilege model as the original helper).
 --
--- Execute grants are intentionally unchanged from
--- 20260803191017_close_remaining_supabase_advisors.sql (service_role only in
--- production; pgTAP re-grants authenticated inside a rolled-back transaction).
+-- Execute grants are owned by 20261006000000_restore_current_tenant_id_execute
+-- (authenticated + service_role). This migration only replaces the function body.
 
 CREATE OR REPLACE FUNCTION public.current_tenant_id()
 RETURNS uuid
