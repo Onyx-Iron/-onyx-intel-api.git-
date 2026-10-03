@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useVirtualizer } from "@tanstack/react-virtual";
 import Link from "next/link";
 import { calculateAssemblyQuantities, type RebarSize, REBAR_UNIT_WEIGHT_LBS_PER_FT } from "@/lib/math/assemblies";
+import OutboxSyncPanel from "@/components/estimate/OutboxSyncPanel";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -620,6 +621,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         )}
 
         {seedResult && <div className="border-t border-white/5 bg-white/[0.03] px-4 py-1.5 text-[11px] text-white/70">{seedResult}</div>}
+        <OutboxSyncPanel projectId={projectId} />
         {versions.length > 1 && (
           <div className="border-t border-white/5 px-4 py-2 flex flex-wrap items-center gap-2 text-[11px]">
             <span className="uppercase tracking-widest text-white/40">Compare</span>
