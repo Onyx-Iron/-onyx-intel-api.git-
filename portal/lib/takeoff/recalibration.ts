@@ -55,3 +55,41 @@ export function previewRecalibration(
 export function recalibrationNeedsConfirm(lines: RecalibrationPreviewLine[]): boolean {
   return lines.some((line) => line.recomputed && Math.abs(line.after - line.before) > 1e-6);
 }
+
+/**
+ * Columns that exist on `manual_takeoffs`. The display name lives in
+ * `geometry.label` — there is no `label` or `review_status` column.
+ * Selecting either makes PostgREST fail the query.
+ */
+export const MANUAL_TAKEOFF_DRAFT_COLUMNS =
+  "id, takeoff_type, quantity, unit, geometry, cost_code, row_version";
+
+export const MANUAL_TAKEOFF_EXPORT_COLUMNS =
+  "id, cost_code, takeoff_type, quantity, unit, page_id, layer_id, geometry, created_at";
+
+export function labelFromTakeoffGeometry(geometry: unknown): string | null {
+  if (!geometry || typeof geometry !== "object" || Array.isArray(geometry)) return null;
+  const label = (geometry as { label?: unknown }).label;
+  if (typeof label !== "string") return null;
+  const trimmed = label.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export interface ManualTakeoffDraftRow {
+  id: string;
+  takeoff_type: string;
+  quantity: number | string;
+  unit?: string | null;
+  geometry?: unknown;
+}
+
+/** Build the preview input from a draft row. Label comes from geometry. */
+export function measurementFromDraftRow(row: ManualTakeoffDraftRow): RecalibrationMeasurement {
+  return {
+    id: row.id,
+    label: labelFromTakeoffGeometry(row.geometry),
+    takeoff_type: row.takeoff_type,
+    quantity: Number(row.quantity),
+    unit: row.unit ?? null,
+  };
+}

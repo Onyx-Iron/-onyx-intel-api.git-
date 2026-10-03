@@ -5,6 +5,7 @@ import {
   getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant,
 } from "@/lib/project-controls/server";
 import { ownershipDenied } from "@/lib/project-controls/route-guards";
+import { labelFromTakeoffGeometry, MANUAL_TAKEOFF_EXPORT_COLUMNS } from "@/lib/takeoff/recalibration";
 
 export const runtime = "nodejs";
 
@@ -29,14 +30,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, error } = await (db as any)
     .from("manual_takeoffs")
-    .select("id, label, cost_code, takeoff_type, quantity, unit, page_id, layer_id, geometry, review_status, created_at")
+    .select(MANUAL_TAKEOFF_EXPORT_COLUMNS)
     .eq("tenant_id", tenantId)
     .eq("project_id", projectId)
     .is("deleted_at", null)
     .order("created_at", { ascending: true });
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  const rows = data ?? [];
+  const rows = (data ?? []).map((row: { geometry?: unknown }) => ({
+    ...row,
+    label: labelFromTakeoffGeometry(row.geometry),
+  }));
 
   if (format === "csv") {
     const header = ["id", "label", "cost_code", "takeoff_type", "quantity", "unit", "page_id", "layer_id"];
@@ -44,7 +48,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     for (const r of rows) {
       lines.push([
         r.id,
-        JSON.stringify(r.label ?? ""),
+        JSON.stringify(labelFromTakeoffGeometry(r.geometry) ?? ""),
         r.cost_code ?? "",
         r.takeoff_type ?? "",
         r.quantity ?? "",
