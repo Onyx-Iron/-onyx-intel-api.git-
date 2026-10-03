@@ -271,10 +271,14 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     e.target.value = "";
     setUploading(true);
     try {
-      // Direct-to-Supabase signed PUT / TUS — bytes never touch Vercel's 4.5MB limit.
-      // Large PDFs are completed via upload-url/complete → ingest → page-split-worker.
+      // Direct-to-Supabase signed PUT / TUS — no Google Drive required; bytes
+      // never touch Vercel's 4.5MB limit. Large PDFs complete via
+      // upload-url/complete → ingest → page-split-worker. "From Drive" stays
+      // the Drive import path.
       await uploadDocumentDirect(file, projectId);
-      loadDocuments();
+      toast({ title: String(`Uploaded ${file.name}`), kind: "info" });
+      setPollTimedOut(false);
+      await loadDocuments(false);
     } catch (err) {
       toast({ title: String(`Upload failed: ${err instanceof Error ? err.message : String(err)}`), kind: "error" });
     } finally {
@@ -325,7 +329,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     } finally {
       setDriveImporting(false);
     }
-  }, [projectId, loadDocuments]);
+  }, [projectId, loadDocuments, toast]);
 
   const openAsk = (doc: Document) => {
     setAskDoc({ id: doc.id, name: doc.file_name });
@@ -369,6 +373,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   }, [askDoc]);
 
   const retryIngest = useCallback(async (doc: Document) => {
+    if (retryingDocId) return;
     if (!documentHasAskableSource(doc)) {
       toast({ title: String("No stored file to retry — re-upload this document."), kind: "error" });
       return;
@@ -380,17 +385,38 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
-      const data = await res.json().catch(() => ({})) as { error?: string; skipped?: boolean; reason?: string };
-      if (!res.ok && res.status !== 409) {
+      const data = await res.json().catch(() => ({})) as {
+        error?: string;
+        skipped?: boolean;
+        reason?: string;
+        queued?: boolean;
+      };
+      if (!res.ok && res.status !== 409 && res.status !== 202) {
         toast({ title: String(data.error ?? `Retry failed (${res.status})`), kind: "error" });
         return;
       }
       if (data.skipped && data.reason === "already_complete") {
         toast({ title: String("Document is already processed."), kind: "info" });
-      } else if (data.skipped && data.reason === "already_processing") {
+      } else if (
+        data.skipped
+        && (data.reason === "already_processing" || data.reason === "concurrent_claim")
+      ) {
+        toast({ title: String("Document is already being processed."), kind: "info" });
+      } else if (res.status === 409 && data.skipped) {
         toast({ title: String("Document is already being processed."), kind: "info" });
       } else {
-        toast({ title: String("Re-processing started."), kind: "info" });
+        toast({
+          title: data.queued
+            ? `${doc.file_name} re-queued for page-split.`
+            : `${doc.file_name} ingest restarted.`,
+          kind: "success",
+        });
+        // Optimistically flip so polling resumes immediately.
+        setDocuments((prev) => prev.map((d) => (
+          d.id === doc.id
+            ? { ...d, status: data.queued ? "queued" : "processing", last_error: null, last_error_step: null }
+            : d
+        )));
       }
       setPollTimedOut(false);
       await loadDocuments(false);
@@ -399,7 +425,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     } finally {
       setRetryingDocId(null);
     }
-  }, [loadDocuments, toast]);
+  }, [retryingDocId, loadDocuments, toast]);
 
   return (
     <div className="space-y-3">
@@ -572,15 +598,17 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                               <span className="text-[10px] uppercase tracking-widest font-mono">Ask</span>
                             </button>
                           )}
-                          {isRetryable(doc.status) && (
+                          {(isRetryable(doc.status) || (pollTimedOut && isProcessing)) && (
                             <button
                               onClick={() => void retryIngest(doc)}
                               disabled={retryingDocId === doc.id}
                               className="flex items-center gap-1.5 text-gray-600 hover:text-[#00D2FF] transition-colors disabled:opacity-40"
-                              title="Retry processing"
+                              title="Retry ingest / page-split"
                             >
-                              <RefreshCw size={12} className={retryingDocId === doc.id ? "animate-spin" : ""} />
-                              <span className="text-[10px] uppercase tracking-widest font-mono">Retry</span>
+                              <RefreshCw size={12} className={retryingDocId === doc.id ? "animate-spin" : undefined} />
+                              <span className="text-[10px] uppercase tracking-widest font-mono">
+                                {retryingDocId === doc.id ? "Retrying…" : "Retry"}
+                              </span>
                             </button>
                           )}
                           <button

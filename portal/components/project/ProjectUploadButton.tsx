@@ -13,6 +13,11 @@ interface ProjectUploadButtonProps {
   onUploaded?: () => void;
 }
 
+/**
+ * Project-header "Upload Plans" control.
+ * Direct-to-Supabase signed PUT / TUS — local files never depend on Google
+ * Drive. Drive import stays on Documents → From Drive.
+ */
 export default function ProjectUploadButton({
   projectId,
   variant = "primary",
@@ -31,6 +36,7 @@ export default function ProjectUploadButton({
     setUploading(true);
     setProgress(0);
     const failures: string[] = [];
+    let uploaded = 0;
     try {
       for (const file of files) {
         try {
@@ -38,6 +44,7 @@ export default function ProjectUploadButton({
           await uploadDocumentDirect(file, projectId, {
             onProgress: (p) => setProgress(p.percent),
           });
+          uploaded += 1;
         } catch (err) {
           failures.push(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -45,6 +52,15 @@ export default function ProjectUploadButton({
       onUploaded?.();
       if (failures.length > 0) {
         toast({ title: String(`Some files could not be uploaded:\n\n${failures.join("\n")}`), kind: "error" });
+      } else if (uploaded > 0) {
+        toast({
+          title: String(
+            uploaded === 1
+              ? "Plan uploaded — page-split / ingest is running in the background."
+              : `${uploaded} plans uploaded — processing continues in the background.`,
+          ),
+          kind: "success",
+        });
       }
     } finally {
       setUploading(false);

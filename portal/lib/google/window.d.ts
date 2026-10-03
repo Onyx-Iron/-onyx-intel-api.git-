@@ -49,6 +49,8 @@ declare global {
           initTokenClient: (opts: {
             client_id: string;
             scope: string;
+            /** GIS defaults to true; set false so prior grants are not merged. */
+            include_granted_scopes?: boolean;
             callback: (resp: { access_token?: string; expires_in?: number; error?: string }) => void;
             error_callback?: (err: { type?: string; message?: string }) => void;
           }) => { requestAccessToken: (overrides?: { prompt?: string }) => void };

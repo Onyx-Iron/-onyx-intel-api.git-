@@ -63,7 +63,12 @@ export default function OnboardingPlanPage() {
       const res = await fetch("/api/billing/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plan_tier: planKey, cycle: billingCycle }),
+        body: JSON.stringify({
+          plan: planKey,
+          plan_tier: planKey,
+          billing_cycle: billingCycle,
+          cycle: billingCycle,
+        }),
       });
       if (!res.ok) {
         const text = await res.text();
