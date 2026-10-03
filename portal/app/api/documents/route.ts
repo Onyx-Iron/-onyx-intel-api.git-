@@ -9,6 +9,7 @@ import { auditDelete } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
 import { reclaimStuckProcessingDocuments, reclaimStuckProcessingPages, reclaimStuckProcessingSheets } from "@/lib/documents/reclaimStuck";
 import { finalizeDocumentsFromOcr } from "@/lib/documents/finalizeDocument";
+import { settleRailwayExtracts } from "@/lib/documents/railwaySettle";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
@@ -22,6 +23,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const { page, limit, offset } = parsePagination(req.nextUrl.searchParams);
 
     const db = await createServiceClient();
+    // Land finished CAD/IFC Celery extracts before the stuck-processing
+    // reclaim can mark a still-running (or just-finished) job as a timeout.
+    await settleRailwayExtracts(db, tenantId).catch((err) =>
+      console.error("[GET /api/documents] railway extract settle failed", err),
+    );
     // Opportunistic reclaim + OCR finalize so list polls advance stuck / split
     // docs instead of spinning forever in the Documents UI.
     await reclaimStuckProcessingDocuments(db, tenantId).catch((err) =>

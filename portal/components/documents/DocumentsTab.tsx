@@ -8,6 +8,7 @@ import GenerateDocDropdown from "@/components/common/GenerateDocDropdown";
 
 import { useToast } from "@/components/common/Toast";
 import { uploadDocumentDirect } from "@/lib/documents/browser-upload";
+import { RAILWAY_EXTRACT_TIMEOUT_MS, RAILWAY_PROCESSING_KIND } from "@/lib/documents/railwayJob";
 import {
   isInFlightStatus,
   isRetryable,
@@ -157,8 +158,16 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
 
   // Stop polling after this many ms if status still hasn't changed —
   // a stuck "processing" usually means the fire-and-forget ingest crashed
-  // before it could update the row to "error".
+  // before it could update the row to "error". CAD/IFC extracts run on
+  // Celery and can outlast that window; those keep polling until the
+  // worker timeout so a finished job is imported on the next list refresh.
   const POLL_TIMEOUT_MS = 5 * 60 * 1000;
+  const pollTimeoutMsRef = useRef(POLL_TIMEOUT_MS);
+  pollTimeoutMsRef.current = documents.some(
+    (d) => isInFlightStatus(d.status) && d.meta?.processing === RAILWAY_PROCESSING_KIND,
+  )
+    ? RAILWAY_EXTRACT_TIMEOUT_MS
+    : POLL_TIMEOUT_MS;
 
   const toggleInsights = useCallback(async (docId: string) => {
     if (expandedDocId === docId) {
@@ -225,13 +234,16 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     const hasInFlight = documents.some(
       (d) => isInFlightStatus(d.status) || needsSplitStatusPoll(d),
     );
-    if (hasInFlight && !pollTimedOut) {
+    const railwayInFlight = documents.some(
+      (d) => isInFlightStatus(d.status) && d.meta?.processing === RAILWAY_PROCESSING_KIND,
+    );
+    if (hasInFlight && (!pollTimedOut || railwayInFlight)) {
       if (!pollRef.current) {
         pollStartedAtRef.current = Date.now();
         pollRef.current = setInterval(() => {
           void (async () => {
             const startedAt = pollStartedAtRef.current ?? Date.now();
-            if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+            if (Date.now() - startedAt > pollTimeoutMsRef.current) {
               if (pollRef.current) {
                 clearInterval(pollRef.current);
                 pollRef.current = null;

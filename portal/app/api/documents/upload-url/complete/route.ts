@@ -94,9 +94,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           projectId: doc.project_id,
           email,
         });
+        const enqueuedAt = new Date().toISOString();
         await db.from("documents").update({
           status: "processing",
-          processing_started_at: new Date().toISOString(),
+          processing_started_at: enqueuedAt,
           last_error: null,
           last_error_step: null,
           meta: {
@@ -104,6 +105,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             railway_job_id: job.job_id,
             railway_poll_url: job.poll_url ?? null,
             processing: "railway_celery",
+            railway_enqueued_at: enqueuedAt,
           },
         }).eq("id", doc.id).eq("tenant_id", tenantId);
 
