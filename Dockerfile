@@ -25,4 +25,4 @@ ENV PYTHONUNBUFFERED=1
 ENV CUDA_VISIBLE_DEVICES=""
 EXPOSE 8000
 
-CMD uvicorn takeoff_api:app --host 0.0.0.0 --port ${PORT:-8000} --workers 2
+CMD uvicorn takeoff_api:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1
