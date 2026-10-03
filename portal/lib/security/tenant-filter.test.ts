@@ -12,7 +12,10 @@ const ALLOWLIST = new Set([
   "cost-catalog/ingest/bls/route.ts",
   "cost-catalog/ingest/oce/route.ts",
   "public/procurement-request/[id]/route.ts",
+  // Cross-tenant workers. Auth is INTERNAL_WORKER_SECRET / CRON_SECRET,
+  // not a tenant predicate. internal-routes.test.ts locks that check.
   "internal/outbox/process/route.ts",
+  "internal/sheets/process/route.ts",
 ]);
 
 function walk(dir: string): string[] {
