@@ -2,12 +2,12 @@ import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { headerSafe } from "@/lib/http";
-import { pythonApiHeaders } from "@/lib/python-api";
+import { pythonApiBaseUrl, pythonApiHeaders } from "@/lib/python-api";
 import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 
-const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
+const PYTHON_API_URL = pythonApiBaseUrl();
 
 // ── AI vision provider config (used only when ?ai_fallback=true) ─────────────
 const GEMINI_API_KEY    = headerSafe(process.env.GEMINI_API_KEY);

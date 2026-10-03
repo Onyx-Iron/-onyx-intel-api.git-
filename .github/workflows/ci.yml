@@ -149,6 +149,9 @@ jobs:
           exit 1
       - run: supabase db push --local
         working-directory: portal
+      # XD-14: pgTAP cross-tenant isolation (supabase/tests/*.test.sql)
+      - run: supabase test db
+        working-directory: portal
       - run: supabase stop
         working-directory: portal
         if: always()

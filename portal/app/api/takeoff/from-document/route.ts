@@ -1,11 +1,10 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { headerSafe } from "@/lib/http";
 import { getAccessToken } from "@/lib/google/oauth";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
-import { pythonApiHeaders } from "@/lib/python-api";
+import { pythonApiBaseUrl, pythonApiHeaders } from "@/lib/python-api";
 import { CANONICAL_FAILURE, CANONICAL_SUCCESS } from "@/lib/documents/status";
 import {
   ASYNC_SPLIT_BYTES,
@@ -13,7 +12,7 @@ import {
   queueLocalDocumentForPageSplit,
 } from "@/lib/documents/queuePageSplit";
 
-const PYTHON_API_URL = headerSafe(process.env.PYTHON_API_URL) || "http://localhost:5050";
+const PYTHON_API_URL = pythonApiBaseUrl();
 // Aligned with the Supabase Edge Functions — see `page-split-worker/index.ts`.
 const BUCKET = "plans-bucket";
 

@@ -71,6 +71,10 @@ enabled = true
 # Supports glob patterns relative to supabase directory: "./seeds/*.sql"
 sql_paths = ["./seed.sql"]
 
+[db.tests]
+# pgTAP suite under supabase/tests (XD-14 cross-tenant isolation).
+enabled = true
+
 [db.network_restrictions]
 # Enable management of network restrictions.
 enabled = false

@@ -58,3 +58,23 @@ export function computeCount(coords: Point[]): number {
 export function unitFor(type: "length" | "area" | "count" | "angle"): string {
   return { length: "ft", area: "sf", count: "count", angle: "deg" }[type];
 }
+
+/**
+ * Calibration check-tool verdict.
+ *
+ * Grades from the ROUNDED one-decimal error the UI displays so chip color
+ * never contradicts the number: |shown| ≤ 1.0 → match, ≤ 5.0 → close, else
+ * wrong. NaN / non-finite errors grade as wrong (never "confidently green").
+ */
+export function checkVerdict(errPct: number): { shown: number; grade: "match" | "close" | "wrong" } {
+  if (!Number.isFinite(errPct)) return { shown: 0, grade: "wrong" };
+  const shown = Number(errPct.toFixed(1)) || 0;
+  const a = Math.abs(shown);
+  return { shown, grade: a <= 1 ? "match" : a <= 5 ? "close" : "wrong" };
+}
+
+/** Percent error of a measured length vs a known real-world distance. */
+export function calibrationErrorPct(measured: number, known: number): number {
+  if (!Number.isFinite(measured) || !Number.isFinite(known) || known === 0) return NaN;
+  return ((measured - known) / known) * 100;
+}

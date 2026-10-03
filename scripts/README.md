@@ -38,27 +38,28 @@ BLS endpoint: `https://api.bls.gov/publicAPI/v2/timeseries/data/`
 Free tier: 25 series/day. Registered (free) key: 500 series/day.
 
 ### `fetch_dot_tx.py`
-**Run monthly (cron) — currently a stub.** TxDOT publishes bid tabulations
-for every state highway letting (project bid summary, item-level, with all
-bidders' unit prices). Public domain, geographically tagged. This is the
-single best source for sitework / civil cost calibration in Texas.
+**Run monthly (cron).** TxDOT publishes bid tabulations for every state
+highway letting (project bid summary, item-level, with all bidders' unit
+prices). Public domain, geographically tagged. This is the single best
+source for sitework / civil cost calibration in Texas.
 
 ```bash
-python scripts/fetch_dot_tx.py --sample      # POST embedded sample
-python scripts/fetch_dot_tx.py --dry-run
+python scripts/fetch_dot_tx.py --sample           # POST embedded sample
+python scripts/fetch_dot_tx.py --sample --dry-run
+python scripts/fetch_dot_tx.py --file tab.csv --dry-run   # CSV or PDF
 ```
-
-The `--file` flag is reserved for the eventual PDF/CSV parser
-(`parse_tx_bid_tab` is currently `NotImplementedError`).
 
 Source: <https://www.txdot.gov/business/let-bids/bid-tab-archive.html>
 
 ### `fetch_dot_ca.py`
-**Run monthly (cron) — currently a stub.** Caltrans equivalent of the TxDOT
-script. Anchors our US_WEST cost-region multiplier.
+**Run monthly (cron).** Caltrans equivalent of the TxDOT script. Anchors
+our US_WEST cost-region multiplier. Accepts Contract Cost Data CSV or a
+bid-summary PDF table; posts `{ state: "CA", rows: [...] }` to the same
+DOT ingest endpoint.
 
 ```bash
 python scripts/fetch_dot_ca.py --sample
+python scripts/fetch_dot_ca.py --file cost_data.csv --dry-run
 ```
 
 Source: <https://dot.ca.gov/programs/design/contract-standards/contract-cost-data>
