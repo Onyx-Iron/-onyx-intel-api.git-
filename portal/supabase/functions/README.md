@@ -69,15 +69,23 @@ supabase functions deploy page-takeoff-worker
 
 ## Design notes
 
+- **Batched split (500+ pages).** `page-split-worker` uploads pages
+  concurrently (`SPLIT_UPLOAD_CONCURRENCY`, default 8), inserts in chunks,
+  fans out with a pool (`SPLIT_FANOUT_CONCURRENCY`, default 40), and
+  self-chains every `SPLIT_PAGE_BATCH` pages (default 75) via `page_from`
+  so large decks stay under the Edge wall-clock. Shared math lives in
+  `_shared/splitBatch.ts`.
 - **Durable fan-out.** `page-split-worker` enqueues each page to
   `page-processor` and `page-takeoff-worker`, then uses Edge `waitUntil`
-  so cold isolates don't drop kicks when the HTTP response returns.
+  so cold isolates don't drop kicks when the HTTP response returns
+  (including the continuation self-invoke).
 - **No `display_name`.** Payloads to Gemini's `generateContent` REST
   endpoint deliberately omit `display_name` — it exists only in the Files
   API and the inlineData shape rejects it.
-- **Idempotent rekick.** Re-invoking `page-split-worker` clears prior
-  `document_pages` for the document, then re-inserts — safe for Retry /
-  partial (`complete_with_errors`) recovery.
+- **Idempotent rekick.** Re-invoking `page-split-worker` from page 1
+  clears prior `document_pages`, then re-inserts — safe for Retry /
+  partial (`complete_with_errors`) recovery. Continuation batches only
+  clear the page range they rewrite.
 - **Grounded chunks.** Every `document_chunks` row carries `page_id` +
   `page_number` so the AI chat's RAG retriever can cite "page 42 of the
   arch set" instead of "somewhere in that PDF".

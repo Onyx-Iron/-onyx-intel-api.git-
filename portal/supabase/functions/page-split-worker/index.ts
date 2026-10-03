@@ -39,16 +39,24 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { PDFDocument } from "https://esm.sh/pdf-lib@1.17.1";
 import { captureException } from "../_shared/errors.ts";
 import { reconcileDocumentPages, reconcileSheets } from "../_shared/split-reconcile.ts";
+import {
+  DEFAULT_FANOUT_CONCURRENCY,
+  DEFAULT_PAGE_BATCH,
+  DEFAULT_UPLOAD_CONCURRENCY,
+  computePageBatchRange,
+  shouldReadOriginalFromStorage,
+} from "../_shared/splitBatch.ts";
+
 
 const SUPABASE_URL       = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY   = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const PLANS_BUCKET       = Deno.env.get("PLANS_BUCKET") ?? "plans-bucket";
 /** Parallel page PDF uploads — keeps large decks under the Edge wall-clock. */
-const UPLOAD_CONCURRENCY = Math.max(1, Number(Deno.env.get("SPLIT_UPLOAD_CONCURRENCY") ?? "8") || 8);
+const UPLOAD_CONCURRENCY = Math.max(1, Number(Deno.env.get("SPLIT_UPLOAD_CONCURRENCY") ?? String(DEFAULT_UPLOAD_CONCURRENCY)) || DEFAULT_UPLOAD_CONCURRENCY);
 /** Max page-worker fan-out fetches in flight at once (OCR + takeoff each count). */
-const FANOUT_CONCURRENCY = Math.max(2, Number(Deno.env.get("SPLIT_FANOUT_CONCURRENCY") ?? "40") || 40);
+const FANOUT_CONCURRENCY = Math.max(2, Number(Deno.env.get("SPLIT_FANOUT_CONCURRENCY") ?? String(DEFAULT_FANOUT_CONCURRENCY)) || DEFAULT_FANOUT_CONCURRENCY);
 /** Pages per Edge invocation before self-chaining (500+ page decks). */
-const PAGE_BATCH = Math.max(10, Number(Deno.env.get("SPLIT_PAGE_BATCH") ?? "75") || 75);
+const PAGE_BATCH = Math.max(10, Number(Deno.env.get("SPLIT_PAGE_BATCH") ?? String(DEFAULT_PAGE_BATCH)) || DEFAULT_PAGE_BATCH);
 const INSERT_CHUNK = 100;
 
 async function mapPool<T, R>(
@@ -135,13 +143,15 @@ Deno.serve(async (req) => {
   const isContinuation = pageFrom > 1;
   // Continuation batches always read the original from Storage (first batch
   // already copied Drive bytes into plans-bucket).
-  const fromStorage = !body.drive_file_id || isContinuation;
+  const fromStorage = shouldReadOriginalFromStorage(pageFrom, Boolean(body.drive_file_id));
   if (!fromStorage && !body.access_token) {
     return new Response(JSON.stringify({ error: "access_token is required when drive_file_id is set" }), { status: 400 });
   }
   if (!body.original_path) {
     return new Response(JSON.stringify({ error: "original_path is required" }), { status: 400 });
   }
+  // clear_pages is accepted for API compat but ignored — retries use
+  // reconcileDocumentPages / reconcileSheets, never delete-all.
 
   const db = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -226,11 +236,11 @@ Deno.serve(async (req) => {
 
     // Bound this invocation to PAGE_BATCH pages; remaining pages chain via
     // a self-invoke so 500+ decks stay under the Edge wall-clock.
-    const hardEnd = Math.min(pageCount, pageFrom + PAGE_BATCH - 1);
-    const pageIndexes = Array.from(
-      { length: hardEnd - pageFrom + 1 },
-      (_, k) => pageFrom - 1 + k,
-    );
+    const batch = computePageBatchRange(pageFrom, pageCount, PAGE_BATCH);
+    const pageIndexes = batch.pageIndexes;
+    const pageTo = batch.pageTo;
+    const hasMore = batch.hasMore;
+    const nextPageFrom = batch.nextPageFrom ?? pageTo + 1;
 
     const uploadResults = await mapPool(pageIndexes, UPLOAD_CONCURRENCY, async (i) => {
       const single = await PDFDocument.create();
@@ -265,10 +275,6 @@ Deno.serve(async (req) => {
     });
     const pageRows = uploadResults.filter((r): r is PageRow => r != null);
     const batchFailed = pageIndexes.length - pageRows.length;
-    const pageTo = pageIndexes.length > 0
-      ? pageIndexes[pageIndexes.length - 1]! + 1
-      : pageFrom - 1;
-    const hasMore = pageTo < pageCount;
 
     if (pageRows.length === 0) {
       throw new Error(`All ${pageIndexes.length} page upload(s) in batch failed — nothing to process`);
@@ -440,7 +446,6 @@ Deno.serve(async (req) => {
       }
     });
 
-    const nextPageFrom = pageTo + 1;
     const continueSplit = hasMore
       ? fetch(selfUrl, {
           method: "POST",
