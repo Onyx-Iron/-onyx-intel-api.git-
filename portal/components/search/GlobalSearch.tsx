@@ -34,13 +34,17 @@ function hrefFor(r: SearchResult): string {
     case "project":
       return `/dashboard/projects/${r.id}`;
     case "document":
-      return "/dashboard/documents";
+      return r.project_id
+        ? `/dashboard/projects/${r.project_id}?phase=documents&tab=documents`
+        : "/dashboard/documents";
     case "contact":
       return "/dashboard/contacts";
     case "generated_document":
+      // There is no /dashboard/generated-docs page — land on the project
+      // overview (or Reports roll-up) where generated docs are surfaced.
       return r.project_id
-        ? `/dashboard/projects/${r.project_id}`
-        : "/dashboard/generated-docs";
+        ? `/dashboard/projects/${r.project_id}?phase=overview&tab=summary`
+        : "/dashboard/reports";
   }
 }
 

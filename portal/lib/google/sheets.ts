@@ -9,12 +9,10 @@
  * Requires the Google Sheets API enabled on the Cloud project.
  */
 
+import { createGisTokenClient } from "./gisTokenClient";
+
 const CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? "";
 const SCOPE = "https://www.googleapis.com/auth/drive.file";
-
-interface TokenClient {
-  requestAccessToken: (overrides?: { prompt?: string }) => void;
-}
 
 function loadGis(): Promise<void> {
   return new Promise((resolve) => {
@@ -35,23 +33,22 @@ function loadGis(): Promise<void> {
 
 function getToken(): Promise<string> {
   return new Promise((resolve, reject) => {
-    const oauth2 = window.google?.accounts?.oauth2;
-    if (!oauth2) {
+    try {
+      const tokenClient = createGisTokenClient({
+        clientId: CLIENT_ID,
+        scope: SCOPE,
+        callback: (resp) => {
+          if (resp.access_token) resolve(resp.access_token);
+          else reject(new Error(resp.error ?? "Authorization failed"));
+        },
+        error_callback: (err) => {
+          reject(new Error(err?.message ?? err?.type ?? "Authorization failed"));
+        },
+      });
+      tokenClient.requestAccessToken();
+    } catch {
       reject(new Error("Google authorization is not loaded."));
-      return;
     }
-
-    const tokenClient: TokenClient = oauth2.initTokenClient({
-      client_id: CLIENT_ID,
-      scope: SCOPE,
-      // Avoid merging incompatible prior grants (e.g. YouTube) into drive.file.
-      include_granted_scopes: false,
-      callback: (resp: { access_token?: string; error?: string }) => {
-        if (resp.access_token) resolve(resp.access_token);
-        else reject(new Error(resp.error ?? "Authorization failed"));
-      },
-    });
-    tokenClient.requestAccessToken();
   });
 }
 

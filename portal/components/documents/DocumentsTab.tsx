@@ -339,7 +339,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     } finally {
       setDriveImporting(false);
     }
-  }, [projectId, loadDocuments]);
+  }, [projectId, loadDocuments, toast]);
 
   const openAsk = (doc: Document) => {
     setAskDoc({ id: doc.id, name: doc.file_name });

@@ -8,6 +8,7 @@
  * Docs, Drive, Sheets) so the user connects once.
  */
 
+import { createGisTokenClient } from "./gisTokenClient";
 import { GOOGLE_SCOPES } from "./scopes";
 
 const CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? "";
@@ -44,27 +45,23 @@ export function disconnectGoogle() {
 
 function requestToken(prompt: "consent" | ""): Promise<string | null> {
   return new Promise((resolve, reject) => {
-    const oauth2 = window.google?.accounts?.oauth2;
-    if (!oauth2) {
-      reject(new Error("google_auth_not_loaded"));
-      return;
+    try {
+      const tc = createGisTokenClient({
+        clientId: CLIENT_ID,
+        scope: GOOGLE_SCOPES,
+        callback: (resp) => {
+          if (resp.access_token) { store(resp.access_token, resp.expires_in ?? 3600); resolve(resp.access_token); }
+          else resolve(null);
+        },
+        error_callback: (err) => {
+          if (err?.type === "popup_closed") resolve(null);
+          else reject(new Error(err?.type ?? "google_auth_error"));
+        },
+      });
+      tc.requestAccessToken({ prompt });
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error("google_auth_not_loaded"));
     }
-    const tc = oauth2.initTokenClient({
-      client_id: CLIENT_ID,
-      scope: GOOGLE_SCOPES,
-      // Do not pull in unrelated prior grants on this OAuth client (YouTube,
-      // Analytics, etc.) — Google rejects those when mixed with Drive scopes.
-      include_granted_scopes: false,
-      callback: (resp) => {
-        if (resp.access_token) { store(resp.access_token, resp.expires_in ?? 3600); resolve(resp.access_token); }
-        else resolve(null);
-      },
-      error_callback: (err: { type?: string }) => {
-        if (err?.type === "popup_closed") resolve(null);
-        else reject(new Error(err?.type ?? "google_auth_error"));
-      },
-    });
-    tc.requestAccessToken({ prompt });
   });
 }
 
