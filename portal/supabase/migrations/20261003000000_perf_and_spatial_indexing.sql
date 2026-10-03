@@ -6,12 +6,33 @@
 --   * audit_logs is a plain heap table (not partitioned) → BRIN on created_at
 --     instead of CREATE TABLE ... PARTITION OF (which would fail)
 --   * bounding_box_geom did not exist → add + backfill from jsonb coords/points
---   * postgis is installed in schema topology (not extensions) on this project
+--   * PostGIS schema varies (extensions locally, topology on this project),
+--     so search_path includes both
 
 CREATE EXTENSION IF NOT EXISTS postgis;
 
--- PostGIS types/functions live in topology on this Supabase project.
-SET search_path = public, topology;
+-- Resolve geometry / ST_* for the rest of this migration whether PostGIS
+-- lives in extensions (local) or topology (production).
+SELECT set_config(
+  'search_path',
+  'public,' || coalesce(
+    (
+      SELECT n.nspname
+      FROM pg_type t
+      JOIN pg_namespace n ON n.oid = t.typnamespace
+      WHERE t.typname = 'geometry'
+      ORDER BY CASE n.nspname
+        WHEN 'extensions' THEN 0
+        WHEN 'public' THEN 1
+        WHEN 'topology' THEN 2
+        ELSE 3
+      END
+      LIMIT 1
+    ),
+    'public'
+  ),
+  true
+);
 
 -- ---------------------------------------------------------------------------
 -- 1. Optimistic concurrency columns on estimate drafts
@@ -52,22 +73,50 @@ CREATE INDEX IF NOT EXISTS idx_estimate_sync_outbox_created_at_brin
 -- ---------------------------------------------------------------------------
 -- 4. Fast spatial indexing for canvas takeoff shapes
 -- ---------------------------------------------------------------------------
-ALTER TABLE manual_measurements
-  ADD COLUMN IF NOT EXISTS bounding_box_geom topology.geometry;
+-- Resolve geometry via a DO block so ADD COLUMN works whether PostGIS lives
+-- in extensions (local Supabase) or topology (this production project).
+DO $$
+DECLARE
+  postgis_schema text;
+BEGIN
+  SELECT n.nspname INTO postgis_schema
+  FROM pg_type t
+  JOIN pg_namespace n ON n.oid = t.typnamespace
+  WHERE t.typname = 'geometry'
+  ORDER BY CASE n.nspname
+    WHEN 'extensions' THEN 0
+    WHEN 'public' THEN 1
+    WHEN 'topology' THEN 2
+    ELSE 3
+  END
+  LIMIT 1;
 
-ALTER TABLE manual_takeoffs
-  ADD COLUMN IF NOT EXISTS bounding_box_geom topology.geometry;
+  IF postgis_schema IS NULL THEN
+    RAISE EXCEPTION 'postgis geometry type not found';
+  END IF;
+
+  EXECUTE format(
+    'ALTER TABLE manual_measurements ADD COLUMN IF NOT EXISTS bounding_box_geom %I.geometry',
+    postgis_schema
+  );
+  EXECUTE format(
+    'ALTER TABLE manual_takeoffs ADD COLUMN IF NOT EXISTS bounding_box_geom %I.geometry',
+    postgis_schema
+  );
+END;
+$$;
 
 -- Envelope helper for a jsonb array of {x,y} points (page space).
 -- Single-point counts expand to a tiny box so GIST still has an area.
+-- search_path covers both common PostGIS install schemas.
 CREATE OR REPLACE FUNCTION public.bbox_from_xy_points(p_points jsonb)
-RETURNS topology.geometry
+RETURNS geometry
 LANGUAGE plpgsql
 IMMUTABLE
-SET search_path = public, topology
+SET search_path = public, extensions, topology
 AS $$
 DECLARE
-  v_geom topology.geometry;
+  v_geom geometry;
 BEGIN
   IF p_points IS NULL OR jsonb_typeof(p_points) <> 'array' OR jsonb_array_length(p_points) = 0 THEN
     RETURN NULL;
@@ -120,7 +169,7 @@ CREATE INDEX IF NOT EXISTS idx_manual_takeoffs_bbox_gist
 CREATE OR REPLACE FUNCTION public.touch_manual_measurement_bbox()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = public, topology
+SET search_path = public, extensions, topology
 AS $$
 BEGIN
   NEW.bounding_box_geom := public.bbox_from_xy_points(NEW.coords);
@@ -136,7 +185,7 @@ CREATE TRIGGER trg_manual_measurements_bbox
 CREATE OR REPLACE FUNCTION public.touch_manual_takeoff_bbox()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = public, topology
+SET search_path = public, extensions, topology
 AS $$
 BEGIN
   NEW.bounding_box_geom := public.bbox_from_xy_points(NEW.geometry->'points');
