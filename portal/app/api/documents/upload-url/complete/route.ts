@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { logEvent } from "@/lib/activity";
+import { shouldMarkIngestStartError } from "@/lib/documents/ingest-start";
 import { PLANS_UPLOAD_BUCKET } from "@/lib/documents/signed-upload";
 import {
   enqueueRailwayExtractFromStorage,
@@ -125,13 +126,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     // ── PDF / other → ingest (page-split-worker for large plan sets) ───────
-    await db.from("documents").update({
-      status: "processing",
-      processing_started_at: new Date().toISOString(),
-      last_error: null,
-      last_error_step: null,
-    }).eq("id", doc.id).eq("tenant_id", tenantId);
-
+    // Do not stamp status=processing here. Ingest treats a fresh
+    // processing_started_at as another owner and returns 409 without
+    // reading the file. The row is still pending from upload-url; ingest
+    // claims it.
     void fetch(new URL(`/api/documents/${doc.id}/ingest`, req.url).toString(), {
       method: "POST",
       headers: {
@@ -140,14 +138,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       },
       body: JSON.stringify({}),
     }).then(async (res) => {
-      if (res.ok || res.status === 202) return;
+      if (!shouldMarkIngestStartError(res.status)) return;
       const detail = (await res.text().catch(() => "")).slice(0, 500);
       try {
         await db.from("documents").update({
           status: "error",
           last_error: `Ingest failed to start (${res.status}): ${detail}`.slice(0, 2000),
           last_error_step: "ingest_start",
-        }).eq("id", doc.id).in("status", ["processing", "pending"]);
+        }).eq("id", doc.id).eq("tenant_id", tenantId).in("status", ["processing", "pending"]);
       } catch (markErr) {
         console.error("[upload-url/complete] failed to mark document error", markErr);
       }
@@ -158,7 +156,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           status: "error",
           last_error: `Ingest request failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 2000),
           last_error_step: "ingest_start",
-        }).eq("id", doc.id).in("status", ["processing", "pending"]);
+        }).eq("id", doc.id).eq("tenant_id", tenantId).in("status", ["processing", "pending"]);
       } catch (markErr) {
         console.error("[upload-url/complete] failed to mark document error", markErr);
       }
