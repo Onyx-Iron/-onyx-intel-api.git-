@@ -1,9 +1,12 @@
+import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import {
   exchangeProviderCode,
   type OAuthHubProvider,
 } from "@/lib/connections/oauthProviders";
+import { oauthCallbackStateMatchesSession } from "@/lib/connections/oauthState";
 import { upsertTenantConnection } from "@/lib/connections/store";
+import { authTenantKey, authTenantName, getOrCreateTenant } from "@/lib/project-controls/server";
 
 export const runtime = "nodejs";
 
@@ -22,23 +25,32 @@ export async function GET(req: NextRequest, ctx: Ctx): Promise<NextResponse> {
   if (!VALID.has(raw as OAuthHubProvider)) return fail("unknown_provider");
   const provider = raw as OAuthHubProvider;
 
+  const { userId, orgId, orgSlug } = await auth();
+  if (!userId) return fail("not_signed_in");
+
   const code = req.nextUrl.searchParams.get("code");
   const stateRaw = req.nextUrl.searchParams.get("state");
   if (!code || !stateRaw) return fail("missing_code");
 
-  let state: { tenantId: string; userId: string; provider: string };
+  let state: { tenantId?: unknown; userId?: unknown; provider?: unknown };
   try {
     state = JSON.parse(Buffer.from(stateRaw, "base64url").toString("utf8"));
   } catch {
     return fail("bad_state");
   }
-  if (state.provider !== provider) return fail("state_mismatch");
+
+  // State is unsigned. Bind the stored tokens to the Clerk session, matching
+  // /api/google/callback, so a redirect cannot attach this code to another account.
+  const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  if (!oauthCallbackStateMatchesSession(state, { tenantId, userId, provider })) {
+    return fail("state_mismatch");
+  }
 
   try {
     const tokens = await exchangeProviderCode(provider, code);
     await upsertTenantConnection({
-      tenantId: state.tenantId,
-      userId: state.userId,
+      tenantId,
+      userId,
       provider,
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken ?? null,
