@@ -10,7 +10,7 @@ import {
 export const runtime = "nodejs";
 
 type SearchResult = {
-  kind: "project" | "document" | "contact" | "generated_document" | "bid_opportunity" | "campaign";
+  kind: "project" | "document" | "contact" | "generated_document" | "bid_opportunity" | "campaign" | "takeoff";
   id: string;
   title: string;
   project_id?: string | null;
@@ -59,7 +59,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const db = await createServiceClient();
     const pat = `%${escapeIlikePattern(q)}%`;
 
-    const [projectsRes, documentsRes, contactsRes, generatedRes, bidsRes, campaignsRes] =
+    const [projectsRes, documentsRes, contactsRes, generatedRes, bidsRes, campaignsRes, takeoffsRes] =
       await Promise.all([
         db
           .from("projects")
@@ -98,6 +98,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           .select("id, campaign_name, platform, project_id")
           .eq("tenant_id", tenantId)
           .ilike("campaign_name", pat)
+          .limit(PER_CATEGORY),
+        db
+          .from("takeoff_items")
+          .select("id, label, csi_code, project_id")
+          .eq("tenant_id", tenantId)
+          .or(`label.ilike.${pat},csi_code.ilike.${pat}`)
           .limit(PER_CATEGORY),
       ]);
 
@@ -190,6 +196,20 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           project_id: row.project_id,
           snippet: row.platform,
           score: score(row.campaign_name, q),
+        });
+      }
+    }
+
+    if (!takeoffsRes.error && takeoffsRes.data) {
+      for (const row of takeoffsRes.data as Array<{ id: string; label: string | null; csi_code: string | null; project_id: string }>) {
+        const title = row.label || row.csi_code || "Takeoff item";
+        results.push({
+          kind: "takeoff",
+          id: row.id,
+          title,
+          project_id: row.project_id,
+          snippet: row.csi_code,
+          score: Math.max(score(row.label, q), score(row.csi_code, q)),
         });
       }
     }

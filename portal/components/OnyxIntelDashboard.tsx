@@ -50,6 +50,20 @@ interface DashKpis {
   scheduleTasks: number;
   estimatedValue: number;
   bidsDue7d?: number;
+  planEmails7d?: number;
+  agentApprovals?: number;
+  docsStuck?: number;
+  openInvoices?: number;
+  seoHealth?: number;
+  connectionsOk?: number;
+  connectionErrors?: number;
+}
+
+interface DashAlert {
+  id: string;
+  label: string;
+  value: number;
+  href: string;
 }
 
 interface DashBidDue {
@@ -74,6 +88,7 @@ interface DashData {
   projects: DashProject[];
   activity: DashActivity[];
   bids_due?: DashBidDue[];
+  alerts?: DashAlert[];
 }
 
 interface AIMessage {
@@ -875,14 +890,25 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
             <Panel title="What needs attention">
               <div className="divide-y divide-white/5">
                 {([
-                  { label: activeProjectId ? "Needs takeoff" : "Projects needing takeoff", value: pendingTakeoffs, tone: "text-[#CCFF00] bg-[#CCFF00]/10", icon: <Layers size={13} /> },
-                  { label: "Budget alerts",            value: overBudget,      tone: "text-amber-400 bg-amber-400/10", icon: <AlertTriangle size={13} /> },
-                  { label: "Schedule tasks",           value: scopedScheduleTasks, tone: "text-[#00D2FF] bg-[#00D2FF]/10", icon: <Clock size={13} /> },
-                ] as { label: string; value: number; tone: string; icon: React.ReactNode }[]).map((item) => (
+                  { label: activeProjectId ? "Needs takeoff" : "Projects needing takeoff", value: pendingTakeoffs, tone: "text-[#CCFF00] bg-[#CCFF00]/10", icon: <Layers size={13} />, href: null as string | null },
+                  { label: "Budget alerts",            value: overBudget,      tone: "text-amber-400 bg-amber-400/10", icon: <AlertTriangle size={13} />, href: null },
+                  { label: "Schedule tasks",           value: scopedScheduleTasks, tone: "text-[#00D2FF] bg-[#00D2FF]/10", icon: <Clock size={13} />, href: null },
+                  ...((data?.alerts ?? []).map((a) => ({
+                    label: a.label,
+                    value: a.value,
+                    tone: a.value > 0 ? "text-amber-300 bg-amber-400/10" : "text-white/50 bg-white/5",
+                    icon: <Zap size={13} />,
+                    href: a.href as string | null,
+                  }))),
+                ] as { label: string; value: number; tone: string; icon: React.ReactNode; href: string | null }[]).map((item) => (
                   <div key={item.label} className="flex items-center justify-between px-4 py-3.5">
                     <div className="flex items-center gap-2.5">
                       <span className={`flex items-center justify-center rounded-md p-1.5 ${item.tone}`}>{item.icon}</span>
-                      <span className="text-sm text-white/50">{item.label}</span>
+                      {item.href ? (
+                        <Link href={item.href} className="text-sm text-white/70 hover:text-[#CCFF00]">{item.label}</Link>
+                      ) : (
+                        <span className="text-sm text-white/50">{item.label}</span>
+                      )}
                     </div>
                     <span className={`rounded-lg px-3 py-1 text-lg font-black ${item.tone}`}>{dataLoading ? "--" : item.value}</span>
                   </div>

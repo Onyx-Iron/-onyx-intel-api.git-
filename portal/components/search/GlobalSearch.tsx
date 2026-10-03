@@ -2,9 +2,9 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Search, X, Folder, FileText, Users, Sparkles, Loader2 } from "lucide-react";
+import { Search, X, Folder, FileText, Users, Sparkles, Loader2, Layers } from "lucide-react";
 
-type SearchKind = "project" | "document" | "contact" | "generated_document" | "bid_opportunity" | "campaign";
+type SearchKind = "project" | "document" | "contact" | "generated_document" | "bid_opportunity" | "campaign" | "takeoff";
 
 type SearchResult = {
   kind: SearchKind;
@@ -25,10 +25,11 @@ const KIND_META: Record<
 > = {
   project: { label: "Projects", icon: Folder, order: 1 },
   bid_opportunity: { label: "Bids", icon: Sparkles, order: 2 },
-  document: { label: "Documents", icon: FileText, order: 3 },
-  contact: { label: "Contacts", icon: Users, order: 4 },
-  campaign: { label: "Campaigns", icon: Sparkles, order: 5 },
-  generated_document: { label: "Generated reports", icon: Sparkles, order: 6 },
+  takeoff: { label: "Takeoffs", icon: Layers, order: 3 },
+  document: { label: "Documents", icon: FileText, order: 4 },
+  contact: { label: "Contacts", icon: Users, order: 5 },
+  campaign: { label: "Campaigns", icon: Sparkles, order: 6 },
+  generated_document: { label: "Generated reports", icon: Sparkles, order: 7 },
 };
 
 function hrefFor(r: SearchResult): string {
@@ -45,6 +46,10 @@ function hrefFor(r: SearchResult): string {
       return "/dashboard/preconstruction";
     case "campaign":
       return "/dashboard/marketing";
+    case "takeoff":
+      return r.project_id
+        ? `/dashboard/projects/${r.project_id}/takeoff/canvas`
+        : "/dashboard";
     case "generated_document":
       return r.project_id
         ? `/dashboard/projects/${r.project_id}?phase=overview&tab=summary`
