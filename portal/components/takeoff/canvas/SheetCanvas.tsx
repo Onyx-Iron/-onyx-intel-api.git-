@@ -1175,8 +1175,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       }
     }
     if (res.ok) {
-      const data = await res.json() as { calibration: Calibration };
+      const data = await res.json() as { calibration: Calibration; warning?: string | null };
       queryClient.setQueryData(takeoffQueryKeys.calibration(pageId), data.calibration);
+      if (data.warning) alert(data.warning);
       if (applyToDrafts) window.location.reload();
     } else {
       const err = await res.json().catch(() => ({}));

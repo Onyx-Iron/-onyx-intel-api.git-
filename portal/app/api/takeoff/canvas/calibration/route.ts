@@ -3,8 +3,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant, assertPageBelongsToProject } from "@/lib/project-controls/server";
 import type { CalibrationPoint, CalibrationUpsertBody } from "@/lib/types/takeoff";
-import { previewRecalibration, recalibrationNeedsConfirm } from "@/lib/takeoff/recalibration";
+import { commitRecalibratedDrafts, previewRecalibration, recalibrationNeedsConfirm, type RecalibrationPreviewLine } from "@/lib/takeoff/recalibration";
 import { requirePermission } from "@/lib/project-controls/route-guards";
+import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
+import { processOutboxBatch } from "@/lib/estimating/outbox-worker";
 
 export const runtime = "nodejs";
 
@@ -160,25 +162,63 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     actor_user_id: userId, before: before ?? null, after: data,
   });
 
+  let warning: string | null = null;
   if (body.apply_to_drafts === true) {
-    const draftRows = (drafts ?? []) as Array<{ id: string; geometry: unknown; unit?: string | null; cost_code?: string | null; row_version?: number }>;
-    for (const line of preview) {
-      if (!line.recomputed) continue;
-      const row = draftRows.find((candidate) => candidate.id === line.id);
-      if (!row || typeof row.row_version !== "number") continue;
-      await anyDb.rpc("update_manual_takeoff_tx", {
-        p_id: row.id,
-        p_tenant_id: tenantId,
-        p_expected_row_version: row.row_version,
-        p_geometry: row.geometry ?? {},
-        p_quantity: line.after,
-        p_unit: row.unit ?? null,
-        p_cost_code: row.cost_code ?? null,
-        p_actor_user_id: userId,
-        p_calculation_formula_version: "recalibration-v1",
-      });
+    const draftRows = (drafts ?? []) as Array<{ id: string; geometry: unknown; unit?: string | null; cost_code?: string | null; row_version?: number | string }>;
+    const applied = await commitRecalibratedDrafts({
+      lines: preview,
+      write: (line) => writeRecalibratedQuantity(anyDb, draftRows, line, tenantId, userId),
+      syncEstimate: async () => {
+        // update_manual_takeoff_tx only enqueues estimate_sync_outbox. The
+        // cron that drains it runs once a day, so a confirmed scale change
+        // would leave the draft bid on the old quantity until then.
+        const synced = await syncTakeoffToEstimate(tenantId, project_id);
+        if (synced.imported === 0 && synced.updated === 0 && synced.skipped === 0) {
+          throw new Error("Draft estimate sync did not apply the new quantities.");
+        }
+        await processOutboxBatch(anyDb, `inline-calibration-${Date.now()}`, 50).catch((err) => {
+          console.error("[canvas/calibration] outbox drain failed", err);
+        });
+      },
+    });
+    const parts: string[] = [];
+    if (applied.failures.length > 0) {
+      parts.push(`${applied.failures.length} measurement${applied.failures.length === 1 ? "" : "s"} could not be updated. The new scale is saved; those quantities are still on the previous scale.`);
     }
+    if (applied.estimateError) {
+      parts.push("The new quantities were saved, but the draft estimate was not updated. Open the estimate and run Draft rates.");
+    }
+    warning = parts.join(" ") || null;
   }
 
-  return NextResponse.json({ calibration: data, preview });
+  return NextResponse.json({ calibration: data, preview, warning });
+}
+
+async function writeRecalibratedQuantity(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  anyDb: any,
+  draftRows: Array<{ id: string; geometry: unknown; unit?: string | null; cost_code?: string | null; row_version?: number | string }>,
+  line: RecalibrationPreviewLine,
+  tenantId: string,
+  userId: string,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const row = draftRows.find((candidate) => candidate.id === line.id);
+  const rowVersion = typeof row?.row_version === "number" ? row.row_version : Number(row?.row_version);
+  if (!row || !Number.isInteger(rowVersion)) return { ok: false, reason: "missing row version" };
+  const { data: written, error } = await anyDb.rpc("update_manual_takeoff_tx", {
+    p_id: row.id,
+    p_tenant_id: tenantId,
+    p_expected_row_version: rowVersion,
+    p_geometry: row.geometry ?? {},
+    p_quantity: line.after,
+    p_unit: row.unit ?? null,
+    p_cost_code: row.cost_code ?? null,
+    p_actor_user_id: userId,
+    p_calculation_formula_version: "recalibration-v1",
+  }).single();
+  if (error) return { ok: false, reason: error.message ?? "quantity update failed" };
+  if ((written as { conflict?: boolean } | null)?.conflict) {
+    return { ok: false, reason: "quantity was edited by someone else" };
+  }
+  return { ok: true };
 }
