@@ -25,6 +25,9 @@ jobs:
           cache: npm
           cache-dependency-path: portal/package-lock.json
       - run: npm ci
+      - name: Expand Supabase types from fragments
+        working-directory: .
+        run: python3 scripts/expand_types_frags.py
       - run: npm run typecheck
 
   lint:
@@ -38,6 +41,9 @@ jobs:
           cache: npm
           cache-dependency-path: portal/package-lock.json
       - run: npm ci
+      - name: Expand Supabase types from fragments
+        working-directory: .
+        run: python3 scripts/expand_types_frags.py
       - run: npm run lint
 
   unit-tests:
@@ -51,6 +57,9 @@ jobs:
           cache: npm
           cache-dependency-path: portal/package-lock.json
       - run: npm ci
+      - name: Expand Supabase types from fragments
+        working-directory: .
+        run: python3 scripts/expand_types_frags.py
       - run: npm run test:unit
 
   build:
@@ -64,6 +73,9 @@ jobs:
           cache: npm
           cache-dependency-path: portal/package-lock.json
       - run: npm ci
+      - name: Expand Supabase types from fragments
+        working-directory: .
+        run: python3 scripts/expand_types_frags.py
       # Placeholder values only — this build never runs against a real
       # backend and nothing here is deployed. Real secrets live in Vercel's
       # own env var config for actual deployments.
