@@ -8,6 +8,7 @@ import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
+import { CANVAS_HOTKEY_HINT, resolveCanvasHotkey, type CanvasTool } from "@/lib/takeoff/canvas/hotkeys";
 import {
   DEFAULT_SNAP_THRESHOLD_PX,
   getNearestVectorPoint,
@@ -30,7 +31,7 @@ type CoordinateSpace = "page_space" | "legacy_pixel";
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
-type Tool = "pan" | "calibrate" | "count" | "length" | "area" | "utility_pipe" | "spot_elevation" | "contour_line" | "civil_area_bounds";
+type Tool = CanvasTool;
 
 /** Tools where cursor magnetic-snap to CAD/PDF vector vertices is useful. */
 const SNAP_TOOLS: ReadonlySet<Tool> = new Set([
@@ -168,6 +169,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     return coordinateSpace === "page_space" ? pointsToScreenSpace(points, renderScale) : points;
   }, [renderScale]);
   const [tool, setTool]             = useState<Tool>("pan");
+  const toolBeforeSpacePan = useRef<Tool | null>(null);
   const [shapes, setShapes]         = useState<Shape[]>([]);
   const [draftPoints, setDraftPoints] = useState<Pt[]>([]);   // in-progress polygon/line points
   const [calibration, setCalibration] = useState<Calibration | null>(null);
@@ -671,15 +673,91 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     setDraftPoints([]);
   }, [draftPoints, tool, scale, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft]);
 
-  // Escape/Enter shortcuts for finishing a polygon/line.
+  const clearDrafts = useCallback(() => {
+    setDraftPoints([]);
+    setCalibPts([]);
+    setUtilityDraftPts([]);
+    setContourDraftPts([]);
+    setAreaDraftPts([]);
+  }, []);
+
+  const selectTool = useCallback((next: Tool) => {
+    toolBeforeSpacePan.current = null;
+    setTool(next);
+    clearDrafts();
+  }, [clearDrafts]);
+
+  const undoLast = useCallback(() => {
+    // Prefer undoing an in-progress vertex; otherwise drop the newest unsaved measurement.
+    if (draftPoints.length > 0) {
+      setDraftPoints((prev) => prev.slice(0, -1));
+      return;
+    }
+    if (utilityDraftPts.length > 0) {
+      setUtilityDraftPts((prev) => prev.slice(0, -1));
+      return;
+    }
+    if (contourDraftPts.length > 0) {
+      setContourDraftPts((prev) => prev.slice(0, -1));
+      return;
+    }
+    if (areaDraftPts.length > 0) {
+      setAreaDraftPts((prev) => prev.slice(0, -1));
+      return;
+    }
+    if (calibPts.length > 0) {
+      setCalibPts((prev) => prev.slice(0, -1));
+      return;
+    }
+    setShapes((prev) => {
+      for (let i = prev.length - 1; i >= 0; i -= 1) {
+        if (!prev[i].saved) return [...prev.slice(0, i), ...prev.slice(i + 1)];
+      }
+      return prev;
+    });
+  }, [draftPoints.length, utilityDraftPts.length, contourDraftPts.length, areaDraftPts.length, calibPts.length]);
+
+  // Professional hotkeys: L/A/C tools, Space-hold pan, Z undo, Esc cancel, Enter finish.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { setDraftPoints([]); setCalibPts([]); setUtilityDraftPts([]); setContourDraftPts([]); setAreaDraftPts([]); }
-      else if (e.key === "Enter") finishDraft();
+      const action = resolveCanvasHotkey(e);
+      if (!action) return;
+      e.preventDefault();
+
+      switch (action.type) {
+        case "tool":
+          selectTool(action.tool);
+          break;
+        case "cancel":
+          clearDrafts();
+          break;
+        case "finish":
+          finishDraft();
+          break;
+        case "undo":
+          undoLast();
+          break;
+        case "pan_hold_start":
+          if (tool !== "pan") {
+            toolBeforeSpacePan.current = tool;
+            setTool("pan");
+          }
+          break;
+        case "pan_hold_end": {
+          const restore = toolBeforeSpacePan.current;
+          toolBeforeSpacePan.current = null;
+          if (restore) setTool(restore);
+          break;
+        }
+      }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [finishDraft]);
+    window.addEventListener("keyup", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKey);
+    };
+  }, [tool, selectTool, clearDrafts, finishDraft, undoLast]);
 
   // ── Persistence ───────────────────────────────────────────────────────────
   async function saveCalibration(pointA: Pt, pointB: Pt, knownDistanceFt: number) {
@@ -1092,21 +1170,26 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           </div>
 
           {/* Tool switcher */}
-          <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] p-1">
-            {(["pan", "calibrate", "count", "length", "area", "utility_pipe", "spot_elevation", "contour_line", "civil_area_bounds"] as Tool[]).map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => { setTool(t); setDraftPoints([]); setCalibPts([]); setUtilityDraftPts([]); setContourDraftPts([]); setAreaDraftPts([]); }}
-                className={`px-3 h-7 text-[10px] uppercase tracking-widest font-mono rounded-full transition-colors ${
-                  tool === t
-                    ? "bg-[#CCFF00] text-black"
-                    : "text-white/60 hover:text-white hover:bg-white/[0.06]"
-                }`}
-              >
-                {t}
-              </button>
-            ))}
+          <div className="flex flex-col items-end gap-1">
+            <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] p-1">
+              {(["pan", "calibrate", "count", "length", "area", "utility_pipe", "spot_elevation", "contour_line", "civil_area_bounds"] as Tool[]).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => selectTool(t)}
+                  className={`px-3 h-7 text-[10px] uppercase tracking-widest font-mono rounded-full transition-colors ${
+                    tool === t
+                      ? "bg-[#CCFF00] text-black"
+                      : "text-white/60 hover:text-white hover:bg-white/[0.06]"
+                  }`}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+            <p className="hidden px-1 text-[9px] font-mono uppercase tracking-widest text-white/30 sm:block">
+              {CANVAS_HOTKEY_HINT}
+            </p>
           </div>
 
           <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono text-white/40">
@@ -1135,7 +1218,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                       "Recalibrating sets the scale for NEW measurements drawn from now on.\n\n" +
                       "Existing saved measurements keep their already-computed quantities unchanged — recalibration never silently alters them.\n\nContinue?",
                     )) return;
-                    setTool("calibrate"); setDraftPoints([]); setCalibPts([]);
+                    selectTool("calibrate");
                   }}
                   className="rounded-full border border-white/10 px-2 py-0.5 text-white/60 hover:text-white hover:bg-white/[0.06] normal-case tracking-normal"
                 >
