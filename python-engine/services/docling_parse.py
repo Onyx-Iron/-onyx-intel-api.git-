@@ -43,15 +43,33 @@ def parse_pdf_with_docling(path: str | Path, *, max_preview_chars: int = 3000) -
         return DoclingParseResult(status="error", metadata={"error": f"missing file: {path}"})
 
     try:
-        from docling.document_converter import DocumentConverter
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.document_converter import DocumentConverter, PdfFormatOption
     except ImportError as exc:
         raise ImportError(
             "docling is not installed; pip install -r requirements-docling.txt"
         ) from exc
 
-    converter = DocumentConverter()
-    result = converter.convert(str(path))
-    doc = result.document
+    # Text-PDF path: skip OCR / table models to keep Railway memory under control.
+    pipeline_options = PdfPipelineOptions()
+    pipeline_options.do_ocr = False
+    if hasattr(pipeline_options, "do_table_structure"):
+        pipeline_options.do_table_structure = False
+    converter = DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+        }
+    )
+    try:
+        result = converter.convert(str(path))
+        doc = result.document
+    except Exception as exc:  # noqa: BLE001 — convert-time failures
+        return DoclingParseResult(
+            status="parse_error",
+            metadata={"error": f"docling convert failed: {type(exc).__name__}: {exc}"},
+        )
+
 
     markdown = ""
     try:
