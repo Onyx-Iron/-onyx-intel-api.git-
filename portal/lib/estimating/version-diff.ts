@@ -1,3 +1,5 @@
+import { MONEY_EPSILON, moneyDiffers } from "./money";
+
 export interface VersionDiffItem {
   id?: string;
   source_takeoff_id?: string | null;
@@ -8,10 +10,13 @@ export interface VersionDiffItem {
   total_price?: number | null;
 }
 
+export type VersionDiffChangeKind = "quantity" | "unit_cost" | "total_price";
+
 export interface VersionDiffChange {
   key: string;
   left: VersionDiffItem;
   right: VersionDiffItem;
+  changes: VersionDiffChangeKind[];
   quantityDelta: number | null;
   unitCostDelta: number | null;
   totalDelta: number | null;
@@ -21,7 +26,10 @@ export interface VersionDiff {
   added: VersionDiffItem[];
   removed: VersionDiffItem[];
   changed: VersionDiffChange[];
+  unchangedCount: number;
 }
+
+const QUANTITY_EPSILON = 1e-6;
 
 function itemKey(item: VersionDiffItem): string {
   const source = item.source_takeoff_id?.trim();
@@ -36,43 +44,81 @@ function delta(left: number | null | undefined, right: number | null | undefined
   return (right ?? 0) - (left ?? 0);
 }
 
-function changedFields(left: VersionDiffItem, right: VersionDiffItem): boolean {
-  return left.quantity !== right.quantity
-    || left.unit_cost !== right.unit_cost
-    || left.total_price !== right.total_price;
+function classifyChange(left: VersionDiffItem, right: VersionDiffItem): VersionDiffChangeKind[] {
+  const changes: VersionDiffChangeKind[] = [];
+  const lq = left.quantity ?? 0;
+  const rq = right.quantity ?? 0;
+  if (Math.abs(lq - rq) > QUANTITY_EPSILON) changes.push("quantity");
+  if (moneyDiffers(left.unit_cost ?? 0, right.unit_cost ?? 0, MONEY_EPSILON)) changes.push("unit_cost");
+  if (moneyDiffers(left.total_price ?? 0, right.total_price ?? 0, MONEY_EPSILON)) changes.push("total_price");
+  return changes;
 }
 
-export function diffEstimateVersions(leftItems: VersionDiffItem[], rightItems: VersionDiffItem[]): VersionDiff {
-  const leftByKey = new Map<string, VersionDiffItem>();
-  for (const item of leftItems) leftByKey.set(itemKey(item), item);
+interface FlatItem {
+  key: string;
+  index: number;
+  item: VersionDiffItem;
+}
 
-  const rightByKey = new Map<string, VersionDiffItem>();
-  for (const item of rightItems) rightByKey.set(itemKey(item), item);
+function flatten(items: VersionDiffItem[]): FlatItem[] {
+  return items.map((item, index) => ({ key: itemKey(item), index, item }));
+}
+
+function groupByKey(items: FlatItem[]): Map<string, FlatItem[]> {
+  const grouped = new Map<string, FlatItem[]>();
+  for (const entry of items) {
+    const bucket = grouped.get(entry.key);
+    if (bucket) bucket.push(entry);
+    else grouped.set(entry.key, [entry]);
+  }
+  return grouped;
+}
+
+/**
+ * Diff two estimate versions.
+ *
+ * Keys prefer source_takeoff_id, else CSI+description. Duplicate keys inside
+ * one side are paired in sheet order (so two identical "Elbow, 2in" lines are
+ * not reported as one add + one delete when a neighbour moves). Money fields
+ * ignore sub-cent drift.
+ */
+export function diffEstimateVersions(leftItems: VersionDiffItem[], rightItems: VersionDiffItem[]): VersionDiff {
+  const leftFlat = flatten(leftItems);
+  const rightFlat = flatten(rightItems);
+  const leftByKey = groupByKey(leftFlat);
 
   const added: VersionDiffItem[] = [];
   const removed: VersionDiffItem[] = [];
   const changed: VersionDiffChange[] = [];
+  let unchangedCount = 0;
 
-  for (const [key, right] of rightByKey) {
-    const left = leftByKey.get(key);
-    if (!left) {
-      added.push(right);
+  for (const entry of rightFlat) {
+    const bucket = leftByKey.get(entry.key);
+    if (!bucket || bucket.length === 0) {
+      added.push(entry.item);
       continue;
     }
-    if (!changedFields(left, right)) continue;
+    const left = bucket.shift()!.item;
+    const changes = classifyChange(left, entry.item);
+    if (changes.length === 0) {
+      unchangedCount += 1;
+      continue;
+    }
     changed.push({
-      key,
+      key: entry.key,
       left,
-      right,
-      quantityDelta: delta(left.quantity, right.quantity),
-      unitCostDelta: delta(left.unit_cost, right.unit_cost),
-      totalDelta: delta(left.total_price, right.total_price),
+      right: entry.item,
+      changes,
+      quantityDelta: delta(left.quantity, entry.item.quantity),
+      unitCostDelta: delta(left.unit_cost, entry.item.unit_cost),
+      totalDelta: delta(left.total_price, entry.item.total_price),
     });
   }
 
-  for (const [key, left] of leftByKey) {
-    if (!rightByKey.has(key)) removed.push(left);
-  }
+  const leftover: FlatItem[] = [];
+  for (const bucket of leftByKey.values()) leftover.push(...bucket);
+  leftover.sort((a, b) => a.index - b.index);
+  for (const entry of leftover) removed.push(entry.item);
 
-  return { added, removed, changed };
+  return { added, removed, changed, unchangedCount };
 }
