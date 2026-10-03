@@ -588,6 +588,15 @@ export async function POST(
             page_number: batch[j].page_number,
             content: batch[j].content,
             embedding: `[${solo.join(",")}]` as unknown as never,
+            // Sync Gemini summary path — async Docling/Gemini OCR stamps
+            // richer meta via page-processor (XD-02).
+            meta: {
+              parser_id: "gemini",
+              confidence: null,
+              heading_path: null,
+              bbox: null,
+              source: "portal-ingest",
+            } as unknown as never,
           });
           continue;
         }
@@ -598,6 +607,13 @@ export async function POST(
           page_number: batch[j].page_number,
           content: batch[j].content,
           embedding: `[${values.join(",")}]` as unknown as never,
+          meta: {
+            parser_id: "gemini",
+            confidence: null,
+            heading_path: null,
+            bbox: null,
+            source: "portal-ingest",
+          } as unknown as never,
         });
       }
       // Checkpoint progress so a timeout/retry can see how far we got.

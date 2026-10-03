@@ -143,11 +143,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         match_tenant_id: tenantId,
         match_document_id: document_id,
         match_count: 8,
-      }) as { data: Array<{ content: string; page_number: number; similarity: number }> | null };
+      }) as {
+        data: Array<{
+          content: string;
+          page_number: number;
+          similarity: number;
+          meta?: { parser_id?: string; heading_path?: string[] | null } | null;
+        }> | null;
+      };
       const relevant = (matchedChunks ?? []).filter((c) => c.similarity > 0.55);
       if (relevant.length > 0) {
+        const { formatChunkCitationLabel } = await import("@/lib/documents/chunkMeta");
+        type ChunkMeta = import("@/lib/documents/chunkMeta").ChunkMeta;
         const context = relevant
-          .map((c, i) => `[${i + 1}] (page ${c.page_number})\n${c.content}`)
+          .map((c, i) => {
+            const meta = c.meta as Partial<ChunkMeta> | null | undefined;
+            return `[${i + 1}] (${formatChunkCitationLabel({ pageNumber: c.page_number, meta })})\n${c.content}`;
+          })
           .join("\n\n");
         return await answerFromTextContext(context, "document excerpts", "document_chunks");
       }

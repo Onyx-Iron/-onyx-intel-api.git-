@@ -1,7 +1,7 @@
 -- XD-14: pgTAP cross-tenant isolation suite.
 --
--- Proves the app.clerk_org_id RLS policies on projects / takeoff_items /
--- estimate_items deny tenant B rows when the GUC is set to tenant A's org.
+-- Proves tenant RLS on projects / takeoff_items / estimate_items denies
+-- tenant B rows when impersonating tenant A's Clerk org (JWT + GUC).
 -- Runs inside a transaction that rolls back (including temporary GRANTs
 -- needed because production revokes authenticated table privileges —
 -- RLS is a backstop for future PostgREST paths).
