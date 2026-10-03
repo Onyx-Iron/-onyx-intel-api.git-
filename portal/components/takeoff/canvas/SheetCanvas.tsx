@@ -5,7 +5,11 @@ import Link from "next/link";
 import CADVectorLayer from "./CADVectorLayer";
 import VisionExtractionsPanel from "./VisionExtractionsPanel";
 import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-page";
-import { calcPipeEmbedment } from "@/lib/math/civil-scope";
+import { calcPipeEmbedment, trenchPrism } from "@/lib/math/civil-scope";
+import { applySheetTransform, fitSheetTransform, type SheetTransform } from "@/lib/cad/georeference";
+import { bufferCenterline } from "@/lib/takeoff/canvas/centerline";
+import { netArea } from "@/lib/takeoff/canvas/net-area";
+import { topoToSurfacePoints } from "@/lib/takeoff/canvas/topo-surface";
 import { pointsToPageSpace, pointsToScreenSpace, samePoints, toPageSpace, translateStoredPoints } from "@/lib/takeoff/canvas/coordinates";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
 import { rasterizePdfOffThread } from "@/lib/takeoff/canvas/pdf-raster";
@@ -31,7 +35,7 @@ type CoordinateSpace = "page_space" | "legacy_pixel";
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
-type Tool = "pan" | "calibrate" | "count" | "length" | "area" | "utility_pipe" | "spot_elevation" | "contour_line" | "civil_area_bounds";
+type Tool = "pan" | "calibrate" | "count" | "length" | "area" | "symbol" | "utility_pipe" | "spot_elevation" | "contour_line" | "civil_area_bounds";
 
 interface Pt { x: number; y: number }
 
@@ -41,10 +45,12 @@ interface Shape {
   row_version?: number;       // optimistic-concurrency version last read from the server (see update_manual_takeoff_tx)
   tool: "count" | "length" | "area";
   points: Pt[];               // coords in `coordinateSpace` (see toDisplayPoints)
+  holes?: Pt[][];             // area openings (shaft, stair) in the same coordinate space
   coordinateSpace: CoordinateSpace;
   quantity: number;           // computed (count: N; length: LF; area: SF)
   unit: "EA" | "LF" | "SF";
   cost_code?: string;
+  label?: string;
   saved?: boolean;            // has been persisted to manual_takeoffs
 }
 
@@ -173,7 +179,12 @@ const ShapeGlyph = memo(function ShapeGlyph({
     );
   }
 
-  const d = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + (shape.tool === "area" ? " Z" : "");
+  const close = shape.tool === "area" ? " Z" : "";
+  const holePaths = (shape.holes ?? []).map((ring) => {
+    const projected = displayPoints(ring, shape.coordinateSpace, renderScale);
+    return projected.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z";
+  }).join(" ");
+  const d = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + close;
   if (shape.tool === "length") {
     return (
       <g className={cursorClass} onClick={onClick} onMouseDown={onMouseDown}>
@@ -184,6 +195,7 @@ const ShapeGlyph = memo(function ShapeGlyph({
   return (
     <g className={cursorClass} onClick={onClick} onMouseDown={onMouseDown}>
       <path d={triangleFillPath(pts)} fill={`${color}44`} stroke="none" />
+      {holePaths && <path d={holePaths} fill="#06070A" fillOpacity={0.7} stroke={color} strokeWidth={1} />}
       <path d={d} fill="none" stroke={color} strokeWidth={selected ? 3 : 2} />
     </g>
   );
@@ -326,6 +338,20 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [areaDraftPts, setAreaDraftPts] = useState<Pt[]>([]);
   const [areaBoundaryKind, setAreaBoundaryKind] = useState<BoundaryKind>("topsoil_stripping");
   const [areaDepthIn, setAreaDepthIn] = useState(6);
+  const [cadSnapPoints, setCadSnapPoints] = useState<Pt[]>([]);
+  const [areaHoles, setAreaHoles] = useState<Pt[][]>([]);
+  const [holeDraft, setHoleDraft] = useState<Pt[] | null>(null);
+  const [wallWidthFt, setWallWidthFt] = useState("");
+  const [symbolPts, setSymbolPts] = useState<Pt[]>([]);
+  const [symbolBusy, setSymbolBusy] = useState(false);
+  const [surveyEpsg, setSurveyEpsg] = useState(2276);
+  const [tieA, setTieA] = useState({ e: "", n: "" });
+  const [tieB, setTieB] = useState({ e: "", n: "" });
+  const [sheetTie, setSheetTie] = useState<SheetTransform | null>(null);
+  const [publishingGrade, setPublishingGrade] = useState(false);
+  const onCadScreenPoints = useCallback((points: Pt[]) => {
+    setCadSnapPoints(points);
+  }, []);
 
   // ── Load signed URL + existing calibration + saved takeoffs ────────────────
   useEffect(() => {
@@ -337,7 +363,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         const sheet = await sheetRes.json() as {
           url: string;
           calibration: Calibration | null;
-          manual: { items: Array<{ id: string; deleted_at?: string | null; takeoff_type: "count" | "length" | "area"; cost_code: string | null; quantity: number; unit: string | null; row_version?: number; geometry: { points?: Pt[]; coordinate_space?: string } }> };
+          manual: { items: Array<{ id: string; deleted_at?: string | null; takeoff_type: "count" | "length" | "area"; cost_code: string | null; quantity: number; unit: string | null; row_version?: number; geometry: { points?: Pt[]; holes?: Pt[][]; description?: string; coordinate_space?: string } }> };
           utility: { items: Array<{
             id: string; system_type: string; pipe_diameter_in: number;
             invert_elevation_start: number | null; invert_elevation_end: number | null;
@@ -364,6 +390,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               row_version: it.row_version ?? 1,
               tool: it.takeoff_type,
               points: Array.isArray(it.geometry?.points) ? it.geometry.points : [],
+              holes: Array.isArray(it.geometry?.holes) ? it.geometry.holes : undefined,
+              label: typeof it.geometry?.description === "string" ? it.geometry.description : undefined,
               // Absent/unrecognized tag → 'legacy_pixel' (rows saved before
               // this milestone) — never assumed to be page_space, so old
               // geometry keeps rendering exactly as it always has.
@@ -617,8 +645,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     for (const run of utilityRuns) points.push(...displayPoints(run.points, run.coordinateSpace, renderScale));
     for (const node of topoNodes) points.push(...displayPoints(node.points, node.coordinateSpace, renderScale));
     for (const bound of areaBounds) points.push(...displayPoints(bound.points, bound.coordinateSpace, renderScale));
+    points.push(...cadSnapPoints);
     return buildSnapIndex(points);
-  }, [shapes, utilityRuns, topoNodes, areaBounds, renderScale]);
+  }, [shapes, utilityRuns, topoNodes, areaBounds, cadSnapPoints, renderScale]);
   const snapDrawingPoint = useCallback((point: Pt): Pt => {
     if (tool === "pan") return point;
     return nearestSnap(snapIndex, point.x, point.y, 12) ?? point;
@@ -639,9 +668,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const draftQuantity = useMemo(() => {
     if (draftPoints.length === 0) return 0;
     if (tool === "length") return totalLen(draftPoints) * scale;
-    if (tool === "area")   return polygonArea(draftPoints) * scale * scale;
+    if (tool === "area") {
+      const holes = holeDraft && holeDraft.length >= 3 ? [...areaHoles, holeDraft] : areaHoles;
+      return netArea(draftPoints, holes) * scale * scale;
+    }
     return 0;
-  }, [draftPoints, tool, scale]);
+  }, [draftPoints, tool, scale, areaHoles, holeDraft]);
 
   // ── Click handling ────────────────────────────────────────────────────────
   const onCanvasClick: React.MouseEventHandler<SVGSVGElement> = (e) => {
@@ -651,23 +683,49 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (tool === "calibrate") {
       const next = [...calibPts, p];
       if (next.length === 2) {
-        const raw = window.prompt("Enter the real-world distance between the two clicks (feet):", "10");
-        if (raw != null) {
-          const feet = Number(raw);
-          if (Number.isFinite(feet) && feet > 0) {
-            const px = pixelDistance(next[0], next[1]);
-            // Convert the two CURRENT-render-pixel click points to page
-            // space before sending — the server computes and stores
-            // page_space_scale_factor from these page-space points itself,
-            // never from a render-pixel ratio (STEP 2: never fabricate
-            // calibration from current_render_pixels * historical scale).
-            if (px > 0) saveCalibration(toPageSpace(next[0], renderScale), toPageSpace(next[1], renderScale), feet);
+        const eastA = Number(tieA.e);
+        const northA = Number(tieA.n);
+        const eastB = Number(tieB.e);
+        const northB = Number(tieB.n);
+        const tied = [eastA, northA, eastB, northB].every((value) => Number.isFinite(value));
+        const worldDistance = tied ? Math.hypot(eastB - eastA, northB - northA) : 0;
+        let feet = worldDistance;
+        if (!(feet > 0)) {
+          const raw = window.prompt("Enter the real-world distance between the two clicks (feet):", "10");
+          feet = raw == null ? NaN : Number(raw);
+        }
+        if (Number.isFinite(feet) && feet > 0) {
+          const px = pixelDistance(next[0], next[1]);
+          // Convert the two CURRENT-render-pixel click points to page
+          // space before sending — the server computes and stores
+          // page_space_scale_factor from these page-space points itself,
+          // never from a render-pixel ratio (STEP 2: never fabricate
+          // calibration from current_render_pixels * historical scale).
+          if (px > 0) saveCalibration(toPageSpace(next[0], renderScale), toPageSpace(next[1], renderScale), feet);
+        }
+        if (tied && worldDistance > 0) {
+          try {
+            const transform = fitSheetTransform(next[0], next[1], { x: eastA, y: northA }, { x: eastB, y: northB }, surveyEpsg);
+            setSheetTie(transform);
+          } catch {
+            setSheetTie(null);
           }
         }
         setCalibPts([]);
         setTool("pan");
       } else {
         setCalibPts(next);
+      }
+      return;
+    }
+
+    if (tool === "symbol") {
+      const next = [...symbolPts, p];
+      if (next.length === 2) {
+        setSymbolPts([]);
+        void countSymbolCrop(next[0], next[1]);
+      } else {
+        setSymbolPts(next);
       }
       return;
     }
@@ -690,7 +748,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
 
     if (tool === "length" || tool === "area") {
-      setDraftPoints((prev) => [...prev, p]);
+      if (tool === "area" && holeDraft) setHoleDraft((prev) => [...(prev ?? []), p]);
+      else setDraftPoints((prev) => [...prev, p]);
     }
 
     if (tool === "utility_pipe") {
@@ -807,35 +866,68 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (tool === "utility_pipe") { finishUtilityDraft(); return; }
     if (tool === "contour_line") { finishContourDraft(); return; }
     if (tool === "civil_area_bounds") { finishAreaBoundsDraft(); return; }
-    if (draftPoints.length < 2) { setDraftPoints([]); return; }
+    if (holeDraft) {
+      if (holeDraft.length >= 3) setAreaHoles((prev) => [...prev, holeDraft]);
+      setHoleDraft(null);
+      return;
+    }
+    if (draftPoints.length < 2) { setDraftPoints([]); setHoleDraft(null); return; }
     if (tool === "length") {
       const quantity = totalLen(draftPoints) * scale;
-      setShapes((prev) => [...prev, {
+      const width = Number(wallWidthFt);
+      const created: Shape[] = [{
         key: `l-${Date.now()}`,
         tool: "length",
         points: draftPoints,
         coordinateSpace: "legacy_pixel",
         quantity,
         unit: "LF",
-      }]);
+      }];
+      if (Number.isFinite(width) && width > 0 && scale > 0) {
+        const buffered = bufferCenterline(draftPoints, (width / 2) / scale);
+        if (buffered.ring.length >= 3) {
+          created.push({
+            key: `pave-${Date.now()}`,
+            tool: "area",
+            points: buffered.ring,
+            coordinateSpace: "legacy_pixel",
+            quantity: buffered.area * scale * scale,
+            unit: "SF",
+            label: "Centerline offset",
+          });
+        }
+      }
+      setShapes((prev) => [...prev, ...created]);
     } else if (tool === "area" && draftPoints.length >= 3) {
-      const quantity = polygonArea(draftPoints) * scale * scale;
+      const quantity = netArea(draftPoints, areaHoles) * scale * scale;
       setShapes((prev) => [...prev, {
         key: `a-${Date.now()}`,
         tool: "area",
         points: draftPoints,
+        holes: areaHoles.length > 0 ? areaHoles : undefined,
         coordinateSpace: "legacy_pixel",
         quantity,
         unit: "SF",
       }]);
+      setAreaHoles([]);
+      setHoleDraft(null);
     }
     setDraftPoints([]);
-  }, [draftPoints, tool, scale, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft]);
+  }, [draftPoints, tool, scale, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft, holeDraft, areaHoles, wallWidthFt]);
 
   // Escape/Enter shortcuts for finishing a polygon/line.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { setDraftPoints([]); setCalibPts([]); setUtilityDraftPts([]); setContourDraftPts([]); setAreaDraftPts([]); }
+      if (e.key === "Escape") {
+        setDraftPoints([]);
+        setCalibPts([]);
+        setUtilityDraftPts([]);
+        setContourDraftPts([]);
+        setAreaDraftPts([]);
+        setHoleDraft(null);
+        setAreaHoles([]);
+        setSymbolPts([]);
+      }
       else if (e.key === "Enter") finishDraft();
     };
     window.addEventListener("keydown", onKey);
@@ -1045,7 +1137,13 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           quantity: Number(s.quantity.toFixed(3)),
           unit: s.unit,
           client_key: s.key,
-          geometry: { points: toPersistedPoints(s.points, s.coordinateSpace), coordinate_space: "page_space", page_number: pageNumber },
+          geometry: {
+            points: toPersistedPoints(s.points, s.coordinateSpace),
+            ...(s.holes && s.holes.length > 0 ? { holes: s.holes.map((ring) => toPersistedPoints(ring, s.coordinateSpace)) } : {}),
+            ...(s.label ? { description: s.label } : {}),
+            coordinate_space: "page_space",
+            page_number: pageNumber,
+          },
         }));
         manualSaveRequest = fetch("/api/takeoff/canvas/manual", {
           method: "POST",
@@ -1211,6 +1309,92 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
   }
 
+  async function publishExistingGrade() {
+    const contours = topoNodes
+      .filter((node) => node.node_type === "contour_line")
+      .map((node) => ({ elevation: node.elevation, points: toDisplayPoints(node.points, node.coordinateSpace) }));
+    const spots = topoNodes.flatMap((node) => {
+      if (node.node_type !== "spot_elevation") return [];
+      const point = toDisplayPoints(node.points, node.coordinateSpace)[0];
+      return point ? [{ x: point.x, y: point.y, elevation: node.elevation }] : [];
+    });
+    const points = topoToSurfacePoints(contours, spots, scale);
+    if (points.length < 3) {
+      alert("Draw at least three contour vertices or spot elevations before publishing a grade.");
+      return;
+    }
+    setPublishingGrade(true);
+    try {
+      const res = await fetch("/api/cut-fill/surfaces", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project_id: projectId,
+          name: `Sheet topo — Page ${pageNumber}`,
+          type: "existing",
+          points,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Could not publish existing grade: ${err.error ?? res.status}`);
+      }
+    } finally {
+      setPublishingGrade(false);
+    }
+  }
+
+  async function countSymbolCrop(a: Pt, b: Pt) {
+    const cvs = canvasRef.current;
+    if (!cvs) return;
+    const x = Math.min(a.x, b.x);
+    const y = Math.min(a.y, b.y);
+    const w = Math.abs(b.x - a.x);
+    const h = Math.abs(b.y - a.y);
+    if (w < 4 || h < 4) return;
+    const name = window.prompt("Symbol name", "symbol");
+    if (name == null) return;
+    setSymbolBusy(true);
+    try {
+      const crop = document.createElement("canvas");
+      crop.width = Math.max(1, Math.round(w));
+      crop.height = Math.max(1, Math.round(h));
+      const cropCtx = crop.getContext("2d");
+      if (!cropCtx) return;
+      cropCtx.drawImage(cvs, x, y, w, h, 0, 0, crop.width, crop.height);
+      const pageBlob = await new Promise<Blob | null>((resolve) => cvs.toBlob(resolve, "image/png"));
+      const templateBlob = await new Promise<Blob | null>((resolve) => crop.toBlob(resolve, "image/png"));
+      if (!pageBlob || !templateBlob) return;
+      const body = new FormData();
+      body.set("page", pageBlob, "page.png");
+      body.set("template", templateBlob, "template.png");
+      body.set("class_name", name || "symbol");
+      body.set("threshold", "0.8");
+      const res = await fetch("/api/vision/count-template", { method: "POST", body });
+      const data = await res.json().catch(() => ({})) as { error?: string; matches?: Array<{ x: number; y: number }> };
+      if (!res.ok) {
+        alert(`Symbol count failed: ${data.error ?? res.status}`);
+        return;
+      }
+      const matches = data.matches ?? [];
+      if (matches.length === 0) {
+        alert(`No copies of ${name || "symbol"} found on this sheet.`);
+        return;
+      }
+      setShapes((prev) => [...prev, ...matches.map((match, index) => ({
+        key: `sym-${Date.now()}-${index}`,
+        tool: "count" as const,
+        points: [{ x: match.x + crop.width / 2, y: match.y + crop.height / 2 }],
+        coordinateSpace: "legacy_pixel" as const,
+        quantity: 1,
+        unit: "EA" as const,
+        label: name || "symbol",
+      }))]);
+    } finally {
+      setSymbolBusy(false);
+    }
+  }
+
   // ── "Commit Area to Earthwork" — push a boundary's excavation volume into
   // earthwork_volumes as a localized deduction layer. ──
   const [committingAreaKey, setCommittingAreaKey] = useState<string | null>(null);
@@ -1276,11 +1460,11 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
           {/* Tool switcher */}
           <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] p-1">
-            {(["pan", "calibrate", "count", "length", "area", "utility_pipe", "spot_elevation", "contour_line", "civil_area_bounds"] as Tool[]).map((t) => (
+            {(["pan", "calibrate", "count", "length", "area", "symbol", "utility_pipe", "spot_elevation", "contour_line", "civil_area_bounds"] as Tool[]).map((t) => (
               <button
                 key={t}
                 type="button"
-                onClick={() => { setTool(t); setDraftPoints([]); setCalibPts([]); setUtilityDraftPts([]); setContourDraftPts([]); setAreaDraftPts([]); }}
+                onClick={() => { setTool(t); setDraftPoints([]); setCalibPts([]); setUtilityDraftPts([]); setContourDraftPts([]); setAreaDraftPts([]); setHoleDraft(null); setSymbolPts([]); }}
                 className={`px-3 h-7 text-[10px] uppercase tracking-widest font-mono rounded-full transition-colors ${
                   tool === t
                     ? "bg-[#CCFF00] text-black"
@@ -1303,6 +1487,11 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   <span className="text-amber-400" title="This calibration predates the page-space model and is render-scale-dependent — recalibrate before approving new measurements or syncing to the estimate">
                     ⚠ Legacy scale — needs recalibration
                     {calibration.scale_ratio != null && <> ({calibration.scale_ratio.toFixed(4)} ft/px at save time)</>}
+                  </span>
+                )}
+                {sheetTie && (
+                  <span className="text-[#CCFF00]" title="Held in this sheet session. Not written to the project row.">
+                    EPSG {sheetTie.epsg} · origin {applySheetTransform([{ x: 0, y: 0 }], sheetTie)[0].x.toFixed(0)},{applySheetTransform([{ x: 0, y: 0 }], sheetTie)[0].y.toFixed(0)}
                   </span>
                 )}
                 <button
@@ -1333,6 +1522,36 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             )}
           </div>
         </div>
+
+        {tool === "calibrate" && (
+          <div className="flex flex-wrap items-end gap-2 border-t border-white/5 bg-white/[0.02] px-4 py-2 text-[10px] font-mono text-white/50">
+            <label>EPSG
+              <input value={surveyEpsg} onChange={(e) => setSurveyEpsg(Number(e.target.value) || 2276)} className="ml-1 w-16 rounded border border-white/10 bg-black/40 px-1 py-0.5 text-white" />
+            </label>
+            <label>A easting
+              <input value={tieA.e} onChange={(e) => setTieA((prev) => ({ ...prev, e: e.target.value }))} className="ml-1 w-24 rounded border border-white/10 bg-black/40 px-1 py-0.5 text-white" />
+            </label>
+            <label>A northing
+              <input value={tieA.n} onChange={(e) => setTieA((prev) => ({ ...prev, n: e.target.value }))} className="ml-1 w-24 rounded border border-white/10 bg-black/40 px-1 py-0.5 text-white" />
+            </label>
+            <label>B easting
+              <input value={tieB.e} onChange={(e) => setTieB((prev) => ({ ...prev, e: e.target.value }))} className="ml-1 w-24 rounded border border-white/10 bg-black/40 px-1 py-0.5 text-white" />
+            </label>
+            <label>B northing
+              <input value={tieB.n} onChange={(e) => setTieB((prev) => ({ ...prev, n: e.target.value }))} className="ml-1 w-24 rounded border border-white/10 bg-black/40 px-1 py-0.5 text-white" />
+            </label>
+            <span>Two clicks use this state-plane pair when both are filled. The tie stays in this session.</span>
+          </div>
+        )}
+
+        {tool === "length" && (
+          <div className="flex items-center gap-2 border-t border-white/5 bg-white/[0.02] px-4 py-2 text-[10px] font-mono text-white/50">
+            <label>Wall / paving width (ft)
+              <input value={wallWidthFt} onChange={(e) => setWallWidthFt(e.target.value)} placeholder="0" className="ml-1 w-16 rounded border border-white/10 bg-black/40 px-1 py-0.5 text-white" />
+            </label>
+            <span>A width offsets the centerline into an SF area when you commit the line.</span>
+          </div>
+        )}
 
         {deletedTakeoffs.length > 0 && (
           <div className="flex flex-wrap items-center gap-2 border-t border-white/5 bg-white/[0.02] px-4 py-2">
@@ -1497,6 +1716,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   {tool === "area" && draftPoints.length >= 3 && (
                     <path d={triangleFillPath(draftPoints)} fill="#f9731633" stroke="none" />
                   )}
+                  {areaHoles.map((ring, index) => (
+                    <path key={`hole-${index}`} d={ring.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z"} fill="#06070A" fillOpacity={0.55} stroke="#f97316" strokeWidth={1} />
+                  ))}
+                  {holeDraft && holeDraft.length > 0 && (
+                    <path d={holeDraft.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ")} stroke="#CCFF00" strokeWidth={1.5} fill="none" strokeDasharray="4 3" />
+                  )}
                   <path
                     d={draftPoints.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + (tool === "area" && draftPoints.length >= 3 ? " Z" : "")}
                     stroke={tool === "area" ? "#f97316" : "#00D2FF"}
@@ -1515,6 +1740,14 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               )}
 
               {/* Calibration guide */}
+              {symbolPts.length > 0 && (
+                <g>
+                  {symbolPts.map((p, i) => (
+                    <circle key={i} cx={p.x} cy={p.y} r={4} fill="#CCFF00" stroke="#000" strokeWidth={1} />
+                  ))}
+                </g>
+              )}
+
               {calibPts.length > 0 && (
                 <g>
                   {calibPts.map((p, i) => (
@@ -1532,6 +1765,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             canvasSize={renderSize}
             scaleRatio={scale}
             onVectorsLoaded={setVectorDescriptions}
+            onScreenPoints={onCadScreenPoints}
             onCommitted={(m) => {
               // Mirror an approved CAD vector into the local shapes dock so
               // estimators see it immediately without needing to reload.
@@ -1595,15 +1829,29 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           </div>
         )}
 
+        {tool === "symbol" && (
+          <div className="fixed bottom-4 left-4 z-10 rounded-lg border border-white/10 bg-black/80 px-3 py-2 backdrop-blur">
+            <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Symbol</div>
+            <div className="mt-0.5 text-sm text-white/70">
+              {symbolBusy ? "Counting copies…" : "Drag a box with two clicks around one symbol."}
+            </div>
+          </div>
+        )}
+
         {(tool === "length" || tool === "area") && draftPoints.length > 0 && (
           <div className="fixed bottom-4 left-4 z-10 rounded-lg border border-white/10 bg-black/80 px-3 py-2 backdrop-blur">
             <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Draft</div>
             <div className="mt-0.5 text-sm">
               {tool === "length"
                 ? <><span className="text-[#00D2FF] font-mono">{draftQuantity.toFixed(2)}</span> LF</>
-                : <><span className="text-orange-400 font-mono">{draftQuantity.toFixed(2)}</span> SF</>
+                : <><span className="text-orange-400 font-mono">{draftQuantity.toFixed(2)}</span> SF{areaHoles.length > 0 ? ` · ${areaHoles.length} hole${areaHoles.length === 1 ? "" : "s"}` : ""}</>
               }
-              <span className="ml-3 text-[10px] text-white/40">Enter = commit · Esc = cancel</span>
+              {tool === "area" && (
+                <button type="button" onClick={() => setHoleDraft(holeDraft ? null : [])} className="ml-3 rounded border border-white/15 px-2 py-0.5 text-[10px] uppercase tracking-widest text-white/70 hover:text-white">
+                  {holeDraft ? "Drawing hole" : "Add hole"}
+                </button>
+              )}
+              <span className="ml-3 text-[10px] text-white/40">{holeDraft ? "Enter = close hole · Esc = cancel" : "Enter = commit · Esc = cancel"}</span>
             </div>
           </div>
         )}
@@ -1710,6 +1958,14 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   <span>Exc: {r.trench.trench_excavation_bcy.toFixed(1)} BCY</span>
                   <span>Bedding: {r.trench.bedding_material_cy.toFixed(1)} CY</span>
                   <span>Backfill: {r.trench.native_backfill_cy.toFixed(1)} CY</span>
+                  <span className="col-span-3 text-white/35">
+                    Prism {trenchPrism({
+                      length_lf: r.run_length_lf,
+                      width_ft: r.inputs.trench_width_ft,
+                      depth_ft: 4,
+                      bedding_ft: 0.5,
+                    }).excavation_cy.toFixed(1)} CY at 4 ft cover
+                  </span>
                 </div>
                 <div className="mt-1.5 flex items-center gap-2">
                   <input
@@ -1739,6 +1995,14 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 className="text-[9px] uppercase tracking-widest font-mono text-[#22d3ee] hover:opacity-70 disabled:opacity-40"
               >
                 {compilingMesh ? "Compiling…" : "Compile to Surface Mesh"}
+              </button>
+              <button
+                type="button"
+                onClick={() => { void publishExistingGrade(); }}
+                disabled={publishingGrade}
+                className="text-[9px] uppercase tracking-widest font-mono text-[#22d3ee] hover:opacity-70 disabled:opacity-40"
+              >
+                {publishingGrade ? "Publishing…" : "Use as existing grade"}
               </button>
             </div>
             {topoNodes.map((n) => (

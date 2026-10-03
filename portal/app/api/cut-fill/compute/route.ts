@@ -9,6 +9,7 @@ import {
   type Bounds,
   type Point3,
 } from "@/lib/cutfill/sampling";
+import { cutFillTin, type Ring } from "@/lib/cutfill/tin";
 import type { Json } from "@/lib/supabase/types";
 
 // Each grid cell runs two O(points) IDW scans (existing + proposed surface),
@@ -25,12 +26,33 @@ interface ComputeBody {
   existing_surface_id?: string;
   proposed_surface_id?: string;
   grid_resolution_ft?: number;
+  boundary?: unknown;
 }
 
 interface SurfaceRow {
   id: string;
   points: unknown;
   bounds: unknown;
+}
+
+function asRing(value: unknown): Ring | null {
+  if (!Array.isArray(value) || value.length < 3) return null;
+  const ring: Ring = [];
+  for (const raw of value) {
+    if (Array.isArray(raw) && raw.length >= 2) {
+      const x = Number(raw[0]);
+      const y = Number(raw[1]);
+      if (Number.isFinite(x) && Number.isFinite(y)) ring.push([x, y]);
+      continue;
+    }
+    if (raw && typeof raw === "object") {
+      const point = raw as { x?: unknown; y?: unknown };
+      const x = Number(point.x);
+      const y = Number(point.y);
+      if (Number.isFinite(x) && Number.isFinite(y)) ring.push([x, y]);
+    }
+  }
+  return ring.length >= 3 ? ring : null;
 }
 
 function asPoints(value: unknown): Point3[] {
@@ -147,6 +169,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const vols = computeVolumes(deltaGrid, cellArea);
+    const boundary = asRing(body.boundary);
+    let tin: ReturnType<typeof cutFillTin> | null = null;
+    let tinError: string | null = null;
+    try {
+      tin = cutFillTin(existingPts, proposedPts, boundary);
+    } catch (err: unknown) {
+      tinError = err instanceof Error ? err.message : String(err);
+    }
 
     // Stat extremes for caller's color scaling.
     let minDelta = Infinity;
@@ -201,6 +231,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         cells: rowsCount * colsCount,
         bounds: { minX, maxX, minY, maxY },
       },
+      tin,
+      tin_error: tinError,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

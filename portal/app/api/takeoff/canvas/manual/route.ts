@@ -4,7 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant, assertPageBelongsToProject } from "@/lib/project-controls/server";
 import { logEvent } from "@/lib/activity";
 import { processOutboxBatch } from "@/lib/estimating/outbox-worker";
-import { calculateLinearLength, calculatePolygonArea, calculateCount, FORMULA_VERSION } from "@/lib/takeoff/canvas/quantity";
+import { calculateLinearLength, calculateNetPolygonArea, calculateCount, FORMULA_VERSION } from "@/lib/takeoff/canvas/quantity";
 import type { Point } from "@/lib/takeoff/canvas/coordinates";
 
 export const runtime = "nodejs";
@@ -38,6 +38,22 @@ export const runtime = "nodejs";
  */
 
 const COST_CODE_RE = /^\d{2}-\d{2}-\d{2}$/;
+
+function geometryHoles(geo: { [k: string]: unknown }): Point[][] {
+  if (!Array.isArray(geo.holes)) return [];
+  const holes: Point[][] = [];
+  for (const ring of geo.holes) {
+    if (!Array.isArray(ring)) continue;
+    const points: Point[] = [];
+    for (const raw of ring) {
+      if (!raw || typeof raw !== "object") continue;
+      const point = raw as { x?: unknown; y?: unknown };
+      if (typeof point.x === "number" && typeof point.y === "number") points.push({ x: point.x, y: point.y });
+    }
+    if (points.length >= 3) holes.push(points);
+  }
+  return holes;
+}
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
@@ -178,7 +194,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       let serverQuantity: number;
       if (it.takeoff_type === "count") serverQuantity = calculateCount(points);
       else if (it.takeoff_type === "length") serverQuantity = calculateLinearLength(points, calibration.page_space_scale_factor);
-      else serverQuantity = calculatePolygonArea(points, calibration.page_space_scale_factor);
+      else serverQuantity = calculateNetPolygonArea(points, calibration.page_space_scale_factor, geometryHoles(geo));
 
       const pctDiff = it.quantity !== 0 ? Math.abs(serverQuantity - it.quantity) / Math.abs(it.quantity) * 100 : (serverQuantity === 0 ? 0 : 100);
       if (pctDiff > QUANTITY_TOLERANCE_PCT) {
@@ -360,7 +376,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       let serverQuantity: number;
       if (existing.takeoff_type === "count") serverQuantity = calculateCount(points);
       else if (existing.takeoff_type === "length") serverQuantity = calculateLinearLength(points, calibration.page_space_scale_factor);
-      else serverQuantity = calculatePolygonArea(points, calibration.page_space_scale_factor);
+      else serverQuantity = calculateNetPolygonArea(points, calibration.page_space_scale_factor, geometryHoles(geo));
 
       const pctDiff = body.quantity !== 0 ? Math.abs(serverQuantity - body.quantity) / Math.abs(body.quantity) * 100 : (serverQuantity === 0 ? 0 : 100);
       if (pctDiff > QUANTITY_TOLERANCE_PCT) {

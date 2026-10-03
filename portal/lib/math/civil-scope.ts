@@ -230,3 +230,30 @@ export function summarizeLedger(rows: LedgerRow[]): LedgerTotals {
 }
 
 export const CIVIL_MATERIAL_DENSITY_TON_PER_CY = AGGREGATE_TONS_PER_CY;
+
+export interface TrenchPrismInput {
+  length_lf: number;
+  width_ft: number;
+  depth_ft: number;
+  bedding_ft?: number;
+}
+
+export interface TrenchPrismResult {
+  excavation_cy: number;
+  bedding_cy: number;
+  backfill_cy: number;
+}
+
+/** Length × width × depth prism. Bedding is taken from the bottom; the rest is backfill. */
+export function trenchPrism(input: TrenchPrismInput): TrenchPrismResult {
+  const length = Math.max(0, input.length_lf);
+  const width = Math.max(0, input.width_ft);
+  const depth = Math.max(0, input.depth_ft);
+  const bedding = Math.min(Math.max(0, input.bedding_ft ?? 0), depth);
+  const section = length * width / CF_PER_CY;
+  return {
+    excavation_cy: round(section * depth),
+    bedding_cy: round(section * bedding),
+    backfill_cy: round(section * (depth - bedding)),
+  };
+}

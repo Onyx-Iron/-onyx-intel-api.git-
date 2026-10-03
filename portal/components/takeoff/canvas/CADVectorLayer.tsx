@@ -36,12 +36,14 @@ interface Props {
   }) => void;
   /** Called whenever the CAD vector set is (re)loaded — used by cross-verify. */
   onVectorsLoaded?: (descriptions: string[]) => void;
+  /** Screen-space vertices so the snap index can land on saved CAD geometry. */
+  onScreenPoints?: (points: Array<{ x: number; y: number }>) => void;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
-export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRatio, onCommitted, onVectorsLoaded }: Props) {
+export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRatio, onCommitted, onVectorsLoaded, onScreenPoints }: Props) {
   const [raw, setRaw] = useState<RawVector[]>([]);
   const [enabled, setEnabled] = useState(true);
   const [hoverKey, setHoverKey] = useState<string | null>(null);
@@ -147,6 +149,11 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
       };
     });
   }, [raw, canvasSize]);
+
+  useEffect(() => {
+    if (!onScreenPoints) return;
+    onScreenPoints(rendered.flatMap((vector) => vector.screenPoints.map(([x, y]) => ({ x, y }))));
+  }, [rendered, onScreenPoints]);
 
   // ── Layer legend ──────────────────────────────────────────────────────────
   const layers = useMemo(() => {

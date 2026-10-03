@@ -24,5 +24,8 @@ describe("live estimate workbook", () => {
     assert.equal((book.proposal[2][1] as { f: string }).f, "SUM('Schedule of Values'!R2:R2)");
     assert.equal((book.proposal[7][1] as { f: string }).f, "B5+B6+B7");
     assert.equal(book.settings[0][1], 0.1);
+    assert.equal((book.unitPrices[1][5] as { f: string }).f, "C2*E2");
+    assert.equal(book.unitPrices[1][4], "");
+    assert.equal((book.unitPrices[2][5] as { f: string }).f, "SUM(F2:F2)");
   });
 });

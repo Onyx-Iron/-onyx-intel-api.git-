@@ -38,12 +38,34 @@ interface ComputeSummary {
   cells: number;
 }
 
+interface TinSummary {
+  cut_cy: number;
+  fill_cy: number;
+  net_cy: number;
+  triangles: number;
+  clipped: boolean;
+  steepest_slope_pct: number;
+  low_points: Array<{ x: number; y: number; z: number }>;
+}
+
 interface CutFillTabProps {
   projectId: string;
 }
 
 function fmt(n: number): string {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(Math.round(n));
+}
+
+function parseBoundary(text: string): Array<[number, number]> | undefined {
+  const ring: Array<[number, number]> = [];
+  for (const line of text.split(/\n+/)) {
+    const parts = line.split(/[,\s]+/).map((part) => part.trim()).filter(Boolean);
+    if (parts.length < 2) continue;
+    const x = Number(parts[0]);
+    const y = Number(parts[1]);
+    if (Number.isFinite(x) && Number.isFinite(y)) ring.push([x, y]);
+  }
+  return ring.length >= 3 ? ring : undefined;
 }
 
 export default function CutFillTab({ projectId }: CutFillTabProps) {
@@ -55,6 +77,8 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
   const [error, setError] = useState<string | null>(null);
   const [grid, setGrid] = useState<GridData | null>(null);
   const [summary, setSummary] = useState<ComputeSummary | null>(null);
+  const [tin, setTin] = useState<TinSummary | null>(null);
+  const [boundaryText, setBoundaryText] = useState("");
   const existingInput = useRef<HTMLInputElement | null>(null);
   const proposedInput = useRef<HTMLInputElement | null>(null);
 
@@ -143,18 +167,20 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
           existing_surface_id: existingId,
           proposed_surface_id: proposedId,
           grid_resolution_ft: resolution,
+          boundary: parseBoundary(boundaryText),
         }),
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || "Compute failed");
       setGrid(j.grid as GridData);
       setSummary(j.summary as ComputeSummary);
+      setTin((j.tin as TinSummary | null) ?? null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
-  }, [projectId, existingId, proposedId, resolution]);
+  }, [projectId, existingId, proposedId, resolution, boundaryText]);
 
   const existingSurfaces = surfaces.filter((s) => s.type === "existing");
   const proposedSurfaces = surfaces.filter((s) => s.type === "proposed");
@@ -165,7 +191,7 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
         <h2 className="text-xl font-semibold tracking-tight">Cut / Fill Earthwork</h2>
         <p className="mt-1 text-sm text-neutral-400">
           Upload existing and proposed grade points as CSV (columns: x,y,z or northing,easting,elevation).
-          We interpolate Δz on a uniform grid and tally cut/fill volumes.
+          Volumes are tallied on a uniform grid and on the TIN prisms between the survey points.
         </p>
       </div>
 
@@ -264,6 +290,18 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
             />
           </label>
         </div>
+        <label className="mt-3 block">
+          <span className="mb-1 block text-xs text-neutral-400">
+            Limit of work (optional). One x,y pair per line. The TIN keeps triangles whose centroid is inside this ring.
+          </span>
+          <textarea
+            value={boundaryText}
+            onChange={(e) => setBoundaryText(e.target.value)}
+            rows={3}
+            placeholder={"0,0\n100,0\n100,80\n0,80"}
+            className="w-full rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1.5 font-mono text-xs"
+          />
+        </label>
         <div className="mt-4 flex items-center gap-3">
           <button
             type="button"
@@ -279,15 +317,17 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
       {summary && (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
           <div className="rounded-md border border-red-900/60 bg-red-950/30 p-4">
-            <div className="text-xs uppercase tracking-wider text-red-300">Cut</div>
+            <div className="text-xs uppercase tracking-wider text-red-300">Cut · grid</div>
             <div className="mt-1 text-2xl font-semibold text-red-200">{fmt(summary.cut_cy)} CY</div>
+            {tin && <div className="mt-1 text-xs text-red-300/80">TIN {fmt(tin.cut_cy)} CY</div>}
           </div>
           <div className="rounded-md border border-sky-900/60 bg-sky-950/30 p-4">
-            <div className="text-xs uppercase tracking-wider text-sky-300">Fill</div>
+            <div className="text-xs uppercase tracking-wider text-sky-300">Fill · grid</div>
             <div className="mt-1 text-2xl font-semibold text-sky-200">{fmt(summary.fill_cy)} CY</div>
+            {tin && <div className="mt-1 text-xs text-sky-300/80">TIN {fmt(tin.fill_cy)} CY</div>}
           </div>
           <div className="rounded-md border border-neutral-800 bg-neutral-950/60 p-4">
-            <div className="text-xs uppercase tracking-wider text-neutral-400">Net (Fill − Cut)</div>
+            <div className="text-xs uppercase tracking-wider text-neutral-400">Net (Fill − Cut) · grid</div>
             <div
               className={`mt-1 text-2xl font-semibold ${
                 summary.net_cy >= 0 ? "text-sky-200" : "text-red-200"
@@ -296,6 +336,13 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
               {summary.net_cy >= 0 ? "+" : ""}
               {fmt(summary.net_cy)} CY
             </div>
+            {tin && (
+              <div className="mt-2 text-xs text-neutral-400">
+                TIN net {tin.net_cy >= 0 ? "+" : ""}{fmt(tin.net_cy)} CY · {tin.triangles} triangles
+                {tin.clipped ? " · clipped" : ""} · steepest {tin.steepest_slope_pct.toFixed(1)}%
+                · {tin.low_points.length} low point{tin.low_points.length === 1 ? "" : "s"}
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -24,6 +24,7 @@ export interface LiveWorkbook {
   proposal: WorkbookCell[][];
   schedule: WorkbookCell[][];
   settings: WorkbookCell[][];
+  unitPrices: WorkbookCell[][];
 }
 
 /**
@@ -79,5 +80,20 @@ export function buildLiveWorkbook(projectName: string, rows: WorkbookLine[], set
     ["Overhead rate", settings.overhead_pct / 100],
     ["Profit rate", settings.profit_pct / 100],
   ];
-  return { proposal, schedule, settings: settingsSheet };
+  const unitPrices: WorkbookCell[][] = [["Item", "Description", "Qty", "Unit", "Unit Price", "Extension"]];
+  rows.forEach((row, index) => {
+    const excelRow = index + 2;
+    unitPrices.push([
+      index + 1,
+      row.description,
+      row.quantity,
+      row.unit,
+      "",
+      { f: `C${excelRow}*E${excelRow}` },
+    ]);
+  });
+  if (rows.length > 0) {
+    unitPrices.push(["Total", "", "", "", "", { f: `SUM(F2:F${rows.length + 1})` }]);
+  }
+  return { proposal, schedule, settings: settingsSheet, unitPrices };
 }
