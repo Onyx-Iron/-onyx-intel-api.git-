@@ -3,7 +3,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant, assertPageBelongsToProject } from "@/lib/project-controls/server";
 import type { CalibrationPoint, CalibrationUpsertBody } from "@/lib/types/takeoff";
-import { previewRecalibration, recalibrationNeedsConfirm } from "@/lib/takeoff/recalibration";
+import {
+  MANUAL_TAKEOFF_DRAFT_COLUMNS,
+  measurementFromDraftRow,
+  previewRecalibration,
+  recalibrationNeedsConfirm,
+} from "@/lib/takeoff/recalibration";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 
 export const runtime = "nodejs";
@@ -101,22 +106,26 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
 
   const oldFactor = typeof before?.page_space_scale_factor === "number" ? before.page_space_scale_factor : null;
   const oldVerified = before?.status === "verified" && oldFactor != null && oldFactor > 0;
-  const { data: drafts } = oldVerified
+  const { data: drafts, error: draftsErr } = oldVerified
     ? await anyDb
       .from("manual_takeoffs")
-      .select("id, label, takeoff_type, quantity, unit, geometry, cost_code, row_version")
+      .select(MANUAL_TAKEOFF_DRAFT_COLUMNS)
       .eq("tenant_id", tenantId)
       .eq("page_id", page_id)
       .is("deleted_at", null)
-    : { data: [] as Array<Record<string, unknown>> };
+    : { data: [] as Array<Record<string, unknown>>, error: null };
+  if (draftsErr) return NextResponse.json({ error: draftsErr.message }, { status: 500 });
+  const draftRows = (drafts ?? []) as Array<{
+    id: string;
+    takeoff_type: string;
+    quantity: number | string;
+    unit?: string | null;
+    geometry?: unknown;
+    cost_code?: string | null;
+    row_version?: number;
+  }>;
   const preview = previewRecalibration(
-    ((drafts ?? []) as Array<{ id: string; label?: string | null; takeoff_type: string; quantity: number; unit?: string | null }>).map((row) => ({
-      id: row.id,
-      label: row.label,
-      takeoff_type: row.takeoff_type,
-      quantity: Number(row.quantity),
-      unit: row.unit,
-    })),
+    draftRows.map(measurementFromDraftRow),
     oldVerified ? oldFactor : null,
     pageSpaceScaleFactor,
   );
@@ -161,12 +170,12 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   });
 
   if (body.apply_to_drafts === true) {
-    const draftRows = (drafts ?? []) as Array<{ id: string; geometry: unknown; unit?: string | null; cost_code?: string | null; row_version?: number }>;
+    const updateErrors: string[] = [];
     for (const line of preview) {
       if (!line.recomputed) continue;
       const row = draftRows.find((candidate) => candidate.id === line.id);
       if (!row || typeof row.row_version !== "number") continue;
-      await anyDb.rpc("update_manual_takeoff_tx", {
+      const { error: updateErr } = await anyDb.rpc("update_manual_takeoff_tx", {
         p_id: row.id,
         p_tenant_id: tenantId,
         p_expected_row_version: row.row_version,
@@ -177,6 +186,14 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
         p_actor_user_id: userId,
         p_calculation_formula_version: "recalibration-v1",
       });
+      if (updateErr) updateErrors.push(updateErr.message);
+    }
+    if (updateErrors.length > 0) {
+      return NextResponse.json({
+        error: `Scale was saved, but ${updateErrors.length} measurement(s) could not be updated: ${updateErrors[0]}`,
+        calibration: data,
+        preview,
+      }, { status: 500 });
     }
   }
 

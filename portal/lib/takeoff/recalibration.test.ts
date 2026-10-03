@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { previewRecalibration, recalibrationNeedsConfirm } from "./recalibration.ts";
+import {
+  labelFromTakeoffGeometry,
+  MANUAL_TAKEOFF_DRAFT_COLUMNS,
+  MANUAL_TAKEOFF_EXPORT_COLUMNS,
+  measurementFromDraftRow,
+  previewRecalibration,
+  recalibrationNeedsConfirm,
+} from "./recalibration.ts";
 
 describe("recalibration preview", () => {
   it("scales length and perimeter linearly, area by the square, and leaves counts", () => {
@@ -32,5 +39,28 @@ describe("recalibration preview", () => {
     assert.equal(lines[0].after, 10);
     assert.equal(lines[0].recomputed, false);
     assert.equal(recalibrationNeedsConfirm(lines), false);
+  });
+
+  it("reads the measurement name from geometry and does not select missing columns", () => {
+    assert.equal(labelFromTakeoffGeometry({ label: "  Curb  ", points: [] }), "Curb");
+    assert.equal(labelFromTakeoffGeometry({ points: [] }), null);
+    assert.equal(labelFromTakeoffGeometry(null), null);
+    for (const columns of [MANUAL_TAKEOFF_DRAFT_COLUMNS, MANUAL_TAKEOFF_EXPORT_COLUMNS]) {
+      assert.equal(columns.split(", ").includes("label"), false);
+      assert.equal(columns.split(", ").includes("review_status"), false);
+    }
+    const lines = previewRecalibration(
+      [measurementFromDraftRow({
+        id: "curb",
+        takeoff_type: "length",
+        quantity: "100",
+        geometry: { label: "Curb", measure: "length" },
+      })],
+      1,
+      2,
+    );
+    assert.equal(lines[0].label, "Curb");
+    assert.equal(lines[0].after, 200);
+    assert.equal(recalibrationNeedsConfirm(lines), true);
   });
 });
