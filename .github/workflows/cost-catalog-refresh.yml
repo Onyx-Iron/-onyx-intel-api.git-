@@ -1,0 +1,45 @@
+# Free cost-catalog refresh — BLS weekly, DOT monthly (sample-safe).
+name: Cost catalog refresh
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Mon 06:00 UTC — BLS
+    - cron: "0 6 1 * *"   # 1st of month — DOT
+  workflow_dispatch:
+
+jobs:
+  bls:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 6 * * 1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - run: python scripts/fetch_bls_ppi.py
+        env:
+          ONYX_PORTAL_URL: ${{ secrets.ONYX_PORTAL_URL }}
+          ONYX_INGEST_TOKEN: ${{ secrets.ONYX_INGEST_TOKEN }}
+          BLS_API_KEY: ${{ secrets.BLS_API_KEY }}
+        continue-on-error: true
+
+  dot:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 6 1 * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - run: python scripts/fetch_dot_tx.py --sample
+        env:
+          ONYX_PORTAL_URL: ${{ secrets.ONYX_PORTAL_URL }}
+          ONYX_INGEST_TOKEN: ${{ secrets.ONYX_INGEST_TOKEN }}
+        continue-on-error: true
+      - run: python scripts/fetch_dot_ca.py --sample
+        env:
+          ONYX_PORTAL_URL: ${{ secrets.ONYX_PORTAL_URL }}
+          ONYX_INGEST_TOKEN: ${{ secrets.ONYX_INGEST_TOKEN }}
+        continue-on-error: true

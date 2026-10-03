@@ -4,6 +4,7 @@ import {
   scaleOptionalCost,
   type EscalateResult,
 } from "@/lib/cost/ppi";
+import { scoreCostConfidence } from "@/lib/cost/confidence";
 
 export interface CostResolveInput {
   cost_code: string;
@@ -197,12 +198,20 @@ export async function resolveCost(
       },
       undefined as string | undefined,
     );
+    // Multi-source confidence helper (Company Hub M6) — ages + variance aware.
+    const scored = scoreCostConfidence(
+      (actuals as Array<{ actual_unit_cost: number | string; observed_at?: string | null }>).map((a) => ({
+        unitCost: Number(a.actual_unit_cost),
+        observedAt: a.observed_at ?? null,
+        source: "tenant_actual",
+      })),
+    );
     return applyPpiAging({
       cost_code,
       unit_cost: avg,
       source: "actuals_avg",
-      confidence: n >= 3 ? "high" : "medium",
-      detail: `avg of ${n} actuals (last 6mo)`,
+      confidence: scored.confidence,
+      detail: `avg of ${n} actuals (last 6mo); confidence_score=${scored.score}`,
       region_code: state,
       observed_at: newest,
     }, pctChangeByDivision);

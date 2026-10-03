@@ -73,7 +73,46 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     projectId: version.project_id, tenantId, userId,
     entityType: "estimate", entityId: id, action: "status_changed",
     title: `Estimate version ${version.version_number} approved`,
+    meta: { href: `/dashboard/projects/${version.project_id}/estimate` },
   });
 
-  return NextResponse.json({ version: approved });
+  // Company Hub M2: if a bid opportunity is linked to this project, suggest
+  // advancing the board stage (human confirms via Bid Board PATCH).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: opp } = await (db as any)
+    .from("bid_opportunities")
+    .select("id, name, stage")
+    .eq("tenant_id", tenantId)
+    .eq("project_id", version.project_id)
+    .not("stage", "in", '("won","lost","no_bid")')
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  let bid_stage_suggestion: {
+    opportunity_id: string;
+    name: string;
+    current_stage: string;
+    suggested_stage: "submitted" | "won";
+    href: string;
+  } | null = null;
+
+  if (opp) {
+    const suggested =
+      opp.stage === "submitted" ? "won" as const
+        : (opp.stage === "pricing" || opp.stage === "takeoff" || opp.stage === "pursuing" || opp.stage === "identified")
+          ? "submitted" as const
+          : null;
+    if (suggested) {
+      bid_stage_suggestion = {
+        opportunity_id: opp.id,
+        name: opp.name,
+        current_stage: opp.stage,
+        suggested_stage: suggested,
+        href: "/dashboard/preconstruction",
+      };
+    }
+  }
+
+  return NextResponse.json({ version: approved, bid_stage_suggestion });
 }

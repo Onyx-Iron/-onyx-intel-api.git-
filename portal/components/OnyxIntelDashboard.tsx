@@ -49,6 +49,29 @@ interface DashKpis {
   documents: number;
   scheduleTasks: number;
   estimatedValue: number;
+  bidsDue7d?: number;
+  planEmails7d?: number;
+  agentApprovals?: number;
+  docsStuck?: number;
+  openInvoices?: number;
+  seoHealth?: number;
+  connectionsOk?: number;
+  connectionErrors?: number;
+}
+
+interface DashAlert {
+  id: string;
+  label: string;
+  value: number;
+  href: string;
+}
+
+interface DashBidDue {
+  id: string;
+  name: string;
+  due_at: string;
+  stage: string;
+  href: string;
 }
 
 interface DashActivity {
@@ -64,6 +87,8 @@ interface DashData {
   kpis: DashKpis;
   projects: DashProject[];
   activity: DashActivity[];
+  bids_due?: DashBidDue[];
+  alerts?: DashAlert[];
 }
 
 interface AIMessage {
@@ -284,6 +309,37 @@ function ScheduleRiskPanel({ projects, loading }: { projects: DashProject[]; loa
               <div className="mt-3">
                 <ProgressBar value={project.completion} tone={project.completion < 35 ? "amber" : "blue"} />
               </div>
+            </Link>
+          ))
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+function BidsDuePanel({ data, loading }: { data: DashData | null; loading: boolean }) {
+  const bids = data?.bids_due ?? [];
+  return (
+    <Panel title="Bids due (7 days)">
+      <div className="border-b border-white/5 px-4 py-3">
+        <p className="text-2xl font-black text-white">{loading ? "--" : data?.kpis.bidsDue7d ?? bids.length}</p>
+        <p className="text-[10px] uppercase tracking-widest text-white/40">Open opportunities</p>
+      </div>
+      <div className="divide-y divide-white/5">
+        {loading ? (
+          <div className="px-4 py-6 text-sm text-white/30">Loading…</div>
+        ) : bids.length === 0 ? (
+          <div className="px-4 py-6 text-sm text-white/30">
+            No bids due this week.{" "}
+            <Link href="/dashboard/preconstruction" className="text-[#CCFF00]/80 hover:underline">Open Bid Board</Link>
+          </div>
+        ) : (
+          bids.slice(0, 5).map((b) => (
+            <Link key={b.id} href={b.href} className="block px-4 py-3 hover:bg-white/[0.03]">
+              <p className="truncate text-sm font-medium text-white">{b.name}</p>
+              <p className="mt-0.5 text-xs text-white/40">
+                {b.stage} · due {new Date(b.due_at).toLocaleDateString()}
+              </p>
             </Link>
           ))
         )}
@@ -834,14 +890,25 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
             <Panel title="What needs attention">
               <div className="divide-y divide-white/5">
                 {([
-                  { label: activeProjectId ? "Needs takeoff" : "Projects needing takeoff", value: pendingTakeoffs, tone: "text-[#CCFF00] bg-[#CCFF00]/10", icon: <Layers size={13} /> },
-                  { label: "Budget alerts",            value: overBudget,      tone: "text-amber-400 bg-amber-400/10", icon: <AlertTriangle size={13} /> },
-                  { label: "Schedule tasks",           value: scopedScheduleTasks, tone: "text-[#00D2FF] bg-[#00D2FF]/10", icon: <Clock size={13} /> },
-                ] as { label: string; value: number; tone: string; icon: React.ReactNode }[]).map((item) => (
+                  { label: activeProjectId ? "Needs takeoff" : "Projects needing takeoff", value: pendingTakeoffs, tone: "text-[#CCFF00] bg-[#CCFF00]/10", icon: <Layers size={13} />, href: null as string | null },
+                  { label: "Budget alerts",            value: overBudget,      tone: "text-amber-400 bg-amber-400/10", icon: <AlertTriangle size={13} />, href: null },
+                  { label: "Schedule tasks",           value: scopedScheduleTasks, tone: "text-[#00D2FF] bg-[#00D2FF]/10", icon: <Clock size={13} />, href: null },
+                  ...((data?.alerts ?? []).map((a) => ({
+                    label: a.label,
+                    value: a.value,
+                    tone: a.value > 0 ? "text-amber-300 bg-amber-400/10" : "text-white/50 bg-white/5",
+                    icon: <Zap size={13} />,
+                    href: a.href as string | null,
+                  }))),
+                ] as { label: string; value: number; tone: string; icon: React.ReactNode; href: string | null }[]).map((item) => (
                   <div key={item.label} className="flex items-center justify-between px-4 py-3.5">
                     <div className="flex items-center gap-2.5">
                       <span className={`flex items-center justify-center rounded-md p-1.5 ${item.tone}`}>{item.icon}</span>
-                      <span className="text-sm text-white/50">{item.label}</span>
+                      {item.href ? (
+                        <Link href={item.href} className="text-sm text-white/70 hover:text-[#CCFF00]">{item.label}</Link>
+                      ) : (
+                        <span className="text-sm text-white/50">{item.label}</span>
+                      )}
                     </div>
                     <span className={`rounded-lg px-3 py-1 text-lg font-black ${item.tone}`}>{dataLoading ? "--" : item.value}</span>
                   </div>
@@ -858,6 +925,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
                 <ScheduleRiskPanel projects={filteredProjects} loading={dataLoading} />
                 <GoogleCalendarCard />
                 <GmailInboxCard />
+                <BidsDuePanel data={data} loading={dataLoading} />
                 <DocumentIntelligence data={data} loading={dataLoading} />
                 <RecentContactsCard />
                 <AuditActivityCard />
