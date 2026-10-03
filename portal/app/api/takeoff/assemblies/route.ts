@@ -12,7 +12,9 @@ export const runtime = "nodejs";
 export async function GET(): Promise<NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  // Auth-bound tenant resolution (catalog tables are global; gate by tenant membership).
+  const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  if (!tenantId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
