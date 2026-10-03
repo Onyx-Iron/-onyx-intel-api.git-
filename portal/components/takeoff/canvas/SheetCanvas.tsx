@@ -7,6 +7,8 @@ import CADVectorLayer from "./CADVectorLayer";
 import VisionExtractionsPanel from "./VisionExtractionsPanel";
 import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
+import { utilityRecipeFromRun, wallRecipeLines } from "@/lib/math/scope-recipes";
+import type { RebarSize } from "@/lib/math/assemblies";
 import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
 import { CANVAS_HOTKEY_HINT, resolveCanvasHotkey, type CanvasTool } from "@/lib/takeoff/canvas/hotkeys";
@@ -89,6 +91,25 @@ interface UtilityRun {
   trench: TrenchYield;
   cost_code?: string;
   saved?: boolean;
+}
+
+interface WallRun {
+  key: string;
+  points: Pt[];
+  coordinateSpace: CoordinateSpace;
+  length_lf: number;
+  height_ft: number;
+  thickness_in: number;
+  rebar_size?: RebarSize;
+  rebar_spacing_inches?: number;
+  saved?: boolean;
+}
+
+interface WallInputs {
+  height_ft: number;
+  thickness_in: number;
+  rebar_size?: RebarSize;
+  rebar_spacing_inches?: number;
 }
 
 // Page-space calibration model (manual-takeoff-calibration-hardening
@@ -196,6 +217,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [utilityRuns, setUtilityRuns] = useState<UtilityRun[]>([]);
   const [utilityDraftPts, setUtilityDraftPts] = useState<Pt[]>([]);
   const [utilityModalPts, setUtilityModalPts] = useState<Pt[] | null>(null); // non-null while the input overlay is open
+  const [wallMode, setWallMode] = useState(false);
+  const [wallRuns, setWallRuns] = useState<WallRun[]>([]);
+  const [wallModalPts, setWallModalPts] = useState<Pt[] | null>(null);
 
   // Topo (contour / spot elevation)
   const [topoNodes, setTopoNodes] = useState<TopoNode[]>([]);
@@ -234,12 +258,13 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     let cancelled = false;
     (async () => {
       try {
-        const [urlRes, mtRes, utRes, topoRes, areaRes] = await Promise.all([
+        const [urlRes, mtRes, utRes, topoRes, areaRes, wallRes] = await Promise.all([
           fetch(`/api/takeoff/canvas/page-url?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/manual?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/utility?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/topo?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
           fetch(`/api/takeoff/canvas/area-bounds?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
+          fetch(`/api/takeoff/canvas/wall?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
         ]);
         if (!urlRes.ok) throw new Error(`page-url ${urlRes.status}`);
         const urlData = await urlRes.json() as { url: string };
@@ -328,6 +353,32 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               depth_in: it.stripping_depth_in != null ? Number(it.stripping_depth_in) : undefined,
               volume_cy: it.excavation_volume_cy != null ? Number(it.excavation_volume_cy) : undefined,
               target_cost_code: it.target_cost_code ?? undefined,
+              saved: true,
+            })));
+          }
+        }
+        if (wallRes.ok) {
+          type SavedWallRow = {
+            id: string;
+            client_key?: string | null;
+            length_lf: number | null;
+            height_ft: number | null;
+            thickness_in: number | null;
+            rebar_size?: string | null;
+            rebar_spacing_inches?: number | null;
+            geometry?: { points?: Pt[]; coordinate_space?: string } | null;
+          };
+          const wallData = await wallRes.json() as { items: SavedWallRow[] };
+          if (!cancelled) {
+            setWallRuns(wallData.items.map((it) => ({
+              key: it.client_key || `saved-${it.id}`,
+              points: Array.isArray(it.geometry?.points) ? it.geometry.points : [],
+              coordinateSpace: (it.geometry?.coordinate_space === "page_space" ? "page_space" : "legacy_pixel") as CoordinateSpace,
+              length_lf: Number(it.length_lf ?? 0),
+              height_ft: Number(it.height_ft ?? 0),
+              thickness_in: Number(it.thickness_in ?? 0),
+              rebar_size: (it.rebar_size ?? undefined) as RebarSize | undefined,
+              rebar_spacing_inches: it.rebar_spacing_inches ?? undefined,
               saved: true,
             })));
           }
@@ -634,6 +685,24 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     setUtilityDraftPts([]);
   }, [utilityModalPts, scale]);
 
+  const commitWall = useCallback((inputs: WallInputs) => {
+    if (!wallModalPts) return;
+    const lengthLf = totalLen(wallModalPts) * scale;
+    const run: WallRun = {
+      key: `w-${Date.now()}`,
+      points: wallModalPts,
+      coordinateSpace: "legacy_pixel",
+      length_lf: lengthLf,
+      height_ft: inputs.height_ft,
+      thickness_in: inputs.thickness_in,
+      rebar_size: inputs.rebar_size,
+      rebar_spacing_inches: inputs.rebar_spacing_inches,
+    };
+    setWallRuns((prev) => [...prev, run]);
+    setWallModalPts(null);
+    setDraftPoints([]);
+  }, [wallModalPts, scale]);
+
   const finishContourDraft = useCallback(() => {
     if (contourDraftPts.length < 2) { setContourDraftPts([]); return; }
     const raw = window.prompt("Enter this contour's baseline elevation (feet), e.g. 410.00:", "");
@@ -682,6 +751,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (tool === "contour_line") { finishContourDraft(); return; }
     if (tool === "civil_area_bounds") { finishAreaBoundsDraft(); return; }
     if (draftPoints.length < 2) { setDraftPoints([]); return; }
+    if (tool === "length" && wallMode) {
+      setWallModalPts(draftPoints);
+      return;
+    }
     if (tool === "length") {
       const quantity = totalLen(draftPoints) * scale;
       setShapes((prev) => [...prev, {
@@ -704,7 +777,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       }]);
     }
     setDraftPoints([]);
-  }, [draftPoints, tool, scale, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft]);
+  }, [draftPoints, tool, scale, wallMode, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft]);
 
   const clearDrafts = useCallback(() => {
     setDraftPoints([]);
@@ -944,7 +1017,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     const unsavedRuns = utilityRuns.filter((r) => !r.saved);
     const unsavedTopo = topoNodes.filter((n) => !n.saved);
     const unsavedAreas = areaBounds.filter((a) => !a.saved);
-    if (unsaved.length === 0 && unsavedRuns.length === 0 && unsavedTopo.length === 0 && unsavedAreas.length === 0) return;
+    const unsavedWalls = wallRuns.filter((w) => !w.saved);
+    if (unsaved.length === 0 && unsavedRuns.length === 0 && unsavedTopo.length === 0 && unsavedAreas.length === 0 && unsavedWalls.length === 0) return;
     setSaving(true);
     try {
       const requests: Promise<Response>[] = [];
@@ -1040,6 +1114,25 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         }));
       }
 
+      if (unsavedWalls.length > 0) {
+        const items = unsavedWalls.map((w) => ({
+          project_id: projectId,
+          page_id: pageId,
+          length_lf: Number(w.length_lf.toFixed(2)),
+          height_ft: w.height_ft,
+          thickness_in: w.thickness_in,
+          rebar_size: w.rebar_size ?? null,
+          rebar_spacing_inches: w.rebar_spacing_inches ?? null,
+          client_key: w.key,
+          geometry: { points: toPersistedPoints(w.points, w.coordinateSpace), coordinate_space: "page_space", page_number: pageNumber },
+        }));
+        requests.push(fetch("/api/takeoff/canvas/wall", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items }),
+        }));
+      }
+
       const results = await Promise.all(requests);
       const allOk = results.every((r) => r.ok);
       if (allOk) {
@@ -1059,6 +1152,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         setUtilityRuns((prev) => prev.map((r) => (r.saved ? r : { ...r, points: toPersistedPoints(r.points, r.coordinateSpace), coordinateSpace: "page_space", saved: true })));
         setTopoNodes((prev) => prev.map((n) => (n.saved ? n : { ...n, points: toPersistedPoints(n.points, n.coordinateSpace), coordinateSpace: "page_space", saved: true })));
         setAreaBounds((prev) => prev.map((a) => (a.saved ? a : { ...a, points: toPersistedPoints(a.points, a.coordinateSpace), coordinateSpace: "page_space", saved: true })));
+        setWallRuns((prev) => prev.map((w) => (w.saved ? w : { ...w, points: toPersistedPoints(w.points, w.coordinateSpace), coordinateSpace: "page_space", saved: true })));
       } else {
         const failed = results.find((r) => !r.ok);
         const err = failed ? await failed.json().catch(() => ({})) : {};
@@ -1279,6 +1373,20 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             {autoTopoStatus && <span className="text-[10px] text-white/40">{autoTopoStatus}</span>}
           </div>
         )}
+        {tool === "length" && (
+          <div className="flex items-center gap-3 border-t border-white/5 bg-white/[0.02] px-4 py-2">
+            <label className="flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono text-white/60">
+              <input
+                type="checkbox"
+                checked={wallMode}
+                onChange={(e) => setWallMode(e.target.checked)}
+                className="accent-[#CCFF00]"
+              />
+              Expand as wall
+            </label>
+            <span className="text-[10px] text-white/40">Draw the centerline, then set height and thickness. Concrete, formwork, and rebar are calculated from that line.</span>
+          </div>
+        )}
         {tool === "civil_area_bounds" && (
           <div className="flex items-center gap-3 border-t border-white/5 bg-white/[0.02] px-4 py-2">
             <label className="flex items-center gap-2">
@@ -1358,6 +1466,19 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                     <path d={d} stroke="#a855f7" strokeWidth={4} fill="none" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="10 4" />
                     {uPts.map((p, i) => (
                       <circle key={i} cx={p.x} cy={p.y} r={3.5} fill="#a855f7" stroke="#000" strokeWidth={1} />
+                    ))}
+                  </g>
+                );
+              })}
+
+              {wallRuns.map((w) => {
+                const wPts = toDisplayPoints(w.points, w.coordinateSpace);
+                const d = wPts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+                return (
+                  <g key={w.key}>
+                    <path d={d} stroke="#f59e0b" strokeWidth={4} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                    {wPts.map((p, i) => (
+                      <circle key={i} cx={p.x} cy={p.y} r={3.5} fill="#f59e0b" stroke="#000" strokeWidth={1} />
                     ))}
                   </g>
                 );
@@ -1779,13 +1900,51 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           </div>
         )}
 
+        {wallRuns.length > 0 && (
+          <div className="border-t border-white/10 px-3 py-2 space-y-1.5 max-h-[35vh] overflow-y-auto">
+            <div className="px-1 text-[10px] uppercase tracking-widest font-mono text-amber-400">
+              Walls · {wallRuns.length}
+            </div>
+            {wallRuns.map((w) => {
+              const recipe = wallRecipeLines({
+                name: "Wall",
+                length_lf: w.length_lf,
+                height_ft: w.height_ft,
+                thickness_in: w.thickness_in,
+                rebar_size: w.rebar_size,
+                rebar_spacing_inches: w.rebar_spacing_inches,
+              });
+              return (
+                <div key={w.key} className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-mono">
+                      {w.length_lf.toFixed(1)} <span className="text-white/40">LF</span>
+                      <span className="text-white/40 text-xs"> · {w.height_ft}&apos; H · {w.thickness_in}&quot;</span>
+                    </div>
+                    <button type="button" onClick={() => setWallRuns((prev) => prev.filter((x) => x.key !== w.key))} className="text-[10px] text-white/30 hover:text-red-400">✕</button>
+                  </div>
+                  <div className="mt-1 space-y-0.5 text-[10px] font-mono text-white/50">
+                    {recipe.map((line) => (
+                      <div key={line.csi_code} className="flex justify-between gap-2">
+                        <span>{line.label}</span>
+                        <span>{line.quantity} {line.unit}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {w.saved && <span className="text-[9px] uppercase tracking-widest font-mono text-white/40">Saved</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         <div className="border-t border-white/10 p-3">
           <button
             type="button"
             onClick={saveAllUnsaved}
             disabled={saving
-              || ([...shapes, ...utilityRuns, ...topoNodes, ...areaBounds].every((x) => x.saved))
-              || (shapes.length === 0 && utilityRuns.length === 0 && topoNodes.length === 0 && areaBounds.length === 0)}
+              || ([...shapes, ...utilityRuns, ...topoNodes, ...areaBounds, ...wallRuns].every((x) => x.saved))
+              || (shapes.length === 0 && utilityRuns.length === 0 && topoNodes.length === 0 && areaBounds.length === 0 && wallRuns.length === 0)}
             className="w-full inline-flex h-11 items-center justify-center rounded-full bg-[#CCFF00] px-5 text-xs font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85 disabled:opacity-40"
           >
             {saving ? "Saving…" : "Save to Project Book"}
@@ -1801,6 +1960,13 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           previewLengthLf={totalLen(utilityModalPts) * scale}
           onCancel={() => { setUtilityModalPts(null); setUtilityDraftPts([]); }}
           onSubmit={commitUtilityRun}
+        />
+      )}
+      {wallModalPts && (
+        <WallRunModal
+          previewLengthLf={totalLen(wallModalPts) * scale}
+          onCancel={() => { setWallModalPts(null); setDraftPoints([]); }}
+          onSubmit={commitWall}
         />
       )}
     </div>
@@ -1820,13 +1986,6 @@ function UtilityRunModal({
   const [investStart, setInvertStart] = useState(0);
   const [invertEnd, setInvertEnd] = useState(0);
   const [trenchWidthFt, setTrenchWidthFt] = useState(3);
-
-  const preview = useMemo(() => calcPipeEmbedment({
-    length_lf: previewLengthLf,
-    diameter_in: diameterIn,
-    trench_width_ft: trenchWidthFt,
-    avg_depth_ft: 4, // matches the server's DEFAULT_COVER_FT assumption
-  }), [previewLengthLf, diameterIn, trenchWidthFt]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
@@ -1873,10 +2032,19 @@ function UtilityRunModal({
         </div>
 
         <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.02] p-3 text-[11px] text-white/70">
-          <div className="mb-1 text-[9px] uppercase tracking-widest text-white/40">Trench Excavation Yield</div>
-          <div className="flex justify-between"><span>Total Trench Excavation</span><span className="font-mono">{preview.trench_excavation_bcy.toLocaleString()} BCY</span></div>
-          <div className="flex justify-between"><span>Bedding Material</span><span className="font-mono">{preview.totals.aggregate_import_cy.toLocaleString()} CY</span></div>
-          <div className="flex justify-between"><span>Native Backfill</span><span className="font-mono">{preview.common_backfill_cy.toLocaleString()} CY</span></div>
+          <div className="mb-1 text-[9px] uppercase tracking-widest text-white/40">Recipe</div>
+          {utilityRecipeFromRun({
+            name: systemType,
+            system: systemType,
+            diameter_in: diameterIn,
+            length_lf: previewLengthLf,
+            trench_width_ft: trenchWidthFt,
+          }).map((line) => (
+            <div key={`${line.csi_code}-${line.label}`} className="flex justify-between gap-3">
+              <span>{line.label}</span>
+              <span className="font-mono">{line.quantity.toLocaleString()} {line.unit}</span>
+            </div>
+          ))}
         </div>
 
         <div className="mt-5 flex justify-end gap-2">
@@ -1893,6 +2061,90 @@ function UtilityRunModal({
             className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85"
           >
             Add Pipe Run
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WallRunModal({
+  previewLengthLf, onCancel, onSubmit,
+}: {
+  previewLengthLf: number;
+  onCancel: () => void;
+  onSubmit: (inputs: WallInputs) => void;
+}) {
+  const [heightFt, setHeightFt] = useState(8);
+  const [thicknessIn, setThicknessIn] = useState(8);
+  const [rebarSize, setRebarSize] = useState<RebarSize | "">("#4");
+  const [spacingIn, setSpacingIn] = useState(18);
+  const recipe = wallRecipeLines({
+    name: "Wall",
+    length_lf: previewLengthLf,
+    height_ft: heightFt,
+    thickness_in: thicknessIn,
+    rebar_size: rebarSize || undefined,
+    rebar_spacing_inches: rebarSize ? spacingIn : undefined,
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+      <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#0E0F12] p-6">
+        <div className="mb-1 flex items-center justify-between">
+          <h3 className="text-sm font-bold uppercase tracking-widest text-white">Configure Wall</h3>
+          <button type="button" onClick={onCancel} className="text-white/40 hover:text-white">✕</button>
+        </div>
+        <p className="mb-4 text-[11px] text-white/50">
+          Centerline: <span className="font-mono text-amber-400">{previewLengthLf.toFixed(1)} LF</span>
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          <label className="flex flex-col gap-1">
+            <span className="text-[9px] uppercase tracking-widest text-white/40">Height (ft)</span>
+            <input type="number" min={0.5} step={0.5} value={heightFt} onChange={(e) => setHeightFt(Number(e.target.value))}
+              className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-[#CCFF00]" />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[9px] uppercase tracking-widest text-white/40">Thickness (in)</span>
+            <input type="number" min={1} step={1} value={thicknessIn} onChange={(e) => setThicknessIn(Number(e.target.value))}
+              className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-[#CCFF00]" />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[9px] uppercase tracking-widest text-white/40">Rebar size</span>
+            <select value={rebarSize} onChange={(e) => setRebarSize(e.target.value as RebarSize | "")}
+              className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-[#CCFF00]">
+              <option value="">None</option>
+              {(["#3", "#4", "#5", "#6", "#7", "#8"] as RebarSize[]).map((size) => <option key={size} value={size}>{size}</option>)}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[9px] uppercase tracking-widest text-white/40">Spacing (in)</span>
+            <input type="number" min={1} step={1} value={spacingIn} onChange={(e) => setSpacingIn(Number(e.target.value))}
+              className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-[#CCFF00]" />
+          </label>
+        </div>
+        <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.02] p-3 text-[11px] text-white/70">
+          <div className="mb-1 text-[9px] uppercase tracking-widest text-white/40">Recipe</div>
+          {recipe.map((line) => (
+            <div key={line.csi_code} className="flex justify-between gap-3">
+              <span>{line.label}</span>
+              <span className="font-mono">{line.quantity.toLocaleString()} {line.unit}</span>
+            </div>
+          ))}
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onCancel} className="inline-flex h-9 items-center rounded-full border border-white/15 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/70 hover:text-white">Cancel</button>
+          <button
+            type="button"
+            onClick={() => onSubmit({
+              height_ft: heightFt,
+              thickness_in: thicknessIn,
+              rebar_size: rebarSize || undefined,
+              rebar_spacing_inches: rebarSize ? spacingIn : undefined,
+            })}
+            className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85"
+          >
+            Add Wall
           </button>
         </div>
       </div>
