@@ -14,6 +14,8 @@ function fakeDb(tables: Record<string, Row[]>) {
     const state = {
       filters: [] as Array<{ op: string; col: string; val: unknown }>,
       columns: [] as string[],
+      limit: null as number | null,
+      range: null as { from: number; to: number } | null,
     };
     const chain: Record<string, unknown> = {};
     const run = () =>
@@ -32,6 +34,11 @@ function fakeDb(tables: Record<string, Row[]>) {
           for (const column of state.columns) projected[column] = row[column];
           return projected;
         });
+    const page = (rows: Row[]) => {
+      if (state.range) return rows.slice(state.range.from, state.range.to + 1);
+      if (state.limit != null) return rows.slice(0, state.limit);
+      return rows;
+    };
     const passthrough = () => chain;
     chain.select = (columns: string) => {
       state.columns = columns.split(",").map((column) => column.trim());
@@ -54,12 +61,19 @@ function fakeDb(tables: Record<string, Row[]>) {
     chain.gte = passthrough;
     chain.lte = passthrough;
     chain.order = passthrough;
-    chain.limit = passthrough;
-    chain.single = () => Promise.resolve({ data: run()[0] ?? null, error: null });
+    chain.limit = (n: number) => {
+      state.limit = n;
+      return chain;
+    };
+    chain.range = (from: number, to: number) => {
+      state.range = { from, to };
+      return chain;
+    };
+    chain.single = () => Promise.resolve({ data: page(run())[0] ?? null, error: null });
     chain.then = (
       resolve: (value: { data: Row[]; error: null }) => unknown,
       reject?: (reason: unknown) => unknown,
-    ) => Promise.resolve({ data: run(), error: null }).then(resolve, reject);
+    ) => Promise.resolve({ data: page(run()), error: null }).then(resolve, reject);
     return chain;
   }
   return { from, selects, rpc: async () => ({ data: [] }) };
@@ -141,6 +155,37 @@ describe("project skills", () => {
       assert.match(projectDestinations("job-9", "Job 9").map((item) => item.href).join("\n"), new RegExp(`phase=${section.slug}`));
     }
     assert.equal(skillLink("job-9", "not-a-skill"), null);
+  });
+
+  it("sums every estimate line instead of the first page", async () => {
+    const items = Array.from({ length: 1001 }, (_, index) => ({
+      id: `item-${index}`,
+      tenant_id: "tenant-1",
+      project_id: "project-1",
+      estimate_version_id: "version-1",
+      total_price: 2,
+    }));
+    const result = await executeProjectSkill(
+      "get_estimate_summary",
+      {},
+      fakeDb({
+        estimates: [{
+          id: "est-1",
+          tenant_id: "tenant-1",
+          project_id: "project-1",
+          name: "Base bid",
+          estimate_number: "E-1",
+          status: "draft",
+          estimate_type: "budget",
+          current_version_id: "version-1",
+        }],
+        estimate_items: items,
+      }),
+      ctx({ canReadFinancial: true }),
+    ) as { rows: Array<{ current_total: number; item_count: number }> };
+
+    assert.equal(result.rows[0].item_count, 1001);
+    assert.equal(result.rows[0].current_total, 2002);
   });
 
   it("rejects unknown tools", async () => {
