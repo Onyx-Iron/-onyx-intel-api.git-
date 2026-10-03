@@ -54,6 +54,7 @@ export interface ManualTakeoffUpdateBody {
   unit?: string | null;
   cost_code?: string | null;
   geometry: TakeoffGeometry;
+  layer_id?: string | null;
 }
 
 // ── Calibration ───────────────────────────────────────────────────────────

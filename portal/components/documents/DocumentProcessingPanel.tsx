@@ -45,7 +45,7 @@ export default function DocumentProcessingPanel({ projectId }: { projectId: stri
   const [busyId, setBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [openDocId, setOpenDocId] = useState<string | null>(null);
-  const [pageNumbers, setPageNumbers] = useState<Record<string, number[]>>({});
+  const [pageNumbers, setPageNumbers] = useState<Record<string, Array<{ pageNumber: number; failed?: boolean; error?: string | null }>>>({});
 
   const load = useCallback(async () => {
     const res = await fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}&limit=200`, { cache: "no-store" });
@@ -134,7 +134,7 @@ export default function DocumentProcessingPanel({ projectId }: { projectId: stri
             const ledger = loadedPages
               ? buildPageLedger({
                   pageCount: doc.page_count,
-                  pages: loadedPages.map((pageNumber) => ({ pageNumber })),
+                  pages: loadedPages,
                   missingPageNumbers: missing,
                 })
               : [];
@@ -195,10 +195,14 @@ export default function DocumentProcessingPanel({ projectId }: { projectId: stri
                       if (next && !pageNumbers[doc.id]) {
                         void fetch(`/api/documents/${encodeURIComponent(doc.id)}/pages`)
                           .then((res) => res.json())
-                          .then((data: { pages?: Array<{ page_number: number }> }) => {
+                          .then((data: { pages?: Array<{ page_number: number; status?: string | null; error?: string | null }> }) => {
                             setPageNumbers((prev) => ({
                               ...prev,
-                              [doc.id]: (data.pages ?? []).map((page) => page.page_number),
+                              [doc.id]: (data.pages ?? []).map((page) => ({
+                                pageNumber: page.page_number,
+                                failed: page.status === "error",
+                                error: page.error,
+                              })),
                             }));
                           })
                           .catch(() => undefined);

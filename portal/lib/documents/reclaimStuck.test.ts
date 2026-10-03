@@ -26,7 +26,7 @@ describe("reclaimStuck constants", () => {
 });
 
 describe("reclaimStuckProcessingSheets", () => {
-  it("returns 0 when the update fails", async () => {
+  it("throws when the update fails", async () => {
     const db = {
       from: () => ({
         update: () => ({
@@ -40,7 +40,6 @@ describe("reclaimStuckProcessingSheets", () => {
         }),
       }),
     };
-    const count = await reclaimStuckProcessingSheets(db, "tenant-1");
-    assert.equal(count, 0);
+    await assert.rejects(() => reclaimStuckProcessingSheets(db, "tenant-1"), /boom/);
   });
 });
