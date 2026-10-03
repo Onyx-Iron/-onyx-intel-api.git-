@@ -6,6 +6,8 @@
  * takeoff pages are still processing.
  */
 
+import { missingPageNumbers } from "@/lib/documents/processing-display";
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyDb = any;
 
@@ -55,7 +57,7 @@ export async function finalizeDocumentsFromOcr(
   const ids = (docs as Array<{ id: string }>).map((d) => d.id);
   const { data: pages, error: pagesErr } = await db
     .from("document_pages")
-    .select("document_id, status, takeoff_status")
+    .select("document_id, status, takeoff_status, page_number")
     .eq("tenant_id", tenantId)
     .in("document_id", ids);
   if (pagesErr) {
@@ -69,18 +71,21 @@ export async function finalizeDocumentsFromOcr(
     errored: number;
     takeoffInFlight: number;
     takeoffError: number;
+    pageNumbers: number[];
   }>();
   for (const p of (pages ?? []) as Array<{
     document_id: string;
     status: string | null;
     takeoff_status: string | null;
+    page_number?: number | null;
   }>) {
     const cur = byDoc.get(p.document_id) ?? {
-      total: 0, done: 0, errored: 0, takeoffInFlight: 0, takeoffError: 0,
+      total: 0, done: 0, errored: 0, takeoffInFlight: 0, takeoffError: 0, pageNumbers: [],
     };
     cur.total += 1;
     if (p.status === "done") cur.done += 1;
     else if (p.status === "error") cur.errored += 1;
+    if (typeof p.page_number === "number") cur.pageNumbers.push(p.page_number);
     if (p.takeoff_status === "pending" || p.takeoff_status === "processing") {
       cur.takeoffInFlight += 1;
     } else if (p.takeoff_status === "error") {
@@ -129,10 +134,14 @@ export async function finalizeDocumentsFromOcr(
         ? "complete_with_errors"
         : "complete";
 
+    const numberedMissing = stats.pageNumbers.length > 0
+      ? missingPageNumbers(expectedPages, stats.pageNumbers)
+      : [];
     const errorParts: string[] = [];
     if (stats.errored > 0) errorParts.push(`${stats.errored} of ${stats.total} page(s) failed OCR`);
     if (stats.takeoffError > 0) errorParts.push(`${stats.takeoffError} page(s) failed takeoff`);
-    if (missingPages > 0) errorParts.push(`${missingPages} page(s) missing after split`);
+    if (numberedMissing.length > 0) errorParts.push(`Missing pages: ${numberedMissing.join(", ")}`);
+    else if (missingPages > 0) errorParts.push(`${missingPages} page(s) missing after split`);
 
     const ocrStatus = stats.errored === 0 && missingPages === 0
       ? "done"
@@ -167,6 +176,7 @@ export async function finalizeDocumentsFromOcr(
           pages_ocr_failed: stats.errored,
           pages_takeoff_failed: stats.takeoffError,
           pages_missing: missingPages,
+          missing_page_numbers: numberedMissing,
           ocr_finalized_at: now,
         },
       },

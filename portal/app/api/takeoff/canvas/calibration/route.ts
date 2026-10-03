@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant, assertPageBelongsToProject } from "@/lib/project-controls/server";
 import type { CalibrationPoint, CalibrationUpsertBody } from "@/lib/types/takeoff";
+import { previewRecalibration, recalibrationNeedsConfirm } from "@/lib/takeoff/recalibration";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 
 export const runtime = "nodejs";
@@ -98,6 +99,35 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     .eq("page_id", page_id)
     .maybeSingle();
 
+  const oldFactor = typeof before?.page_space_scale_factor === "number" ? before.page_space_scale_factor : null;
+  const oldVerified = before?.status === "verified" && oldFactor != null && oldFactor > 0;
+  const { data: drafts } = oldVerified
+    ? await anyDb
+      .from("manual_takeoffs")
+      .select("id, label, takeoff_type, quantity, unit, geometry, cost_code, row_version")
+      .eq("tenant_id", tenantId)
+      .eq("page_id", page_id)
+      .is("deleted_at", null)
+    : { data: [] as Array<Record<string, unknown>> };
+  const preview = previewRecalibration(
+    ((drafts ?? []) as Array<{ id: string; label?: string | null; takeoff_type: string; quantity: number; unit?: string | null }>).map((row) => ({
+      id: row.id,
+      label: row.label,
+      takeoff_type: row.takeoff_type,
+      quantity: Number(row.quantity),
+      unit: row.unit,
+    })),
+    oldVerified ? oldFactor : null,
+    pageSpaceScaleFactor,
+  );
+  if (oldVerified && recalibrationNeedsConfirm(preview) && body.apply_to_drafts !== true) {
+    return NextResponse.json({
+      error: "Confirm the before and after quantities before this scale change is saved.",
+      requires_confirmation: true,
+      preview,
+    }, { status: 409 });
+  }
+
   const { data, error } = await anyDb
     .from("sheet_calibrations")
     .upsert(
@@ -130,5 +160,25 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     actor_user_id: userId, before: before ?? null, after: data,
   });
 
-  return NextResponse.json({ calibration: data });
+  if (body.apply_to_drafts === true) {
+    const draftRows = (drafts ?? []) as Array<{ id: string; geometry: unknown; unit?: string | null; cost_code?: string | null; row_version?: number }>;
+    for (const line of preview) {
+      if (!line.recomputed) continue;
+      const row = draftRows.find((candidate) => candidate.id === line.id);
+      if (!row || typeof row.row_version !== "number") continue;
+      await anyDb.rpc("update_manual_takeoff_tx", {
+        p_id: row.id,
+        p_tenant_id: tenantId,
+        p_expected_row_version: row.row_version,
+        p_geometry: row.geometry ?? {},
+        p_quantity: line.after,
+        p_unit: row.unit ?? null,
+        p_cost_code: row.cost_code ?? null,
+        p_actor_user_id: userId,
+        p_calculation_formula_version: "recalibration-v1",
+      });
+    }
+  }
+
+  return NextResponse.json({ calibration: data, preview });
 }

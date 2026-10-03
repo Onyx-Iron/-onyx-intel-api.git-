@@ -13,6 +13,7 @@ export type CanvasTool =
   | "count"
   | "length"
   | "area"
+  | "perimeter"
   | "utility_pipe"
   | "spot_elevation"
   | "contour_line"
@@ -33,6 +34,7 @@ export type HotkeyAction =
 const TOOL_BY_KEY: Record<string, CanvasTool> = {
   l: "length",
   a: "area",
+  r: "perimeter",
   c: "count",
   p: "pan",
   k: "calibrate",
@@ -101,4 +103,4 @@ export function resolveCanvasHotkey(
 
 /** Human-readable shortcut legend for the toolbar. */
 export const CANVAS_HOTKEY_HINT =
-  "L line · A area · C count · Space pan · Ctrl+Z undo · Ctrl+Y redo · Del delete · Esc cancel · Enter finish";
+  "L line · R perimeter · A area · C count · K scale · Space pan · Ctrl+Z undo · Enter finish";

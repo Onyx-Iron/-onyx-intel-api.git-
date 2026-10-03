@@ -195,7 +195,7 @@ describe("takeoff to estimate import quality", () => {
     assert.equal(result.rows.length, 0);
   });
 
-  it("marks AI vision takeoff rows for estimator review even when pricing is available", () => {
+  it("keeps an unapproved AI vision quantity out of the estimate", () => {
     const result = buildEstimateImportRows({
       takeoffItems: [
         {
@@ -219,10 +219,8 @@ describe("takeoff to estimate import quality", () => {
       projectId: "project-1",
     });
 
-    assert.equal(result.rows.length, 1);
-    assert.equal(result.rows[0].unit_cost, 325);
-    assert.equal(result.rows[0].pricing_status, "review");
-    assert.match(result.rows[0].notes, /Review required: AI vision quantity/);
+    assert.equal(result.rows.length, 0);
+    assert.equal(result.blockedByReview, 1);
   });
 
   it("excludes suggested AI takeoff items from the estimate entirely", () => {
@@ -446,5 +444,38 @@ describe("takeoff to estimate import quality", () => {
     assert.equal(result.rows.length, 0);
     assert.equal(result.updates.length, 0);
     assert.equal(result.skipped, 1);
+  });
+
+  it("prices the matching unit, adjusts by a location index, and holds a national average for review", () => {
+    const result = buildEstimateImportRows({
+      takeoffItems: [
+        { id: "exact", label: "Slab", csi_code: "03-30-00", quantity: 12, unit: "CY" },
+        { id: "alias", label: "Curb", csi_code: "32-16-13", quantity: 40, unit: "FT" },
+        { id: "indexed", label: "Pipe", csi_code: "33-11-00", quantity: 100, unit: "LF" },
+        { id: "national", label: "Panel", csi_code: "26-24-16", quantity: 1, unit: "EA" },
+        { id: "wrong-unit", label: "Sidewalk", csi_code: "32-13-13", quantity: 500, unit: "SF" },
+      ],
+      existingEstimateItems: [],
+      costCatalog: [
+        { csi_code: "033000", uom: "CY", unit_cost: 185, basis: "section" },
+        { csi_code: "32-16-13", uom: "LF", unit_cost: 22, basis: "section" },
+        { csi_code: "33-11-00", uom: "LF", unit_cost: 48, basis: "location_index" },
+        { csi_code: "26-24-16", uom: "EA", unit_cost: 1800, basis: "national" },
+        { csi_code: "32-13-13", uom: "SY", unit_cost: 90, basis: "section" },
+        { csi_code: "03", uom: "CY", unit_cost: 10, basis: "section" },
+      ],
+      projectId: "project-1",
+    });
+    const byId = new Map(result.rows.map((row) => [row.source_takeoff_id, row]));
+    assert.equal(byId.get("exact")?.unit_cost, 185);
+    assert.equal(byId.get("exact")?.pricing_status, "priced");
+    assert.equal(byId.get("alias")?.unit_cost, 22);
+    assert.equal(byId.get("indexed")?.pricing_status, "priced");
+    assert.match(byId.get("indexed")?.notes ?? "", /location index/);
+    assert.equal(byId.get("national")?.unit_cost, 1800);
+    assert.equal(byId.get("national")?.pricing_status, "review");
+    assert.equal(byId.get("wrong-unit")?.unit_cost, null);
+    assert.equal(byId.get("wrong-unit")?.pricing_status, "unpriced");
+    assert.match(byId.get("wrong-unit")?.notes ?? "", /not SF/);
   });
 });

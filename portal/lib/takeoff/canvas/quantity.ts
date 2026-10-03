@@ -112,6 +112,19 @@ export function calculateSlopeAdjustedLength(points: Point[], pageSpaceScaleFact
   return applyWasteAndMultiplier(slopeLength, opts);
 }
 
+/** Server and canvas share this switch so a perimeter cannot be priced as an area. */
+export function quantityForMeasurement(
+  takeoffType: string,
+  points: Point[],
+  pageSpaceScaleFactor: number,
+  measure?: string | null,
+): number {
+  if (takeoffType === "count") return calculateCount(points);
+  if (takeoffType === "perimeter" || measure === "perimeter") return calculatePerimeter(points, pageSpaceScaleFactor);
+  if (takeoffType === "area") return calculatePolygonArea(points, pageSpaceScaleFactor);
+  return calculateLinearLength(points, pageSpaceScaleFactor);
+}
+
 // ── Unit conversion ─────────────────────────────────────────────────────────
 const LENGTH_TO_FEET: Record<string, number> = {
   ft: 1, feet: 1, lf: 1,

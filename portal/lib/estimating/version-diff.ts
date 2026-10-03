@@ -8,9 +8,11 @@ export interface VersionDiffItem {
   quantity?: number | null;
   unit_cost?: number | null;
   total_price?: number | null;
+  drawing_ref?: string | null;
+  quantity_basis?: string | null;
 }
 
-export type VersionDiffChangeKind = "quantity" | "unit_cost" | "total_price";
+export type VersionDiffChangeKind = "quantity" | "unit_cost" | "total_price" | "source";
 
 export interface VersionDiffChange {
   key: string;
@@ -51,6 +53,9 @@ function classifyChange(left: VersionDiffItem, right: VersionDiffItem): VersionD
   if (Math.abs(lq - rq) > QUANTITY_EPSILON) changes.push("quantity");
   if (moneyDiffers(left.unit_cost ?? 0, right.unit_cost ?? 0, MONEY_EPSILON)) changes.push("unit_cost");
   if (moneyDiffers(left.total_price ?? 0, right.total_price ?? 0, MONEY_EPSILON)) changes.push("total_price");
+  const leftSource = `${left.drawing_ref ?? ""}|${left.quantity_basis ?? ""}`;
+  const rightSource = `${right.drawing_ref ?? ""}|${right.quantity_basis ?? ""}`;
+  if (leftSource !== rightSource) changes.push("source");
   return changes;
 }
 

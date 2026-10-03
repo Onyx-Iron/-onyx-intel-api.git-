@@ -14,6 +14,8 @@ export interface DirectUploadResult {
 interface UploadUrlResponse {
   document_id?: string;
   path?: string;
+  reused?: boolean;
+  skip_upload?: boolean;
   prefer_tus?: boolean;
   upload?: { url?: string; token?: string | null; path?: string; method?: string };
   tus?: {
@@ -29,6 +31,11 @@ function progressOf(sent: number, total: number): UploadProgress {
   const bytesTotal = total > 0 ? total : 0;
   const percent = bytesTotal > 0 ? Math.min(100, Math.round((sent / bytesTotal) * 100)) : 0;
   return { bytesSent: sent, bytesTotal, percent };
+}
+
+async function sha256Hex(file: File): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /** PUT file bytes to a signed URL with upload progress (XHR — fetch has no upload progress). */
@@ -139,12 +146,20 @@ export async function uploadDocumentDirect(
       file_name: file.name,
       size: file.size,
       content_type: file.type || "application/octet-stream",
+      content_sha256: await sha256Hex(file),
     }),
     signal: opts?.signal,
   });
   const session = await sessionRes.json().catch(() => ({})) as UploadUrlResponse;
   if (!sessionRes.ok || !session.document_id) {
     throw new Error(session.error ?? `Could not start upload (${sessionRes.status})`);
+  }
+  if (session.skip_upload) {
+    return {
+      documentId: session.document_id,
+      path: session.path ?? "",
+      method: "put",
+    };
   }
 
   const preferTus = session.prefer_tus || file.size >= TUS_THRESHOLD_BYTES;
