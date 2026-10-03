@@ -268,10 +268,14 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     e.target.value = "";
     setUploading(true);
     try {
-      // Direct-to-Supabase signed PUT / TUS — bytes never touch Vercel's 4.5MB limit.
-      // Large PDFs are completed via upload-url/complete → ingest → page-split-worker.
+      // Direct-to-Supabase signed PUT / TUS — no Google Drive required; bytes
+      // never touch Vercel's 4.5MB limit. Large PDFs complete via
+      // upload-url/complete → ingest → page-split-worker. "From Drive" stays
+      // the Drive import path.
       await uploadDocumentDirect(file, projectId);
-      loadDocuments();
+      toast({ title: String(`Uploaded ${file.name}`), kind: "info" });
+      setPollTimedOut(false);
+      await loadDocuments(false);
     } catch (err) {
       toast({ title: String(`Upload failed: ${err instanceof Error ? err.message : String(err)}`), kind: "error" });
     } finally {
@@ -322,7 +326,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     } finally {
       setDriveImporting(false);
     }
-  }, [projectId, loadDocuments]);
+  }, [projectId, loadDocuments, toast]);
 
   const openAsk = (doc: Document) => {
     setAskDoc({ id: doc.id, name: doc.file_name });

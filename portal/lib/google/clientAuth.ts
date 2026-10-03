@@ -8,6 +8,7 @@
  * Docs, Drive, Sheets) so the user connects once.
  */
 
+import { createGisTokenClient, loadGisScript } from "./gisTokenClient";
 import { GOOGLE_SCOPES } from "./scopes";
 
 const CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? "";
@@ -16,18 +17,7 @@ export { GOOGLE_SCOPES };
 const TOKEN_KEY = "onyx_g_token";
 const EXP_KEY = "onyx_g_exp";
 
-function loadGis(): Promise<void> {
-  return new Promise((resolve) => {
-    if (window.google?.accounts?.oauth2) return resolve();
-    const existing = document.querySelector('script[src="https://accounts.google.com/gsi/client"]');
-    if (existing) { existing.addEventListener("load", () => resolve()); if (window.google) resolve(); return; }
-    const s = document.createElement("script");
-    s.src = "https://accounts.google.com/gsi/client";
-    s.async = true; s.defer = true;
-    s.onload = () => resolve();
-    document.head.appendChild(s);
-  });
-}
+const loadGis = loadGisScript;
 
 function store(token: string, expiresIn: number) {
   sessionStorage.setItem(TOKEN_KEY, token);
@@ -44,24 +34,23 @@ export function disconnectGoogle() {
 
 function requestToken(prompt: "consent" | ""): Promise<string | null> {
   return new Promise((resolve, reject) => {
-    const oauth2 = window.google?.accounts?.oauth2;
-    if (!oauth2) {
-      reject(new Error("google_auth_not_loaded"));
-      return;
+    try {
+      const tc = createGisTokenClient({
+        clientId: CLIENT_ID,
+        scope: GOOGLE_SCOPES,
+        callback: (resp) => {
+          if (resp.access_token) { store(resp.access_token, resp.expires_in ?? 3600); resolve(resp.access_token); }
+          else resolve(null);
+        },
+        error_callback: (err) => {
+          if (err?.type === "popup_closed") resolve(null);
+          else reject(new Error(err?.type ?? "google_auth_error"));
+        },
+      });
+      tc.requestAccessToken({ prompt });
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error("google_auth_not_loaded"));
     }
-    const tc = oauth2.initTokenClient({
-      client_id: CLIENT_ID,
-      scope: GOOGLE_SCOPES,
-      callback: (resp) => {
-        if (resp.access_token) { store(resp.access_token, resp.expires_in ?? 3600); resolve(resp.access_token); }
-        else resolve(null);
-      },
-      error_callback: (err: { type?: string }) => {
-        if (err?.type === "popup_closed") resolve(null);
-        else reject(new Error(err?.type ?? "google_auth_error"));
-      },
-    });
-    tc.requestAccessToken({ prompt });
   });
 }
 
