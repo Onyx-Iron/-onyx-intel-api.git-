@@ -23,7 +23,7 @@
 ### Peer license summary
 
 | Peer | License | Use in Onyx |
-|---|---|---|
+|---|---|
 | [Kentucky-ai/opentakeoff](https://github.com/Kentucky-ai/opentakeoff) | Apache-2.0 | Patterns + optional attributed reuse of small helpers |
 | [buildvisionai/construction-calculators](https://github.com/buildvisionai/construction-calculators) | MIT | Safe to depend on npm/PyPI or reimplement |
 | [DynMEP/YOLOplan](https://github.com/DynMEP/YOLOplan) | Check LICENSE before vendoring | Ideas for symbol detection; verify before code reuse |
@@ -145,8 +145,8 @@ These beat any external scrape:
 | OSS-01 | Upgrade `diffEstimateVersions` to bucket+pair duplicates; classify quantity/rate/total; money epsilon | Bidwright revision-compare | ✅ shipped (ideas only) |
 | OSS-02 | Add branded money helpers (`asPerUnit`, `asLineTotal`, `asMarkupRatio`) used by write paths | Bidwright money.ts | ✅ shipped (ideas only) |
 | OSS-03 | Calibration **check tool** with match/close/wrong grades from displayed % error | OpenTakeoff `checkVerdict` | ✅ pure helpers shipped |
-| OSS-04 | Persist measurement `origin` (`actor`, `method`, `edited`, `author_id`) on canvas shapes / takeoff items | OpenTakeoff provenance | Apache ideas / reimplement |
-| OSS-05 | Estimator-only approval records distinct from AI suggestions | OpenTakeoff approvals | Apache ideas / reimplement |
+| OSS-04 | Persist measurement `origin` (`actor`, `method`, `edited`, `author_id`) on canvas shapes / takeoff items | OpenTakeoff provenance | ✅ `origin_actor`/`origin_method`/`origin_edited` + `provenance.ts` |
+| OSS-05 | Estimator-only approval records distinct from AI suggestions | OpenTakeoff approvals | ✅ vision mirrors `suggested`; outbox only when `approved` |
 | OSS-06 | Edge-only unit conversion module (`internal feet`, display imperial/metric) | OpenTakeoff units.ts | ✅ `portal/lib/takeoff/units.ts` |
 
 ### P2 — Product depth
