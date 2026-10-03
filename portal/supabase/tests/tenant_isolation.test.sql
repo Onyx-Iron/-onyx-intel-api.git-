@@ -1,7 +1,7 @@
 -- XD-14: pgTAP cross-tenant isolation suite.
 --
--- Proves the app.clerk_org_id RLS policies on projects / takeoff_items /
--- estimate_items deny tenant B rows when the GUC is set to tenant A's org.
+-- Proves tenant RLS on projects / takeoff_items / estimate_items denies
+-- tenant B rows when impersonating tenant A's Clerk org (JWT + GUC).
 -- Runs inside a transaction that rolls back (including temporary GRANTs
 -- needed because production revokes authenticated table privileges —
 -- RLS is a backstop for future PostgREST paths).
@@ -102,9 +102,19 @@ select is(
   'superuser sees both takeoff_items'
 );
 
--- Impersonate tenant A via GUC used by tenant_isolation_* ALL policies.
+-- Impersonate tenant A.
+-- Policies use either:
+--   - current_tenant_id() → auth.jwt() ->> 'org_id' (request.jwt.claims)
+--   - tenant_isolation_* ALL → app.clerk_org_id + subquery on tenants
+-- tenants.self_select also uses current_tenant_id(), so JWT must be set
+-- or the clerk_org_id subquery sees zero tenant rows under RLS.
 set local role authenticated;
 select set_config('app.clerk_org_id', 'org_pgtap_a', true);
+select set_config(
+  'request.jwt.claims',
+  json_build_object('org_id', 'org_pgtap_a')::text,
+  true
+);
 
 select is(
   (select count(*)::int from public.projects
@@ -136,6 +146,11 @@ select is(
 
 -- Switch to tenant B — must not see A.
 select set_config('app.clerk_org_id', 'org_pgtap_b', true);
+select set_config(
+  'request.jwt.claims',
+  json_build_object('org_id', 'org_pgtap_b')::text,
+  true
+);
 
 select is(
   (select count(*)::int from public.projects
