@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-const STORAGE_KEY = "onyx_tour_completed_v1";
+const STORAGE_KEY = "onyx_tour_completed_v2";
 
 interface Step {
   title: string;
@@ -32,8 +32,12 @@ const STEPS: Step[] = [
   },
   {
     title: "One section at a time",
-    body: "Use the section list (or mobile dropdown) to move through Documents, Takeoff, Estimate, Field, and the rest — same power, less chrome.",
+    body: "Inside a project, the section list covers documents, takeoff, estimate, schedule, controls, procurement, financials, field, and closeout.",
     targetId: "phase-tabs",
+  },
+  {
+    title: "Jump to any function",
+    body: "Press Ctrl K, or use Jump in the sidebar. Search takeoff, invoices, RFIs, procurement, settings — every working screen is one step away.",
   },
 ];
 

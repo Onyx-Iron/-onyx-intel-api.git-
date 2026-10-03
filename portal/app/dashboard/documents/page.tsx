@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { Info, FileText } from "lucide-react";
 import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
@@ -84,7 +85,7 @@ function SkeletonRows() {
 }
 
 export default function DocumentsPage() {
-  const { activeProjectId, activeProject } = useProjectContext();
+  const { activeProjectId, activeProject, projects } = useProjectContext();
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -169,6 +170,10 @@ export default function DocumentsPage() {
               ) : (
                 filtered.map((doc) => {
                   const statusKey = (doc.status as string) in STATUS_STYLES ? doc.status : "pending";
+                  const projectName = projects.find((project) => project.id === doc.project_id)?.name;
+                  const workspaceHref = doc.project_id
+                    ? `/dashboard/projects/${doc.project_id}?phase=documents&tab=documents`
+                    : null;
                   return (
                     <tr key={doc.id} className="hover:bg-white/[0.02] transition-colors">
                       <td className="px-4 py-3">
@@ -176,11 +181,23 @@ export default function DocumentsPage() {
                           <svg className="w-3 h-3 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                           </svg>
-                          <span className="text-white text-xs truncate max-w-xs">{doc.file_name}</span>
+                          {workspaceHref ? (
+                            <Link href={workspaceHref} className="max-w-xs truncate text-xs text-white hover:text-[#CCFF00]">
+                              {doc.file_name}
+                            </Link>
+                          ) : (
+                            <span className="max-w-xs truncate text-xs text-white">{doc.file_name}</span>
+                          )}
                         </div>
                       </td>
-                      <td className="px-4 py-3 text-gray-500 font-mono text-xs">
-                        {doc.project_id ?? "—"}
+                      <td className="px-4 py-3 text-xs text-gray-400">
+                        {workspaceHref ? (
+                          <Link href={workspaceHref} className="hover:text-[#CCFF00]">
+                            {projectName ?? "Open project"}
+                          </Link>
+                        ) : (
+                          "—"
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <span className={`inline-flex items-center px-2 py-0.5 rounded border text-[9px] font-bold tracking-widest uppercase ${STATUS_STYLES[statusKey]}`} aria-label={`Status: ${doc.status}`}>

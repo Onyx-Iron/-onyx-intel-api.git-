@@ -48,35 +48,17 @@ import ClosedInvoicesTab        from "@/components/invoicing/ClosedInvoicesTab";
 import LienWaiversTab           from "@/components/invoicing/LienWaiversTab";
 import CutFillTab               from "@/components/cut-fill/CutFillTab";
 import ProcurementBoard         from "@/components/procurement/ProcurementBoard";
+import { phaseFromSlug, PROJECT_SECTIONS, type ProjectPhase } from "@/lib/navigation/project-sections";
 
 // Target 10-section IA (docs/frontend-backend-reconciliation/INFORMATION_ARCHITECTURE.md)
 // replacing the prior 5-phase/~21-subtab structure. This recomposes the same
 // existing *Tab.tsx components into fewer top-level sections -- none of the
 // underlying tab components were rewritten, only regrouped.
-type Phase =
-  | "Overview"
-  | "Documents"
-  | "Takeoff"
-  | "Estimate & Budget"
-  | "Schedule"
-  | "Project Controls"
-  | "Procurement"
-  | "Financials"
-  | "Field"
-  | "Closeout";
+type Phase = ProjectPhase;
 
-const PHASE_SLUGS: Record<Phase, string> = {
-  Overview: "overview",
-  Documents: "documents",
-  Takeoff: "takeoff",
-  "Estimate & Budget": "estimate",
-  Schedule: "schedule",
-  "Project Controls": "controls",
-  Procurement: "procurement",
-  Financials: "financials",
-  Field: "field",
-  Closeout: "closeout",
-};
+function phaseSlug(phase: Phase): string {
+  return PROJECT_SECTIONS.find((section) => section.id === phase)?.slug ?? "overview";
+}
 
 /** Old `?section=` deep links from roll-up pages before phase/tab IA. */
 const LEGACY_SECTION_TO_PHASE_TAB: Record<string, { phase: Phase; tab: string }> = {
@@ -91,12 +73,6 @@ const LEGACY_SECTION_TO_PHASE_TAB: Record<string, { phase: Phase; tab: string }>
   procurement: { phase: "Procurement", tab: "procurement" },
   financials: { phase: "Financials", tab: "ar" },
 };
-
-function phaseFromSlug(slug: string | null): Phase | null {
-  if (!slug) return null;
-  const entry = (Object.entries(PHASE_SLUGS) as [Phase, string][]).find(([, s]) => s === slug);
-  return entry?.[0] ?? null;
-}
 
 interface SubTabDef {
   id: string;
@@ -216,7 +192,7 @@ export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps
     (phase: Phase, tab: string) => {
       const params = new URLSearchParams(searchParams.toString());
       params.delete("section");
-      params.set("phase", PHASE_SLUGS[phase]);
+      params.set("phase", phaseSlug(phase));
       params.set("tab", tab);
       router.replace(`${pathname}?${params.toString()}`, { scroll: false });
     },
