@@ -12,6 +12,11 @@ interface ParsedPageRow {
   page_number: number;
   summary: string;
   key_terms: string[];
+  page_id?: string | null;
+  ocr_status?: string | null;
+  takeoff_status?: string | null;
+  error?: string | null;
+  takeoff_error?: string | null;
 }
 
 function mapSyncPage(extractedText: string | null, pageNumber: number): ParsedPageRow {
@@ -74,22 +79,51 @@ export async function GET(
       mapSyncPage(p.extracted_text, p.page_number),
     );
 
-    // Fallback: async page-split pipeline writes OCR to document_pages instead
-    // of the sync ingest `pages` table.
+    // Fallback / enrichment: async page-split pipeline writes OCR to document_pages.
+    // Always load pipeline rows so Partial docs can show failed pages + reprocess.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: asyncPages, error: asyncErr } = await (db as any)
+      .from("document_pages")
+      .select("id, page_number, ocr_text, status, takeoff_status, error, takeoff_error")
+      .eq("document_id", documentId)
+      .eq("tenant_id", tenantId)
+      .order("page_number", { ascending: true });
+    if (asyncErr) {
+      return NextResponse.json({ error: asyncErr.message }, { status: 500 });
+    }
+    const asyncRows = (asyncPages ?? []) as Array<{
+      id: string;
+      page_number: number;
+      ocr_text: string | null;
+      status: string | null;
+      takeoff_status: string | null;
+      error: string | null;
+      takeoff_error: string | null;
+    }>;
+
     if (parsedPages.length === 0) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data: asyncPages, error: asyncErr } = await (db as any)
-        .from("document_pages")
-        .select("page_number, ocr_text, status")
-        .eq("document_id", documentId)
-        .eq("tenant_id", tenantId)
-        .order("page_number", { ascending: true });
-      if (asyncErr) {
-        return NextResponse.json({ error: asyncErr.message }, { status: 500 });
-      }
-      parsedPages = ((asyncPages ?? []) as Array<{ page_number: number; ocr_text: string | null; status: string }>)
-        .filter((p) => p.status === "done" || (p.ocr_text ?? "").trim().length > 0)
-        .map((p) => mapAsyncPage(p.ocr_text, p.page_number));
+      parsedPages = asyncRows.map((p) => ({
+        ...mapAsyncPage(p.ocr_text, p.page_number),
+        page_id: p.id,
+        ocr_status: p.status,
+        takeoff_status: p.takeoff_status,
+        error: p.error,
+        takeoff_error: p.takeoff_error,
+      }));
+    } else if (asyncRows.length > 0) {
+      const byNum = new Map(asyncRows.map((p) => [p.page_number, p]));
+      parsedPages = parsedPages.map((p) => {
+        const async = byNum.get(p.page_number);
+        if (!async) return p;
+        return {
+          ...p,
+          page_id: async.id,
+          ocr_status: async.status,
+          takeoff_status: async.takeoff_status,
+          error: async.error,
+          takeoff_error: async.takeoff_error,
+        };
+      });
     }
 
     const meta = (doc.meta ?? {}) as Record<string, unknown>;
