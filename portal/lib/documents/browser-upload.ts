@@ -16,6 +16,7 @@ interface UploadUrlResponse {
   path?: string;
   reused?: boolean;
   skip_upload?: boolean;
+  upsert?: boolean;
   prefer_tus?: boolean;
   upload?: { url?: string; token?: string | null; path?: string; method?: string };
   tus?: {
@@ -44,12 +45,13 @@ export function putToSignedUrl(
   file: File,
   onProgress?: (p: UploadProgress) => void,
   signal?: AbortSignal,
+  upsert = false,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", url);
     xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
-    xhr.setRequestHeader("x-upsert", "false");
+    xhr.setRequestHeader("x-upsert", upsert ? "true" : "false");
 
     const onAbort = () => {
       xhr.abort();
@@ -173,14 +175,14 @@ export async function uploadDocumentDirect(
       // Fall back to single signed PUT if TUS auth/bucket policy isn't available.
       if (!session.upload?.url) throw tusErr;
       console.warn("[browser-upload] TUS failed, falling back to signed PUT", tusErr);
-      await putToSignedUrl(session.upload.url, file, opts?.onProgress, opts?.signal);
+      await putToSignedUrl(session.upload.url, file, opts?.onProgress, opts?.signal, session.upsert === true);
       method = "put";
     }
   } else {
     if (!session.upload?.url) {
       throw new Error(session.error ?? "No signed upload URL returned");
     }
-    await putToSignedUrl(session.upload.url, file, opts?.onProgress, opts?.signal);
+    await putToSignedUrl(session.upload.url, file, opts?.onProgress, opts?.signal, session.upsert === true);
   }
 
   const completeRes = await fetch("/api/documents/upload-url/complete", {
