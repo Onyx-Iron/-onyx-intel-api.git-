@@ -71,11 +71,9 @@ export async function POST(req: NextRequest): Promise<Response> {
     const isPdf = doc.file_name.toLowerCase().endsWith(".pdf");
 
     // ── Large PDF → async page-split pipeline ────────────────────────────────
-    // Applies whether the original lives in Supabase Storage (older local
-    // uploads) or Google Drive (current default for new local uploads — see
-    // /api/takeoff/drive-upload-session) — both feed page-split-worker,
-    // just with a different fetch source for the original bytes.
-    const isLargePdf = isPdf && fileSize != null && fileSize >= ASYNC_THRESHOLD_BYTES;
+    // Missing size is treated as large — safer than silent mid-stream death
+    // on the sync Railway path when meta.size was never recorded.
+    const isLargePdf = isPdf && (fileSize == null || fileSize >= ASYNC_THRESHOLD_BYTES);
     if (isLargePdf && (storagePath || driveFileId)) {
       await db.from("documents")
         .update({ status: "queued", updated_at: new Date().toISOString() } as never)

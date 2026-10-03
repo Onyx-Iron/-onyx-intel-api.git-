@@ -99,7 +99,7 @@ export default function ProjectUploadButton({
               size: file.size,
             }),
           });
-          if (!regRes.ok) {
+          if (!regRes.ok && regRes.status !== 202) {
             const d = await regRes.json().catch(() => ({})) as { error?: string };
             failures.push(`${file.name}: ${d.error ?? "registration failed"}`);
             continue;
@@ -111,11 +111,20 @@ export default function ProjectUploadButton({
       onUploaded?.();
       if (failures.length > 0) {
         toast({ title: String(`Some files could not be uploaded:\n\n${failures.join("\n")}`), kind: "error" });
+      } else if (files.length > 0) {
+        toast({
+          title: String(
+            files.length === 1
+              ? "Plan uploaded — page-split / ingest is running in the background."
+              : `${files.length} plans uploaded — processing continues in the background.`,
+          ),
+          kind: "success",
+        });
       }
     } finally {
       setUploading(false);
     }
-  }, [projectId, onUploaded]);
+  }, [projectId, onUploaded, toast]);
 
   const isPrimary = variant === "primary";
   const cls = isPrimary

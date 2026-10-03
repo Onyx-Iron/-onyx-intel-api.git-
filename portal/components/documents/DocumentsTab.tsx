@@ -20,28 +20,63 @@ interface SavedQuestion {
   asked_at: string;
 }
 
-type DocStatus = "pending" | "processing" | "ready" | "complete" | "error";
+type DocStatus =
+  | "pending"
+  | "queued"
+  | "processing"
+  | "split"
+  | "ready"
+  | "complete"
+  | "error"
+  | "failed";
 
 type DocType = "drawing" | "spec" | "rfi" | "submittal" | "other" | null;
 
 interface Document {
   id: string;
   file_name: string;
-  status: DocStatus;
+  status: DocStatus | string;
   doc_type: DocType;
   page_count: number | null;
   uploaded_at: string | null;
   processed_at: string | null;
+  last_error: string | null;
+  last_error_step: string | null;
   meta: Record<string, unknown> | null;
 }
 
+/** Statuses that mean work is still in flight — keep polling. */
+const IN_FLIGHT = new Set(["pending", "queued", "processing", "split"]);
+
 const STATUS_STYLES: Record<string, string> = {
   pending:    "bg-white/5 text-gray-500 border-white/10",
+  queued:     "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
   processing: "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
+  split:      "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
   ready:      "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
   complete:   "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
   error:      "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
+  failed:     "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
 };
+
+const STATUS_LABELS: Record<string, string> = {
+  pending: "Pending",
+  queued: "Queued",
+  processing: "Processing",
+  split: "Splitting",
+  ready: "Ready",
+  complete: "Complete",
+  error: "Error",
+  failed: "Failed",
+};
+
+function isInFlight(status: string): boolean {
+  return IN_FLIGHT.has(status);
+}
+
+function isErrorStatus(status: string): boolean {
+  return status === "error" || status === "failed";
+}
 
 const DOC_TYPE_STYLES: Record<string, string> = {
   drawing:   "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
@@ -93,6 +128,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   const [answer, setAnswer] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
   const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
+  const [retryingDocId, setRetryingDocId] = useState<string | null>(null);
   const [expandedDocId, setExpandedDocId] = useState<string | null>(null);
   const [pagesByDoc, setPagesByDoc] = useState<Record<string, { loading: boolean; pages: ParsedPage[]; questions: SavedQuestion[]; classification?: Record<string, string>; error?: string }>>({});
 
@@ -145,11 +181,11 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     loadDocuments();
   }, [loadDocuments]);
 
-  // Poll while any doc is still processing — but give up after POLL_TIMEOUT_MS
-  // so a silently-crashed background ingest doesn't spin forever.
+  // Poll while any doc is in flight (queued → split → processing) — give up
+  // after POLL_TIMEOUT_MS so a crashed worker doesn't spin forever.
   useEffect(() => {
-    const hasProcessing = documents.some((d) => d.status === "processing" || d.status === "pending");
-    if (hasProcessing && !pollTimedOut) {
+    const hasInFlight = documents.some((d) => isInFlight(String(d.status)));
+    if (hasInFlight && !pollTimedOut) {
       if (!pollRef.current) {
         pollStartedAtRef.current = Date.now();
         pollRef.current = setInterval(() => {
@@ -171,11 +207,9 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
         pollRef.current = null;
       }
       pollStartedAtRef.current = null;
-      // Reset the timed-out flag once nothing is processing anymore
-      if (!hasProcessing && pollTimedOut) setPollTimedOut(false);
+      if (!hasInFlight && pollTimedOut) setPollTimedOut(false);
     }
     return () => {
-      // Cleanup on unmount: clear interval so no setState fires on a dead component
       if (pollRef.current) {
         clearInterval(pollRef.current);
         pollRef.current = null;
@@ -246,26 +280,33 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
         return;
       }
 
-      // Step 3: register the document row via the unified endpoint
-      // (the server auto-fires ingest — no separate call needed)
+      // Step 3: register — PDFs go to async page-split; small non-PDFs sync-ingest.
       const regRes = await fetch("/api/documents/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ storage_type: "drive", project_id: projectId, file_name: file.name, drive_file_id: driveFileId, mime_type: file.type, size: file.size }),
       });
-      if (!regRes.ok) {
-        const d = await regRes.json().catch(() => ({})) as { error?: string };
-        toast({ title: String(d.error ?? "Registration failed"), kind: "error" });
+      const regData = await regRes.json().catch(() => ({})) as { error?: string; document?: { status?: string }; queued?: boolean };
+      if (!regRes.ok && regRes.status !== 202) {
+        toast({ title: String(regData.error ?? "Registration failed"), kind: "error" });
         return;
       }
 
+      const queued = regRes.status === 202 || regData.queued || regData.document?.status === "queued";
+      toast({
+        title: queued
+          ? `${file.name} uploaded — page-split is running in the background.`
+          : `${file.name} uploaded — processing started.`,
+        kind: "success",
+      });
+      setPollTimedOut(false);
       loadDocuments();
     } catch (err) {
       toast({ title: String(`Upload failed: ${err instanceof Error ? err.message : String(err)}`), kind: "error" });
     } finally {
       setUploading(false);
     }
-  }, [projectId, loadDocuments]);
+  }, [projectId, loadDocuments, toast]);
 
   const handleDriveFiles = useCallback(async (
     driveFiles: { id: string; name: string; mimeType: string; sizeBytes?: number }[],
@@ -274,28 +315,39 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     setDriveImporting(true);
     const failures: string[] = [];
     try {
-      // accessToken is intentionally unused — server uses the stored OAuth token
+      // accessToken unused — server uses the stored OAuth token
       void accessToken;
       await Promise.all(
         driveFiles.map(async (f) => {
           try {
-            // Unified endpoint inserts the row and auto-fires ingest
-            const regRes = await fetch("/api/documents/upload", {
+            const isPdf = f.name.toLowerCase().endsWith(".pdf")
+              || f.mimeType === "application/pdf";
+            // Plan PDFs → dedicated import-drive (page-split). Other types → upload sync-ingest.
+            const endpoint = isPdf ? "/api/documents/import-drive" : "/api/documents/upload";
+            const body = isPdf
+              ? {
+                  project_id: projectId,
+                  file_id: f.id,
+                  file_name: f.name,
+                  mime_type: f.mimeType,
+                  size: f.sizeBytes,
+                }
+              : {
+                  storage_type: "drive",
+                  project_id: projectId,
+                  file_name: f.name,
+                  drive_file_id: f.id,
+                  mime_type: f.mimeType,
+                  size: f.sizeBytes,
+                };
+            const regRes = await fetch(endpoint, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                storage_type: "drive",
-                project_id: projectId,
-                file_name: f.name,
-                drive_file_id: f.id,
-                mime_type: f.mimeType,
-                size: f.sizeBytes,
-              }),
+              body: JSON.stringify(body),
             });
-            if (!regRes.ok) {
+            if (!regRes.ok && regRes.status !== 202) {
               const d = await regRes.json().catch(() => ({})) as { error?: string };
               failures.push(`${f.name}: ${d.error ?? regRes.status}`);
-              return;
             }
           } catch (err) {
             failures.push(`${f.name}: ${err instanceof Error ? err.message : String(err)}`);
@@ -303,14 +355,52 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
         }),
       );
 
+      setPollTimedOut(false);
       loadDocuments();
       if (failures.length) {
-        toast({ title: String(`Couldn't import ${failures.length} file(s) from Drive:\n\n${failures.join("\n")}`), kind: "info" });
+        toast({ title: String(`Couldn't import ${failures.length} file(s) from Drive:\n\n${failures.join("\n")}`), kind: "error" });
+      } else {
+        toast({ title: String(`Imported ${driveFiles.length} file(s) — processing in the background.`), kind: "success" });
       }
     } finally {
       setDriveImporting(false);
     }
-  }, [projectId, loadDocuments]);
+  }, [projectId, loadDocuments, toast]);
+
+  const retryIngest = useCallback(async (doc: Document) => {
+    if (retryingDocId) return;
+    setRetryingDocId(doc.id);
+    try {
+      const res = await fetch(`/api/documents/${encodeURIComponent(doc.id)}/ingest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({})) as { error?: string; queued?: boolean };
+      if (!res.ok && res.status !== 202) {
+        toast({ title: String(data.error ?? `Retry failed (${res.status})`), kind: "error" });
+        return;
+      }
+      toast({
+        title: data.queued
+          ? `${doc.file_name} re-queued for page-split.`
+          : `${doc.file_name} ingest restarted.`,
+        kind: "success",
+      });
+      setPollTimedOut(false);
+      // Optimistically flip to queued/processing so polling resumes immediately.
+      setDocuments((prev) => prev.map((d) => (
+        d.id === doc.id
+          ? { ...d, status: data.queued ? "queued" : "processing", last_error: null, last_error_step: null }
+          : d
+      )));
+      loadDocuments(false);
+    } catch (err) {
+      toast({ title: String(`Retry failed: ${err instanceof Error ? err.message : String(err)}`), kind: "error" });
+    } finally {
+      setRetryingDocId(null);
+    }
+  }, [retryingDocId, loadDocuments, toast]);
 
   const openAsk = (doc: Document) => {
     setAskDoc({ id: doc.id, name: doc.file_name });
@@ -365,7 +455,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
         <div className="rounded-xl border border-[#E50914]/30 bg-[#E50914]/5 px-4 py-3 text-[11px] text-[#E50914]">
           <div className="flex items-center justify-between gap-3">
             <span>
-              One or more documents have been stuck in &ldquo;Processing&rdquo; for over 5 minutes. The background ingest likely failed silently — try deleting and re-uploading, or click Refresh.
+              One or more documents have been in progress for over 5 minutes. Use Retry on the errored/stuck row, or Refresh to check again.
             </span>
             <button
               onClick={() => { setPollTimedOut(false); loadDocuments(); }}
@@ -448,10 +538,11 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
               ) : (
                 documents.flatMap((doc) => {
                   const statusKey = doc.status in STATUS_STYLES ? doc.status : "pending";
-                  const isProcessing = doc.status === "processing";
+                  const inFlight = isInFlight(String(doc.status));
                   const isReady = doc.status === "ready" || doc.status === "complete";
                   const isExpanded = expandedDocId === doc.id;
                   const insights = pagesByDoc[doc.id];
+                  const statusLabel = STATUS_LABELS[statusKey] ?? String(doc.status);
                   return [
                     <tr key={doc.id} className="hover:bg-white/[0.02] transition-colors">
                       <td className="px-4 py-3">
@@ -488,9 +579,14 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                       </td>
                       <td className="px-4 py-3">
                         <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded border text-[9px] font-bold tracking-widest uppercase ${STATUS_STYLES[statusKey]}`}>
-                          {isProcessing && <span className="w-1.5 h-1.5 rounded-full bg-[#00D2FF] animate-pulse" />}
-                          {isProcessing ? "Processing" : doc.status}
+                          {inFlight && <span className="w-1.5 h-1.5 rounded-full bg-[#00D2FF] animate-pulse" />}
+                          {statusLabel}
                         </span>
+                        {doc.last_error && (
+                          <p className="mt-1 max-w-[14rem] truncate text-[9px] text-[#E50914]" title={doc.last_error}>
+                            {doc.last_error_step ? `${doc.last_error_step}: ` : ""}{doc.last_error}
+                          </p>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-right text-gray-500 font-mono text-xs">
                         {doc.page_count != null ? doc.page_count : "—"}
@@ -508,16 +604,17 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                               <span className="text-[10px] uppercase tracking-widest font-mono">Ask</span>
                             </button>
                           )}
-                          {doc.status === "error" && (
+                          {(isErrorStatus(String(doc.status)) || (pollTimedOut && inFlight)) && (
                             <button
-                              onClick={() => {
-                                toast({ title: String("To retry, re-import this file from Drive using the From Drive button."), kind: "info" });
-                              }}
-                              className="flex items-center gap-1.5 text-gray-600 hover:text-[#00D2FF] transition-colors"
-                              title="Retry"
+                              onClick={() => void retryIngest(doc)}
+                              disabled={retryingDocId === doc.id}
+                              className="flex items-center gap-1.5 text-gray-600 hover:text-[#00D2FF] transition-colors disabled:opacity-40"
+                              title="Retry ingest / page-split"
                             >
-                              <RefreshCw size={12} />
-                              <span className="text-[10px] uppercase tracking-widest font-mono">Retry</span>
+                              <RefreshCw size={12} className={retryingDocId === doc.id ? "animate-spin" : undefined} />
+                              <span className="text-[10px] uppercase tracking-widest font-mono">
+                                {retryingDocId === doc.id ? "Retrying…" : "Retry"}
+                              </span>
                             </button>
                           )}
                           <button

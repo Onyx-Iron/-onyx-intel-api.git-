@@ -7,30 +7,26 @@ import { requirePermission, ownershipDenied } from "@/lib/project-controls/route
 import { getAccessTokenWithReason } from "@/lib/google/oauth";
 import { logEvent } from "@/lib/activity";
 import { auditInsert } from "@/lib/audit";
+import {
+  PLANS_BUCKET,
+  isPdfFileName,
+  shouldAsyncSplitPdf,
+  queueDriveDocumentForPageSplit,
+  queueLocalDocumentForPageSplit,
+} from "@/lib/documents/queuePageSplit";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const BUCKET = "project-documents";
-
 /**
  * Unified document upload entry point.
  *
- * Two modes, selected by `storage_type` (or the request Content-Type):
+ *  - storage_type:"drive" (JSON) — resumable Drive URL, or register completed Drive file
+ *  - storage_type:"supabase" (multipart) — bytes into plans-bucket
  *
- *  - storage_type:"drive" (default for JSON requests) — body is JSON:
- *      { project_id, file_name, content_type?, size?, drive_file_id? }
- *    If `drive_file_id` is NOT provided: opens a Drive resumable upload session
- *    and inserts a documents row in one shot; returns { upload_url, document }.
- *    If `drive_file_id` IS provided: the browser already finished a Drive PUT
- *    (e.g. via the Drive picker, or a back-compat call from register-drive);
- *    we just insert the row.
- *
- *  - storage_type:"supabase" (default for multipart requests) — body is multipart
- *    with `file` and `project_id`. Bytes are uploaded to Supabase Storage server-side.
- *
- * Ingest is fire-and-forget in both branches.
+ * Plan PDFs are queued onto the async page-split pipeline (same as takeoff).
+ * Small non-PDFs still fire sync ingest.
  */
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
@@ -68,27 +64,31 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         throw err;
       }
 
-      const safeName = file.name.replace(/[^\w.\-]+/g, "_");
-      const storagePath = `${tenantId}/${project_id}/${Date.now()}-${safeName}`;
+      const documentId = crypto.randomUUID();
+      const originalPath = `originals/${documentId}.pdf`;
+      const storagePath = isPdfFileName(file.name)
+        ? originalPath
+        : `${tenantId}/${project_id}/${Date.now()}-${file.name.replace(/[^\w.\-]+/g, "_")}`;
       const bytes = Buffer.from(await file.arrayBuffer());
 
       const { error: uploadErr } = await db.storage
-        .from(BUCKET)
+        .from(PLANS_BUCKET)
         .upload(storagePath, bytes, { contentType: file.type || "application/octet-stream", upsert: false });
       if (uploadErr) {
         return NextResponse.json({ error: `Storage upload failed: ${uploadErr.message}` }, { status: 500 });
       }
 
+      const asyncSplit = shouldAsyncSplitPdf(file.name, bytes.length);
       const insertRow: TablesInsert<"documents"> = {
-        id: crypto.randomUUID(),
+        id: documentId,
         tenant_id: tenantId,
         project_id,
         file_name: file.name,
-        status: "pending",
+        status: asyncSplit ? "queued" : "pending",
         uploaded_at: new Date().toISOString(),
         meta: buildDocumentRevisionMeta(file.name, {
           source: "local_upload",
-          storage: "supabase",
+          storage: PLANS_BUCKET,
           storage_path: storagePath,
           size: bytes.length,
           content_type: file.type || "application/octet-stream",
@@ -106,7 +106,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         new_values: insertRow as unknown as Record<string, unknown>,
       });
 
-      fireIngest(req, doc.id);
+      if (asyncSplit) {
+        await queueLocalDocumentForPageSplit({
+          tenantId,
+          userId,
+          projectId: project_id,
+          documentId: doc.id,
+          originalPath: storagePath,
+        });
+      } else {
+        fireIngest(req, doc.id);
+      }
+
       void logEvent({
         projectId: project_id,
         tenantId,
@@ -115,11 +126,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         entityId: doc.id,
         action: "uploaded",
         title: `Document uploaded: ${file.name}`,
-        meta: { size: bytes.length, content_type: file.type || "application/octet-stream" },
+        meta: { size: bytes.length, content_type: file.type || "application/octet-stream", async_split: asyncSplit },
       });
 
       return NextResponse.json({
-        document: { id: doc.id, file_name: file.name, status: "pending", storage_path: storagePath },
+        document: { id: doc.id, file_name: file.name, status: asyncSplit ? "queued" : "pending", storage_path: storagePath },
       });
     }
 
@@ -155,9 +166,50 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       throw err;
     }
 
-    // Case A: caller already finished a Drive upload → just register the row.
+    // Case A: caller already finished a Drive upload → register + process.
     if (drive_file_id) {
-      const inserted = await insertDriveRow({
+      const asyncSplit = shouldAsyncSplitPdf(file_name, body.size ?? null);
+
+      if (asyncSplit) {
+        const queued = await queueDriveDocumentForPageSplit({
+          tenantId,
+          userId,
+          projectId: project_id,
+          driveFileId: drive_file_id,
+          fileName: file_name,
+          mimeType: content_type,
+          sizeBytes: body.size ?? null,
+        });
+        if (!queued.ok) {
+          return NextResponse.json(
+            { error: queued.error, code: queued.code },
+            { status: queued.status },
+          );
+        }
+        void logEvent({
+          projectId: project_id,
+          tenantId,
+          userId,
+          entityType: "document",
+          entityId: queued.documentId,
+          action: "queued",
+          title: `Plan queued for page-split: ${file_name}`,
+          meta: { drive_file_id, async_split: true, deduped: queued.deduped },
+        });
+        return NextResponse.json({
+          document: {
+            id: queued.documentId,
+            file_name,
+            status: queued.status,
+            drive_file_id,
+          },
+          deduped: queued.deduped,
+          queued: queued.queued,
+        }, { status: 202 });
+      }
+
+      // Small non-PDF (or tiny non-async) Drive file — sync ingest path.
+      const inserted = await insertDriveRowLegacy({
         db, tenantId, userId, projectId: project_id, fileName: file_name,
         driveFileId: drive_file_id, mimeType: content_type, size: body.size ?? null,
       });
@@ -220,9 +272,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 }
 
-// ---------- helpers ----------
-
-async function insertDriveRow(args: {
+/** Legacy sync-ingest row for small non-PDF Drive files. */
+async function insertDriveRowLegacy(args: {
   db: Awaited<ReturnType<typeof createServiceClient>>;
   tenantId: string;
   userId: string;
@@ -234,9 +285,6 @@ async function insertDriveRow(args: {
 }): Promise<{ id: string; deduped: boolean } | { error: string; status: number }> {
   const { db, tenantId, userId, projectId, fileName, driveFileId, mimeType, size } = args;
 
-  // Explicit check-then-insert dedupe (the race-proof partial unique index
-  // isn't applied to the DB yet). Idempotent across browser retries on the
-  // same (tenant, project, drive_file_id).
   const { data: existing } = await db
     .from("documents")
     .select("id")
@@ -276,9 +324,6 @@ async function insertDriveRow(args: {
 }
 
 function fireIngest(req: NextRequest, docId: string): void {
-  // Fire-and-forget: do NOT await, so the upload response stays fast.
-  // If the ingest request never starts (network/platform failure), mark the
-  // document errored so it cannot sit in "processing" forever with no worker.
   void fetch(new URL(`/api/documents/${docId}/ingest`, req.url).toString(), {
     method: "POST",
     headers: {
@@ -287,31 +332,28 @@ function fireIngest(req: NextRequest, docId: string): void {
     },
     body: JSON.stringify({}),
   }).then(async (res) => {
-    if (res.ok) return;
+    if (res.ok || res.status === 202) return;
     const detail = (await res.text().catch(() => "")).slice(0, 500);
-    try {
-      const { createServiceClient } = await import("@/lib/supabase/server");
-      const db = await createServiceClient();
-      await db.from("documents").update({
-        status: "error",
-        last_error: `Ingest failed to start (${res.status}): ${detail}`.slice(0, 2000),
-        last_error_step: "ingest_start",
-      }).eq("id", docId).eq("status", "processing");
-    } catch (err) {
-      console.error("[fireIngest] failed to mark document error", err);
-    }
+    await markIngestStartFailed(docId, `Ingest failed to start (${res.status}): ${detail}`);
   }).catch(async (err) => {
     console.error("[fireIngest] fetch failed", err);
-    try {
-      const { createServiceClient } = await import("@/lib/supabase/server");
-      const db = await createServiceClient();
-      await db.from("documents").update({
-        status: "error",
-        last_error: `Ingest request failed to start: ${err instanceof Error ? err.message : String(err)}`.slice(0, 2000),
-        last_error_step: "ingest_start",
-      }).eq("id", docId).eq("status", "processing");
-    } catch (markErr) {
-      console.error("[fireIngest] failed to mark document error", markErr);
-    }
+    await markIngestStartFailed(
+      docId,
+      `Ingest request failed to start: ${err instanceof Error ? err.message : String(err)}`,
+    );
   });
+}
+
+async function markIngestStartFailed(docId: string, message: string): Promise<void> {
+  try {
+    const { createServiceClient } = await import("@/lib/supabase/server");
+    const db = await createServiceClient();
+    await db.from("documents").update({
+      status: "error",
+      last_error: message.slice(0, 2000),
+      last_error_step: "ingest_start",
+    }).eq("id", docId).in("status", ["processing", "pending", "queued"]);
+  } catch (err) {
+    console.error("[fireIngest] failed to mark document error", err);
+  }
 }

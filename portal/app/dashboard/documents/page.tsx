@@ -7,7 +7,7 @@ import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
 import { useProjectContext } from "@/components/project/ProjectContext";
 
-type DocStatus = "pending" | "processing" | "complete" | "error";
+type DocStatus = "pending" | "queued" | "processing" | "split" | "ready" | "complete" | "error" | "failed";
 type PipelineStatus = "pending" | "processing" | "done" | "error" | "partially_completed" | "skipped";
 
 interface ProcessingSummary {
@@ -21,7 +21,7 @@ interface ProcessingSummary {
 interface Document {
   id: string;
   file_name: string;
-  status: DocStatus;
+  status: DocStatus | string;
   pages: number | null;
   page_count: number | null;
   uploaded_at: string | null;
@@ -35,11 +35,15 @@ interface Document {
   meta?: { processing_summary?: ProcessingSummary } | null;
 }
 
-const STATUS_STYLES: Record<DocStatus, string> = {
+const STATUS_STYLES: Record<string, string> = {
   pending:    "bg-white/5 text-gray-500 border-white/10",
+  queued:     "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
   processing: "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
+  split:      "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
+  ready:      "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
   complete:   "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
   error:      "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
+  failed:     "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
 };
 
 const PIPELINE_DOT: Record<PipelineStatus, string> = {

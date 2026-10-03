@@ -1,8 +1,7 @@
 /**
- * Marks documents / pages stuck in `processing` as `error` so users can retry.
- * Vercel may kill ingest/page workers at maxDuration without running catch;
- * listing documents and polling split-status are cheap places to reclaim
- * those orphans opportunistically.
+ * Marks documents / pages stuck in processing as error so users can retry.
+ * Vercel/Edge kills leave orphans without catch handlers; list + split-status
+ * polls reclaim them opportunistically.
  */
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -11,13 +10,19 @@ type AnyDb = any;
 /** Default: 10 minutes — well above normal ingest, below "forgotten forever". */
 export const STUCK_PROCESSING_MS = 10 * 60 * 1000;
 
+/** Queued docs with no worker progress after this are treated as abandoned. */
+export const STUCK_QUEUED_MS = 15 * 60 * 1000;
+
 export async function reclaimStuckProcessingDocuments(
   db: AnyDb,
   tenantId: string,
   olderThanMs: number = STUCK_PROCESSING_MS,
 ): Promise<number> {
   const cutoff = new Date(Date.now() - olderThanMs).toISOString();
-  const { data, error } = await db
+
+  // Prefer processing_started_at so long Drive uploads that only later enter
+  // processing aren't falsely reclaimed based on uploaded_at alone.
+  const { data: byStart, error: startErr } = await db
     .from("documents")
     .update({
       status: "error",
@@ -26,20 +31,51 @@ export async function reclaimStuckProcessingDocuments(
     })
     .eq("tenant_id", tenantId)
     .eq("status", "processing")
+    .not("processing_started_at", "is", null)
+    .lt("processing_started_at", cutoff)
+    .select("id");
+
+  if (startErr) console.error("[reclaimStuckProcessingDocuments:started]", startErr);
+
+  // Fallback: processing rows that never got processing_started_at set.
+  const { data: byUpload, error: uploadErr } = await db
+    .from("documents")
+    .update({
+      status: "error",
+      last_error: "Processing timed out or was interrupted. Retry ingest to continue.",
+      last_error_step: "stuck_processing_reclaim",
+    })
+    .eq("tenant_id", tenantId)
+    .eq("status", "processing")
+    .is("processing_started_at", null)
     .lt("uploaded_at", cutoff)
     .select("id");
-  if (error) {
-    console.error("[reclaimStuckProcessingDocuments]", error);
-    return 0;
-  }
-  return (data ?? []).length;
+
+  if (uploadErr) console.error("[reclaimStuckProcessingDocuments:uploaded]", uploadErr);
+
+  // Stale queued / pending with no page progress — abandoned upload-url or
+  // worker invoke that never started.
+  const queuedCutoff = new Date(Date.now() - STUCK_QUEUED_MS).toISOString();
+  const { data: queued, error: queuedErr } = await db
+    .from("documents")
+    .update({
+      status: "error",
+      last_error: "Upload was queued but processing never started. Retry ingest or re-upload.",
+      last_error_step: "stuck_queued_reclaim",
+    })
+    .eq("tenant_id", tenantId)
+    .in("status", ["queued", "pending"])
+    .lt("uploaded_at", queuedCutoff)
+    .select("id");
+
+  if (queuedErr) console.error("[reclaimStuckProcessingDocuments:queued]", queuedErr);
+
+  return (byStart?.length ?? 0) + (byUpload?.length ?? 0) + (queued?.length ?? 0);
 }
 
 /**
  * Reclaims document_pages stuck in OCR (`status=processing`) or takeoff
- * (`takeoff_status=processing`). Page workers set these mid-flight and only
- * mark error in catch — a platform kill leaves pages stuck forever unless
- * something opportunistic reclaims them.
+ * (`takeoff_status=processing`).
  */
 export async function reclaimStuckProcessingPages(
   db: AnyDb,

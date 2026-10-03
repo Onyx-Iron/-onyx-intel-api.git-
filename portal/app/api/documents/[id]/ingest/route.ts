@@ -8,7 +8,13 @@ import { logEvent } from "@/lib/activity";
 import { requireEnv } from "@/lib/env";
 import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
-import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
+import {
+  PLANS_BUCKET,
+  ASYNC_SPLIT_BYTES,
+  shouldAsyncSplitPdf,
+  queueDriveDocumentForPageSplit,
+  queueLocalDocumentForPageSplit,
+} from "@/lib/documents/queuePageSplit";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
@@ -16,8 +22,6 @@ export const maxDuration = 300;
 
 const EMBED_MODEL = "text-embedding-004";
 const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
-const PLANS_BUCKET = "plans-bucket";
-const ASYNC_SPLIT_BYTES = 3.5 * 1024 * 1024;
 /** Leave headroom under Vercel maxDuration=300 so we can write error status before kill. */
 const INGEST_BUDGET_MS = 270_000;
 
@@ -253,12 +257,61 @@ export async function POST(
     const meta = (doc.meta ?? {}) as Record<string, unknown>;
     const driveFileId = doc.drive_file_id ?? (meta.drive_file_id as string | undefined);
     const storagePath = typeof meta.storage_path === "string" ? meta.storage_path : null;
+    const storageBucket = typeof meta.storage === "string" && meta.storage !== "drive"
+      ? meta.storage
+      : PLANS_BUCKET;
+    const metaSize = typeof meta.size === "number" ? meta.size : null;
+    const projectIdForSplit = doc.project_id as string | null;
 
     if (!driveFileId && !storagePath) {
       return NextResponse.json({ error: "Document has no source (no drive_file_id or storage_path)" }, { status: 400 });
     }
 
-    // 1. Download PDF from Drive or Supabase Storage
+    // Plan PDFs that need async split: never download into this Vercel function.
+    // Route Drive → page-split-worker (streams from Drive); local → page-split
+    // when bytes already live in plans-bucket.
+    if (projectIdForSplit && shouldAsyncSplitPdf(doc.file_name, metaSize)) {
+      if (driveFileId) {
+        const queued = await queueDriveDocumentForPageSplit({
+          tenantId: resolvedTenantId,
+          userId,
+          projectId: projectIdForSplit,
+          driveFileId,
+          fileName: doc.file_name,
+          mimeType: typeof meta.content_type === "string" ? meta.content_type : "application/pdf",
+          sizeBytes: metaSize,
+          rekickIfStuck: true,
+        });
+        if (!queued.ok) {
+          await markError(queued.error, "split");
+          return NextResponse.json({ error: queued.error, code: queued.code }, { status: queued.status });
+        }
+        return NextResponse.json({
+          ok: true,
+          queued: true,
+          reason: "large_plan_set_drive",
+          document_id: queued.documentId,
+        }, { status: 202 });
+      }
+      if (storagePath) {
+        await queueLocalDocumentForPageSplit({
+          tenantId: resolvedTenantId,
+          userId,
+          projectId: projectIdForSplit,
+          documentId: docId,
+          originalPath: storagePath,
+        });
+        return NextResponse.json({
+          ok: true,
+          queued: true,
+          reason: "large_plan_set_local",
+        }, { status: 202 });
+      }
+    }
+
+    await assertWithinBudget("download");
+
+    // 1. Download PDF from Drive or Supabase Storage (small files only)
     let pdfBytes: Buffer;
 
     if (driveFileId) {
@@ -279,9 +332,8 @@ export async function POST(
       }
       pdfBytes = Buffer.from(await driveRes.arrayBuffer());
     } else {
-      // Local file stored in Supabase Storage
       const { data: signed, error: signErr } = await db.storage
-        .from(PLANS_BUCKET)
+        .from(storageBucket)
         .createSignedUrl(storagePath!, 300);
       if (signErr || !signed?.signedUrl) {
         await markError(signErr?.message ?? "Could not access stored file", "download");
@@ -295,34 +347,50 @@ export async function POST(
       pdfBytes = Buffer.from(await storageRes.arrayBuffer());
     }
 
-    const projectIdForSplit = doc.project_id as string | null;
-    if (pdfBytes.length >= ASYNC_SPLIT_BYTES) {
-      if (storagePath && projectIdForSplit) {
-        await db.from("documents").update({
-          status: "processing",
-          split_status: "pending",
-          processing_started_at: new Date().toISOString(),
-          last_error: null,
-          last_error_step: null,
-        }).eq("id", docId).eq("tenant_id", tenantId);
-        await invokePageSplitWorker({
-          document_id: docId,
-          tenant_id: resolvedTenantId,
-          project_id: projectIdForSplit,
-          original_path: storagePath,
-          user_id: userId,
-          is_local_upload: true,
+    // Late size discovery: meta.size was missing but file is actually large.
+    if (projectIdForSplit && pdfBytes.length >= ASYNC_SPLIT_BYTES) {
+      if (storagePath && storageBucket === PLANS_BUCKET) {
+        await queueLocalDocumentForPageSplit({
+          tenantId: resolvedTenantId,
+          userId,
+          projectId: projectIdForSplit,
+          documentId: docId,
+          originalPath: storagePath,
         });
         return NextResponse.json({
           ok: true,
           queued: true,
-          reason: "large_plan_set",
+          reason: "large_plan_set_discovered",
           bytes: pdfBytes.length,
         }, { status: 202 });
       }
-      const message = "Plan set is too large for synchronous ingest. Upload it through takeoff so it can be split by page.";
-      await markError(message, "split");
-      return NextResponse.json({ error: message }, { status: 409 });
+      if (driveFileId) {
+        // Persist bytes to plans-bucket then split locally so we don't re-download from Drive in the worker with a potentially stale token.
+        const originalPath = `originals/${docId}.pdf`;
+        const { error: upErr } = await db.storage
+          .from(PLANS_BUCKET)
+          .upload(originalPath, pdfBytes, { contentType: "application/pdf", upsert: true });
+        if (upErr) {
+          await markError(`Could not stage large Drive PDF: ${upErr.message}`, "split");
+          return NextResponse.json({ error: upErr.message }, { status: 500 });
+        }
+        await db.from("documents").update({
+          meta: { ...meta, storage: PLANS_BUCKET, storage_path: originalPath, size: pdfBytes.length },
+        }).eq("id", docId).eq("tenant_id", resolvedTenantId);
+        await queueLocalDocumentForPageSplit({
+          tenantId: resolvedTenantId,
+          userId,
+          projectId: projectIdForSplit,
+          documentId: docId,
+          originalPath,
+        });
+        return NextResponse.json({
+          ok: true,
+          queued: true,
+          reason: "large_plan_set_staged",
+          bytes: pdfBytes.length,
+        }, { status: 202 });
+      }
     }
 
     await db.from("documents").update({

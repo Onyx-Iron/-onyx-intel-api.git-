@@ -199,13 +199,18 @@ Deno.serve(async (req) => {
       if (insErr) throw new Error(`insert document_pages: ${insErr.message}`);
     }
 
-    // ── 6. Fan out: fire-and-forget each page to page-processor (OCR/embed
-    // for search) AND page-takeoff-worker (real CSI takeoff rows) ───────────
+    // ── 6. Fan out page jobs WITHOUT awaiting completion ───────────────────
+    // Previously we awaited every page-processor / page-takeoff-worker HTTP
+    // response inside this Edge Function, which burned the ~150s wall clock
+    // on OCR/takeoff and caused the portal invoke to time out / mark docs
+    // failed even after pages were already inserted. Kick the requests and
+    // return immediately — split-status + reclaimStuck finalize progress.
     const base = SUPABASE_URL.replace(/\/$/, "");
     const processorUrl = `${base}/functions/v1/page-processor`;
     const takeoffWorkerUrl = `${base}/functions/v1/page-takeoff-worker`;
-    const fanoutResults = await Promise.allSettled(pageRows.flatMap((p) => [
-      fetch(processorUrl, {
+    const fanoutJobs = pageRows.length * 2;
+    for (const p of pageRows) {
+      void fetch(processorUrl, {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
@@ -218,8 +223,9 @@ Deno.serve(async (req) => {
           page_number: p.page_number,
           storage_path: p.storage_path,
         }),
-      }),
-      fetch(takeoffWorkerUrl, {
+      }).catch((err) => console.warn(`[page-split] processor enqueue failed page ${p.page_number}`, err));
+
+      void fetch(takeoffWorkerUrl, {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
@@ -233,24 +239,10 @@ Deno.serve(async (req) => {
           page_number: p.page_number,
           storage_path: p.storage_path,
         }),
-      }),
-    ]));
-    // fetch() fulfills on HTTP 4xx/5xx — count those as failures too so a
-    // cold-start 5xx doesn't look like a successful enqueue.
-    let fanoutFailures = 0;
-    for (const r of fanoutResults) {
-      if (r.status === "rejected") {
-        fanoutFailures++;
-        continue;
-      }
-      if (!r.value.ok) fanoutFailures++;
-    }
-    if (fanoutFailures > 0) {
-      await recordEvent("failed", `fan-out failed for ${fanoutFailures}/${fanoutResults.length} page jobs`);
+      }).catch((err) => console.warn(`[page-split] takeoff enqueue failed page ${p.page_number}`, err));
     }
 
     // Mark documents.status="split" — pages are now the unit of work.
-    // Persist fan-out summary so clients can surface partial enqueue failures.
     const { data: docMetaRow } = await db
       .from("documents")
       .select("meta")
@@ -268,8 +260,8 @@ Deno.serve(async (req) => {
           ...prevMeta,
           processing_summary: {
             pages_enqueued: pageRows.length,
-            fanout_jobs: fanoutResults.length,
-            fanout_failures: fanoutFailures,
+            fanout_jobs: fanoutJobs,
+            fanout_mode: "fire_and_forget",
             failed_uploads: failedUploads,
             updated_at: new Date().toISOString(),
           },
@@ -287,15 +279,14 @@ Deno.serve(async (req) => {
       p_document_id: body.document_id,
     });
     if (summaryErr) console.warn("[page-split] summary refresh failed", summaryErr.message);
-    if (fanoutFailures === 0) await recordEvent("succeeded");
-    else await recordEvent("succeeded", `split ok with ${fanoutFailures} fan-out failures`);
+    await recordEvent("succeeded", `split ok; ${pageRows.length} pages enqueued`);
 
     return new Response(JSON.stringify({
       ok: true,
       document_id: body.document_id,
       page_count: pageCount,
       pages_enqueued: pageRows.length,
-      fanout_failures: fanoutFailures,
+      fanout_jobs: fanoutJobs,
       elapsed_ms: Date.now() - started,
     }), { status: 200, headers: { "Content-Type": "application/json" } });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
