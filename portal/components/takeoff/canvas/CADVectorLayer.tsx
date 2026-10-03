@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { classifyLayer, type LayerClassification } from "@/lib/cad/layer-classify";
 import { shapesInView, type Box } from "@/lib/takeoff/canvas/visible-shapes";
 import { collectSnapPoints } from "@/lib/takeoff/canvas/vector-snap";
+import { takeoffQueryKeys, useCadVectorMetadata } from "@/lib/takeoff/queries";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -46,6 +48,8 @@ interface Props {
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
 export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRatio, onCommitted, onVectorsLoaded, onSnapPointsChange }: Props) {
+  const queryClient = useQueryClient();
+  const { data: queryVectors } = useCadVectorMetadata(pageId);
   const [raw, setRaw] = useState<RawVector[]>([]);
   const [enabled, setEnabled] = useState(true);
   const [hoverKey, setHoverKey] = useState<string | null>(null);
@@ -57,33 +61,24 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
   const [view, setView] = useState<Box | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
-  // ── Load vectors (initial + on refresh signal from PDF extractor) ─────────
+  // ── Sync cached CAD vector metadata (staleTime: Infinity until explicit refresh) ──
   useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const res = await fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
-        if (!res.ok) return;
-        const data = await res.json() as { vectors: RawVector[] };
-        if (!cancelled && Array.isArray(data.vectors)) {
-          setRaw(data.vectors);
-          const descriptions = Array.from(new Set(data.vectors.map((v) => classifyLayer(v.layer).description)));
-          onVectorsLoaded?.(descriptions);
-        }
-      } catch { /* silent */ }
-    };
-    void load();
+    if (!queryVectors) return;
+    setRaw(queryVectors);
+    const descriptions = Array.from(new Set(queryVectors.map((v) => classifyLayer(v.layer).description)));
+    onVectorsLoaded?.(descriptions);
+  }, [queryVectors, onVectorsLoaded]);
 
+  useEffect(() => {
     const onRefresh = (ev: Event) => {
       const detail = (ev as CustomEvent<{ pageId?: string }>).detail;
-      if (!detail?.pageId || detail.pageId === pageId) void load();
+      if (!detail?.pageId || detail.pageId === pageId) {
+        void queryClient.invalidateQueries({ queryKey: takeoffQueryKeys.cadVectors(pageId) });
+      }
     };
     window.addEventListener("onyx:cad-vectors-refresh", onRefresh as EventListener);
-    return () => {
-      cancelled = true;
-      window.removeEventListener("onyx:cad-vectors-refresh", onRefresh as EventListener);
-    };
-  }, [pageId]);
+    return () => window.removeEventListener("onyx:cad-vectors-refresh", onRefresh as EventListener);
+  }, [pageId, queryClient]);
 
   // ── World→screen projection ───────────────────────────────────────────────
   // Fit-to-canvas: compute overall bbox in world units and scale to fit the

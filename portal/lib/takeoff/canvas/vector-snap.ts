@@ -1,65 +1,24 @@
 /**
- * Magnetic snap: pull the cursor onto the nearest CAD/PDF vector vertex
- * when it is within `thresholdPixels` of that vertex (screen space).
+ * Magnetic snap helpers for CAD/PDF vector vertices.
+ * Hot-path nearest-point search runs in workers/snap.worker.ts.
  */
 
-export interface VectorPoint {
-  x: number;
-  y: number;
-}
-
-export interface SnapResult {
-  snapped: boolean;
-  point: VectorPoint;
-  distance: number;
-}
-
-export const DEFAULT_SNAP_THRESHOLD_PX = 12;
-
-/**
- * Find the nearest vector vertex to `cursor` within `thresholdPixels`.
- * When nothing is close enough, returns the original cursor (snapped: false).
- */
-export function getNearestVectorPoint(
-  cursor: VectorPoint,
-  vectorPoints: ReadonlyArray<VectorPoint>,
-  thresholdPixels: number = DEFAULT_SNAP_THRESHOLD_PX,
-): SnapResult {
-  if (!Number.isFinite(cursor.x) || !Number.isFinite(cursor.y)) {
-    return { snapped: false, point: { x: cursor.x, y: cursor.y }, distance: Infinity };
-  }
-  if (vectorPoints.length === 0 || thresholdPixels < 0) {
-    return { snapped: false, point: { x: cursor.x, y: cursor.y }, distance: Infinity };
-  }
-
-  let best: VectorPoint | null = null;
-  let bestDist = thresholdPixels;
-
-  for (const candidate of vectorPoints) {
-    if (!Number.isFinite(candidate.x) || !Number.isFinite(candidate.y)) continue;
-    const distance = Math.hypot(candidate.x - cursor.x, candidate.y - cursor.y);
-    if (distance <= bestDist) {
-      bestDist = distance;
-      best = candidate;
-    }
-  }
-
-  if (!best) {
-    return { snapped: false, point: { x: cursor.x, y: cursor.y }, distance: Infinity };
-  }
-
-  return { snapped: true, point: { x: best.x, y: best.y }, distance: bestDist };
-}
+export {
+  DEFAULT_SNAP_THRESHOLD_PX,
+  getNearestVectorPoint,
+  type SnapResult,
+  type VectorPoint,
+} from "./snap-algorithm";
 
 /**
  * Flatten polyline / point vectors into unique screen-space snap targets.
  * Coordinates are rounded to 0.1px so near-duplicate vertices collapse.
  */
 export function collectSnapPoints(
-  vectors: ReadonlyArray<{ points: ReadonlyArray<readonly [number, number] | VectorPoint> }>,
-): VectorPoint[] {
+  vectors: ReadonlyArray<{ points: ReadonlyArray<readonly [number, number] | { x: number; y: number }> }>,
+): import("./snap-algorithm").VectorPoint[] {
   const seen = new Set<string>();
-  const out: VectorPoint[] = [];
+  const out: import("./snap-algorithm").VectorPoint[] = [];
 
   for (const vector of vectors) {
     for (const raw of vector.points) {

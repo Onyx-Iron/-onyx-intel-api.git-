@@ -12,7 +12,7 @@
  * all server-side (Next.js Route Handlers).
  */
 
-import { headerSafe } from "@/lib/http";
+import { headerSafe, withCompressionHeaders } from "@/lib/http";
 
 const ADMIN_EMAIL = "justinatteberry@onyx-iron.com";
 
@@ -43,9 +43,9 @@ export function pythonApiHeaders(opts: {
   projectId?: string | null;
   extra?: Record<string, string>;
 }): Record<string, string> {
-  const headers: Record<string, string> = {
+  const headers = withCompressionHeaders({
     "X-Onyx-Secret": headerSafe(pythonApiSecret(opts.email)),
-  };
+  });
   if (opts.tenantId) headers["X-Onyx-Tenant"] = headerSafe(opts.tenantId);
   if (opts.projectId) headers["X-Onyx-Project"] = headerSafe(opts.projectId);
   if (opts.extra) Object.assign(headers, opts.extra);
