@@ -215,11 +215,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     // Additive layer assignment (Company Hub M3) — do not alter save_manual_takeoff_tx.
     if (it.layer_id) {
-      await anyDb
+      const { error: layerErr } = await anyDb
         .from("manual_takeoffs")
         .update({ layer_id: it.layer_id })
         .eq("id", row.manual_takeoff.id)
         .eq("tenant_id", tenantId);
+      if (layerErr) return NextResponse.json({ error: layerErr.message }, { status: 500 });
     }
 
     results.push({
