@@ -6,6 +6,7 @@ import { logEvent } from "@/lib/activity";
 import { processOutboxBatch } from "@/lib/estimating/outbox-worker";
 import { calculateLinearLength, calculatePolygonArea, calculateCount, FORMULA_VERSION } from "@/lib/takeoff/canvas/quantity";
 import type { Point } from "@/lib/takeoff/canvas/coordinates";
+import type { ManualTakeoffItem, ManualTakeoffUpdateBody } from "@/lib/types/takeoff";
 
 export const runtime = "nodejs";
 
@@ -65,16 +66,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   return NextResponse.json({ items: data ?? [] });
 }
 
-interface Item {
-  project_id: string;
-  page_id?: string | null;
-  cost_code?: string | null;
-  takeoff_type: string;     // count | length | area
-  quantity: number;
-  unit?: string | null;     // EA | LF | SF
-  geometry: { points?: Point[]; coordinate_space?: string; [k: string]: unknown };
-  client_key?: string | null;
-}
+type Item = ManualTakeoffItem;
 
 const QUANTITY_TOLERANCE_PCT = 1; // >1% discrepancy between submitted and server-calculated quantity is flagged
 
@@ -330,14 +322,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   });
 }
 
-interface UpdateBody {
-  id?: string;
-  row_version?: number;
-  quantity?: number;
-  unit?: string | null;
-  cost_code?: string | null;
-  geometry?: { points?: Point[]; coordinate_space?: string; [k: string]: unknown };
-}
+type UpdateBody = Partial<ManualTakeoffUpdateBody>;
 
 /**
  * PATCH { id, row_version, quantity, unit?, cost_code?, geometry }

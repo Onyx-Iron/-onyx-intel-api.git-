@@ -8,6 +8,7 @@ import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
+import { extractScreenVertices, getNearestVectorPoint, type SnapResult, type VectorPoint } from "@/lib/takeoff/canvas/vector-snap";
 
 // Coordinate-space tag carried alongside each committed item (professional-
 // manual-takeoff milestone, PERMANENT RULE 1/2). 'page_space' points are
@@ -26,6 +27,9 @@ type CoordinateSpace = "page_space" | "legacy_pixel";
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 type Tool = "pan" | "calibrate" | "count" | "length" | "area" | "utility_pipe" | "spot_elevation" | "contour_line" | "civil_area_bounds";
+
+const SNAP_TOOLS = new Set<Tool>(["calibrate", "length", "area", "utility_pipe", "contour_line", "civil_area_bounds"]);
+const SNAP_THRESHOLD_PX = 12;
 
 interface Pt { x: number; y: number }
 
@@ -164,6 +168,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // runs/topo nodes/area bounds, is deferred — see REMAINING_RISKS.md.
   const [dragState, setDragState] = useState<{ key: string; startClient: Pt; originalPoints: Pt[]; originalRowVersion: number } | null>(null);
   const [vectorDescriptions, setVectorDescriptions] = useState<string[]>([]);
+  const [cadRawVectors, setCadRawVectors] = useState<Array<{ points: Array<[number, number]> }>>([]);
+  const [snapTarget, setSnapTarget] = useState<SnapResult | null>(null);
   const [utilityRuns, setUtilityRuns] = useState<UtilityRun[]>([]);
   const [utilityDraftPts, setUtilityDraftPts] = useState<Pt[]>([]);
   const [utilityModalPts, setUtilityModalPts] = useState<Pt[] | null>(null); // non-null while the input overlay is open
@@ -381,6 +387,49 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     };
   }, [pdfUrl, pageId, tool]);
 
+  // ── CAD vector vertices projected to screen space for magnetic snapping ───
+  const vectorSnapPoints = useMemo((): VectorPoint[] => {
+    if (!renderSize || cadRawVectors.length === 0) return [];
+    return extractScreenVertices(cadRawVectors, renderSize);
+  }, [cadRawVectors, renderSize]);
+
+  // Load CAD vectors for snap targets (same source as CADVectorLayer)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
+        if (!res.ok || cancelled) return;
+        const data = await res.json() as { vectors?: Array<{ points: Array<[number, number]> }> };
+        if (Array.isArray(data.vectors)) setCadRawVectors(data.vectors);
+      } catch { /* silent */ }
+    })();
+    const onRefresh = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ pageId?: string }>).detail;
+      if (!detail?.pageId || detail.pageId === pageId) {
+        void (async () => {
+          try {
+            const res = await fetch(`/api/takeoff/canvas/vectors?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
+            if (!res.ok || cancelled) return;
+            const data = await res.json() as { vectors?: Array<{ points: Array<[number, number]> }> };
+            if (Array.isArray(data.vectors)) setCadRawVectors(data.vectors);
+          } catch { /* silent */ }
+        })();
+      }
+    };
+    window.addEventListener("onyx:cad-vectors-refresh", onRefresh as EventListener);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("onyx:cad-vectors-refresh", onRefresh as EventListener);
+    };
+  }, [pageId]);
+
+  const applySnap = useCallback((cursor: Pt): Pt => {
+    if (!SNAP_TOOLS.has(tool) || vectorSnapPoints.length === 0) return cursor;
+    const result = getNearestVectorPoint(cursor, vectorSnapPoints, SNAP_THRESHOLD_PX);
+    return result.snapped ? result.point : cursor;
+  }, [tool, vectorSnapPoints]);
+
   // ── Coordinate conversion (SVG uses canvas pixel space directly) ──────────
   const toLocal = useCallback((clientX: number, clientY: number, svgEl: SVGSVGElement): Pt => {
     const rect = svgEl.getBoundingClientRect();
@@ -436,10 +485,22 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     return 0;
   }, [draftPoints, tool, scale]);
 
+  const onCanvasMouseMove: React.MouseEventHandler<SVGSVGElement> = (e) => {
+    if (!renderSize || !SNAP_TOOLS.has(tool)) {
+      setSnapTarget(null);
+      return;
+    }
+    const cursor = toLocal(e.clientX, e.clientY, e.currentTarget);
+    const result = getNearestVectorPoint(cursor, vectorSnapPoints, SNAP_THRESHOLD_PX);
+    setSnapTarget(result.snapped ? result : null);
+  };
+
+  const onCanvasMouseLeave = () => setSnapTarget(null);
+
   // ── Click handling ────────────────────────────────────────────────────────
   const onCanvasClick: React.MouseEventHandler<SVGSVGElement> = (e) => {
     if (!renderSize) return;
-    const p = toLocal(e.clientX, e.clientY, e.currentTarget);
+    const p = applySnap(toLocal(e.clientX, e.clientY, e.currentTarget));
 
     if (tool === "calibrate") {
       const next = [...calibPts, p];
@@ -1152,6 +1213,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               viewBox={`0 0 ${renderSize.w} ${renderSize.h}`}
               className={`absolute inset-0 select-none ${tool === "pan" ? "cursor-grab" : "cursor-crosshair"}`}
               onClick={onCanvasClick}
+              onMouseMove={onCanvasMouseMove}
+              onMouseLeave={onCanvasMouseLeave}
               onDoubleClick={finishDraft}
             >
               {/* Committed shapes */}
@@ -1297,6 +1360,48 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   {calibPts.map((p, i) => (
                     <circle key={i} cx={p.x} cy={p.y} r={5} fill="#CCFF00" stroke="#000" strokeWidth={1} />
                   ))}
+                </g>
+              )}
+
+              {/* Magnetic snap target ring (Konva-style visual on SVG overlay) */}
+              {snapTarget?.snapped && (
+                <g pointerEvents="none">
+                  <circle
+                    cx={snapTarget.point.x}
+                    cy={snapTarget.point.y}
+                    r={10}
+                    fill="none"
+                    stroke="#22c55e"
+                    strokeWidth={2}
+                    opacity={0.9}
+                  />
+                  <circle
+                    cx={snapTarget.point.x}
+                    cy={snapTarget.point.y}
+                    r={4}
+                    fill="#22c55e"
+                    stroke="#000"
+                    strokeWidth={1}
+                    opacity={0.85}
+                  />
+                  <line
+                    x1={snapTarget.point.x - 14}
+                    y1={snapTarget.point.y}
+                    x2={snapTarget.point.x + 14}
+                    y2={snapTarget.point.y}
+                    stroke="#22c55e"
+                    strokeWidth={1.5}
+                    opacity={0.7}
+                  />
+                  <line
+                    x1={snapTarget.point.x}
+                    y1={snapTarget.point.y - 14}
+                    x2={snapTarget.point.x}
+                    y2={snapTarget.point.y + 14}
+                    stroke="#22c55e"
+                    strokeWidth={1.5}
+                    opacity={0.7}
+                  />
                 </g>
               )}
             </svg>

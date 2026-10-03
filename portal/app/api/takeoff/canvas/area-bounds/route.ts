@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import type { AreaBoundItem } from "@/lib/types/takeoff";
 
 export const runtime = "nodejs";
 
@@ -40,17 +41,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const { data, error } = await query.order("created_at", { ascending: false });
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ items: data ?? [] });
-}
-
-interface AreaBoundItem {
-  project_id: string;
-  page_id?: string | null;
-  boundary_kind: string;
-  area_sf: number;
-  stripping_depth_in?: number | null;
-  excavation_volume_cy?: number | null;
-  target_cost_code?: string | null;
-  boundary_geometry: unknown;
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {

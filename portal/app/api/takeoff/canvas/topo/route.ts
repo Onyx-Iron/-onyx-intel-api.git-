@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import type { TopoNodeItem } from "@/lib/types/takeoff";
 
 export const runtime = "nodejs";
 
@@ -37,15 +38,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const { data, error } = await query.order("created_at", { ascending: false });
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ items: data ?? [] });
-}
-
-interface TopoNodeItem {
-  project_id: string;
-  page_id: string;
-  node_type: "contour_line" | "spot_elevation";
-  elevation: number;
-  geometry: unknown;
-  layer_assignment?: string | null;
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {

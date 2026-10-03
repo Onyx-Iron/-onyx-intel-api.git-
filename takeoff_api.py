@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import tempfile
 import uuid
 from pathlib import Path
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Header, Depends
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Header, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import uvicorn
@@ -44,6 +45,13 @@ from enhanced_takeoff_system import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+# Python engine (civil math) — hyphenated directory added to import path
+_ENGINE_DIR = Path(__file__).parent / "python-engine"
+if _ENGINE_DIR.is_dir() and str(_ENGINE_DIR) not in sys.path:
+    sys.path.insert(0, str(_ENGINE_DIR))
+
+from services.civil_utility import CivilTrenchRequest, calc_civil_trench  # noqa: E402
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
@@ -896,6 +904,21 @@ async def extract_from_drive(
         }
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+
+
+@app.post(
+    "/api/v1/math/civil-trench",
+    summary="OSHA-compliant trench excavation volume calculator",
+    dependencies=[Depends(verify_secret)],
+)
+async def civil_trench(body: CivilTrenchRequest = Body(...)) -> dict:
+    """Compute sloped-trench excavation (BCY) with OSHA Type A/B/C layback angles,
+    aggregate bedding depth, and safety width offsets derived from pipe OD."""
+    try:
+        result = calc_civil_trench(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return result.model_dump()
 
 
 @app.get("/api/health")
