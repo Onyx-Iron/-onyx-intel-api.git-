@@ -66,11 +66,63 @@ interface DashData {
   activity: DashActivity[];
 }
 
+interface CitationChip {
+  document_id: string;
+  page_number: number;
+  similarity: number;
+  file_name?: string;
+}
+
 interface AIMessage {
   id: string;
   role: "user" | "system";
   content: string;
   timestamp: string;
+  citations?: CitationChip[];
+}
+
+function parseCitationsHeader(raw: string | null): CitationChip[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((c): c is CitationChip =>
+        Boolean(
+          c &&
+            typeof c === "object" &&
+            typeof (c as CitationChip).document_id === "string" &&
+            typeof (c as CitationChip).page_number === "number",
+        ),
+      )
+      .map((c) => ({
+        document_id: c.document_id,
+        page_number: c.page_number,
+        similarity: typeof c.similarity === "number" ? c.similarity : 0,
+        file_name: typeof c.file_name === "string" ? c.file_name : undefined,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function normalizeStoredCitations(raw: unknown): CitationChip[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((c): c is CitationChip =>
+      Boolean(
+        c &&
+          typeof c === "object" &&
+          typeof (c as CitationChip).document_id === "string" &&
+          typeof (c as CitationChip).page_number === "number",
+      ),
+    )
+    .map((c) => ({
+      document_id: c.document_id,
+      page_number: c.page_number,
+      similarity: typeof c.similarity === "number" ? c.similarity : 0,
+      file_name: typeof c.file_name === "string" ? c.file_name : undefined,
+    }));
 }
 
 interface Metric {
@@ -376,6 +428,7 @@ function AICommandPanel({
   chatEndRef,
   projectLabel,
   memoryMode,
+  projectId,
 }: {
   aiInput: string;
   aiMessages: AIMessage[];
@@ -385,6 +438,7 @@ function AICommandPanel({
   chatEndRef: React.RefObject<HTMLDivElement | null>;
   projectLabel: string | null;
   memoryMode: boolean;
+  projectId: string | null;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   return (
@@ -410,6 +464,30 @@ function AICommandPanel({
               </div>
               <div className={`max-w-[84%] rounded-lg border px-3 py-2 text-sm leading-6 ${message.role === "system" ? "border-white/8 bg-white/3 text-white/80" : "border-[#00D2FF]/20 bg-[#00D2FF]/8 text-white"}`}>
                 {message.content}
+                {message.citations && message.citations.length > 0 && projectId && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {message.citations.map((cite, idx) => {
+                      const label = cite.file_name
+                        ? `${cite.file_name} · p.${cite.page_number}`
+                        : `Doc · p.${cite.page_number}`;
+                      const href =
+                        `/dashboard/projects/${projectId}/takeoff/canvas` +
+                        `?document_id=${encodeURIComponent(cite.document_id)}` +
+                        `&page_number=${encodeURIComponent(String(cite.page_number))}`;
+                      return (
+                        <Link
+                          key={`${message.id}-cite-${idx}-${cite.document_id}-${cite.page_number}`}
+                          href={href}
+                          className="inline-flex items-center gap-1 rounded border border-[#CCFF00]/25 bg-[#CCFF00]/8 px-2 py-0.5 text-[10px] font-medium text-[#CCFF00] transition-colors hover:border-[#CCFF00]/50 hover:bg-[#CCFF00]/15"
+                          title={cite.similarity > 0 ? `Similarity ${(cite.similarity * 100).toFixed(0)}%` : "Open sheet page"}
+                        >
+                          <FileText size={10} />
+                          {label}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                )}
                 <p className="mt-1 text-[10px] text-white/30">{message.timestamp}</p>
               </div>
             </div>
@@ -524,13 +602,17 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
     let cancelled = false;
     fetch(`/api/ai/chat?project_id=${activeProjectId}`)
       .then((res) => res.json())
-      .then((body: { conversation_id?: string | null; messages?: Array<{ id?: string; role: string; content: string; created_at?: string }> }) => {
+      .then((body: {
+        conversation_id?: string | null;
+        messages?: Array<{ id?: string; role: string; content: string; citations?: unknown; created_at?: string }>;
+      }) => {
         if (cancelled) return;
         setConversationId(body.conversation_id ?? null);
         const history = (body.messages ?? []).map((m, i) => ({
           id: m.id ?? `hist-${i}`,
           role: (m.role === "user" ? "user" : "system") as AIMessage["role"],
           content: m.content,
+          citations: normalizeStoredCitations(m.citations),
           timestamp: m.created_at
             ? new Date(m.created_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })
             : "",
@@ -668,12 +750,16 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
         }
         const convHeader = response.headers.get("X-Conversation-Id");
         if (convHeader) setConversationId(convHeader);
+        const citations = parseCitationsHeader(response.headers.get("X-Citations"));
 
         const reader = response.body?.getReader();
         const decoder = new TextDecoder();
         let full = "";
         const msgId = `msg-${Date.now() + 1}`;
-        setAiMessages((previous) => [...previous, { id: msgId, role: "system", content: "", timestamp: timestamp() }]);
+        setAiMessages((previous) => [
+          ...previous,
+          { id: msgId, role: "system", content: "", timestamp: timestamp(), citations },
+        ]);
         if (reader) {
           while (true) {
             const { done, value } = await reader.read();
@@ -826,6 +912,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
               chatEndRef={chatEndRef}
               projectLabel={activeProject?.name ?? null}
               memoryMode={Boolean(activeProjectId)}
+              projectId={activeProjectId}
             />
             <ProjectPipeline projects={filteredProjects} loading={dataLoading} />
           </div>

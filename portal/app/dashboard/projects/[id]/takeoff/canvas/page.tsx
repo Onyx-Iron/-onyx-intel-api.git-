@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
 
 interface PageProps {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ page_id?: string; document_id?: string }>;
+  searchParams: Promise<{ page_id?: string; document_id?: string; page_number?: string }>;
 }
 
 interface PageRow {
@@ -30,6 +30,7 @@ interface PageRow {
  * Query params:
  *   ?page_id=<uuid>            → open a specific page directly
  *   ?document_id=<uuid>        → default to page 1 of that document
+ *   ?document_id=&page_number= → open a specific page of that document (citation jump)
  * If neither is present, we pick the newest split page for the project.
  */
 export default async function CanvasPage({ params, searchParams }: PageProps) {
@@ -61,12 +62,19 @@ export default async function CanvasPage({ params, searchParams }: PageProps) {
       .eq("id", sp.page_id).eq("tenant_id", tenantId).single();
     page = (data ?? null) as PageRow | null;
   } else if (sp.document_id) {
-    const { data } = await anyDb
+    const pageNumber = Number(sp.page_number);
+    let q = anyDb
       .from("document_pages")
       .select("id, page_number, document_id, status")
-      .eq("document_id", sp.document_id).eq("tenant_id", tenantId)
-      .order("page_number", { ascending: true }).limit(1);
-    page = (data?.[0] ?? null) as PageRow | null;
+      .eq("document_id", sp.document_id)
+      .eq("tenant_id", tenantId);
+    if (Number.isFinite(pageNumber) && pageNumber > 0) {
+      q = q.eq("page_number", pageNumber);
+    } else {
+      q = q.order("page_number", { ascending: true }).limit(1);
+    }
+    const { data } = await q;
+    page = (Array.isArray(data) ? data[0] : data) ?? null;
   } else {
     // Fallback: latest split document's first page in this project.
     const { data: docs } = await anyDb

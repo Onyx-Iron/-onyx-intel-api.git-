@@ -236,10 +236,23 @@ const TOOL_DECLARATIONS = [
     name: "search_project_docs",
     description:
       "Semantically search indexed project documents (drawings, specs, submittals, contracts). " +
-      "Use when the question involves document content, specifications, materials, quantities, or referenced sheets.",
+      "Use when the question involves document content, specifications, materials, quantities, or referenced sheets. " +
+      "Optionally narrow by document_ids or doc_types (e.g. drawing, spec, submittal).",
     parameters: {
       type: "OBJECT",
-      properties: { query: { type: "STRING", description: "Natural language search query" } },
+      properties: {
+        query: { type: "STRING", description: "Natural language search query" },
+        document_ids: {
+          type: "ARRAY",
+          items: { type: "STRING" },
+          description: "Optional document UUIDs to restrict the search",
+        },
+        doc_types: {
+          type: "ARRAY",
+          items: { type: "STRING" },
+          description: "Optional document types to restrict the search (drawing, spec, submittal, contract, etc.)",
+        },
+      },
       required: ["query"],
     },
   },
@@ -306,6 +319,12 @@ async function executeTool(
     case "search_project_docs": {
       const query = String(args.query ?? "").trim();
       if (!query) return "No query provided.";
+      const documentIds = Array.isArray(args.document_ids)
+        ? args.document_ids.filter((x): x is string => typeof x === "string")
+        : undefined;
+      const docTypes = Array.isArray(args.doc_types)
+        ? args.doc_types.filter((x): x is string => typeof x === "string")
+        : undefined;
       try {
         const embedding = await embedText(query);
         const vectorStr = `[${embedding.join(",")}]`;
@@ -316,6 +335,8 @@ async function executeTool(
           match_project_id: projectId,
           query_text: query,
           match_count: 6,
+          filter_document_ids: documentIds?.length ? documentIds : null,
+          filter_doc_types: docTypes?.length ? docTypes : null,
         }) as { data: ChunkRow[] | null };
         const chunks = (data ?? []).filter((c) => c.rrf_score > 0.010);
         if (chunks.length === 0) return "No relevant document excerpts found.";
@@ -462,6 +483,7 @@ async function handleRag(
   project_id: string,
   message: string,
   conversation_id: string | undefined,
+  filters?: { document_ids?: string[]; doc_types?: string[] },
 ): Promise<Response> {
   const db = await createServiceClient();
 
@@ -543,6 +565,8 @@ async function handleRag(
       match_project_id: project_id,
       query_text: message.trim(),
       match_count: 6,
+      filter_document_ids: filters?.document_ids?.length ? filters.document_ids : null,
+      filter_doc_types: filters?.doc_types?.length ? filters.doc_types : null,
     }) as { data: ChunkRow[] | null };
 
     if (chunks && chunks.length > 0) {
@@ -918,7 +942,16 @@ export async function POST(req: NextRequest): Promise<Response> {
     if (mode === "agentic") {
       return await handleAgentic(tenantId, body.project_id, body.message, body.conversation_id);
     }
-    return await handleRag(userId, tenantId, body.project_id, body.message, body.conversation_id);
+    const documentIds = Array.isArray((body as { document_ids?: unknown }).document_ids)
+      ? ((body as { document_ids: unknown[] }).document_ids).filter((x): x is string => typeof x === "string")
+      : undefined;
+    const docTypes = Array.isArray((body as { doc_types?: unknown }).doc_types)
+      ? ((body as { doc_types: unknown[] }).doc_types).filter((x): x is string => typeof x === "string")
+      : undefined;
+    return await handleRag(userId, tenantId, body.project_id, body.message, body.conversation_id, {
+      document_ids: documentIds,
+      doc_types: docTypes,
+    });
   } catch (err: unknown) {
     if (err instanceof NoProviderError) {
       return NextResponse.json(
