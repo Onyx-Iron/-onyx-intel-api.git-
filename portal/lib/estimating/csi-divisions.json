@@ -1,78 +1,1110 @@
 {
   "divisions": [
-    { "code": "00", "name": "Procurement and Contracting Requirements" },
-    { "code": "01", "name": "General Requirements" },
-    { "code": "02", "name": "Existing Conditions" },
-    { "code": "03", "name": "Concrete" },
-    { "code": "04", "name": "Masonry" },
-    { "code": "05", "name": "Metals" },
-    { "code": "06", "name": "Wood, Plastics, and Composites" },
-    { "code": "07", "name": "Thermal and Moisture Protection" },
-    { "code": "08", "name": "Openings" },
-    { "code": "09", "name": "Finishes" },
-    { "code": "10", "name": "Specialties" },
-    { "code": "11", "name": "Equipment" },
-    { "code": "12", "name": "Furnishings" },
-    { "code": "13", "name": "Special Construction" },
-    { "code": "14", "name": "Conveying Equipment" },
-    { "code": "21", "name": "Fire Suppression" },
-    { "code": "22", "name": "Plumbing" },
-    { "code": "23", "name": "Heating, Ventilating, and Air Conditioning" },
-    { "code": "26", "name": "Electrical" },
-    { "code": "27", "name": "Communications" },
-    { "code": "28", "name": "Electronic Safety and Security" },
-    { "code": "31", "name": "Earthwork" },
-    { "code": "32", "name": "Exterior Improvements" },
-    { "code": "33", "name": "Utilities" }
+    {
+      "code": "00",
+      "name": "Procurement and Contracting Requirements"
+    },
+    {
+      "code": "01",
+      "name": "General Requirements"
+    },
+    {
+      "code": "02",
+      "name": "Existing Conditions"
+    },
+    {
+      "code": "03",
+      "name": "Concrete"
+    },
+    {
+      "code": "04",
+      "name": "Masonry"
+    },
+    {
+      "code": "05",
+      "name": "Metals"
+    },
+    {
+      "code": "06",
+      "name": "Wood, Plastics, and Composites"
+    },
+    {
+      "code": "07",
+      "name": "Thermal and Moisture Protection"
+    },
+    {
+      "code": "08",
+      "name": "Openings"
+    },
+    {
+      "code": "09",
+      "name": "Finishes"
+    },
+    {
+      "code": "10",
+      "name": "Specialties"
+    },
+    {
+      "code": "11",
+      "name": "Equipment"
+    },
+    {
+      "code": "12",
+      "name": "Furnishings"
+    },
+    {
+      "code": "13",
+      "name": "Special Construction"
+    },
+    {
+      "code": "14",
+      "name": "Conveying Equipment"
+    },
+    {
+      "code": "15",
+      "name": "Reserved"
+    },
+    {
+      "code": "21",
+      "name": "Fire Suppression"
+    },
+    {
+      "code": "22",
+      "name": "Plumbing"
+    },
+    {
+      "code": "23",
+      "name": "Heating, Ventilating, and Air Conditioning"
+    },
+    {
+      "code": "25",
+      "name": "Integrated Automation"
+    },
+    {
+      "code": "26",
+      "name": "Electrical"
+    },
+    {
+      "code": "27",
+      "name": "Communications"
+    },
+    {
+      "code": "28",
+      "name": "Electronic Safety and Security"
+    },
+    {
+      "code": "31",
+      "name": "Earthwork"
+    },
+    {
+      "code": "32",
+      "name": "Exterior Improvements"
+    },
+    {
+      "code": "33",
+      "name": "Utilities"
+    },
+    {
+      "code": "34",
+      "name": "Transportation"
+    },
+    {
+      "code": "35",
+      "name": "Waterway and Marine Construction"
+    },
+    {
+      "code": "40",
+      "name": "Process Interconnections"
+    },
+    {
+      "code": "41",
+      "name": "Material Processing and Handling Equipment"
+    },
+    {
+      "code": "42",
+      "name": "Process Heating, Cooling, and Drying Equipment"
+    },
+    {
+      "code": "43",
+      "name": "Process Gas and Liquid Handling"
+    },
+    {
+      "code": "44",
+      "name": "Pollution and Waste Control Equipment"
+    },
+    {
+      "code": "45",
+      "name": "Industry-Specific Manufacturing Equipment"
+    },
+    {
+      "code": "46",
+      "name": "Water and Wastewater Equipment"
+    },
+    {
+      "code": "48",
+      "name": "Electrical Power Generation"
+    }
   ],
   "sections": [
-    { "code": "01-21-00", "division": "01", "name": "Allowances" },
-    { "code": "01-31-00", "division": "01", "name": "Project Management and Coordination" },
-    { "code": "01-45-00", "division": "01", "name": "Quality Control" },
-    { "code": "01-50-00", "division": "01", "name": "Temporary Facilities and Controls" },
-    { "code": "02-41-00", "division": "02", "name": "Demolition" },
-    { "code": "03-11-00", "division": "03", "name": "Concrete Forming" },
-    { "code": "03-20-00", "division": "03", "name": "Concrete Reinforcing" },
-    { "code": "03-30-00", "division": "03", "name": "Cast-in-Place Concrete" },
-    { "code": "03-35-00", "division": "03", "name": "Concrete Finishing" },
-    { "code": "04-20-00", "division": "04", "name": "Unit Masonry" },
-    { "code": "05-12-00", "division": "05", "name": "Structural Steel Framing" },
-    { "code": "05-50-00", "division": "05", "name": "Metal Fabrications" },
-    { "code": "06-10-00", "division": "06", "name": "Rough Carpentry" },
-    { "code": "06-40-00", "division": "06", "name": "Architectural Woodwork" },
-    { "code": "07-21-00", "division": "07", "name": "Thermal Insulation" },
-    { "code": "07-50-00", "division": "07", "name": "Membrane Roofing" },
-    { "code": "07-92-00", "division": "07", "name": "Joint Sealants" },
-    { "code": "08-11-00", "division": "08", "name": "Metal Doors and Frames" },
-    { "code": "08-14-00", "division": "08", "name": "Wood Doors" },
-    { "code": "08-41-00", "division": "08", "name": "Entrances and Storefronts" },
-    { "code": "08-51-00", "division": "08", "name": "Windows" },
-    { "code": "09-29-00", "division": "09", "name": "Gypsum Board" },
-    { "code": "09-30-00", "division": "09", "name": "Tiling" },
-    { "code": "09-65-00", "division": "09", "name": "Resilient Flooring" },
-    { "code": "09-91-00", "division": "09", "name": "Painting" },
-    { "code": "10-14-00", "division": "10", "name": "Signage" },
-    { "code": "11-40-00", "division": "11", "name": "Foodservice Equipment" },
-    { "code": "12-36-00", "division": "12", "name": "Countertops" },
-    { "code": "14-20-00", "division": "14", "name": "Elevators" },
-    { "code": "21-13-00", "division": "21", "name": "Fire-Suppression Sprinkler Systems" },
-    { "code": "22-11-00", "division": "22", "name": "Facility Water Distribution" },
-    { "code": "22-13-00", "division": "22", "name": "Facility Sanitary Sewerage" },
-    { "code": "22-40-00", "division": "22", "name": "Plumbing Fixtures" },
-    { "code": "23-31-00", "division": "23", "name": "HVAC Ducts and Casings" },
-    { "code": "23-34-00", "division": "23", "name": "HVAC Fans" },
-    { "code": "23-64-00", "division": "23", "name": "Packaged Water Chillers" },
-    { "code": "26-05-00", "division": "26", "name": "Common Work Results for Electrical" },
-    { "code": "26-24-00", "division": "26", "name": "Switchboards and Panelboards" },
-    { "code": "26-51-00", "division": "26", "name": "Interior Lighting" },
-    { "code": "31-23-00", "division": "31", "name": "Excavation and Fill" },
-    { "code": "31-23-16", "division": "31", "name": "Excavation" },
-    { "code": "31-23-23", "division": "31", "name": "Fill" },
-    { "code": "32-12-00", "division": "32", "name": "Flexible Paving" },
-    { "code": "32-16-00", "division": "32", "name": "Curbs, Gutters, and Sidewalks" },
-    { "code": "32-92-00", "division": "32", "name": "Turf and Grasses" },
-    { "code": "33-11-00", "division": "33", "name": "Water Utility Distribution Piping" },
-    { "code": "33-30-00", "division": "33", "name": "Sanitary Sewerage Utilities" },
-    { "code": "33-40-00", "division": "33", "name": "Stormwater Utilities" }
+    {
+      "code": "00-72-00",
+      "division": "00",
+      "name": "General Conditions"
+    },
+    {
+      "code": "01-11-00",
+      "division": "01",
+      "name": "Summary of Work"
+    },
+    {
+      "code": "01-21-00",
+      "division": "01",
+      "name": "Allowances"
+    },
+    {
+      "code": "01-26-00",
+      "division": "01",
+      "name": "Contract Modification Procedures"
+    },
+    {
+      "code": "01-29-00",
+      "division": "01",
+      "name": "Payment Procedures"
+    },
+    {
+      "code": "01-31-00",
+      "division": "01",
+      "name": "Project Management and Coordination"
+    },
+    {
+      "code": "01-31-13",
+      "division": "01",
+      "name": "Project Coordination"
+    },
+    {
+      "code": "01-32-00",
+      "division": "01",
+      "name": "Construction Progress Documentation"
+    },
+    {
+      "code": "01-33-00",
+      "division": "01",
+      "name": "Submittal Procedures"
+    },
+    {
+      "code": "01-35-00",
+      "division": "01",
+      "name": "Special Procedures"
+    },
+    {
+      "code": "01-40-00",
+      "division": "01",
+      "name": "Quality Requirements"
+    },
+    {
+      "code": "01-45-00",
+      "division": "01",
+      "name": "Quality Control"
+    },
+    {
+      "code": "01-50-00",
+      "division": "01",
+      "name": "Temporary Facilities and Controls"
+    },
+    {
+      "code": "01-51-00",
+      "division": "01",
+      "name": "Temporary Utilities"
+    },
+    {
+      "code": "01-56-00",
+      "division": "01",
+      "name": "Temporary Barriers and Enclosures"
+    },
+    {
+      "code": "01-74-00",
+      "division": "01",
+      "name": "Cleaning and Waste Management"
+    },
+    {
+      "code": "01-77-00",
+      "division": "01",
+      "name": "Closeout Procedures"
+    },
+    {
+      "code": "01-78-00",
+      "division": "01",
+      "name": "Closeout Submittals"
+    },
+    {
+      "code": "02-21-00",
+      "division": "02",
+      "name": "Surveys"
+    },
+    {
+      "code": "02-22-00",
+      "division": "02",
+      "name": "Existing Conditions Assessment"
+    },
+    {
+      "code": "02-41-00",
+      "division": "02",
+      "name": "Demolition"
+    },
+    {
+      "code": "02-82-00",
+      "division": "02",
+      "name": "Asbestos Remediation"
+    },
+    {
+      "code": "03-05-00",
+      "division": "03",
+      "name": "Common Work Results for Concrete"
+    },
+    {
+      "code": "03-11-00",
+      "division": "03",
+      "name": "Concrete Forming"
+    },
+    {
+      "code": "03-15-00",
+      "division": "03",
+      "name": "Concrete Accessories"
+    },
+    {
+      "code": "03-20-00",
+      "division": "03",
+      "name": "Concrete Reinforcing"
+    },
+    {
+      "code": "03-21-00",
+      "division": "03",
+      "name": "Reinforcing Steel"
+    },
+    {
+      "code": "03-22-00",
+      "division": "03",
+      "name": "Welded Wire Reinforcing"
+    },
+    {
+      "code": "03-30-00",
+      "division": "03",
+      "name": "Cast-in-Place Concrete"
+    },
+    {
+      "code": "03-31-00",
+      "division": "03",
+      "name": "Structural Concrete"
+    },
+    {
+      "code": "03-35-00",
+      "division": "03",
+      "name": "Concrete Finishing"
+    },
+    {
+      "code": "03-37-00",
+      "division": "03",
+      "name": "Specialty Placed Concrete"
+    },
+    {
+      "code": "03-41-00",
+      "division": "03",
+      "name": "Precast Structural Concrete"
+    },
+    {
+      "code": "03-45-00",
+      "division": "03",
+      "name": "Precast Architectural Concrete"
+    },
+    {
+      "code": "04-05-00",
+      "division": "04",
+      "name": "Common Work Results for Masonry"
+    },
+    {
+      "code": "04-20-00",
+      "division": "04",
+      "name": "Unit Masonry"
+    },
+    {
+      "code": "04-21-00",
+      "division": "04",
+      "name": "Clay Unit Masonry"
+    },
+    {
+      "code": "04-22-00",
+      "division": "04",
+      "name": "Concrete Unit Masonry"
+    },
+    {
+      "code": "04-43-00",
+      "division": "04",
+      "name": "Stone Masonry"
+    },
+    {
+      "code": "05-05-00",
+      "division": "05",
+      "name": "Common Work Results for Metals"
+    },
+    {
+      "code": "05-12-00",
+      "division": "05",
+      "name": "Structural Steel Framing"
+    },
+    {
+      "code": "05-21-00",
+      "division": "05",
+      "name": "Steel Joist Framing"
+    },
+    {
+      "code": "05-31-00",
+      "division": "05",
+      "name": "Steel Decking"
+    },
+    {
+      "code": "05-40-00",
+      "division": "05",
+      "name": "Cold-Formed Metal Framing"
+    },
+    {
+      "code": "05-50-00",
+      "division": "05",
+      "name": "Metal Fabrications"
+    },
+    {
+      "code": "05-52-00",
+      "division": "05",
+      "name": "Metal Railings"
+    },
+    {
+      "code": "06-05-00",
+      "division": "06",
+      "name": "Common Work Results for Wood"
+    },
+    {
+      "code": "06-10-00",
+      "division": "06",
+      "name": "Rough Carpentry"
+    },
+    {
+      "code": "06-11-00",
+      "division": "06",
+      "name": "Wood Framing"
+    },
+    {
+      "code": "06-16-00",
+      "division": "06",
+      "name": "Sheathing"
+    },
+    {
+      "code": "06-20-00",
+      "division": "06",
+      "name": "Finish Carpentry"
+    },
+    {
+      "code": "06-40-00",
+      "division": "06",
+      "name": "Architectural Woodwork"
+    },
+    {
+      "code": "07-10-00",
+      "division": "07",
+      "name": "Dampproofing and Waterproofing"
+    },
+    {
+      "code": "07-13-00",
+      "division": "07",
+      "name": "Sheet Waterproofing"
+    },
+    {
+      "code": "07-21-00",
+      "division": "07",
+      "name": "Thermal Insulation"
+    },
+    {
+      "code": "07-21-16",
+      "division": "07",
+      "name": "Blanket Insulation"
+    },
+    {
+      "code": "07-24-00",
+      "division": "07",
+      "name": "Exterior Insulation and Finish Systems"
+    },
+    {
+      "code": "07-31-00",
+      "division": "07",
+      "name": "Shingles and Shakes"
+    },
+    {
+      "code": "07-41-00",
+      "division": "07",
+      "name": "Roof Panels"
+    },
+    {
+      "code": "07-42-00",
+      "division": "07",
+      "name": "Wall Panels"
+    },
+    {
+      "code": "07-50-00",
+      "division": "07",
+      "name": "Membrane Roofing"
+    },
+    {
+      "code": "07-54-00",
+      "division": "07",
+      "name": "Thermoplastic Membrane Roofing"
+    },
+    {
+      "code": "07-62-00",
+      "division": "07",
+      "name": "Sheet Metal Flashing and Trim"
+    },
+    {
+      "code": "07-84-00",
+      "division": "07",
+      "name": "Firestopping"
+    },
+    {
+      "code": "07-92-00",
+      "division": "07",
+      "name": "Joint Sealants"
+    },
+    {
+      "code": "08-11-00",
+      "division": "08",
+      "name": "Metal Doors and Frames"
+    },
+    {
+      "code": "08-11-13",
+      "division": "08",
+      "name": "Hollow Metal Doors and Frames"
+    },
+    {
+      "code": "08-14-00",
+      "division": "08",
+      "name": "Wood Doors"
+    },
+    {
+      "code": "08-31-00",
+      "division": "08",
+      "name": "Access Doors and Panels"
+    },
+    {
+      "code": "08-33-00",
+      "division": "08",
+      "name": "Coiling Doors and Grilles"
+    },
+    {
+      "code": "08-41-00",
+      "division": "08",
+      "name": "Entrances and Storefronts"
+    },
+    {
+      "code": "08-44-00",
+      "division": "08",
+      "name": "Curtain Wall and Glazed Assemblies"
+    },
+    {
+      "code": "08-51-00",
+      "division": "08",
+      "name": "Windows"
+    },
+    {
+      "code": "08-71-00",
+      "division": "08",
+      "name": "Door Hardware"
+    },
+    {
+      "code": "08-80-00",
+      "division": "08",
+      "name": "Glazing"
+    },
+    {
+      "code": "09-21-00",
+      "division": "09",
+      "name": "Plaster and Gypsum Board Assemblies"
+    },
+    {
+      "code": "09-22-00",
+      "division": "09",
+      "name": "Supports for Plaster and Gypsum Board"
+    },
+    {
+      "code": "09-29-00",
+      "division": "09",
+      "name": "Gypsum Board"
+    },
+    {
+      "code": "09-30-00",
+      "division": "09",
+      "name": "Tiling"
+    },
+    {
+      "code": "09-51-00",
+      "division": "09",
+      "name": "Acoustical Ceilings"
+    },
+    {
+      "code": "09-64-00",
+      "division": "09",
+      "name": "Wood Flooring"
+    },
+    {
+      "code": "09-65-00",
+      "division": "09",
+      "name": "Resilient Flooring"
+    },
+    {
+      "code": "09-68-00",
+      "division": "09",
+      "name": "Carpeting"
+    },
+    {
+      "code": "09-72-00",
+      "division": "09",
+      "name": "Wall Coverings"
+    },
+    {
+      "code": "09-91-00",
+      "division": "09",
+      "name": "Painting"
+    },
+    {
+      "code": "10-14-00",
+      "division": "10",
+      "name": "Signage"
+    },
+    {
+      "code": "10-21-00",
+      "division": "10",
+      "name": "Compartments and Cubicles"
+    },
+    {
+      "code": "10-28-00",
+      "division": "10",
+      "name": "Toilet, Bath, and Laundry Accessories"
+    },
+    {
+      "code": "10-44-00",
+      "division": "10",
+      "name": "Fire Protection Specialties"
+    },
+    {
+      "code": "10-51-00",
+      "division": "10",
+      "name": "Lockers"
+    },
+    {
+      "code": "11-13-00",
+      "division": "11",
+      "name": "Loading Dock Equipment"
+    },
+    {
+      "code": "11-31-00",
+      "division": "11",
+      "name": "Residential Appliances"
+    },
+    {
+      "code": "11-40-00",
+      "division": "11",
+      "name": "Foodservice Equipment"
+    },
+    {
+      "code": "12-24-00",
+      "division": "12",
+      "name": "Window Shades"
+    },
+    {
+      "code": "12-32-00",
+      "division": "12",
+      "name": "Manufactured Wood Casework"
+    },
+    {
+      "code": "12-36-00",
+      "division": "12",
+      "name": "Countertops"
+    },
+    {
+      "code": "13-34-00",
+      "division": "13",
+      "name": "Fabricated Engineered Structures"
+    },
+    {
+      "code": "14-20-00",
+      "division": "14",
+      "name": "Elevators"
+    },
+    {
+      "code": "14-24-00",
+      "division": "14",
+      "name": "Hydraulic Elevators"
+    },
+    {
+      "code": "14-42-00",
+      "division": "14",
+      "name": "Wheelchair Lifts"
+    },
+    {
+      "code": "21-05-00",
+      "division": "21",
+      "name": "Common Work Results for Fire Suppression"
+    },
+    {
+      "code": "21-12-00",
+      "division": "21",
+      "name": "Fire-Suppression Standpipes"
+    },
+    {
+      "code": "21-13-00",
+      "division": "21",
+      "name": "Fire-Suppression Sprinkler Systems"
+    },
+    {
+      "code": "21-30-00",
+      "division": "21",
+      "name": "Fire Pumps"
+    },
+    {
+      "code": "22-05-00",
+      "division": "22",
+      "name": "Common Work Results for Plumbing"
+    },
+    {
+      "code": "22-07-00",
+      "division": "22",
+      "name": "Plumbing Insulation"
+    },
+    {
+      "code": "22-11-00",
+      "division": "22",
+      "name": "Facility Water Distribution"
+    },
+    {
+      "code": "22-11-16",
+      "division": "22",
+      "name": "Domestic Water Piping"
+    },
+    {
+      "code": "22-13-00",
+      "division": "22",
+      "name": "Facility Sanitary Sewerage"
+    },
+    {
+      "code": "22-13-16",
+      "division": "22",
+      "name": "Sanitary Waste and Vent Piping"
+    },
+    {
+      "code": "22-14-00",
+      "division": "22",
+      "name": "Facility Storm Drainage"
+    },
+    {
+      "code": "22-33-00",
+      "division": "22",
+      "name": "Electric Domestic Water Heaters"
+    },
+    {
+      "code": "22-40-00",
+      "division": "22",
+      "name": "Plumbing Fixtures"
+    },
+    {
+      "code": "22-42-00",
+      "division": "22",
+      "name": "Commercial Plumbing Fixtures"
+    },
+    {
+      "code": "23-05-00",
+      "division": "23",
+      "name": "Common Work Results for HVAC"
+    },
+    {
+      "code": "23-07-00",
+      "division": "23",
+      "name": "HVAC Insulation"
+    },
+    {
+      "code": "23-09-00",
+      "division": "23",
+      "name": "Instrumentation and Control for HVAC"
+    },
+    {
+      "code": "23-21-00",
+      "division": "23",
+      "name": "Hydronic Piping and Pumps"
+    },
+    {
+      "code": "23-23-00",
+      "division": "23",
+      "name": "Refrigerant Piping"
+    },
+    {
+      "code": "23-31-00",
+      "division": "23",
+      "name": "HVAC Ducts and Casings"
+    },
+    {
+      "code": "23-31-13",
+      "division": "23",
+      "name": "Metal Ducts"
+    },
+    {
+      "code": "23-33-00",
+      "division": "23",
+      "name": "Air Duct Accessories"
+    },
+    {
+      "code": "23-34-00",
+      "division": "23",
+      "name": "HVAC Fans"
+    },
+    {
+      "code": "23-36-00",
+      "division": "23",
+      "name": "Air Terminal Units"
+    },
+    {
+      "code": "23-37-00",
+      "division": "23",
+      "name": "Air Outlets and Inlets"
+    },
+    {
+      "code": "23-52-00",
+      "division": "23",
+      "name": "Heating Boilers"
+    },
+    {
+      "code": "23-62-00",
+      "division": "23",
+      "name": "Packaged Compressor and Condenser Units"
+    },
+    {
+      "code": "23-64-00",
+      "division": "23",
+      "name": "Packaged Water Chillers"
+    },
+    {
+      "code": "23-73-00",
+      "division": "23",
+      "name": "Indoor Central-Station Air-Handling Units"
+    },
+    {
+      "code": "23-81-00",
+      "division": "23",
+      "name": "Decentralized Unitary HVAC Equipment"
+    },
+    {
+      "code": "26-05-00",
+      "division": "26",
+      "name": "Common Work Results for Electrical"
+    },
+    {
+      "code": "26-05-19",
+      "division": "26",
+      "name": "Low-Voltage Electrical Power Conductors"
+    },
+    {
+      "code": "26-05-26",
+      "division": "26",
+      "name": "Grounding and Bonding for Electrical Systems"
+    },
+    {
+      "code": "26-05-33",
+      "division": "26",
+      "name": "Raceway and Boxes for Electrical Systems"
+    },
+    {
+      "code": "26-09-00",
+      "division": "26",
+      "name": "Instrumentation and Control for Electrical Systems"
+    },
+    {
+      "code": "26-22-00",
+      "division": "26",
+      "name": "Low-Voltage Transformers"
+    },
+    {
+      "code": "26-24-00",
+      "division": "26",
+      "name": "Switchboards and Panelboards"
+    },
+    {
+      "code": "26-24-16",
+      "division": "26",
+      "name": "Panelboards"
+    },
+    {
+      "code": "26-27-00",
+      "division": "26",
+      "name": "Low-Voltage Distribution Equipment"
+    },
+    {
+      "code": "26-28-00",
+      "division": "26",
+      "name": "Low-Voltage Circuit Protective Devices"
+    },
+    {
+      "code": "26-32-00",
+      "division": "26",
+      "name": "Packaged Generator Assemblies"
+    },
+    {
+      "code": "26-41-00",
+      "division": "26",
+      "name": "Facility Lightning Protection"
+    },
+    {
+      "code": "26-51-00",
+      "division": "26",
+      "name": "Interior Lighting"
+    },
+    {
+      "code": "26-51-13",
+      "division": "26",
+      "name": "Interior Lighting Fixtures"
+    },
+    {
+      "code": "26-56-00",
+      "division": "26",
+      "name": "Exterior Lighting"
+    },
+    {
+      "code": "27-10-00",
+      "division": "27",
+      "name": "Structured Cabling"
+    },
+    {
+      "code": "27-15-00",
+      "division": "27",
+      "name": "Communications Horizontal Cabling"
+    },
+    {
+      "code": "28-13-00",
+      "division": "28",
+      "name": "Access Control"
+    },
+    {
+      "code": "28-16-00",
+      "division": "28",
+      "name": "Intrusion Detection"
+    },
+    {
+      "code": "28-23-00",
+      "division": "28",
+      "name": "Video Surveillance"
+    },
+    {
+      "code": "28-31-00",
+      "division": "28",
+      "name": "Fire Detection and Alarm"
+    },
+    {
+      "code": "31-11-00",
+      "division": "31",
+      "name": "Clearing and Grubbing"
+    },
+    {
+      "code": "31-20-00",
+      "division": "31",
+      "name": "Earth Moving"
+    },
+    {
+      "code": "31-22-00",
+      "division": "31",
+      "name": "Grading"
+    },
+    {
+      "code": "31-23-00",
+      "division": "31",
+      "name": "Excavation and Fill"
+    },
+    {
+      "code": "31-23-16",
+      "division": "31",
+      "name": "Excavation"
+    },
+    {
+      "code": "31-23-23",
+      "division": "31",
+      "name": "Fill"
+    },
+    {
+      "code": "31-25-00",
+      "division": "31",
+      "name": "Erosion and Sedimentation Controls"
+    },
+    {
+      "code": "31-32-00",
+      "division": "31",
+      "name": "Soil Stabilization"
+    },
+    {
+      "code": "31-50-00",
+      "division": "31",
+      "name": "Excavation Support and Protection"
+    },
+    {
+      "code": "31-62-00",
+      "division": "31",
+      "name": "Driven Piles"
+    },
+    {
+      "code": "31-63-00",
+      "division": "31",
+      "name": "Bored Piles"
+    },
+    {
+      "code": "32-11-00",
+      "division": "32",
+      "name": "Base Courses"
+    },
+    {
+      "code": "32-12-00",
+      "division": "32",
+      "name": "Flexible Paving"
+    },
+    {
+      "code": "32-13-00",
+      "division": "32",
+      "name": "Rigid Paving"
+    },
+    {
+      "code": "32-14-00",
+      "division": "32",
+      "name": "Unit Paving"
+    },
+    {
+      "code": "32-16-00",
+      "division": "32",
+      "name": "Curbs, Gutters, and Sidewalks"
+    },
+    {
+      "code": "32-17-00",
+      "division": "32",
+      "name": "Paving Specialties"
+    },
+    {
+      "code": "32-31-00",
+      "division": "32",
+      "name": "Fences and Gates"
+    },
+    {
+      "code": "32-84-00",
+      "division": "32",
+      "name": "Planting Irrigation"
+    },
+    {
+      "code": "32-91-00",
+      "division": "32",
+      "name": "Planting Preparation"
+    },
+    {
+      "code": "32-92-00",
+      "division": "32",
+      "name": "Turf and Grasses"
+    },
+    {
+      "code": "32-93-00",
+      "division": "32",
+      "name": "Plants"
+    },
+    {
+      "code": "33-05-00",
+      "division": "33",
+      "name": "Common Work Results for Utilities"
+    },
+    {
+      "code": "33-11-00",
+      "division": "33",
+      "name": "Water Utility Distribution Piping"
+    },
+    {
+      "code": "33-14-00",
+      "division": "33",
+      "name": "Water Utility Transmission and Distribution"
+    },
+    {
+      "code": "33-30-00",
+      "division": "33",
+      "name": "Sanitary Sewerage Utilities"
+    },
+    {
+      "code": "33-31-00",
+      "division": "33",
+      "name": "Sanitary Utility Sewerage Piping"
+    },
+    {
+      "code": "33-40-00",
+      "division": "33",
+      "name": "Stormwater Utilities"
+    },
+    {
+      "code": "33-41-00",
+      "division": "33",
+      "name": "Storm Utility Drainage Piping"
+    },
+    {
+      "code": "33-46-00",
+      "division": "33",
+      "name": "Subdrainage"
+    },
+    {
+      "code": "33-71-00",
+      "division": "33",
+      "name": "Electrical Utility Transmission and Distribution"
+    },
+    {
+      "code": "34-71-00",
+      "division": "34",
+      "name": "Roadway Construction"
+    },
+    {
+      "code": "35-20-00",
+      "division": "35",
+      "name": "Waterway Construction and Equipment"
+    },
+    {
+      "code": "40-05-00",
+      "division": "40",
+      "name": "Common Work Results for Process Interconnections"
+    },
+    {
+      "code": "41-22-00",
+      "division": "41",
+      "name": "Cranes and Hoists"
+    },
+    {
+      "code": "42-11-00",
+      "division": "42",
+      "name": "Process Boilers"
+    },
+    {
+      "code": "43-11-00",
+      "division": "43",
+      "name": "Gas Handling Equipment"
+    },
+    {
+      "code": "44-10-00",
+      "division": "44",
+      "name": "Air Pollution Control"
+    },
+    {
+      "code": "45-05-00",
+      "division": "45",
+      "name": "Common Work Results for Industry-Specific Manufacturing"
+    },
+    {
+      "code": "46-07-00",
+      "division": "46",
+      "name": "Packaged Water and Wastewater Treatment Equipment"
+    },
+    {
+      "code": "48-14-00",
+      "division": "48",
+      "name": "Solar Energy Electrical Power Generation"
+    }
   ]
 }

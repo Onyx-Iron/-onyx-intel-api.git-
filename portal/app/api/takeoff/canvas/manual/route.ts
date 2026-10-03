@@ -5,7 +5,8 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { logEvent } from "@/lib/activity";
 import { processOutboxBatch } from "@/lib/estimating/outbox-worker";
-import { calculateLinearLength, calculatePolygonArea, calculateCount, FORMULA_VERSION } from "@/lib/takeoff/canvas/quantity";
+import { quantityForMeasurement, FORMULA_VERSION } from "@/lib/takeoff/canvas/quantity";
+import { measurementUnit, storedTakeoffType } from "@/lib/takeoff/measure-kind";
 import type { Point } from "@/lib/takeoff/canvas/coordinates";
 import type { ManualTakeoffItem, ManualTakeoffUpdateBody } from "@/lib/types/takeoff";
 
@@ -79,7 +80,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const items = Array.isArray(body.items) ? body.items : [];
   if (items.length === 0) return NextResponse.json({ error: "items required" }, { status: 400 });
 
-  const validTypes = new Set(["count", "length", "area"]);
+  const validTypes = new Set(["count", "length", "area", "perimeter"]);
   for (const it of items) {
     if (!it.project_id) return NextResponse.json({ error: "each item needs project_id" }, { status: 400 });
     if (!validTypes.has(it.takeoff_type)) return NextResponse.json({ error: `invalid takeoff_type: ${it.takeoff_type}` }, { status: 400 });
@@ -164,10 +165,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const isPageSpace = geo.coordinate_space === "page_space" && Array.isArray(geo.points);
     if (calibration?.status === "verified" && calibration.page_space_scale_factor != null && isPageSpace) {
       const points = geo.points as Point[];
-      let serverQuantity: number;
-      if (it.takeoff_type === "count") serverQuantity = calculateCount(points);
-      else if (it.takeoff_type === "length") serverQuantity = calculateLinearLength(points, calibration.page_space_scale_factor);
-      else serverQuantity = calculatePolygonArea(points, calibration.page_space_scale_factor);
+      const serverQuantity = quantityForMeasurement(
+        it.takeoff_type,
+        points,
+        calibration.page_space_scale_factor,
+        typeof geo.measure === "string" ? geo.measure : null,
+      );
 
       const pctDiff = it.quantity !== 0 ? Math.abs(serverQuantity - it.quantity) / Math.abs(it.quantity) * 100 : (serverQuantity === 0 ? 0 : 100);
       if (pctDiff > QUANTITY_TOLERANCE_PCT) {
@@ -192,10 +195,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       p_page_id: it.page_id ?? null,
       p_document_id: documentId,
       p_cost_code: it.cost_code ?? null,
-      p_takeoff_type: it.takeoff_type,
+      p_takeoff_type: storedTakeoffType(it.takeoff_type),
       p_quantity: quantity,
-      p_unit: it.unit ?? (it.takeoff_type === "count" ? "EA" : it.takeoff_type === "length" ? "LF" : "SF"),
-      p_geometry: it.geometry,
+      p_unit: it.unit ?? measurementUnit(it.takeoff_type),
+      p_geometry: {
+        ...(it.geometry ?? {}),
+        ...(it.takeoff_type === "perimeter" ? { measure: "perimeter" } : {}),
+      },
       p_client_key: clientKey,
       p_actor_user_id: userId,
       p_calculation_formula_version: calculationFormulaVersion,
@@ -218,7 +224,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     results.push({
       id: row.manual_takeoff.id, client_key: clientKey, was_update: row.was_update,
-      quantity, unit: it.unit ?? (it.takeoff_type === "count" ? "EA" : it.takeoff_type === "length" ? "LF" : "SF"),
+      quantity, unit: it.unit ?? measurementUnit(it.takeoff_type),
       row_version: row.manual_takeoff.row_version,
       calculation_formula_version: calculationFormulaVersion, discrepancy_warning: discrepancyWarning, calibration_warning: calibrationWarning,
     });
@@ -387,24 +393,30 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   const anyDb = db as any;
 
   const { data: existing, error: fetchErr } = await anyDb
-    .from("manual_takeoffs").select("project_id, page_id, takeoff_type").eq("id", body.id).eq("tenant_id", tenantId).maybeSingle();
+    .from("manual_takeoffs").select("project_id, page_id, takeoff_type, geometry").eq("id", body.id).eq("tenant_id", tenantId).maybeSingle();
   if (fetchErr) return NextResponse.json({ error: fetchErr.message }, { status: 500 });
   if (!existing) return NextResponse.json({ error: "not found" }, { status: 404 });
 
   let quantity = body.quantity;
   let calculationFormulaVersion: string | null = null;
   let discrepancyWarning: string | null = null;
-  const geo = body.geometry ?? {};
+  const storedMeasure = existing.geometry && typeof existing.geometry === "object" ? (existing.geometry as { measure?: unknown }).measure : null;
+  const geo = {
+    ...(body.geometry ?? {}),
+    ...(typeof (body.geometry ?? {}).measure !== "string" && storedMeasure === "perimeter" ? { measure: "perimeter" } : {}),
+  };
   const isPageSpace = geo.coordinate_space === "page_space" && Array.isArray(geo.points);
   if (existing.page_id && isPageSpace) {
     const { data: calibration } = await anyDb
       .from("sheet_calibrations").select("page_space_scale_factor, status").eq("tenant_id", tenantId).eq("page_id", existing.page_id).maybeSingle();
     if (calibration?.status === "verified" && calibration.page_space_scale_factor != null) {
       const points = geo.points as Point[];
-      let serverQuantity: number;
-      if (existing.takeoff_type === "count") serverQuantity = calculateCount(points);
-      else if (existing.takeoff_type === "length") serverQuantity = calculateLinearLength(points, calibration.page_space_scale_factor);
-      else serverQuantity = calculatePolygonArea(points, calibration.page_space_scale_factor);
+      const serverQuantity = quantityForMeasurement(
+        existing.takeoff_type,
+        points,
+        calibration.page_space_scale_factor,
+        typeof geo.measure === "string" ? geo.measure : null,
+      );
 
       const pctDiff = body.quantity !== 0 ? Math.abs(serverQuantity - body.quantity) / Math.abs(body.quantity) * 100 : (serverQuantity === 0 ? 0 : 100);
       if (pctDiff > QUANTITY_TOLERANCE_PCT) {
@@ -419,7 +431,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     p_id: body.id,
     p_tenant_id: tenantId,
     p_expected_row_version: body.row_version,
-    p_geometry: body.geometry ?? {},
+    p_geometry: geo,
     p_quantity: quantity,
     p_unit: body.unit ?? null,
     p_cost_code: body.cost_code ?? null,

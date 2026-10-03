@@ -878,7 +878,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
                           <td className="border-b border-white/5 px-1 py-1">
                             <input value={r.unit} onChange={(e) => updateRow(i, { unit: e.target.value })} className="w-full bg-transparent px-1 py-1 text-[11px] font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
                           </td>
-                          <td className="border-b border-white/5 px-2 py-1 text-[10px] text-white/50">{source}</td>
+                          <td className="border-b border-white/5 px-2 py-1 text-[10px] text-white/50" title={r.quantity_basis ?? source}>{source}</td>
                           {showMoney && UNIT_COL_KEYS.map((k) => (
                             <td key={k} className="border-b border-white/5 px-1 py-1">
                               <input type="number" step="0.01" value={r[k]} onChange={(e) => updateRow(i, { [k]: Number(e.target.value) } as Partial<EstimateRow>)} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />

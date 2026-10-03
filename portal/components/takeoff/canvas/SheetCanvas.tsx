@@ -12,6 +12,7 @@ import type { RebarSize } from "@/lib/math/assemblies";
 import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
 import { CANVAS_HOTKEY_HINT, resolveCanvasHotkey, type CanvasTool } from "@/lib/takeoff/canvas/hotkeys";
+import { displayTakeoffTool } from "@/lib/takeoff/measure-kind";
 import { buildQuantitySummary } from "@/lib/takeoff/canvas/quantity-summary";
 import { CommandStack } from "@/lib/takeoff/canvas/command-stack";
 import TakeoffLayersPanel from "./TakeoffLayersPanel";
@@ -46,6 +47,7 @@ const SNAP_TOOLS: ReadonlySet<Tool> = new Set([
   "calibrate",
   "count",
   "length",
+  "perimeter",
   "area",
   "utility_pipe",
   "spot_elevation",
@@ -59,7 +61,7 @@ interface Shape {
   key: string;                // client-side id
   id?: string;                // server id once saved — required to PATCH an existing object
   row_version?: number;       // optimistic-concurrency version last read from the server (see update_manual_takeoff_tx)
-  tool: "count" | "length" | "area";
+  tool: "count" | "length" | "area" | "perimeter";
   points: Pt[];               // coords in `coordinateSpace` (see toDisplayPoints)
   coordinateSpace: CoordinateSpace;
   quantity: number;           // computed (count: N; length: LF; area: SF)
@@ -214,6 +216,14 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [shapes, setShapes]         = useState<Shape[]>([]);
   const [draftPoints, setDraftPoints] = useState<Pt[]>([]);   // in-progress polygon/line points
   const [calibPts, setCalibPts]     = useState<Pt[]>([]);     // during calibrate mode
+  const [scaleDraft, setScaleDraft] = useState<{ a: Pt; b: Pt } | null>(null);
+  const [knownFeet, setKnownFeet] = useState("10");
+  const [recalPreview, setRecalPreview] = useState<{
+    pointA: Pt;
+    pointB: Pt;
+    feet: number;
+    lines: Array<{ label: string; before: number; after: number; unit: string | null }>;
+  } | null>(null);
   const [loadError, setLoadError]   = useState<string | null>(null);
   const [saving, setSaving]         = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -317,20 +327,20 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         if (!cancelled) setPdfUrl(urlData.url);
 
         if (mtRes.ok) {
-          const mtData = await mtRes.json() as { items: Array<{ id: string; takeoff_type: "count" | "length" | "area"; cost_code: string | null; label?: string | null; layer_id?: string | null; quantity: number; unit: string | null; row_version?: number; geometry: { points?: Pt[]; coordinate_space?: string; label?: string; assembly_key?: string } }> };
+          const mtData = await mtRes.json() as { items: Array<{ id: string; takeoff_type: "count" | "length" | "area"; cost_code: string | null; label?: string | null; layer_id?: string | null; quantity: number; unit: string | null; row_version?: number; geometry: { points?: Pt[]; coordinate_space?: string; label?: string; assembly_key?: string; measure?: string } }> };
           if (!cancelled) {
             setShapes(mtData.items.map((it) => ({
               key: `saved-${it.id}`,
               id: it.id,
               row_version: it.row_version ?? 1,
-              tool: it.takeoff_type,
+              tool: displayTakeoffTool(it.takeoff_type, it.geometry?.measure),
               points: Array.isArray(it.geometry?.points) ? it.geometry.points : [],
               // Absent/unrecognized tag → 'legacy_pixel' (rows saved before
               // this milestone) — never assumed to be page_space, so old
               // geometry keeps rendering exactly as it always has.
               coordinateSpace: (it.geometry?.coordinate_space === "page_space" ? "page_space" : "legacy_pixel") as CoordinateSpace,
               quantity: Number(it.quantity),
-              unit: (it.unit ?? (it.takeoff_type === "count" ? "EA" : it.takeoff_type === "length" ? "LF" : "SF")) as Shape["unit"],
+              unit: (it.unit ?? (it.takeoff_type === "count" ? "EA" : it.takeoff_type === "area" ? "SF" : "LF")) as Shape["unit"],
               cost_code: it.cost_code ?? undefined,
               label: it.label ?? it.geometry?.label ?? undefined,
               layer_id: it.layer_id ?? null,
@@ -671,6 +681,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const draftQuantity = useMemo(() => {
     if (draftPoints.length === 0) return 0;
     if (tool === "length") return totalLen(draftPoints) * scale;
+    if (tool === "perimeter" && draftPoints.length >= 2) return (totalLen(draftPoints) + pixelDistance(draftPoints[draftPoints.length - 1], draftPoints[0])) * scale;
     if (tool === "area")   return polygonArea(draftPoints) * scale * scale;
     return 0;
   }, [draftPoints, tool, scale]);
@@ -718,21 +729,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (tool === "calibrate") {
       const next = [...calibPts, p];
       if (next.length === 2) {
-        const raw = window.prompt("Enter the real-world distance between the two clicks (feet):", "10");
-        if (raw != null) {
-          const feet = Number(raw);
-          if (Number.isFinite(feet) && feet > 0) {
-            const px = pixelDistance(next[0], next[1]);
-            // Convert the two CURRENT-render-pixel click points to page
-            // space before sending — the server computes and stores
-            // page_space_scale_factor from these page-space points itself,
-            // never from a render-pixel ratio (STEP 2: never fabricate
-            // calibration from current_render_pixels * historical scale).
-            if (px > 0) saveCalibration(toPageSpace(next[0], renderScale), toPageSpace(next[1], renderScale), feet);
-          }
-        }
+        setScaleDraft({ a: next[0], b: next[1] });
         setCalibPts([]);
-        setTool("pan");
       } else {
         setCalibPts(next);
       }
@@ -906,6 +904,17 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         points: draftPoints,
         coordinateSpace: "legacy_pixel",
         quantity,
+        unit: "LF",
+        layer_id: activeLayerId,
+      }]);
+    } else if (tool === "perimeter" && draftPoints.length >= 3) {
+      const closed = totalLen(draftPoints) + pixelDistance(draftPoints[draftPoints.length - 1], draftPoints[0]);
+      setShapes((prev) => [...prev, {
+        key: `p-${Date.now()}`,
+        tool: "perimeter",
+        points: draftPoints,
+        coordinateSpace: "legacy_pixel",
+        quantity: closed * scale,
         unit: "LF",
         layer_id: activeLayerId,
       }]);
@@ -1156,14 +1165,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         preview?: Array<{ label: string; before: number; after: number; unit: string | null; recomputed: boolean }>;
       };
       if (pending.requires_confirmation && pending.preview) {
-        const lines = pending.preview
-          .filter((line) => line.recomputed)
-          .map((line) => `${line.label}: ${line.before} → ${line.after} ${line.unit ?? ""}`.trim())
-          .join("\n");
-        const accepted = window.confirm(
-          `This scale change updates draft measurements on this sheet:\n\n${lines}\n\nApproved estimate versions stay unchanged. Apply these quantities?`,
-        );
-        if (accepted) await saveCalibration(pointA, pointB, knownDistanceFt, true);
+        setRecalPreview({
+          pointA,
+          pointB,
+          feet: knownDistanceFt,
+          lines: pending.preview.filter((line) => line.recomputed),
+        });
         return;
       }
     }
@@ -1230,7 +1237,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }, [tool]);
 
   const beginVertexDrag = useCallback((e: React.MouseEvent, s: Shape, vertexIndex: number) => {
-    if (tool !== "pan" || (s.tool !== "length" && s.tool !== "area")) return;
+    if (tool !== "pan" || (s.tool !== "length" && s.tool !== "area" && s.tool !== "perimeter")) return;
     e.stopPropagation();
     e.preventDefault();
     setSelectedKey(s.key);
@@ -1248,6 +1255,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     const display = toDisplayPoints(pts, coordinateSpace);
     if (toolKind === "count") return display.length || 1;
     if (toolKind === "length") return totalLen(display) * scale;
+    if (toolKind === "perimeter" && display.length >= 2) {
+      return (totalLen(display) + pixelDistance(display[display.length - 1], display[0])) * scale;
+    }
     return polygonArea(display) * scale * scale;
   }, [toDisplayPoints, scale]);
 
@@ -1267,7 +1277,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       body: JSON.stringify({
         id: s.id, row_version: drag.originalRowVersion,
         quantity: s.quantity, unit: s.unit, cost_code: s.cost_code || null,
-        geometry: { points: s.points, coordinate_space: "page_space", label: s.label, assembly_key: s.assembly_key },
+        geometry: { points: s.points, coordinate_space: "page_space", label: s.label, assembly_key: s.assembly_key, ...(s.tool === "perimeter" ? { measure: "perimeter" } : {}) },
       }),
     });
 
@@ -1319,7 +1329,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           body: JSON.stringify({
             id: cur.id, row_version: cur.row_version,
             quantity: cur.quantity, unit: cur.unit, cost_code: cur.cost_code || null,
-            geometry: { points: previousPoints, coordinate_space: "page_space", label: cur.label },
+            geometry: { points: previousPoints, coordinate_space: "page_space", label: cur.label, ...(cur.tool === "perimeter" ? { measure: "perimeter" } : {}) },
           }),
         });
         if (undoRes.ok) {
@@ -1342,7 +1352,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           body: JSON.stringify({
             id: cur.id, row_version: cur.row_version,
             quantity: cur.quantity, unit: cur.unit, cost_code: cur.cost_code || null,
-            geometry: { points: nextPoints, coordinate_space: "page_space", label: cur.label },
+            geometry: { points: nextPoints, coordinate_space: "page_space", label: cur.label, ...(cur.tool === "perimeter" ? { measure: "perimeter" } : {}) },
           }),
         });
         if (redoRes.ok) {
@@ -1393,7 +1403,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         quantity,
         unit: s.unit,
         cost_code: s.cost_code || null,
-        geometry: { points: s.points, coordinate_space: s.coordinateSpace === "page_space" ? "page_space" : "page_space", label: s.label, assembly_key: s.assembly_key },
+        geometry: { points: s.points, coordinate_space: "page_space", label: s.label, assembly_key: s.assembly_key, ...(s.tool === "perimeter" ? { measure: "perimeter" } : {}) },
       }),
     });
     if (!res.ok) {
@@ -1512,7 +1522,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           project_id: projectId,
           page_id: pageId,
           cost_code: s.cost_code || null,
-          takeoff_type: s.tool,
+          takeoff_type: s.tool === "perimeter" ? "perimeter" : s.tool,
           quantity: Number(s.quantity.toFixed(3)),
           unit: s.unit,
           client_key: s.key,
@@ -1523,6 +1533,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             page_number: pageNumber,
             label: s.label,
             assembly_key: s.assembly_key,
+            ...(s.tool === "perimeter" ? { measure: "perimeter" } : {}),
           },
         }));
         manualSaveRequest = fetch("/api/takeoff/canvas/manual", {
@@ -1789,7 +1800,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           {/* Tool switcher */}
           <div className="flex flex-col items-end gap-1">
             <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] p-1">
-              {(["pan", "calibrate", "count", "length", "area", "utility_pipe", "spot_elevation", "contour_line", "civil_area_bounds"] as Tool[]).map((t) => (
+              {(["pan", "calibrate", "count", "length", "perimeter", "area", "utility_pipe", "spot_elevation", "contour_line", "civil_area_bounds"] as Tool[]).map((t) => (
                 <button
                   key={t}
                   type="button"
@@ -1839,12 +1850,6 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 <button
                   type="button"
                   onClick={() => {
-                    // Existing saved measurements each store their OWN
-                    // computed quantity independently — recalibrating never
-                    // retroactively changes them (approved quantities can
-                    // never silently change, STEP 5). It only changes what
-                    // scale NEW draws use going forward, so the confirmation
-                    // here is about that distinction, not a batch recompute.
                     selectTool("calibrate");
                   }}
                   className="rounded-full border border-white/10 px-2 py-0.5 text-white/60 hover:text-white hover:bg-white/[0.06] normal-case tracking-normal"
@@ -1859,6 +1864,57 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         </div>
 
         {/* Context bar: topo auto-match toggle + area-bounds boundary config */}
+        {scaleDraft && (
+          <form
+            className="flex flex-wrap items-center gap-2 border-t border-white/5 bg-white/[0.02] px-4 py-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const feet = Number(knownFeet);
+              if (!Number.isFinite(feet) || feet <= 0) return;
+              const pageA = toPageSpace(scaleDraft.a, renderScale);
+              const pageB = toPageSpace(scaleDraft.b, renderScale);
+              void saveCalibration(pageA, pageB, feet);
+              setScaleDraft(null);
+              setTool("pan");
+            }}
+          >
+            <span className="text-[10px] uppercase tracking-widest text-white/60">Known distance between the two points</span>
+            <input
+              value={knownFeet}
+              onChange={(event) => setKnownFeet(event.target.value)}
+              inputMode="decimal"
+              className="h-8 w-24 rounded border border-white/15 bg-black/40 px-2 text-xs text-white"
+              aria-label="Known distance in feet"
+            />
+            <span className="text-[10px] uppercase tracking-widest text-white/40">feet</span>
+            <button type="submit" className="h-8 rounded-full bg-[#CCFF00] px-3 text-[10px] font-bold uppercase tracking-widest text-black">Set scale</button>
+            <button type="button" onClick={() => setScaleDraft(null)} className="text-[10px] uppercase tracking-widest text-white/40">Cancel</button>
+          </form>
+        )}
+        {recalPreview && (
+          <div className="border-t border-amber-400/30 bg-amber-400/10 px-4 py-3 text-[11px] text-white/80">
+            <p className="font-semibold text-amber-200">Draft quantities will change. Approved estimate versions stay unchanged.</p>
+            <ul className="mt-2 space-y-1 font-mono">
+              {recalPreview.lines.map((line) => (
+                <li key={`${line.label}-${line.before}`}>{line.label}: {line.before} → {line.after} {line.unit ?? ""}</li>
+              ))}
+            </ul>
+            <div className="mt-2 flex gap-2">
+              <button
+                type="button"
+                className="h-8 rounded-full bg-[#CCFF00] px-3 text-[10px] font-bold uppercase tracking-widest text-black"
+                onClick={() => {
+                  const pending = recalPreview;
+                  setRecalPreview(null);
+                  void saveCalibration(pending.pointA, pending.pointB, pending.feet, true);
+                }}
+              >
+                Apply quantities
+              </button>
+              <button type="button" className="text-[10px] uppercase tracking-widest text-white/50" onClick={() => setRecalPreview(null)}>Keep the current scale</button>
+            </div>
+          </div>
+        )}
         {(tool === "contour_line" || tool === "spot_elevation") && (
           <div className="flex items-center gap-3 border-t border-white/5 bg-white/[0.02] px-4 py-2">
             <label className="flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono text-white/60">

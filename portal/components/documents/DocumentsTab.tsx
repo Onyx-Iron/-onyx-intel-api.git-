@@ -87,17 +87,6 @@ const STATUS_STYLES: Record<string, string> = {
   failed:                "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
 };
 
-const DOC_TYPE_STYLES: Record<string, string> = {
-  drawing:   "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
-  spec:      "bg-purple-500/10 text-purple-400 border-purple-500/20",
-  rfi:       "bg-orange-500/10 text-orange-400 border-orange-500/20",
-  submittal: "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
-  report:    "bg-sky-500/10 text-sky-300 border-sky-500/20",
-  contract:  "bg-emerald-500/10 text-emerald-300 border-emerald-500/20",
-  correspondence: "bg-pink-500/10 text-pink-300 border-pink-500/20",
-  other:     "bg-white/5 text-gray-500 border-white/10",
-};
-
 function FileIcon({ name }: { name: string }) {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   const color =
@@ -609,13 +598,25 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                         </div>
                       </td>
                       <td className="px-4 py-3">
-                        {doc.doc_type ? (
-                          <span className={`inline-flex items-center px-2 py-0.5 rounded border text-[9px] font-bold tracking-widest uppercase ${DOC_TYPE_STYLES[doc.doc_type] ?? DOC_TYPE_STYLES.other}`}>
-                            {doc.doc_type}
-                          </span>
-                        ) : (
-                          <span className="text-gray-700 text-[10px]">—</span>
-                        )}
+                        <select
+                          value={doc.doc_type ?? ""}
+                          aria-label={`Class for ${doc.file_name}`}
+                          onChange={(event) => {
+                            const docType = event.target.value;
+                            setDocuments((prev) => prev.map((row) => row.id === doc.id ? { ...row, doc_type: docType as DocType } : row));
+                            void fetch(`/api/documents/${encodeURIComponent(doc.id)}/classify`, {
+                              method: "PATCH",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ doc_type: docType }),
+                            }).then((res) => {
+                              if (!res.ok) void loadDocuments(false);
+                            });
+                          }}
+                          className="rounded border border-white/10 bg-black/30 px-1 py-1 text-[10px] uppercase tracking-widest text-white/70"
+                        >
+                          {doc.doc_type == null && <option value="">unset</option>}
+                          {DOCUMENT_CLASSES.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
+                        </select>
                       </td>
                       <td className="px-4 py-3">
                         <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded border text-[9px] font-bold tracking-widest uppercase ${STATUS_STYLES[statusKey]}`}>

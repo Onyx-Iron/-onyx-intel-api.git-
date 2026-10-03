@@ -7,9 +7,11 @@ import {
   partialWasAcknowledged,
   plainLanguageError,
   processingStage,
+  processingStall,
   takeoffBlockReason,
   type ProcessingStage,
 } from "@/lib/documents/processing-display";
+import { buildPageLedger, ledgerCounts } from "@/lib/documents/page-ledger";
 
 interface ProcessingDoc {
   id: string;
@@ -22,6 +24,7 @@ interface ProcessingDoc {
   page_count?: number | null;
   last_error?: string | null;
   last_error_step?: string | null;
+  uploaded_at?: string | null;
   meta?: Record<string, unknown> | null;
 }
 
@@ -41,6 +44,8 @@ export default function DocumentProcessingPanel({ projectId }: { projectId: stri
   const [passwords, setPasswords] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [openDocId, setOpenDocId] = useState<string | null>(null);
+  const [pageNumbers, setPageNumbers] = useState<Record<string, number[]>>({});
 
   const load = useCallback(async () => {
     const res = await fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}&limit=200`, { cache: "no-store" });
@@ -120,15 +125,32 @@ export default function DocumentProcessingPanel({ projectId }: { projectId: stri
           {docs.map((doc) => {
             const stage = processingStage(doc);
             const error = plainLanguageError(doc.last_error, doc.last_error_step);
+            const stall = processingStall(doc);
             const missing = listedMissingPages(doc);
             const block = takeoffBlockReason(doc);
             const needsPassword = stage === "Failed" && isPasswordRequired(doc.last_error);
+            const loadedPages = pageNumbers[doc.id];
+            const ledger = loadedPages
+              ? buildPageLedger({
+                  pageCount: doc.page_count,
+                  pages: loadedPages.map((pageNumber) => ({ pageNumber })),
+                  missingPageNumbers: missing,
+                })
+              : [];
+            const counts = ledgerCounts(ledger);
             return (
-              <li key={doc.id} className="flex flex-wrap items-start justify-between gap-3 px-4 py-3">
+              <li key={doc.id} className="px-4 py-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="truncate text-xs text-white">{doc.file_name}</div>
                   <div className={`mt-1 text-[10px] font-bold uppercase tracking-widest ${STAGE_TONE[stage]}`}>{stage}</div>
+                  {stall && <p className="mt-1 max-w-xl text-[11px] text-[#F5A623]">{stall}</p>}
                   {error && stage !== "Complete" && <p className="mt-1 max-w-xl text-[11px] text-white/60">{error}</p>}
+                  {ledger.length > 0 && (
+                    <p className="mt-1 text-[11px] text-white/45">
+                      {counts.parsed} parsed · {counts.failed} failed · {counts.missing} missing · {counts.unread} unread
+                    </p>
+                  )}
                   {missing.length > 0 && <p className="mt-1 text-[11px] text-[#F5A623]">Missing pages: {missing.join(", ")}</p>}
                   {block && <p className="mt-1 text-[11px] text-white/45">{block}</p>}
                   {needsPassword && (
@@ -163,7 +185,38 @@ export default function DocumentProcessingPanel({ projectId }: { projectId: stri
                       {busyId === doc.id ? "Retrying…" : "Retry"}
                     </button>
                   )}
+                  <button
+                    type="button"
+                    className="text-[10px] uppercase tracking-widest text-white/40"
+                    onClick={() => {
+                      const next = openDocId === doc.id ? null : doc.id;
+                      setOpenDocId(next);
+                      if (next && !pageNumbers[doc.id]) {
+                        void fetch(`/api/documents/${encodeURIComponent(doc.id)}/pages`)
+                          .then((res) => res.json())
+                          .then((data: { pages?: Array<{ page_number: number }> }) => {
+                            setPageNumbers((prev) => ({
+                              ...prev,
+                              [doc.id]: (data.pages ?? []).map((page) => page.page_number),
+                            }));
+                          })
+                          .catch(() => undefined);
+                      }
+                    }}
+                  >
+                    {openDocId === doc.id ? "Hide pages" : "Pages"}
+                  </button>
                 </div>
+                </div>
+                {openDocId === doc.id && ledger.length > 0 && (
+                  <ul className="mt-2 grid grid-cols-2 gap-1 sm:grid-cols-4">
+                    {ledger.slice(0, 40).map((page) => (
+                      <li key={page.pageNumber} className="rounded border border-white/5 px-2 py-1 text-[10px] text-white/60" title={page.detail ?? ""}>
+                        p.{page.pageNumber} · {page.outcome}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </li>
             );
           })}

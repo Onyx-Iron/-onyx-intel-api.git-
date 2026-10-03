@@ -35,6 +35,7 @@ export interface ProcessingDocument {
   page_count?: number | null;
   last_error?: string | null;
   last_error_step?: string | null;
+  uploaded_at?: string | null;
   meta?: Record<string, unknown> | null;
 }
 
@@ -155,6 +156,19 @@ export function takeoffBlockReason(doc: ProcessingDocument): string | null {
     return `This file is still ${stage.toLowerCase()}. Takeoff opens when processing finishes.`;
   }
   return null;
+}
+
+const STALL_MS = 5 * 60 * 1000;
+
+/** An in-flight file that has not finished within five minutes of upload. */
+export function processingStall(doc: ProcessingDocument, nowMs: number = Date.now()): string | null {
+  const stage = processingStage(doc);
+  if (stage === "Complete" || stage === "Partial" || stage === "Failed") return null;
+  if (!doc.uploaded_at) return null;
+  const uploaded = Date.parse(doc.uploaded_at);
+  if (!Number.isFinite(uploaded)) return null;
+  if (nowMs - uploaded < STALL_MS) return null;
+  return `This file has been ${stage.toLowerCase()} for more than 5 minutes. Retry it.`;
 }
 
 export function pdfDeclaresEncryption(bytes: Uint8Array): boolean {
