@@ -52,6 +52,9 @@ function requestToken(prompt: "consent" | ""): Promise<string | null> {
     const tc = oauth2.initTokenClient({
       client_id: CLIENT_ID,
       scope: GOOGLE_SCOPES,
+      // Do not pull in unrelated prior grants on this OAuth client (YouTube,
+      // Analytics, etc.) — Google rejects those when mixed with Drive scopes.
+      include_granted_scopes: false,
       callback: (resp) => {
         if (resp.access_token) { store(resp.access_token, resp.expires_in ?? 3600); resolve(resp.access_token); }
         else resolve(null);

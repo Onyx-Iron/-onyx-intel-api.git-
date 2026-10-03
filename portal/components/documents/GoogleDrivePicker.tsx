@@ -89,7 +89,7 @@ export default function GoogleDrivePicker({ onFilesSelected, disabled, children 
 
     picker.setVisible(true);
     setLoading(false);
-  }, []);
+  }, [toast]);
 
   const requestToken = useCallback(() => {
     if (!tokenClientRef.current) {
@@ -103,6 +103,11 @@ export default function GoogleDrivePicker({ onFilesSelected, disabled, children 
       tokenClientRef.current = oauth2.initTokenClient({
         client_id: CLIENT_ID,
         scope: SCOPES,
+        // GIS defaults include_granted_scopes to true. That merges prior grants on
+        // this OAuth client (e.g. YouTube analytics) into the request, and Google
+        // rejects the combo with drive.file as invalid_request. Keep Drive picker
+        // scoped to drive.file only.
+        include_granted_scopes: false,
         callback: (resp) => {
           if (resp.access_token) {
             accessTokenRef.current = resp.access_token;
@@ -123,7 +128,7 @@ export default function GoogleDrivePicker({ onFilesSelected, disabled, children 
       });
     }
     tokenClientRef.current?.requestAccessToken();
-  }, [openPicker]);
+  }, [openPicker, toast]);
 
   // Preload Google's scripts on mount. The OAuth popup must open synchronously
   // inside the click event — if we instead load scripts on click and open the
@@ -153,7 +158,7 @@ export default function GoogleDrivePicker({ onFilesSelected, disabled, children 
     // Request the token NOW, synchronously, so the sign-in popup isn't blocked.
     setLoading(true);
     requestToken();
-  }, [disabled, loading, openPicker, requestToken]);
+  }, [disabled, loading, openPicker, requestToken, toast]);
 
   return (
     <div onClick={handleClick} className="contents cursor-pointer">

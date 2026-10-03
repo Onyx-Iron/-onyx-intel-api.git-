@@ -44,6 +44,8 @@ function getToken(): Promise<string> {
     const tokenClient: TokenClient = oauth2.initTokenClient({
       client_id: CLIENT_ID,
       scope: SCOPE,
+      // Avoid merging incompatible prior grants (e.g. YouTube) into drive.file.
+      include_granted_scopes: false,
       callback: (resp: { access_token?: string; error?: string }) => {
         if (resp.access_token) resolve(resp.access_token);
         else reject(new Error(resp.error ?? "Authorization failed"));
