@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 import { assertVersionEditable, getServiceDb, loadVersionForTenant, NotFoundError, VersionLockedError } from "@/lib/estimating/versioning";
-import { applyVersionPercentages, calculateEstimateTotals, calculateItem } from "@/lib/estimating/calculations";
+import { applyVersionPercentages, calculateItem, totalsFromStoredItems } from "@/lib/estimating/calculations";
 import { recordEstimateAudit, recordEstimateAuditBatch } from "@/lib/estimating/audit";
 
 export const runtime = "nodejs";
@@ -71,18 +71,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     .order("created_at", { ascending: true });
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  const totals = calculateEstimateTotals(
-    (items ?? []).map((it: Record<string, unknown>) => ({
-      totalDirectCost: it.total_direct_cost as number,
-      indirectCost: it.indirect_cost as number,
-      contingency: it.contingency as number,
-      overhead: it.overhead as number,
-      profit: it.profit as number,
-      totalPrice: it.total_price as number,
-      isAlternate: it.is_alternate as boolean,
-      alternateAccepted: it.alternate_accepted as boolean,
-    })),
-  );
+  const totals = totalsFromStoredItems(items ?? []);
 
   return NextResponse.json({ version, items: items ?? [], totals });
 }
@@ -239,18 +228,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     };
   }));
 
-  const totals = calculateEstimateTotals(
-    (data ?? []).map((it: Record<string, unknown>) => ({
-      totalDirectCost: it.total_direct_cost as number,
-      indirectCost: it.indirect_cost as number,
-      contingency: it.contingency as number,
-      overhead: it.overhead as number,
-      profit: it.profit as number,
-      totalPrice: it.total_price as number,
-      isAlternate: it.is_alternate as boolean,
-      alternateAccepted: it.alternate_accepted as boolean,
-    })),
-  );
+  const totals = totalsFromStoredItems(data ?? []);
 
   return NextResponse.json({ items: data ?? [], totals, version: effectiveVersion });
 }
@@ -261,18 +239,7 @@ async function getVersionTotals(db: any, versionId: string) {
     .from("estimate_items")
     .select("total_direct_cost, indirect_cost, contingency, overhead, profit, total_price, is_alternate, alternate_accepted")
     .eq("estimate_version_id", versionId);
-  return calculateEstimateTotals(
-    (items ?? []).map((it: Record<string, unknown>) => ({
-      totalDirectCost: it.total_direct_cost as number,
-      indirectCost: it.indirect_cost as number,
-      contingency: it.contingency as number,
-      overhead: it.overhead as number,
-      profit: it.profit as number,
-      totalPrice: it.total_price as number,
-      isAlternate: it.is_alternate as boolean,
-      alternateAccepted: it.alternate_accepted as boolean,
-    })),
-  );
+  return totalsFromStoredItems(items ?? []);
 }
 
 /**

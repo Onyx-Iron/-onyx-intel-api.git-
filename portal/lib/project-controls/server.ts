@@ -1,5 +1,6 @@
 import { createServiceClient } from "@/lib/supabase/server";
 import { seedStarterCostCatalog } from "@/lib/cost/starter-catalog";
+import { coalesceAsync } from "@/lib/project-controls/tenant-cache";
 
 interface QueryError {
   message: string;
@@ -29,29 +30,39 @@ export interface ControlDb {
   from<T>(table: string): ControlQuery<T>;
 }
 
+const tenantIds = new Map<string, string>();
+const tenantLookups = new Map<string, Promise<string>>();
+
+export function clearTenantCache(): void {
+  tenantIds.clear();
+  tenantLookups.clear();
+}
+
 export async function getOrCreateTenant(orgId: string, orgName: string): Promise<string> {
-  const db = await createServiceClient();
-  const { data } = await db.from("tenants").select("id").eq("clerk_org_id", orgId).single();
-  if (data?.id) return data.id;
+  return coalesceAsync(tenantIds, tenantLookups, orgId, async () => {
+    const db = await createServiceClient();
+    const { data } = await db.from("tenants").select("id").eq("clerk_org_id", orgId).single();
+    if (data?.id) return data.id;
 
-  const { data: created, error } = await db
-    .from("tenants")
-    .insert({ clerk_org_id: orgId, name: orgName })
-    .select("id")
-    .single();
+    const { data: created, error } = await db
+      .from("tenants")
+      .insert({ clerk_org_id: orgId, name: orgName })
+      .select("id")
+      .single();
 
-  if (error || !created) throw new Error(`[tenant] ${error?.message ?? "create failed"}`);
+    if (error || !created) throw new Error(`[tenant] ${error?.message ?? "create failed"}`);
 
-  // Auto-seed starter cost rates so a brand-new tenant never silently sits
-  // with an empty cost_catalog until someone manually finds and clicks
-  // "Seed starter rates" — same failure mode the (now-seeded) global
-  // cost_codes catalog had. Best-effort: a seeding failure shouldn't block
-  // tenant creation.
-  void seedStarterCostCatalog(db, created.id).catch((e) =>
-    console.error("[getOrCreateTenant] starter catalog seed failed", e),
-  );
+    // Auto-seed starter cost rates so a brand-new tenant never silently sits
+    // with an empty cost_catalog until someone manually finds and clicks
+    // "Seed starter rates" — same failure mode the (now-seeded) global
+    // cost_codes catalog had. Best-effort: a seeding failure shouldn't block
+    // tenant creation.
+    void seedStarterCostCatalog(db, created.id).catch((e) =>
+      console.error("[getOrCreateTenant] starter catalog seed failed", e),
+    );
 
-  return created.id;
+    return created.id;
+  });
 }
 
 export async function getControlDb(): Promise<ControlDb> {

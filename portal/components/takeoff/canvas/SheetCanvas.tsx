@@ -8,6 +8,7 @@ import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { pointsToPageSpace, pointsToScreenSpace, samePoints, toPageSpace, translateStoredPoints } from "@/lib/takeoff/canvas/coordinates";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
+import { matchingSheetBitmap, rememberSheetBitmap, sheetRenderScale } from "@/lib/takeoff/canvas/sheet-bitmap-cache";
 import { markPageVectorScanDone, pageVectorScanDone } from "@/lib/takeoff/canvas/vector-scan-cache";
 import { useConfirm } from "@/components/common/ConfirmDialog";
 
@@ -325,24 +326,30 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     let cancelled = false;
     (async () => {
       try {
-        const [urlRes, calRes, mtRes, utRes, topoRes, areaRes] = await Promise.all([
-          fetch(`/api/takeoff/canvas/page-url?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
-          fetch(`/api/takeoff/canvas/calibration?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
-          fetch(`/api/takeoff/canvas/manual?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}&include_deleted=1`, { cache: "no-store" }),
-          fetch(`/api/takeoff/canvas/utility?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
-          fetch(`/api/takeoff/canvas/topo?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
-          fetch(`/api/takeoff/canvas/area-bounds?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" }),
-        ]);
-        if (!urlRes.ok) throw new Error(`page-url ${urlRes.status}`);
-        const urlData = await urlRes.json() as { url: string };
-        if (!cancelled) setPdfUrl(urlData.url);
+        const sheetRes = await fetch(`/api/takeoff/canvas/sheet?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
+        if (!sheetRes.ok) throw new Error(`sheet ${sheetRes.status}`);
+        const sheet = await sheetRes.json() as {
+          url: string;
+          calibration: Calibration | null;
+          manual: { items: Array<{ id: string; deleted_at?: string | null; takeoff_type: "count" | "length" | "area"; cost_code: string | null; quantity: number; unit: string | null; row_version?: number; geometry: { points?: Pt[]; coordinate_space?: string } }> };
+          utility: { items: Array<{
+            id: string; system_type: string; pipe_diameter_in: number;
+            invert_elevation_start: number | null; invert_elevation_end: number | null;
+            trench_width_ft: number; run_length_lf: number;
+            cost_code: string | null; geometry: { points?: Pt[]; coordinate_space?: string } | null;
+            computed_trench_json: { trench_excavation_bcy?: number; common_backfill_cy?: number; totals?: { aggregate_import_cy?: number } } | null;
+          }> };
+          topo: { items: Array<{ id: string; node_type: "contour_line" | "spot_elevation"; elevation: number; layer_assignment: string | null; geometry: { points?: Pt[]; coordinate_space?: string } | null }> };
+          area_bounds: { items: Array<{
+            id: string; boundary_kind: BoundaryKind; area_sf: number; stripping_depth_in: number | null;
+            excavation_volume_cy: number | null; target_cost_code: string | null; boundary_geometry: { points?: Pt[]; coordinate_space?: string } | null;
+          }> };
+        };
+        if (!cancelled) setPdfUrl(sheet.url);
+        if (!cancelled) setCalibration(sheet.calibration);
 
-        if (calRes.ok) {
-          const calData = await calRes.json() as { calibration: Calibration | null };
-          if (!cancelled) setCalibration(calData.calibration);
-        }
-        if (mtRes.ok) {
-          const mtData = await mtRes.json() as { items: Array<{ id: string; deleted_at?: string | null; takeoff_type: "count" | "length" | "area"; cost_code: string | null; quantity: number; unit: string | null; row_version?: number; geometry: { points?: Pt[]; coordinate_space?: string } }> };
+        {
+          const mtData = sheet.manual;
           if (!cancelled) {
             setDeletedTakeoffs(mtData.items.filter((it) => it.deleted_at).map((it) => ({ id: it.id, quantity: it.quantity, unit: it.unit, takeoff_type: it.takeoff_type })));
             setShapes(mtData.items.filter((it) => !it.deleted_at).map((it) => ({
@@ -362,15 +369,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             })).filter((s, i, arr) => arr.findIndex((x) => x.key === s.key) === i)); // dedupe by key
           }
         }
-        if (utRes.ok) {
-          type SavedUtilityRow = {
-            id: string; system_type: string; pipe_diameter_in: number;
-            invert_elevation_start: number | null; invert_elevation_end: number | null;
-            trench_width_ft: number; run_length_lf: number;
-            cost_code: string | null; geometry: { points?: Pt[]; coordinate_space?: string } | null;
-            computed_trench_json: { trench_excavation_bcy?: number; common_backfill_cy?: number; totals?: { aggregate_import_cy?: number } } | null;
-          };
-          const utData = await utRes.json() as { items: SavedUtilityRow[] };
+        {
+          const utData = sheet.utility;
           if (!cancelled) {
             setUtilityRuns(utData.items.map((it) => ({
               key: `saved-${it.id}`,
@@ -395,9 +395,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             })));
           }
         }
-        if (topoRes.ok) {
-          type SavedTopoRow = { id: string; node_type: "contour_line" | "spot_elevation"; elevation: number; layer_assignment: string | null; geometry: { points?: Pt[]; coordinate_space?: string } | null };
-          const topoData = await topoRes.json() as { items: SavedTopoRow[] };
+        {
+          const topoData = sheet.topo;
           if (!cancelled) {
             setTopoNodes(topoData.items.map((it) => ({
               key: `saved-${it.id}`, id: it.id, node_type: it.node_type,
@@ -409,12 +408,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             })));
           }
         }
-        if (areaRes.ok) {
-          type SavedAreaRow = {
-            id: string; boundary_kind: BoundaryKind; area_sf: number; stripping_depth_in: number | null;
-            excavation_volume_cy: number | null; target_cost_code: string | null; boundary_geometry: { points?: Pt[]; coordinate_space?: string } | null;
-          };
-          const areaData = await areaRes.json() as { items: SavedAreaRow[] };
+        {
+          const areaData = sheet.area_bounds;
           if (!cancelled) {
             setAreaBounds(areaData.items.map((it) => ({
               key: `saved-${it.id}`, id: it.id,
@@ -449,6 +444,23 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     let cleaned = false;
     (async () => {
       try {
+        const containerWidth = wrapRef.current?.clientWidth ?? 1200;
+        const cached = matchingSheetBitmap<ImageBitmap>(pageId, containerWidth);
+        const cvs = canvasRef.current;
+        if (!cvs || cancelled) return;
+        const ctx = cvs.getContext("2d");
+        if (!ctx) return;
+        if (cached) {
+          cvs.width = cached.bitmap.width;
+          cvs.height = cached.bitmap.height;
+          ctx.drawImage(cached.bitmap, 0, 0);
+          if (!cancelled) {
+            setRenderSize({ w: cached.bitmap.width, h: cached.bitmap.height });
+            setRenderScale(cached.scale);
+          }
+          if (pageVectorScanDone(pageId)) return;
+        }
+
         const pdfjs = await import("pdfjs-dist");
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (pdfjs as any).GlobalWorkerOptions.workerSrc = new URL(
@@ -459,21 +471,21 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         // Split plan sets store one sheet per file. Always paint page 1 of that file.
         const page = await doc.getPage(1);
 
-        const containerWidth = wrapRef.current?.clientWidth ?? 1200;
         const viewport1 = page.getViewport({ scale: 1 });
-        const scale = Math.min(2.5, Math.max(0.5, (containerWidth - 380) / viewport1.width));
-        const viewport = page.getViewport({ scale });
-
-        const cvs = canvasRef.current;
-        if (!cvs || cancelled) return;
-        cvs.width = viewport.width;
-        cvs.height = viewport.height;
-        const ctx = cvs.getContext("2d");
-        if (!ctx) return;
-        await page.render({ canvas: cvs, canvasContext: ctx, viewport }).promise;
-        if (!cancelled) {
-          setRenderSize({ w: viewport.width, h: viewport.height });
-          setRenderScale(scale);
+        const scale = sheetRenderScale(containerWidth, viewport1.width);
+        if (!cached) {
+          const viewport = page.getViewport({ scale });
+          cvs.width = viewport.width;
+          cvs.height = viewport.height;
+          await page.render({ canvas: cvs, canvasContext: ctx, viewport }).promise;
+          if (!cancelled) {
+            setRenderSize({ w: viewport.width, h: viewport.height });
+            setRenderScale(scale);
+          }
+          if (typeof createImageBitmap === "function") {
+            const bitmap = await createImageBitmap(cvs);
+            rememberSheetBitmap(pageId, { pageWidth: viewport1.width, pageHeight: viewport1.height, scale, bitmap });
+          }
         }
 
         // Vector extraction walks the whole operator list. The sheet is

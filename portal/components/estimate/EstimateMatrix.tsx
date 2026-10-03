@@ -1,30 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import VersionDiffPanel from "@/components/estimate/VersionDiffPanel";
+import { embeddedCurrentVersion, itemToRow, mergeSavedRows, type LoadedEstimateVersion, type MatrixRow, type SavedMatrixItem } from "@/lib/estimating/matrix-rows";
 import { calculateAssemblyQuantities, type RebarSize, REBAR_UNIT_WEIGHT_LBS_PER_FT } from "@/lib/math/assemblies";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
-interface EstimateRow {
-  id?: string;
-  cost_code: string;
-  description: string;
-  quantity: number;
-  unit: string;
-  labor_unit: number;
-  material_unit: number;
-  equipment_unit: number;
-  subcontractor_unit: number;
-  trucking_unit: number;
-  disposal_unit: number;
-  notes: string;
-  sort_order: number;
-  _dirty?: boolean;   // client-only: pending save
-  _local?: string;    // client-only: local uuid for un-saved rows
-}
+type EstimateRow = MatrixRow;
 
 interface AssemblyMixInput {
   lengthFt: number;
@@ -70,33 +55,6 @@ const UNIT_COL_LABELS: Record<UnitKey, string> = {
   disposal_unit:      "Disposal $/u",
 };
 
-// Converts an authoritative estimate_items row (cost-category dollar totals)
-// into the grid's editable per-unit-rate shape. Division is exact (not
-// rounded) so a round-trip load -> save reproduces the same dollar totals.
-function itemToRow(it: {
-  id: string; cost_code: string | null; description: string | null; quantity: number | null; uom: string | null;
-  labor_cost: number; material_cost: number; equipment_cost: number; trucking_cost: number;
-  subcontract_cost: number; disposal_cost: number; notes: string | null; sort_order?: number;
-}, index: number): EstimateRow {
-  const q = it.quantity && it.quantity !== 0 ? it.quantity : 1;
-  return {
-    id: it.id,
-    cost_code: it.cost_code ?? "",
-    description: it.description ?? "",
-    quantity: it.quantity ?? 0,
-    unit: it.uom ?? "EA",
-    labor_unit: it.labor_cost / q,
-    material_unit: it.material_cost / q,
-    equipment_unit: it.equipment_cost / q,
-    subcontractor_unit: it.subcontract_cost / q,
-    trucking_unit: it.trucking_cost / q,
-    disposal_unit: it.disposal_cost / q,
-    notes: it.notes ?? "",
-    sort_order: it.sort_order ?? index,
-    _dirty: false,
-  };
-}
-
 export default function EstimateMatrix({ projectId, projectName }: Props) {
   const [rows, setRows] = useState<EstimateRow[]>([]);
   const [settings, setSettings] = useState<FinancialSettings>({ overhead_pct: 10, profit_pct: 15, contingency_pct: 5 });
@@ -110,6 +68,12 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   const [versionStatus, setVersionStatus] = useState<string | null>(null);
   const [versions, setVersions] = useState<{ id: string; version_number: number; status: string }[]>([]);
   const saveTimer = useRef<number | null>(null);
+  const rowsRef = useRef<EstimateRow[]>([]);
+  const settingsRef = useRef(settings);
+  const savingRef = useRef(false);
+  const saveAllRef = useRef<() => Promise<void>>(async () => {});
+  rowsRef.current = rows;
+  settingsRef.current = settings;
 
   const pricingRestricted = role != null && RESTRICTED_ROLES.has(role);
   const locked = versionStatus === "approved" || versionStatus === "superseded" || versionStatus === "void";
@@ -126,10 +90,33 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      const showVersion = (version: LoadedEstimateVersion, items: SavedMatrixItem[]) => {
+        setVersionId(version.id);
+        setVersionNumber(version.version_number);
+        setVersionStatus(version.status);
+        setRows(items.map((it, i) => itemToRow(it, i)));
+        setSettings({
+          overhead_pct: numericOr(version.overhead_pct, 10),
+          profit_pct: numericOr(version.profit_pct, 15),
+          contingency_pct: numericOr(version.contingency_pct, 5),
+        });
+      };
+
       const listRes = await fetch(`/api/estimate/versions?project_id=${encodeURIComponent(projectId)}`, { cache: "no-store" });
       if (!listRes.ok) throw new Error(await listRes.text());
-      const list = await listRes.json() as { estimate: { id: string; current_version_id: string | null } | null; versions: { id: string; version_number: number; status: string }[] };
+      const list = await listRes.json() as {
+        estimate: { id: string; current_version_id: string | null } | null;
+        versions: { id: string; version_number: number; status: string }[];
+        version?: LoadedEstimateVersion | null;
+        items?: SavedMatrixItem[] | null;
+      };
       setVersions(list.versions ?? []);
+
+      const embedded = embeddedCurrentVersion(list);
+      if (embedded) {
+        showVersion(embedded.version, embedded.items);
+        return;
+      }
 
       let activeVersionId = list.estimate?.current_version_id ?? null;
       if (!activeVersionId) {
@@ -139,27 +126,19 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
           body: JSON.stringify({ project_id: projectId }),
         });
         if (createRes.ok) {
-          const created = await createRes.json() as { version: { id: string } };
+          const created = await createRes.json() as { version: LoadedEstimateVersion };
           activeVersionId = created.version.id;
+          setVersions([{ id: created.version.id, version_number: created.version.version_number, status: created.version.status }]);
+          showVersion(created.version, []);
+          return;
         }
       }
-      if (!activeVersionId) { setLoading(false); return; }
+      if (!activeVersionId) return;
 
       const verRes = await fetch(`/api/estimate/versions/${encodeURIComponent(activeVersionId)}`, { cache: "no-store" });
       if (!verRes.ok) throw new Error(await verRes.text());
-      const ver = await verRes.json() as {
-        version: { id: string; version_number: number; status: string; contingency_pct: number | null; overhead_pct: number | null; profit_pct: number | null };
-        items: Parameters<typeof itemToRow>[0][];
-      };
-      setVersionId(ver.version.id);
-      setVersionNumber(ver.version.version_number);
-      setVersionStatus(ver.version.status);
-      setRows(ver.items.map((it, i) => itemToRow(it, i)));
-      setSettings({
-        overhead_pct: numericOr(ver.version.overhead_pct, 10),
-        profit_pct:   numericOr(ver.version.profit_pct, 15),
-        contingency_pct: numericOr(ver.version.contingency_pct, 5),
-      });
+      const ver = await verRes.json() as { version: LoadedEstimateVersion; items: SavedMatrixItem[] };
+      showVersion(ver.version, ver.items);
     } catch (e) {
       console.error("[estimate] load failed", e);
     } finally {
@@ -235,8 +214,14 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     return { direct, contingency, subtotal, withOverhead, finalBid };
   }, [rows, settings, rowDirect]);
 
+  const scheduleAutoSave = useCallback(() => {
+    if (locked) return;
+    if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => { void saveAllRef.current(); }, 900);
+  }, [locked]);
+
   // ── Row edit helpers ──────────────────────────────────────────────────────
-  function updateRow(idx: number, patch: Partial<EstimateRow>) {
+  const updateRow = useCallback((idx: number, patch: Partial<EstimateRow>) => {
     if (locked) return; // approved/superseded/void versions are immutable — create a new draft to edit
     if (pricingRestricted) {
       // Belt-and-suspenders: strip unit-cost fields even if a disabled
@@ -246,13 +231,14 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     }
     setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch, _dirty: true } : r)));
     scheduleAutoSave();
-  }
+  }, [locked, pricingRestricted, scheduleAutoSave]);
 
   function addRow() {
     if (locked) return;
     setRows((prev) => [
       ...prev,
       {
+        id: crypto.randomUUID(),
         _local: `new-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         cost_code: "",
         description: "",
@@ -291,6 +277,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
 
     if (qty.concrete_cy > 0) {
       newRows.push({
+        id: crypto.randomUUID(),
         _local: `asm-concrete-${Date.now()}`,
         cost_code: "03-30-00",
         description: `Concrete — ${input.mixDesign}, ${input.thicknessInches}" thick`,
@@ -304,6 +291,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     }
     if (qty.base_material_tons > 0) {
       newRows.push({
+        id: crypto.randomUUID(),
         _local: `asm-base-${Date.now()}`,
         cost_code: "31-23-00",
         description: `Aggregate Subbase — ${input.baseDepthInches}" depth`,
@@ -317,6 +305,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     }
     if (qty.rebar_lbs > 0) {
       newRows.push({
+        id: crypto.randomUUID(),
         _local: `asm-rebar-${Date.now()}`,
         cost_code: "03-20-00",
         description: `Rebar — ${input.rebarSize} @ ${input.rebarSpacingInches}" o.c.`,
@@ -334,36 +323,38 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     setAssemblyModalOpen(false);
   }
 
-  async function removeRow(idx: number) {
+  const removeRow = useCallback(async (idx: number) => {
     if (locked) return; // approved/superseded/void — server would reject anyway; don't even try
-    const r = rows[idx];
-    if (r.id && versionId) {
+    const r = rowsRef.current[idx];
+    if (!r) return;
+    // Client-minted ids exist before the first save. Only a row that has
+    // already round-tripped (no _local) is on the server.
+    if (r.id && !r._local && versionId) {
       await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}?item_id=${encodeURIComponent(r.id)}`, { method: "DELETE" });
     }
     setRows((prev) => prev.filter((_, i) => i !== idx));
-  }
-
-  const scheduleAutoSave = useCallback(() => {
-    if (locked) return;
-    if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => { void saveAll(); }, 900);
-  }, [locked]);
+  }, [locked, versionId]);
 
   // Converts a row's edited per-unit rates back into cost-category dollar
   // totals for the authoritative estimate_items shape. contingency/overhead/
   // profit are intentionally omitted — the server derives them from the
   // version's percentages (the sliders below), never trusted from here.
   async function saveAll(includeSettings = true) {
-    if (saving || locked || !versionId) return;
-    const dirty = rows.filter((r) => r._dirty);
-    if (dirty.length === 0 && !includeSettings) return;
+    if (locked || !versionId) return;
+    if (savingRef.current) {
+      scheduleAutoSave();
+      return;
+    }
+    const snapshot = rowsRef.current.filter((r) => r._dirty).map((r) => ({ ...r }));
+    if (snapshot.length === 0 && !includeSettings) return;
+    savingRef.current = true;
     setSaving(true);
     try {
       const res = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          items: dirty.map((r, i) => ({
+          items: snapshot.map((r) => ({
             id: r.id,
             cost_code: r.cost_code || null,
             description: r.description,
@@ -376,18 +367,21 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
             trucking_cost: r.quantity * r.trucking_unit,
             disposal_cost: r.quantity * r.disposal_unit,
             notes: r.notes,
-            sort_order: i,
+            sort_order: r.sort_order,
           })),
-          settings: includeSettings ? settings : undefined,
+          settings: includeSettings ? settingsRef.current : undefined,
         }),
       });
       if (res.ok) {
-        await load(); // reload to pick up server-assigned IDs + recalculated totals
+        const body = await res.json() as { items?: SavedMatrixItem[] };
+        setRows((prev) => mergeSavedRows(prev, body.items ?? [], snapshot));
       }
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
+  saveAllRef.current = saveAll;
 
   function updateSetting(key: keyof FinancialSettings, value: number) {
     if (pricingRestricted || locked) return; // markup sliders are locked for these roles / locked versions
@@ -551,39 +545,16 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i) => {
-                const direct = rowDirect(r);
-                return (
-                  <tr key={r.id ?? r._local} className={`hover:bg-white/[0.02] ${r._dirty ? "bg-[#CCFF00]/[0.03]" : ""}`}>
-                    <td className="border-b border-white/5 px-2 py-1 text-[10px] font-mono text-white/40">{i + 1}</td>
-                    <td className="border-b border-white/5 px-1 py-1">
-                      <input value={r.cost_code} onChange={(e) => updateRow(i, { cost_code: e.target.value })} placeholder="NN-NN-NN" className="w-full bg-transparent px-1 py-1 text-[11px] font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
-                    </td>
-                    <td className="border-b border-white/5 px-1 py-1">
-                      <input value={r.description} onChange={(e) => updateRow(i, { description: e.target.value })} className="w-full bg-transparent px-1 py-1 text-xs focus:outline-none focus:bg-white/[0.05] rounded" />
-                    </td>
-                    <td className="border-b border-white/5 px-1 py-1">
-                      <input type="number" step="0.01" value={r.quantity} onChange={(e) => updateRow(i, { quantity: Number(e.target.value) })} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
-                    </td>
-                    <td className="border-b border-white/5 px-1 py-1">
-                      <input value={r.unit} onChange={(e) => updateRow(i, { unit: e.target.value })} className="w-full bg-transparent px-1 py-1 text-[11px] font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
-                    </td>
-                    {UNIT_COL_KEYS.map((k) => (
-                      <td key={k} className="border-b border-white/5 px-1 py-1">
-                        {pricingRestricted ? (
-                          <span className="block w-full px-1 py-1 text-xs text-right font-mono text-white/20 select-none" aria-hidden="true">••••</span>
-                        ) : (
-                          <input type="number" step="0.01" value={r[k]} onChange={(e) => updateRow(i, { [k]: Number(e.target.value) } as Partial<EstimateRow>)} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
-                        )}
-                      </td>
-                    ))}
-                    <td className="border-b border-white/5 px-2 py-1 text-right text-xs font-mono text-white">{pricingRestricted ? "••••" : `$${fmt(direct)}`}</td>
-                    <td className="border-b border-white/5 px-1 py-1 text-center">
-                      <button type="button" onClick={() => removeRow(i)} className="text-white/30 hover:text-red-400 text-xs">✕</button>
-                    </td>
-                  </tr>
-                );
-              })}
+              {rows.map((r, i) => (
+                <EstimateMatrixRow
+                  key={r.id ?? r._local}
+                  row={r}
+                  index={i}
+                  masked={pricingRestricted}
+                  onChange={updateRow}
+                  onRemove={removeRow}
+                />
+              ))}
             </tbody>
           </table>
         )}
@@ -721,6 +692,51 @@ function Total({ label, value, tone, big }: { label: string; value: number; tone
     </div>
   );
 }
+
+const EstimateMatrixRow = memo(function EstimateMatrixRow({
+  row, index, masked, onChange, onRemove,
+}: {
+  row: EstimateRow;
+  index: number;
+  masked: boolean;
+  onChange: (index: number, patch: Partial<EstimateRow>) => void;
+  onRemove: (index: number) => void;
+}) {
+  const direct = row.quantity * (
+    row.labor_unit + row.material_unit + row.equipment_unit +
+    row.subcontractor_unit + row.trucking_unit + row.disposal_unit
+  );
+  return (
+    <tr className={`hover:bg-white/[0.02] ${row._dirty ? "bg-[#CCFF00]/[0.03]" : ""}`}>
+      <td className="border-b border-white/5 px-2 py-1 text-[10px] font-mono text-white/40">{index + 1}</td>
+      <td className="border-b border-white/5 px-1 py-1">
+        <input value={row.cost_code} onChange={(e) => onChange(index, { cost_code: e.target.value })} placeholder="NN-NN-NN" className="w-full bg-transparent px-1 py-1 text-[11px] font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
+      </td>
+      <td className="border-b border-white/5 px-1 py-1">
+        <input value={row.description} onChange={(e) => onChange(index, { description: e.target.value })} className="w-full bg-transparent px-1 py-1 text-xs focus:outline-none focus:bg-white/[0.05] rounded" />
+      </td>
+      <td className="border-b border-white/5 px-1 py-1">
+        <input type="number" step="0.01" value={row.quantity} onChange={(e) => onChange(index, { quantity: Number(e.target.value) })} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
+      </td>
+      <td className="border-b border-white/5 px-1 py-1">
+        <input value={row.unit} onChange={(e) => onChange(index, { unit: e.target.value })} className="w-full bg-transparent px-1 py-1 text-[11px] font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
+      </td>
+      {UNIT_COL_KEYS.map((k) => (
+        <td key={k} className="border-b border-white/5 px-1 py-1">
+          {masked ? (
+            <span className="block w-full px-1 py-1 text-xs text-right font-mono text-white/20 select-none" aria-hidden="true">••••</span>
+          ) : (
+            <input type="number" step="0.01" value={row[k]} onChange={(e) => onChange(index, { [k]: Number(e.target.value) } as Partial<EstimateRow>)} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
+          )}
+        </td>
+      ))}
+      <td className="border-b border-white/5 px-2 py-1 text-right text-xs font-mono text-white">{masked ? "••••" : `$${fmt(direct)}`}</td>
+      <td className="border-b border-white/5 px-1 py-1 text-center">
+        <button type="button" onClick={() => onRemove(index)} className="text-white/30 hover:text-red-400 text-xs">✕</button>
+      </td>
+    </tr>
+  );
+});
 
 function fmt(v: number): string {
   return new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v);
