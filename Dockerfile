@@ -21,8 +21,8 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY . .
 
 ENV PYTHONUNBUFFERED=1
-# Force Docling/torch away from CUDA discovery in the container
 ENV CUDA_VISIBLE_DEVICES=""
 EXPOSE 8000
 
-CMD uvicorn takeoff_api:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1
+# Single worker: Docling/torch need headroom; shell form expands $PORT.
+CMD ["sh", "-c", "uvicorn takeoff_api:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
