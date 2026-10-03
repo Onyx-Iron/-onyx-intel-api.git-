@@ -12,6 +12,14 @@ interface LocationData {
   longitude?: number | null;
 }
 
+interface WeatherDay {
+  date: string;
+  precipMm: number;
+  tempMaxC: number;
+  tempMinC: number;
+  delayRisk: boolean;
+}
+
 interface Props {
   projectId: string;
   initial: LocationData;
@@ -25,8 +33,73 @@ export default function ProjectLocationCard({ projectId, initial }: Props) {
   const [saving, setSaving] = useState(false);
   const [data, setData] = useState<LocationData>(initial);
   const [draft, setDraft] = useState<LocationData>(initial);
+  const [nominatimQ, setNominatimQ] = useState("");
+  const [geocoding, setGeocoding] = useState(false);
+  const [forecast, setForecast] = useState<WeatherDay[]>([]);
+  const [delayDays, setDelayDays] = useState(0);
   const addressInputRef = useRef<HTMLInputElement | null>(null);
   const autocompleteRef = useRef<GooglePlacesAutocomplete | null>(null);
+
+  useEffect(() => {
+    const lat = data.latitude;
+    const lon = data.longitude;
+    if (lat == null || lon == null || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch(
+          `/api/site/weather?lat=${encodeURIComponent(String(lat))}&lon=${encodeURIComponent(String(lon))}&days=7`,
+          { cache: "no-store" },
+        );
+        if (!res.ok || cancelled) return;
+        const body = await res.json() as { forecast?: WeatherDay[]; delay_days?: number };
+        if (!cancelled) {
+          setForecast(body.forecast ?? []);
+          setDelayDays(body.delay_days ?? 0);
+        }
+      } catch {
+        /* free weather is best-effort */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [data.latitude, data.longitude]);
+
+  async function geocodeWithNominatim() {
+    const q = nominatimQ.trim() || [draft.city, draft.state, draft.zip_code].filter(Boolean).join(", ");
+    if (!q) {
+      toast({ title: "Enter an address to geocode", kind: "error" });
+      return;
+    }
+    setGeocoding(true);
+    try {
+      const res = await fetch(`/api/site/geocode?q=${encodeURIComponent(q)}`, { cache: "no-store" });
+      const body = await res.json() as {
+        error?: string;
+        result?: { lat: number; lon: number; displayName?: string } | null;
+      };
+      if (!res.ok || !body.result) throw new Error(body.error ?? "Geocode failed");
+      const parts = (body.result.displayName ?? "").split(",").map((p) => p.trim());
+      // Nominatim displayName is typically "…, City, County, State, ZIP, Country"
+      const cityGuess = parts.length >= 4 ? parts[parts.length - 5] ?? parts[0] : parts[0];
+      const stateGuess = parts.length >= 3 ? parts[parts.length - 3] : undefined;
+      const zipGuess = parts.find((p) => /^\d{5}(-\d{4})?$/.test(p));
+      setDraft((d) => ({
+        ...d,
+        latitude: body.result!.lat,
+        longitude: body.result!.lon,
+        city: cityGuess || d.city,
+        state: stateGuess || d.state,
+        zip_code: zipGuess ?? d.zip_code,
+      }));
+      toast({ title: "Coordinates filled via OpenStreetMap Nominatim", kind: "success" });
+    } catch (err) {
+      toast({ title: err instanceof Error ? err.message : "Geocode failed", kind: "error" });
+    } finally {
+      setGeocoding(false);
+    }
+  }
 
   // Attach Google Places Autocomplete when editing opens, if available.
   useEffect(() => {
@@ -119,24 +192,46 @@ export default function ProjectLocationCard({ projectId, initial }: Props) {
 
   if (!editing) {
     return (
-      <div className="inline-flex items-center gap-2">
-        <MapPin className="h-3 w-3 text-white/40" aria-hidden />
-        {hasLocation ? (
-          <span className="text-xs text-white/55">
-            {locationLine}
-            {data.zip_code && <span className="ml-1 text-white/40">{data.zip_code}</span>}
-          </span>
-        ) : (
-          <span className="text-xs text-white/40">No location set</span>
+      <div className="space-y-2">
+        <div className="inline-flex items-center gap-2">
+          <MapPin className="h-3 w-3 text-white/40" aria-hidden />
+          {hasLocation ? (
+            <span className="text-xs text-white/55">
+              {locationLine}
+              {data.zip_code && <span className="ml-1 text-white/40">{data.zip_code}</span>}
+            </span>
+          ) : (
+            <span className="text-xs text-white/40">No location set</span>
+          )}
+          <button
+            type="button"
+            onClick={startEdit}
+            className="rounded p-1 text-white/40 transition hover:bg-white/5 hover:text-white"
+            aria-label="Edit project location"
+          >
+            <Pencil className="h-3 w-3" />
+          </button>
+        </div>
+        {forecast.length > 0 && (
+          <div className="rounded-lg border border-white/10 bg-black/30 px-3 py-2">
+            <p className="text-[10px] uppercase tracking-widest text-white/40">
+              Site weather (Open-Meteo){delayDays > 0 ? ` · ${delayDays} delay-risk day${delayDays === 1 ? "" : "s"}` : ""}
+            </p>
+            <div className="mt-1 flex flex-wrap gap-2">
+              {forecast.slice(0, 5).map((d) => (
+                <span
+                  key={d.date}
+                  className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                    d.delayRisk ? "bg-amber-400/15 text-amber-200" : "bg-white/5 text-white/55"
+                  }`}
+                  title={`${d.precipMm.toFixed(1)} mm precip`}
+                >
+                  {d.date.slice(5)} {Math.round(d.tempMaxC)}°/{Math.round(d.tempMinC)}°
+                </span>
+              ))}
+            </div>
+          </div>
         )}
-        <button
-          type="button"
-          onClick={startEdit}
-          className="rounded p-1 text-white/40 transition hover:bg-white/5 hover:text-white"
-          aria-label="Edit project location"
-        >
-          <Pencil className="h-3 w-3" />
-        </button>
       </div>
     );
   }
@@ -175,8 +270,25 @@ export default function ProjectLocationCard({ projectId, initial }: Props) {
           <p className="mt-1 text-[10px] text-white/40">
             {typeof window !== "undefined" && window.google?.maps?.places
               ? "Google autocomplete enabled — selecting a result will fill the fields below."
-              : "Manual entry only — Google autocomplete not loaded."}
+              : "Manual entry only — Google autocomplete not loaded. Use free Nominatim geocode below."}
           </p>
+          <div className="mt-2 flex gap-2">
+            <input
+              type="text"
+              value={nominatimQ}
+              onChange={(e) => setNominatimQ(e.target.value)}
+              placeholder="Free geocode (city, address…)"
+              className="h-9 min-w-0 flex-1 rounded border border-white/10 bg-[#08090C] px-3 text-sm text-white focus:border-[#CCFF00]/40 focus:outline-none"
+            />
+            <button
+              type="button"
+              disabled={geocoding}
+              onClick={() => void geocodeWithNominatim()}
+              className="shrink-0 rounded border border-white/15 px-3 text-[11px] font-bold uppercase tracking-widest text-white/80 hover:bg-white/5 disabled:opacity-50"
+            >
+              {geocoding ? "…" : "Nominatim"}
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">

@@ -15,10 +15,13 @@ create extension if not exists pgtap with schema extensions;
 select plan(8);
 
 -- Temporary grants so SET ROLE authenticated can exercise RLS (rolled back).
+-- Table SELECT was revoked for authenticated in production (service-role app
+-- path). Migration 20261006000000 restores EXECUTE on current_tenant_id()
+-- (tenants.self_select + many tenant_isolation_* policies invoke it); keep a
+-- session grant here so this suite stays green even if that migration is not
+-- yet applied on an older local stack.
 grant select on public.tenants, public.projects, public.takeoff_items, public.estimate_items
   to authenticated;
-
--- RLS policies call current_tenant_id(); production revokes EXECUTE from authenticated.
 grant execute on function public.current_tenant_id() to authenticated;
 
 -- Fixed UUIDs for stable assertions.
@@ -103,18 +106,13 @@ select is(
 );
 
 -- Impersonate tenant A.
--- Policies use either:
---   - current_tenant_id() → auth.jwt() ->> 'org_id' (request.jwt.claims)
---   - tenant_isolation_* ALL → app.clerk_org_id + subquery on tenants
--- tenants.self_select also uses current_tenant_id(), so JWT must be set
--- or the clerk_org_id subquery sees zero tenant rows under RLS.
+-- - app.clerk_org_id feeds the recovered ALL policies
+-- - request.jwt.claims.org_id feeds current_tenant_id() (per-command policies
+--   and tenants.self_select). Without the JWT claim, tenants RLS hides every
+--   row from the clerk_org subquery and authenticated sees 0 rows.
 set local role authenticated;
 select set_config('app.clerk_org_id', 'org_pgtap_a', true);
-select set_config(
-  'request.jwt.claims',
-  json_build_object('org_id', 'org_pgtap_a')::text,
-  true
-);
+select set_config('request.jwt.claims', '{"org_id":"org_pgtap_a"}', true);
 
 select is(
   (select count(*)::int from public.projects
@@ -146,11 +144,7 @@ select is(
 
 -- Switch to tenant B — must not see A.
 select set_config('app.clerk_org_id', 'org_pgtap_b', true);
-select set_config(
-  'request.jwt.claims',
-  json_build_object('org_id', 'org_pgtap_b')::text,
-  true
-);
+select set_config('request.jwt.claims', '{"org_id":"org_pgtap_b"}', true);
 
 select is(
   (select count(*)::int from public.projects

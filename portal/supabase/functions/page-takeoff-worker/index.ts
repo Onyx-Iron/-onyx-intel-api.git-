@@ -30,6 +30,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { captureException } from "../_shared/errors.ts";
 
 const SUPABASE_URL     = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -238,6 +239,7 @@ Deno.serve(async (req) => {
     });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
+    captureException(err, { fn: "page-takeoff-worker", page_id: body?.page_id });
     console.error("[page-takeoff-worker]", err);
     const message = String(err?.message ?? err);
     await recordEvent("failed", message);

@@ -35,6 +35,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { PDFDocument } from "https://esm.sh/pdf-lib@1.17.1";
+import { captureException } from "../_shared/errors.ts";
 
 const SUPABASE_URL       = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY   = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -340,6 +341,7 @@ Deno.serve(async (req) => {
     }), { status: 200, headers: { "Content-Type": "application/json" } });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
+    captureException(err, { fn: "page-split-worker", document_id: body?.document_id });
     console.error("[page-split-worker]", err);
     await recordEvent("failed", String(err?.message ?? err));
     await db.from("documents")
