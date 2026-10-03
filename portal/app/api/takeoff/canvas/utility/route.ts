@@ -2,8 +2,10 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { logEvent } from "@/lib/activity";
+import { auditInsert, auditDelete } from "@/lib/audit";
 import { mirrorCivilItemsToTakeoff, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
 
 const SYSTEM_CSI: Record<string, string> = {
@@ -89,6 +91,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
   const distinctProjectIds = [...new Set(items.map((it) => it.project_id))];
   for (const pid of distinctProjectIds) {
     try {
@@ -129,6 +133,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const anyDb = db as any;
   const { data, error } = await anyDb.from("civil_utility_takeoffs").insert(rows).select("id");
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  for (const row of data ?? []) {
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "civil_utility_takeoffs",
+      record_id: row.id,
+      new_values: { project_id: items[0].project_id },
+    });
+  }
 
   const projectId = items[0].project_id;
 
@@ -184,13 +198,29 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { error } = await (db as any)
+  const anyDb = db as any;
+  const { data: before } = await anyDb
+    .from("civil_utility_takeoffs")
+    .select("*")
+    .eq("id", id)
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  const { error } = await anyDb
     .from("civil_utility_takeoffs")
     .delete()
     .eq("id", id)
     .eq("tenant_id", tenantId);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  auditDelete({
+    tenant_id: tenantId,
+    user_id: userId,
+    table_name: "civil_utility_takeoffs",
+    record_id: id,
+    old_values: (before ?? null) as Record<string, unknown> | null,
+  });
   return NextResponse.json({ ok: true });
 }

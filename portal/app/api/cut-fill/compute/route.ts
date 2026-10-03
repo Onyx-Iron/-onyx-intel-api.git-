@@ -1,7 +1,9 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { auditInsert } from "@/lib/audit";
 import {
   buildGrid,
   computeVolumes,
@@ -81,6 +83,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    await assertProjectBelongsToTenant(project_id, tenantId);
     const db = await createServiceClient();
 
     const { data: rows, error } = await db
@@ -189,6 +194,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     if (insertError) return NextResponse.json({ error: insertError.message }, { status: 422 });
 
+    if (saved?.id) {
+      auditInsert({
+        tenant_id: tenantId,
+        user_id: userId,
+        table_name: "cut_fill_computations",
+        record_id: saved.id,
+        new_values: {
+          id: saved.id,
+          project_id,
+          existing_surface_id,
+          proposed_surface_id,
+          grid_resolution_ft: gridRes,
+          cut_volume_cy: vols.cut,
+          fill_volume_cy: vols.fill,
+          net_volume_cy: vols.net,
+        } as unknown as Record<string, unknown>,
+      });
+    }
+
     return NextResponse.json({
       computation_id: saved?.id,
       computed_at: saved?.computed_at,
@@ -203,6 +227,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       },
     });
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[POST /api/cut-fill/compute] ${msg}` }, { status: 500 });
   }

@@ -2,6 +2,8 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
+import { auditInsert, auditUpdate, auditDelete } from "@/lib/audit";
 import { calcPipeEmbedment, type PipeRunInput } from "@/lib/math/civil-scope";
 import { mirrorCivilItemsToTakeoff, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
 
@@ -56,6 +58,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const computed = calcPipeEmbedment(input);
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
   try {
     await assertProjectBelongsToTenant(body.project_id, tenantId);
   } catch {
@@ -87,6 +91,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }).select("*").single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
+  auditInsert({
+    tenant_id: tenantId,
+    user_id: userId,
+    table_name: "civil_pipe_runs",
+    record_id: data.id,
+    new_values: data as unknown as Record<string, unknown>,
+  });
+
   const takeoffRows: CivilMirrorRow[] = [
     {
       label: `${body.name} (${body.system} pipe, ${input.diameter_in}" dia)`,
@@ -114,6 +126,8 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   const body = await req.json().catch(() => ({})) as Body;
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
@@ -131,8 +145,18 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     computed,
     updated_at: new Date().toISOString(),
   };
-  const { error } = await anyDb.from("civil_pipe_runs").update(patch).eq("id", id).eq("tenant_id", tenantId);
+  const { data: updated, error } = await anyDb.from("civil_pipe_runs").update(patch).eq("id", id).eq("tenant_id", tenantId).select("*").single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  auditUpdate({
+    tenant_id: tenantId,
+    user_id: userId,
+    table_name: "civil_pipe_runs",
+    record_id: id,
+    old_values: existing as unknown as Record<string, unknown>,
+    new_values: (updated ?? { ...patch }) as unknown as Record<string, unknown>,
+  });
+
   return NextResponse.json({ ok: true, computed });
 }
 
@@ -142,11 +166,26 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   const id = req.nextUrl.searchParams.get("id");
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
+
+  const { data: before } = await anyDb.from("civil_pipe_runs")
+    .select("*").eq("id", id).eq("tenant_id", tenantId).maybeSingle();
+
   const { error } = await anyDb.from("civil_pipe_runs").delete().eq("id", id).eq("tenant_id", tenantId);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  auditDelete({
+    tenant_id: tenantId,
+    user_id: userId,
+    table_name: "civil_pipe_runs",
+    record_id: id,
+    old_values: (before ?? null) as unknown as Record<string, unknown> | null,
+  });
+
   return NextResponse.json({ ok: true });
 }
 

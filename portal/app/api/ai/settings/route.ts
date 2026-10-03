@@ -9,6 +9,8 @@ import {
   getUserAIPreference,
 } from "@/lib/ai/preference";
 import { availableProviders } from "@/lib/ai/providers";
+import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
 
 export const runtime = "nodejs";
 
@@ -38,8 +40,12 @@ export async function GET(): Promise<NextResponse> {
 }
 
 export async function PUT(req: NextRequest): Promise<NextResponse> {
-  const { userId } = await auth();
+  const { userId, orgId, orgSlug } = await auth();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "admin", "write");
+  if (denied) return denied;
 
   const body = await req.json().catch(() => ({})) as { provider?: string; model?: string };
   const provider = body.provider ?? "";
@@ -67,8 +73,13 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
 }
 
 export async function DELETE(): Promise<NextResponse> {
-  const { userId } = await auth();
+  const { userId, orgId, orgSlug } = await auth();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "admin", "write");
+  if (denied) return denied;
+
   const res = NextResponse.json({ ok: true, preference: { provider: null, model: null } });
   res.cookies.delete(PROVIDER_COOKIE);
   res.cookies.delete(MODEL_COOKIE);

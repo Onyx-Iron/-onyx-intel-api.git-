@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant, assertPageBelongsToProject } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { logEvent } from "@/lib/activity";
 import { processOutboxBatch } from "@/lib/estimating/outbox-worker";
 import { calculateLinearLength, calculatePolygonArea, calculateCount, FORMULA_VERSION } from "@/lib/takeoff/canvas/quantity";
@@ -95,13 +96,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
 
   const distinctProjectIds = [...new Set(items.map((it) => it.project_id))];
   for (const pid of distinctProjectIds) {
     try {
       await assertProjectBelongsToTenant(pid, tenantId);
-    } catch {
-      return NextResponse.json({ error: `project_id ${pid} does not belong to this tenant` }, { status: 403 });
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
     }
   }
 
@@ -111,8 +116,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   for (const { pageId, projectId: pid } of distinctPagePairs) {
     try {
       await assertPageBelongsToProject(pageId, pid, tenantId);
-    } catch {
-      return NextResponse.json({ error: `page_id ${pageId} does not belong to project ${pid}` }, { status: 403 });
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
     }
   }
 
@@ -259,6 +266,8 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
@@ -296,6 +305,8 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
@@ -364,6 +375,8 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   }
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
