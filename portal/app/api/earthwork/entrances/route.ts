@@ -5,7 +5,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditInsert, auditDelete } from "@/lib/audit";
 import { calcConstructionEntrance } from "@/lib/math/civil-scope";
-import { mirrorCivilItemsToTakeoff } from "@/lib/estimating/civil-mirror";
+import { mirrorCivilItemsToTakeoff, removeCivilMirrors } from "@/lib/estimating/civil-mirror";
 
 export const runtime = "nodejs";
 
@@ -98,6 +98,12 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
 
   const { data: before } = await anyDb.from("civil_construction_entrances")
     .select("*").eq("id", id).eq("tenant_id", tenantId).maybeSingle();
+
+  await removeCivilMirrors(anyDb, tenantId, {
+    sourceTable: "civil_construction_entrances",
+    sourceId: id,
+    projectId: before?.project_id,
+  }, userId);
 
   const { error } = await anyDb.from("civil_construction_entrances").delete().eq("id", id).eq("tenant_id", tenantId);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

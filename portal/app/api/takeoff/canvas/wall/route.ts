@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { logEvent } from "@/lib/activity";
-import { mirrorCivilItemsToTakeoff, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
+import { mirrorCivilItemsToTakeoff, removeCivilMirrors, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
 import { REBAR_UNIT_WEIGHT_LBS_PER_FT, type RebarSize } from "@/lib/math/assemblies";
 import { wallRecipeLines } from "@/lib/math/scope-recipes";
 
@@ -108,14 +108,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     };
   });
 
-  const sourceId = items[0].client_key || crypto.randomUUID();
-  const takeoffRows: CivilMirrorRow[] = recipes.flatMap(({ item, lines }) =>
-    lines.map((line) => ({
+  const takeoffRows: CivilMirrorRow[] = [];
+  for (const { item, lines } of recipes) {
+    const sourceId = item.client_key || crypto.randomUUID();
+    const rows: CivilMirrorRow[] = lines.map((line) => ({
       ...line,
       drawing_ref: null,
       meta: {
         recipe_part: line.csi_code === "03-30-00" ? "concrete" : line.csi_code === "03-11-00" ? "formwork" : "rebar",
-        client_key: item.client_key ?? null,
+        client_key: item.client_key ?? sourceId,
         length_lf: item.length_lf,
         height_ft: item.height_ft,
         thickness_in: item.thickness_in,
@@ -123,26 +124,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         rebar_spacing_inches: item.rebar_spacing_inches ?? null,
         geometry: line.csi_code === "03-30-00" ? item.geometry ?? null : null,
       },
-    })),
-  );
-
-  await mirrorCivilItemsToTakeoff(
-    anyDb,
-    tenantId,
-    projectId,
-    items[0].page_id ?? null,
-    "canvas_wall_recipes",
-    sourceId,
-    takeoffRows,
-    userId,
-  );
+    }));
+    takeoffRows.push(...rows);
+    await mirrorCivilItemsToTakeoff(
+      anyDb,
+      tenantId,
+      item.project_id,
+      item.page_id ?? null,
+      "canvas_wall_recipes",
+      sourceId,
+      rows,
+      userId,
+    );
+  }
 
   void logEvent({
     projectId,
     tenantId,
     userId,
     entityType: "takeoff",
-    entityId: sourceId,
+    entityId: items[0].client_key || projectId,
     action: "created",
     title: `Wall recipe: ${items.length} wall${items.length === 1 ? "" : "s"} saved`,
     meta: { count: items.length, lines: takeoffRows.length },
@@ -152,5 +153,39 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     ok: true,
     inserted: items.length,
     lines: takeoffRows.map((row) => ({ label: row.label, csi_code: row.csi_code, quantity: row.quantity, unit: row.unit })),
+  });
+}
+
+export async function DELETE(req: NextRequest): Promise<NextResponse> {
+  const { userId, orgId, orgSlug } = await auth();
+  if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const clientKey = req.nextUrl.searchParams.get("client_key");
+  const projectId = req.nextUrl.searchParams.get("project_id");
+  if (!clientKey) return NextResponse.json({ error: "client_key required" }, { status: 400 });
+  if (!projectId) return NextResponse.json({ error: "project_id required" }, { status: 400 });
+
+  const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  try {
+    await assertProjectBelongsToTenant(projectId, tenantId);
+  } catch {
+    return NextResponse.json({ error: "project_id does not belong to this tenant" }, { status: 403 });
+  }
+
+  const db = await createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const anyDb = db as any;
+  // Match meta.client_key, not civil_source_id. Older saves stamped one
+  // source id on every wall in the batch; deleting by that id would drop
+  // the other walls too. Each line still carries its own client_key.
+  const removed = await removeCivilMirrors(anyDb, tenantId, {
+    sourceTable: "canvas_wall_recipes",
+    clientKey,
+    projectId,
+  }, userId);
+
+  return NextResponse.json({
+    ok: true,
+    removed_takeoff: removed.removedTakeoff,
+    removed_estimate_lines: removed.removedEstimateLines,
   });
 }
