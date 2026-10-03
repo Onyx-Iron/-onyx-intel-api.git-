@@ -49,8 +49,8 @@ interface Props {
 // ─────────────────────────────────────────────────────────────────────────────
 export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRatio, onCommitted, onVectorsLoaded, onSnapPointsChange }: Props) {
   const queryClient = useQueryClient();
-  const { data: queryVectors } = useCadVectorMetadata(pageId);
-  const [raw, setRaw] = useState<RawVector[]>([]);
+  const { data: fetchedVectors = [] } = useCadVectorMetadata(pageId);
+  const [omittedKeys, setOmittedKeys] = useState<Set<string>>(new Set());
   const [enabled, setEnabled] = useState(true);
   const [hoverKey, setHoverKey] = useState<string | null>(null);
   const [approving, setApproving] = useState(false);
@@ -61,13 +61,16 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
   const [view, setView] = useState<Box | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
-  // ── Sync cached CAD vector metadata (staleTime: Infinity until explicit refresh) ──
+  const raw = useMemo(
+    () => fetchedVectors.filter((v, i) => !omittedKeys.has(`${v.layer}-${i}`)),
+    [fetchedVectors, omittedKeys],
+  );
+
   useEffect(() => {
-    if (!queryVectors) return;
-    setRaw(queryVectors);
-    const descriptions = Array.from(new Set(queryVectors.map((v) => classifyLayer(v.layer).description)));
+    if (fetchedVectors.length === 0) return;
+    const descriptions = Array.from(new Set(fetchedVectors.map((v) => classifyLayer(v.layer).description)));
     onVectorsLoaded?.(descriptions);
-  }, [queryVectors, onVectorsLoaded]);
+  }, [fetchedVectors, onVectorsLoaded]);
 
   useEffect(() => {
     const onRefresh = (ev: Event) => {
@@ -263,7 +266,7 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
       });
       // Hide the approved vector so the user sees progress.
       setLayerFilter((prev) => new Set(prev).add(`__approved:${v.key}`));
-      setRaw((prev) => prev.filter((_, i) => `${_.layer}-${i}` !== v.key));
+      setOmittedKeys((prev) => new Set(prev).add(v.key));
       setHoverKey(null);
       setEditingKey(null);
       setEditingPoints(null);
@@ -277,7 +280,7 @@ export default function CADVectorLayer({ pageId, projectId, canvasSize, scaleRat
   }
 
   function reject(v: RenderedVector) {
-    setRaw((prev) => prev.filter((_, i) => `${_.layer}-${i}` !== v.key));
+    setOmittedKeys((prev) => new Set(prev).add(v.key));
     setHoverKey(null);
     setEditingKey(null);
     setEditingPoints(null);
