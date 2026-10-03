@@ -132,8 +132,21 @@ jobs:
       # typo, a missing dependency, a broken ALTER against assumed prior
       # state — fails CI here instead of being discovered against the real
       # production database.
-      - run: supabase start
+      - name: Start local Supabase (retry on Docker rate limits)
         working-directory: portal
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4; do
+            if supabase start; then
+              exit 0
+            fi
+            echo "supabase start failed (attempt ${attempt}); cleaning and retrying..."
+            supabase stop --no-backup || true
+            docker rm -f $(docker ps -aq --filter name=supabase) 2>/dev/null || true
+            sleep $((attempt * 20))
+          done
+          echo "supabase start failed after retries"
+          exit 1
       - run: supabase db push --local
         working-directory: portal
       - run: supabase stop
