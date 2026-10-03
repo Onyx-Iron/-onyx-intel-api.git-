@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { seedLineCosts } from "./seed-pricing.ts";
+import { isLegacyHeuristicSplit, legacyHeuristicUnitCost, seedLineCosts } from "./seed-pricing.ts";
 
 describe("seedLineCosts", () => {
   it("books a flat catalog price entirely as material", () => {
@@ -40,5 +40,19 @@ describe("seedLineCosts", () => {
     assert.equal(costs.material_cost, 0);
     assert.equal(costs.equipment_cost, 0);
     assert.equal(costs.unit_cost, null);
+  });
+});
+
+describe("legacy heuristic split", () => {
+  it("recognizes the retired 40/45/15 extended costs", () => {
+    const quantity = 10;
+    const unit = 25;
+    assert.equal(isLegacyHeuristicSplit(unit * 0.4 * quantity, unit * 0.45 * quantity, unit * 0.15 * quantity), true);
+    assert.equal(legacyHeuristicUnitCost(unit * 0.4 * quantity, unit * 0.45 * quantity, unit * 0.15 * quantity, quantity), unit);
+  });
+
+  it("does not treat a flat material booking as the old split", () => {
+    assert.equal(isLegacyHeuristicSplit(0, 250, 0), false);
+    assert.equal(legacyHeuristicUnitCost(0, 250, 0, 10), null);
   });
 });

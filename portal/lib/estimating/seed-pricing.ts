@@ -65,3 +65,40 @@ export function seedLineCosts(
     pricing_status: "priced",
   };
 }
+
+const LEGACY_LABOR_SHARE = 0.4;
+const LEGACY_MATERIAL_SHARE = 0.45;
+const LEGACY_EQUIPMENT_SHARE = 0.15;
+
+/**
+ * True when a saved line still carries the retired seed split
+ * (labor 40% / material 45% / equipment 15% of unit × quantity).
+ * A catalog line that happens to use the same shares is repriced from
+ * the catalog; a flat price is not matched because equipment and labor
+ * are zero.
+ */
+export function isLegacyHeuristicSplit(
+  labor: number,
+  material: number,
+  equipment: number,
+): boolean {
+  if (![labor, material, equipment].every((n) => typeof n === "number" && Number.isFinite(n))) return false;
+  const total = labor + material + equipment;
+  if (!(total > 0) || labor <= 0 || material <= 0 || equipment <= 0) return false;
+  const tolerance = 0.01;
+  return Math.abs(labor / total - LEGACY_LABOR_SHARE) <= tolerance
+    && Math.abs(material / total - LEGACY_MATERIAL_SHARE) <= tolerance
+    && Math.abs(equipment / total - LEGACY_EQUIPMENT_SHARE) <= tolerance;
+}
+
+/** Unit price implied by a legacy 40/45/15 extended split, or null. */
+export function legacyHeuristicUnitCost(
+  labor: number,
+  material: number,
+  equipment: number,
+  quantity: number,
+): number | null {
+  if (!isLegacyHeuristicSplit(labor, material, equipment)) return null;
+  if (!(quantity > 0) || !Number.isFinite(quantity)) return null;
+  return (labor + material + equipment) / quantity;
+}
