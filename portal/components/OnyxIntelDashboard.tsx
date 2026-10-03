@@ -49,6 +49,15 @@ interface DashKpis {
   documents: number;
   scheduleTasks: number;
   estimatedValue: number;
+  bidsDue7d?: number;
+}
+
+interface DashBidDue {
+  id: string;
+  name: string;
+  due_at: string;
+  stage: string;
+  href: string;
 }
 
 interface DashActivity {
@@ -64,6 +73,7 @@ interface DashData {
   kpis: DashKpis;
   projects: DashProject[];
   activity: DashActivity[];
+  bids_due?: DashBidDue[];
 }
 
 interface AIMessage {
@@ -284,6 +294,37 @@ function ScheduleRiskPanel({ projects, loading }: { projects: DashProject[]; loa
               <div className="mt-3">
                 <ProgressBar value={project.completion} tone={project.completion < 35 ? "amber" : "blue"} />
               </div>
+            </Link>
+          ))
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+function BidsDuePanel({ data, loading }: { data: DashData | null; loading: boolean }) {
+  const bids = data?.bids_due ?? [];
+  return (
+    <Panel title="Bids due (7 days)">
+      <div className="border-b border-white/5 px-4 py-3">
+        <p className="text-2xl font-black text-white">{loading ? "--" : data?.kpis.bidsDue7d ?? bids.length}</p>
+        <p className="text-[10px] uppercase tracking-widest text-white/40">Open opportunities</p>
+      </div>
+      <div className="divide-y divide-white/5">
+        {loading ? (
+          <div className="px-4 py-6 text-sm text-white/30">Loading…</div>
+        ) : bids.length === 0 ? (
+          <div className="px-4 py-6 text-sm text-white/30">
+            No bids due this week.{" "}
+            <Link href="/dashboard/preconstruction" className="text-[#CCFF00]/80 hover:underline">Open Bid Board</Link>
+          </div>
+        ) : (
+          bids.slice(0, 5).map((b) => (
+            <Link key={b.id} href={b.href} className="block px-4 py-3 hover:bg-white/[0.03]">
+              <p className="truncate text-sm font-medium text-white">{b.name}</p>
+              <p className="mt-0.5 text-xs text-white/40">
+                {b.stage} · due {new Date(b.due_at).toLocaleDateString()}
+              </p>
             </Link>
           ))
         )}
@@ -858,6 +899,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
                 <ScheduleRiskPanel projects={filteredProjects} loading={dataLoading} />
                 <GoogleCalendarCard />
                 <GmailInboxCard />
+                <BidsDuePanel data={data} loading={dataLoading} />
                 <DocumentIntelligence data={data} loading={dataLoading} />
                 <RecentContactsCard />
                 <AuditActivityCard />

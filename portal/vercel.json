@@ -3,6 +3,10 @@
     {
       "path": "/api/internal/outbox/process",
       "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/internal/gmail/plan-poll",
+      "schedule": "0 */6 * * *"
     }
   ]
 }
