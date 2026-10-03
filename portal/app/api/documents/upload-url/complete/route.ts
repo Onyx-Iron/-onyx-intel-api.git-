@@ -1,10 +1,14 @@
-import { auth } from "@clerk/nextjs/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { logEvent } from "@/lib/activity";
 import { PLANS_UPLOAD_BUCKET } from "@/lib/documents/signed-upload";
+import {
+  enqueueRailwayExtractFromStorage,
+  shouldEnqueueRailwayExtract,
+} from "@/lib/documents/railwayExtract";
 
 export const runtime = "nodejs";
 
@@ -13,8 +17,10 @@ export const runtime = "nodejs";
  * Body: { document_id }
  *
  * Called after the browser finishes a direct PUT/TUS to Supabase Storage.
- * Verifies the object exists, then fire-and-forget ingest (large PDFs are
- * offloaded to page-split-worker — not processed inside the Vercel timeout).
+ * Verifies the object exists, then:
+ *  - PDF / raster → fire-and-forget ingest (large PDFs → page-split-worker)
+ *  - DWG / DXF / IFC → Railway Celery extract-async via signed source_url
+ *    (ezdxf never runs inside Vercel's execution timeout)
  */
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
@@ -46,7 +52,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ error: "Document has no storage_path" }, { status: 409 });
     }
 
-    // Confirm bytes landed in Storage before kicking ingest.
+    // Confirm bytes landed in Storage before kicking processing.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: listed, error: listErr } = await (db.storage.from(PLANS_UPLOAD_BUCKET) as any)
       .list(storagePath.includes("/") ? storagePath.slice(0, storagePath.lastIndexOf("/")) : "", {
@@ -56,18 +62,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (listErr) {
       return NextResponse.json({ error: `Could not verify upload: ${listErr.message}` }, { status: 502 });
     }
-    const fileName = storagePath.includes("/") ? storagePath.slice(storagePath.lastIndexOf("/") + 1) : storagePath;
-    const found = Array.isArray(listed) && listed.some((row: { name?: string }) => row?.name === fileName);
+    const objectName = storagePath.includes("/") ? storagePath.slice(storagePath.lastIndexOf("/") + 1) : storagePath;
+    const found = Array.isArray(listed) && listed.some((row: { name?: string }) => row?.name === objectName);
     if (!found) {
       return NextResponse.json({ error: "Upload not found in storage yet — retry complete in a moment" }, { status: 409 });
     }
-
-    await db.from("documents").update({
-      status: "processing",
-      processing_started_at: new Date().toISOString(),
-      last_error: null,
-      last_error_step: null,
-    }).eq("id", doc.id).eq("tenant_id", tenantId);
 
     if (doc.project_id) {
       void logEvent({
@@ -82,7 +81,57 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       });
     }
 
-    // Fire-and-forget ingest — large plan sets are async-split off Vercel.
+    // ── CAD / IFC → Railway Celery (Strategy 4) ────────────────────────────
+    if (shouldEnqueueRailwayExtract(doc.file_name)) {
+      try {
+        const user = await currentUser();
+        const email = user?.emailAddresses?.[0]?.emailAddress ?? null;
+        const job = await enqueueRailwayExtractFromStorage({
+          db,
+          storagePath,
+          fileName: doc.file_name,
+          tenantId,
+          projectId: doc.project_id,
+          email,
+        });
+        await db.from("documents").update({
+          status: "processing",
+          processing_started_at: new Date().toISOString(),
+          last_error: null,
+          last_error_step: null,
+          meta: {
+            ...meta,
+            railway_job_id: job.job_id,
+            railway_poll_url: job.poll_url ?? null,
+            processing: "railway_celery",
+          },
+        }).eq("id", doc.id).eq("tenant_id", tenantId);
+
+        return NextResponse.json({
+          ok: true,
+          document: { id: doc.id, file_name: doc.file_name, status: "processing" },
+          processing: "railway_celery",
+          railway_job_id: job.job_id,
+        });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        await db.from("documents").update({
+          status: "error",
+          last_error: detail.slice(0, 2000),
+          last_error_step: "railway_extract_enqueue",
+        }).eq("id", doc.id).eq("tenant_id", tenantId);
+        return NextResponse.json({ error: detail }, { status: 502 });
+      }
+    }
+
+    // ── PDF / other → ingest (page-split-worker for large plan sets) ───────
+    await db.from("documents").update({
+      status: "processing",
+      processing_started_at: new Date().toISOString(),
+      last_error: null,
+      last_error_step: null,
+    }).eq("id", doc.id).eq("tenant_id", tenantId);
+
     void fetch(new URL(`/api/documents/${doc.id}/ingest`, req.url).toString(), {
       method: "POST",
       headers: {
@@ -99,8 +148,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           last_error: `Ingest failed to start (${res.status}): ${detail}`.slice(0, 2000),
           last_error_step: "ingest_start",
         }).eq("id", doc.id).in("status", ["processing", "pending"]);
-      } catch (err) {
-        console.error("[upload-url/complete] failed to mark document error", err);
+      } catch (markErr) {
+        console.error("[upload-url/complete] failed to mark document error", markErr);
       }
     }).catch(async (err) => {
       console.error("[upload-url/complete] ingest fetch failed", err);
@@ -118,7 +167,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({
       ok: true,
       document: { id: doc.id, file_name: doc.file_name, status: "processing" },
-      processing: "async",
+      processing: "async_ingest",
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
