@@ -5,8 +5,13 @@
       "schedule": "0 6 * * *"
     },
     {
+<<<<<<< HEAD
+      "path": "/api/internal/gmail/plan-poll",
+      "schedule": "0 */6 * * *"
+=======
       "path": "/api/internal/sheets/process",
       "schedule": "*/5 * * * *"
+>>>>>>> origin/main
     }
   ]
 }

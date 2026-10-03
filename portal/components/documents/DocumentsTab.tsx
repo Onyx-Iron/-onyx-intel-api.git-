@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { FolderOpen, FileText, X, RefreshCw, Sparkles, Send, Upload, ChevronDown, ChevronRight } from "lucide-react";
 import GoogleDrivePicker from "./GoogleDrivePicker";
+import EmailImportPanel from "./EmailImportPanel";
+import CloudImportPanel from "./CloudImportPanel";
 import GenerateDocDropdown from "@/components/common/GenerateDocDropdown";
 
 import { useToast } from "@/components/common/Toast";
@@ -605,6 +607,16 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
               <Upload size={12} />
               {uploading ? "Uploading…" : "Upload File"}
             </button>
+            <EmailImportPanel
+              projectId={projectId}
+              onImported={loadDocuments}
+              disabled={uploading || driveImporting}
+            />
+            <CloudImportPanel
+              projectId={projectId}
+              onImported={loadDocuments}
+              disabled={uploading || driveImporting}
+            />
             <GoogleDrivePicker onFilesSelected={handleDriveFiles} disabled={driveImporting}>
               <span className={`flex items-center gap-2 border rounded-lg px-3 py-1.5 text-[11px] font-bold tracking-widest uppercase transition-colors ${
                 driveImporting

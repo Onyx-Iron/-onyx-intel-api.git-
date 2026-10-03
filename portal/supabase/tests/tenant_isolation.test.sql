@@ -16,11 +16,9 @@ select plan(8);
 
 -- Temporary grants so SET ROLE authenticated can exercise RLS (rolled back).
 -- Table SELECT was revoked for authenticated in production (service-role app
--- path); EXECUTE on current_tenant_id() was also revoked after the advisor
--- cleanup. Both are still needed here because the older per-command
--- tenant_isolation_* policies call current_tenant_id(), and Postgres
--- evaluates every permissive policy (OR) — a permission error aborts the
--- query even when the app.clerk_org_id ALL policy would allow the row.
+-- path). Migration 20261006000000 restores EXECUTE on current_tenant_id();
+-- keep a session grant here so this suite stays green even if that migration
+-- is not yet applied on an older local stack.
 grant select on public.tenants, public.projects, public.takeoff_items, public.estimate_items
   to authenticated;
 grant execute on function public.current_tenant_id() to authenticated;
@@ -110,7 +108,7 @@ select is(
 -- - app.clerk_org_id feeds the recovered ALL policies
 -- - request.jwt.claims.org_id feeds current_tenant_id() (per-command policies
 --   and tenants.self_select). Without the JWT claim, tenants RLS hides every
---   row from the clerk_org subquery and authenticated sees nothing.
+--   row from the clerk_org subquery and authenticated sees 0 rows.
 set local role authenticated;
 select set_config('app.clerk_org_id', 'org_pgtap_a', true);
 select set_config('request.jwt.claims', '{"org_id":"org_pgtap_a"}', true);

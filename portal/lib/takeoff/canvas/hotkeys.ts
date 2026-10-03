@@ -2,7 +2,9 @@
  * Professional takeoff canvas hotkeys.
  *
  * L → length (line)   A → area   C → count
- * Space → temporary pan (hold)   Z → undo   Esc → cancel   Enter → finish
+ * Space → temporary pan (hold)
+ * Z / Ctrl+Z → undo   Ctrl+Y / Ctrl+Shift+Z → redo
+ * Esc → cancel   Enter → finish   Delete → delete selection
  */
 
 export type CanvasTool =
@@ -21,6 +23,10 @@ export type HotkeyAction =
   | { type: "cancel" }
   | { type: "finish" }
   | { type: "undo" }
+  | { type: "redo" }
+  | { type: "delete_selection" }
+  | { type: "select_all" }
+  | { type: "duplicate" }
   | { type: "pan_hold_start" }
   | { type: "pan_hold_end" };
 
@@ -46,7 +52,7 @@ export function isEditableKeyboardTarget(target: EventTarget | null): boolean {
     try {
       if (el.closest("[contenteditable='true']")) return true;
     } catch {
-      /* ignore — closest may throw outside a DOM */
+      /* ignore */
     }
   }
   return false;
@@ -54,25 +60,36 @@ export function isEditableKeyboardTarget(target: EventTarget | null): boolean {
 
 /**
  * Map a keyboard event to a canvas hotkey action.
- * Returns null when the event should be ignored (editable fields, modifiers, unknown keys).
+ * Returns null when the event should be ignored (editable fields, unknown keys).
  */
 export function resolveCanvasHotkey(
-  event: Pick<KeyboardEvent, "key" | "code" | "type" | "repeat" | "metaKey" | "ctrlKey" | "altKey" | "target">,
+  event: Pick<KeyboardEvent, "key" | "code" | "type" | "repeat" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey" | "target">,
 ): HotkeyAction | null {
   if (isEditableKeyboardTarget(event.target)) return null;
-  if (event.metaKey || event.ctrlKey || event.altKey) return null;
+  if (event.altKey) return null;
 
   const key = event.key;
   const lower = key.length === 1 ? key.toLowerCase() : key;
+  const mod = event.metaKey || event.ctrlKey;
 
   if (event.type === "keyup") {
     if (key === " " || event.code === "Space") return { type: "pan_hold_end" };
     return null;
   }
 
-  // keydown
+  // Modifier chords first
+  if (mod && !event.repeat) {
+    if (lower === "z" && event.shiftKey) return { type: "redo" };
+    if (lower === "z") return { type: "undo" };
+    if (lower === "y") return { type: "redo" };
+    if (lower === "a") return { type: "select_all" };
+    if (lower === "d") return { type: "duplicate" };
+    return null;
+  }
+
   if (key === "Escape") return { type: "cancel" };
   if (key === "Enter") return { type: "finish" };
+  if ((key === "Delete" || key === "Backspace") && !event.repeat) return { type: "delete_selection" };
   if (lower === "z" && !event.repeat) return { type: "undo" };
   if ((key === " " || event.code === "Space") && !event.repeat) return { type: "pan_hold_start" };
 
@@ -84,4 +101,4 @@ export function resolveCanvasHotkey(
 
 /** Human-readable shortcut legend for the toolbar. */
 export const CANVAS_HOTKEY_HINT =
-  "L line · A area · C count · Space pan · Z undo · Esc cancel · Enter finish";
+  "L line · A area · C count · Space pan · Ctrl+Z undo · Ctrl+Y redo · Del delete · Esc cancel · Enter finish";
