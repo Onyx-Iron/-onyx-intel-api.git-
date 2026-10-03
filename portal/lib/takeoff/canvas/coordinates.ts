@@ -66,6 +66,18 @@ export function translateStoredPoints(
   return coordinateSpace === "page_space" ? pointsToPageSpace(moved, renderScale) : moved;
 }
 
+/** Move every hole ring by the same screen drag as the outer polygon. */
+export function translateStoredRings(
+  rings: Point[][] | undefined,
+  coordinateSpace: "page_space" | "legacy_pixel",
+  dx: number,
+  dy: number,
+  renderScale: number,
+): Point[][] | undefined {
+  if (!rings || rings.length === 0) return undefined;
+  return rings.map((ring) => translateStoredPoints(ring, coordinateSpace, dx, dy, renderScale));
+}
+
 /** True when two polylines are the same stored geometry, including point order. */
 export function samePoints(a: Point[], b: Point[]): boolean {
   if (a.length !== b.length) return false;

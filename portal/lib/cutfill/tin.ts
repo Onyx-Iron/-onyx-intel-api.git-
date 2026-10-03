@@ -33,6 +33,9 @@ export function cutFillTin(existing: TinPoint[], proposed: TinPoint[], boundary?
   const sampled = existing.map((point) => interpolate(proposed, proposedZ, proposedIndex.triangles, point.x, point.y));
   const delta = existing.map((point, index) => sampled[index] - point.z);
   const mesh = Delaunator.from(existing, (point) => point.x, (point) => point.y);
+  if (mesh.triangles.length < 3) {
+    throw new Error("surface points are collinear, so they cannot form a TIN");
+  }
 
   let cut = 0;
   let fill = 0;

@@ -13,7 +13,7 @@ from collections import defaultdict
 
 import numpy as np
 import trimesh
-from scipy.spatial import Delaunay
+from scipy.spatial import Delaunay, QhullError
 from shapely.geometry import Point as ShapelyPoint
 from shapely.geometry import Polygon
 
@@ -50,6 +50,33 @@ def _interpolate(tri: Delaunay, surface: np.ndarray, query: np.ndarray) -> np.nd
     return result
 
 
+def _prepare_surface(points: np.ndarray) -> np.ndarray:
+    """Average repeated shots and reject a line that cannot be triangulated."""
+    if points.ndim != 2 or points.shape[1] != 3 or len(points) < 3:
+        raise ValueError("surfaces must be lists of x, y, z points")
+    buckets: dict[tuple[float, float], list[float]] = {}
+    for x, y, z in points:
+        key = (round(float(x), 4), round(float(y), 4))
+        buckets.setdefault(key, []).append(float(z))
+    unique = np.asarray(
+        [(x, y, float(np.mean(elevations))) for (x, y), elevations in buckets.items()],
+        dtype=float,
+    )
+    if len(unique) < 3:
+        raise ValueError("each surface needs at least 3 distinct x, y points")
+    centered = unique[:, :2] - unique[:, :2].mean(axis=0)
+    if int(np.linalg.matrix_rank(centered, tol=1e-8)) < 2:
+        raise ValueError("surface points are collinear, so they cannot form a TIN")
+    return unique
+
+
+def _delaunay(points: np.ndarray) -> Delaunay:
+    try:
+        return Delaunay(points)
+    except QhullError as exc:
+        raise ValueError("surface points are collinear, so they cannot form a TIN") from exc
+
+
 def _gradient(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> tuple[float, float, float]:
     """Rise/run of the plane through three xyz points, plus downhill x/y."""
     ab = b - a
@@ -66,10 +93,8 @@ def _gradient(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> tuple[float, float
 
 def surface_drainage(points: list[Point3], boundary: Ring | None = None) -> dict:
     """Slope percent, downhill direction, and ponding lows on one TIN."""
-    xyz = np.asarray(points, dtype=float)
-    if xyz.ndim != 2 or xyz.shape[1] != 3 or len(xyz) < 3:
-        raise ValueError("a surface needs at least 3 x, y, z points")
-    tri = Delaunay(xyz[:, :2])
+    xyz = _prepare_surface(np.asarray(points, dtype=float))
+    tri = _delaunay(xyz[:, :2])
     limit = Polygon(boundary) if boundary and len(boundary) >= 3 else None
     neighbors: dict[int, set[int]] = defaultdict(set)
     slopes: list[float] = []
@@ -103,13 +128,20 @@ def surface_drainage(points: list[Point3], boundary: Ring | None = None) -> dict
     }
 
 
+def _xy(point) -> tuple[float, float]:
+    if isinstance(point, dict):
+        return float(point["x"]), float(point["y"])
+    return float(point[0]), float(point[1])
+
+
 def contours_to_points(contours: list[dict], spots: list[dict] | None = None) -> list[Point3]:
     """Contour polylines and spot elevations become one existing-ground cloud."""
     points: list[Point3] = []
     for contour in contours:
         elevation = float(contour["elevation"])
         for point in contour.get("points") or []:
-            points.append((float(point[0]), float(point[1]), elevation))
+            x, y = _xy(point)
+            points.append((x, y, elevation))
     for spot in spots or []:
         elevation = spot.get("z", spot.get("elevation"))
         points.append((float(spot["x"]), float(spot["y"]), float(elevation)))
@@ -148,15 +180,11 @@ def cut_fill_tin(
     Volumes are cubic yards when coordinates are feet, otherwise cubic units.
     Net is fill minus cut, matching the portal grid convention.
     """
-    existing_xyz = np.asarray(existing, dtype=float)
-    proposed_xyz = np.asarray(proposed, dtype=float)
-    if existing_xyz.ndim != 2 or existing_xyz.shape[1] != 3 or proposed_xyz.shape[1] != 3:
-        raise ValueError("surfaces must be lists of x, y, z points")
-    if len(existing_xyz) < 3 or len(proposed_xyz) < 3:
-        raise ValueError("each surface needs at least 3 points")
+    existing_xyz = _prepare_surface(np.asarray(existing, dtype=float))
+    proposed_xyz = _prepare_surface(np.asarray(proposed, dtype=float))
 
-    existing_tri = Delaunay(existing_xyz[:, :2])
-    proposed_tri = Delaunay(proposed_xyz[:, :2])
+    existing_tri = _delaunay(existing_xyz[:, :2])
+    proposed_tri = _delaunay(proposed_xyz[:, :2])
     proposed_z = _interpolate(proposed_tri, proposed_xyz, existing_xyz[:, :2])
     delta = proposed_z - existing_xyz[:, 2]
 

@@ -107,6 +107,19 @@ class TerrainTests(unittest.TestCase):
         self.assertAlmostEqual(prism["excavation_cy"], 80 / 27, places=6)
         self.assertAlmostEqual(prism["bedding_cy"], 10 / 27, places=6)
         self.assertAlmostEqual(prism["backfill_cy"], 70 / 27, places=6)
+        object_points = contours_to_points(
+            [{"elevation": 410, "points": [{"x": 0, "y": 0}, {"x": 10, "y": 0}]}],
+            [{"x": 5, "y": 5, "elevation": 412.5}],
+        )
+        self.assertEqual(object_points[0], (0.0, 0.0, 410.0))
+
+    def test_collinear_and_repeated_shots(self):
+        existing = [(0, 0, 10), (30, 0, 10), (0, 30, 10), (30, 30, 10), (30, 30, 10)]
+        proposed = [(0, 0, 7), (30, 0, 7), (0, 30, 7), (30, 30, 7)]
+        result = cut_fill_tin(existing, proposed)
+        self.assertAlmostEqual(result["cut_cy"], 100.0, places=4)
+        with self.assertRaises(ValueError):
+            cut_fill_tin([(0, 0, 1), (10, 0, 1), (20, 0, 1)], [(0, 0, 0), (10, 0, 0), (20, 0, 0)])
 
 
 class VisionTests(unittest.TestCase):
@@ -243,6 +256,23 @@ class EngineRouteTests(unittest.TestCase):
         response = client.post("/api/geometry/net-area", json={"outer": SQUARE, "holes": [HOLE]})
         self.assertEqual(response.status_code, 200)
         self.assertAlmostEqual(response.json()["area"], 96.0)
+
+    def test_degenerate_tin_and_contour_objects_are_not_server_errors(self):
+        from fastapi.testclient import TestClient
+        import takeoff_api
+
+        client = TestClient(takeoff_api.app, raise_server_exceptions=False)
+        collinear = client.post("/api/terrain/cut-fill", json={
+            "existing": [[0, 0, 1], [10, 0, 1], [20, 0, 1]],
+            "proposed": [[0, 0, 0], [10, 0, 0], [20, 0, 0]],
+        })
+        self.assertEqual(collinear.status_code, 422)
+        contours = client.post("/api/terrain/contours", json={
+            "contours": [{"elevation": 410, "points": [{"x": 0, "y": 0}, {"x": 10, "y": 0}]}],
+            "spots": [{"x": 5, "y": 5, "z": 412}],
+        })
+        self.assertEqual(contours.status_code, 200)
+        self.assertEqual(contours.json()["points"][2][2], 412)
 
 
 class DxfUnionTests(unittest.TestCase):

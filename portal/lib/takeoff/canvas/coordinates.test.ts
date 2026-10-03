@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   clientToPageSpace, computeBoundingBox, distanceToSegment, hitTestShape,
-  toPageSpace, toScreenSpace, pointsToPageSpace, pointsToScreenSpace, translateStoredPoints, samePoints,
+  toPageSpace, toScreenSpace, pointsToPageSpace, pointsToScreenSpace, translateStoredPoints, translateStoredRings, samePoints,
 } from "./coordinates";
 
 describe("toPageSpace / toScreenSpace", () => {
@@ -125,5 +125,10 @@ describe("translateStoredPoints", () => {
     assert.equal(samePoints(original, moved), true);
     assert.equal(samePoints(original, translateStoredPoints(original, "page_space", 3, 0, 1.5)), false);
     assert.equal(samePoints(original, original.slice(0, 1)), false);
+  });
+
+  it("moves a hole ring with the slab", () => {
+    const moved = translateStoredRings([[{ x: 2, y: 2 }, { x: 4, y: 2 }]], "page_space", 20, -10, 2);
+    assert.deepEqual(moved, [[{ x: 12, y: -3 }, { x: 14, y: -3 }]]);
   });
 });

@@ -32,4 +32,11 @@ describe("TIN cut and fill", () => {
     assert.ok(clipped.cut_cy < open.cut_cy);
     assert.equal(clipped.clipped, true);
   });
+
+  it("rejects a collinear survey instead of reporting zero volume", () => {
+    assert.throws(() => cutFillTin(
+      [{ x: 0, y: 0, z: 1 }, { x: 10, y: 0, z: 1 }, { x: 20, y: 0, z: 1 }],
+      [{ x: 0, y: 0, z: 0 }, { x: 10, y: 0, z: 0 }, { x: 20, y: 0, z: 0 }],
+    ), /collinear/);
+  });
 });

@@ -10,7 +10,7 @@ import { applySheetTransform, fitSheetTransform, type SheetTransform } from "@/l
 import { bufferCenterline } from "@/lib/takeoff/canvas/centerline";
 import { netArea } from "@/lib/takeoff/canvas/net-area";
 import { topoToSurfacePoints } from "@/lib/takeoff/canvas/topo-surface";
-import { pointsToPageSpace, pointsToScreenSpace, samePoints, toPageSpace, translateStoredPoints } from "@/lib/takeoff/canvas/coordinates";
+import { pointsToPageSpace, pointsToScreenSpace, samePoints, toPageSpace, translateStoredPoints, translateStoredRings } from "@/lib/takeoff/canvas/coordinates";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
 import { rasterizePdfOffThread } from "@/lib/takeoff/canvas/pdf-raster";
 import { matchingSheetBitmap, rememberSheetBitmap, sheetRenderScale } from "@/lib/takeoff/canvas/sheet-bitmap-cache";
@@ -320,7 +320,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // optimistic concurrency). Vertex-level editing, and dragging for utility
   // runs/topo nodes/area bounds, is deferred — see REMAINING_RISKS.md.
   const dragCleanupRef = useRef<(() => void) | null>(null);
-  const commitShapeDragRef = useRef<(drag: { key: string; originalPoints: Pt[]; originalRowVersion: number }, finalPoints: Pt[]) => Promise<void>>(async () => {});
+  const commitShapeDragRef = useRef<(drag: { key: string; originalPoints: Pt[]; originalHoles?: Pt[][]; originalRowVersion: number }, finalPoints: Pt[], finalHoles?: Pt[][]) => Promise<void>>(async () => {});
   const [deletedTakeoffs, setDeletedTakeoffs] = useState<Array<{ id: string; quantity: number; unit: string | null; takeoff_type: string }>>([]);
   const [vectorDescriptions, setVectorDescriptions] = useState<string[]>([]);
   const [utilityRuns, setUtilityRuns] = useState<UtilityRun[]>([]);
@@ -1008,6 +1008,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     const drag = {
       key: s.key,
       originalPoints: s.points,
+      originalHoles: s.holes,
       originalRowVersion: s.row_version,
       coordinateSpace: s.coordinateSpace,
     };
@@ -1024,8 +1025,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       node.removeAttribute("transform");
       if (dx === 0 && dy === 0) return;
       const finalPoints = translateStoredPoints(drag.originalPoints, drag.coordinateSpace, dx, dy, scaleAtDrag);
-      setShapes((prev) => prev.map((shape) => (shape.key === drag.key ? { ...shape, points: finalPoints } : shape)));
-      void commitShapeDragRef.current(drag, finalPoints);
+      const finalHoles = translateStoredRings(drag.originalHoles, drag.coordinateSpace, dx, dy, scaleAtDrag);
+      setShapes((prev) => prev.map((shape) => (shape.key === drag.key ? { ...shape, points: finalPoints, holes: finalHoles ?? shape.holes } : shape)));
+      void commitShapeDragRef.current(drag, finalPoints, finalHoles);
     };
     const onMove = (ev: MouseEvent) => {
       dx = ev.clientX - originX;
@@ -1047,7 +1049,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     window.addEventListener("mouseup", onUp);
   }, [tool, renderScale]);
 
-  const commitShapeDrag = useCallback(async (drag: { key: string; originalPoints: Pt[]; originalRowVersion: number }, finalPoints: Pt[]) => {
+  const commitShapeDrag = useCallback(async (drag: { key: string; originalPoints: Pt[]; originalHoles?: Pt[][]; originalRowVersion: number }, finalPoints: Pt[], finalHoles?: Pt[][]) => {
     const s = shapes.find((x) => x.key === drag.key);
     if (!s || !s.id) return;
     // No actual movement (e.g. a click that never crossed drag threshold) —
@@ -1060,7 +1062,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       body: JSON.stringify({
         id: s.id, row_version: drag.originalRowVersion,
         quantity: s.quantity, unit: s.unit, cost_code: s.cost_code || null,
-        geometry: { points: finalPoints, coordinate_space: "page_space" },
+        geometry: {
+          points: finalPoints,
+          ...(finalHoles && finalHoles.length > 0 ? { holes: finalHoles } : {}),
+          ...(s.label ? { description: s.label } : {}),
+          coordinate_space: "page_space",
+        },
       }),
     });
 
@@ -1092,7 +1099,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       alert(`Move failed: ${err.error ?? res.status}`);
-      setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, points: drag.originalPoints } : x)));
+      setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, points: drag.originalPoints, holes: drag.originalHoles } : x)));
       return;
     }
 
