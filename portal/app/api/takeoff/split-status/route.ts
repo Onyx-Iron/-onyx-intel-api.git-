@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { reclaimStuckProcessingPages } from "@/lib/documents/reclaimStuck";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,6 +39,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     .maybeSingle();
   if (docErr) return NextResponse.json({ error: docErr.message }, { status: 500 });
   if (!docRow) return NextResponse.json({ error: "Document not found" }, { status: 404 });
+
+  // Reclaim pages stuck in processing before reporting progress so polls
+  // eventually surface terminal errors instead of spinning forever.
+  await reclaimStuckProcessingPages(anyDb, tenantId, undefined, documentId).catch((err) =>
+    console.error("[GET /api/takeoff/split-status] stuck page reclaim failed", err),
+  );
 
   const { data: pages, error: pagesErr } = await anyDb
     .from("document_pages")

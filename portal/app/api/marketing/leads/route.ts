@@ -1,7 +1,9 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { auditInsert } from "@/lib/audit";
 
 export const runtime = "nodejs";
 
@@ -42,6 +44,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   };
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "financial", "write");
+  if (denied) return denied;
+  if (body.project_id) {
+    try {
+      await assertProjectBelongsToTenant(body.project_id, tenantId);
+    } catch (err) {
+      const owned = ownershipDenied(err);
+      if (owned) return owned;
+      throw err;
+    }
+  }
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
@@ -57,5 +70,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     request_details: body.request_details ?? null,
   }).select("id").single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  auditInsert({
+    tenant_id: tenantId,
+    user_id: userId,
+    table_name: "marketing_leads",
+    record_id: data.id,
+    new_values: { project_id: body.project_id ?? null, source: body.source ?? "manual" },
+  });
+
   return NextResponse.json({ ok: true, id: data.id });
 }

@@ -2,7 +2,9 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { NoProviderError, availableProviders } from "@/lib/ai/providers";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
-import { authTenantKey, authTenantName, getOrCreateTenant } from "@/lib/project-controls/server";
+import { authTenantKey, authTenantName, getOrCreateTenant, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { auditInsert } from "@/lib/audit";
 import { generateProjectStatusReport } from "@/lib/reports/project-status";
 import { createServiceClient } from "@/lib/supabase/server";
 
@@ -61,6 +63,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!VALID_TYPES.has(reportType)) return NextResponse.json({ error: "Unsupported report_type" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    await assertProjectBelongsToTenant(projectId, tenantId);
     const db = await createServiceClient();
 
     let generated;
@@ -108,8 +113,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .single();
 
     if (error) return NextResponse.json({ error: `[POST /api/reports] ${error.message}` }, { status: 500 });
+
+    auditInsert({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "report_runs",
+      record_id: data.id,
+      new_values: { project_id: projectId, report_type: reportType, title: payload.title },
+    });
+
     return NextResponse.json({ report: data }, { status: 201 });
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[POST /api/reports] ${msg}` }, { status: 500 });
   }

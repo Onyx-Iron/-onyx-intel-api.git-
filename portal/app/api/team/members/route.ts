@@ -1,5 +1,11 @@
 import { auth, clerkClient } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
+import {
+  getOrCreateTenant,
+  authTenantKey,
+  authTenantName,
+} from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -54,7 +60,7 @@ export async function GET(): Promise<NextResponse> {
 
 export async function DELETE(req: NextRequest): Promise<NextResponse> {
   try {
-    const { userId, orgId } = await auth();
+    const { userId, orgId, orgSlug } = await auth();
     if (!userId) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
@@ -64,6 +70,13 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
         { status: 412 },
       );
     }
+
+    const tenantId = await getOrCreateTenant(
+      authTenantKey(userId, orgId),
+      authTenantName(userId, orgSlug),
+    );
+    const denied = await requirePermission(tenantId, userId, "admin", "write");
+    if (denied) return denied;
 
     const body = (await req.json().catch(() => ({}))) as {
       membership_id?: string;

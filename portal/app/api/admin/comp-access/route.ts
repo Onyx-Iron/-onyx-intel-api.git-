@@ -2,6 +2,9 @@ import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { setCompUntil } from "@/lib/billing/tenantBilling";
+import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
+import { auditUpdate } from "@/lib/audit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,7 +13,7 @@ const ADMIN_EMAIL = "justinatteberry@onyx-iron.com";
 // Sentinel for "comp forever" — far-future timestamp.
 const FOREVER_DATE = new Date("9999-12-31T00:00:00.000Z");
 
-async function requireAdmin(): Promise<NextResponse | null> {
+async function requireAdmin(): Promise<{ userId: string } | NextResponse> {
   const { userId } = await auth();
   if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -20,7 +23,7 @@ async function requireAdmin(): Promise<NextResponse | null> {
   if (email !== ADMIN_EMAIL) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
-  return null;
+  return { userId };
 }
 
 interface PostBody {
@@ -68,8 +71,8 @@ async function resolveTenantId(
 
 export async function GET(): Promise<NextResponse> {
   try {
-    const denied = await requireAdmin();
-    if (denied) return denied;
+    const admin = await requireAdmin();
+    if (admin instanceof NextResponse) return admin;
 
     const db = await createServiceClient();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -96,7 +99,12 @@ export async function GET(): Promise<NextResponse> {
 
 export async function POST(req: Request): Promise<NextResponse> {
   try {
-    const denied = await requireAdmin();
+    const admin = await requireAdmin();
+    if (admin instanceof NextResponse) return admin;
+    const { userId, orgId, orgSlug } = await auth();
+    if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const callerTenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(callerTenantId, userId, "admin", "write");
     if (denied) return denied;
 
     const body = (await req.json()) as PostBody;
@@ -125,6 +133,14 @@ export async function POST(req: Request): Promise<NextResponse> {
     }
 
     await setCompUntil(resolved.id, until);
+    auditUpdate({
+      tenant_id: callerTenantId,
+      user_id: admin.userId,
+      table_name: "tenants",
+      record_id: resolved.id,
+      old_values: null,
+      new_values: { comp_until: until?.toISOString() ?? null } as unknown as Record<string, unknown>,
+    });
     return NextResponse.json({ ok: true, tenant_id: resolved.id });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -137,7 +153,12 @@ export async function POST(req: Request): Promise<NextResponse> {
 
 export async function DELETE(req: Request): Promise<NextResponse> {
   try {
-    const denied = await requireAdmin();
+    const admin = await requireAdmin();
+    if (admin instanceof NextResponse) return admin;
+    const { userId, orgId, orgSlug } = await auth();
+    if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const callerTenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(callerTenantId, userId, "admin", "write");
     if (denied) return denied;
 
     const body = (await req.json()) as { tenant_id?: string };
@@ -149,6 +170,14 @@ export async function DELETE(req: Request): Promise<NextResponse> {
     }
 
     await setCompUntil(body.tenant_id, null);
+    auditUpdate({
+      tenant_id: callerTenantId,
+      user_id: admin.userId,
+      table_name: "tenants",
+      record_id: body.tenant_id,
+      old_values: null,
+      new_values: { comp_until: null } as unknown as Record<string, unknown>,
+    });
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

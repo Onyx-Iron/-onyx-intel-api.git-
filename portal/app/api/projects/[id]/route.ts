@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { uuidSchema } from "@/lib/validation";
 import { logEvent } from "@/lib/activity";
+import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditUpdate, auditDelete } from "@/lib/audit";
 
 export const runtime = "nodejs";
@@ -63,6 +64,9 @@ export async function PATCH(
       return NextResponse.json({ error: "No editable fields supplied" }, { status: 400 });
     }
 
+    const denied = await requirePermission(ctx.tenantId, ctx.userId, "field", "write");
+    if (denied) return denied;
+
     const db = await createServiceClient();
     // Snapshot old values for the audit log before mutation
     const { data: before } = await db
@@ -116,6 +120,9 @@ export async function DELETE(
     const { id } = await params;
     const parsed = uuidSchema.safeParse(id);
     if (!parsed.success) return NextResponse.json({ error: "id must be a valid UUID" }, { status: 400 });
+
+    const denied = await requirePermission(ctx.tenantId, ctx.userId, "admin", "write");
+    if (denied) return denied;
 
     const db = await createServiceClient();
     // Full row snapshot so the audit log carries the deleted state

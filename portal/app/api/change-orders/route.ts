@@ -11,6 +11,7 @@ import {
 } from "@/lib/project-controls/server";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { getUserRole, redactFinancialFields } from "@/lib/project-controls/permissions";
+import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { CHANGE_ORDER_FINANCIAL_FIELDS } from "@/lib/project-controls/financial-redaction";
 import { logEvent } from "@/lib/activity";
 import { auditInsert } from "@/lib/audit";
@@ -69,6 +70,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "financial", "write");
+    if (denied) return denied;
     await assertProjectBelongsToTenant(projectId, tenantId);
     const payload = buildChangeOrderPayload(body, { tenantId, projectId });
     const db = await getControlDb();
@@ -103,8 +106,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json({ item: data }, { status: 201 });
   } catch (err: unknown) {
+    const owned = ownershipDenied(err);
+    if (owned) return owned;
     const msg = err instanceof Error ? err.message : String(err);
-    const status = msg.includes("required") ? 400 : msg.includes("does not belong") ? 403 : 500;
+    const status = msg.includes("required") ? 400 : 500;
     return NextResponse.json({ error: msg }, { status });
   }
 }
