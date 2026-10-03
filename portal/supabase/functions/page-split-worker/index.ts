@@ -217,6 +217,23 @@ Deno.serve(async (req) => {
       if (delErr) throw new Error(`clear document_pages: ${delErr.message}`);
       const { error: insErr } = await db.from("document_pages").insert(pageRows);
       if (insErr) throw new Error(`insert document_pages: ${insErr.message}`);
+
+      const sheetRows = pageRows.map((p) => ({
+        tenant_id: p.tenant_id,
+        project_id: body.project_id,
+        document_id: p.document_id,
+        document_page_id: p.id,
+        page_number: p.page_number,
+        processing_status: "pending",
+      }));
+      const { error: sheetErr } = await db.from("sheets").insert(sheetRows);
+      if (sheetErr) console.warn("[page-split] insert sheets failed:", sheetErr.message);
+      else {
+        const { error: sheetStatusErr } = await db.rpc("refresh_sheet_index_status", {
+          p_document_id: body.document_id,
+        });
+        if (sheetStatusErr) console.warn("[page-split] sheet_index_status refresh failed:", sheetStatusErr.message);
+      }
     }
 
     // ── 6. Fan out page jobs; keep isolate alive until kicks are sent ───────
