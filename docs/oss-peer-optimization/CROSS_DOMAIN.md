@@ -220,16 +220,16 @@ Peers that "feel professional" almost always have:
 
 ### P0 — reliability / trust (any domain)
 
-1. **XD-25** CI gate  
+1. **XD-25** CI gate — ✅ already present (`.github/workflows/ci.yml`)  
 2. **XD-04 / D-12 / D-13** document pipeline failure visibility  
-3. **XD-22** fail-fast secrets in production  
+3. **XD-22** fail-fast secrets in production — ✅ `pythonApiBaseUrl` / `pythonApiSecret` + `/api/health`  
 4. **XD-14 / D-01** RLS or tested app isolation  
 
 ### P1 — data quality
 
 5. **XD-01** Docling spike for text PDFs  
-6. **XD-06** Finish TxDOT/Caltrans bid-tab ingest  
-7. **XD-08** Make PPI escalation estimator-visible  
+6. **XD-06** Finish TxDOT/Caltrans bid-tab ingest — ✅ CSV/PDF parsers for TX+CA  
+7. **XD-08** Make PPI escalation estimator-visible — ✅ resolve-time aging + `pct_change_90d` + cost_prices escalation  
 8. **XD-02** Rich chunk metadata  
 
 ### P2 — product depth

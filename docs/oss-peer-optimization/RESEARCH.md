@@ -142,12 +142,12 @@ These beat any external scrape:
 
 | ID | Change | Peer inspiration | License risk |
 |---|---|---|---|
-| OSS-01 | Upgrade `diffEstimateVersions` to bucket+pair duplicates; classify quantity/rate/total; money epsilon | Bidwright revision-compare | Ideas only |
-| OSS-02 | Add branded money helpers (`asPerUnit`, `asLineTotal`, `asMarkupRatio`) used by write paths | Bidwright money.ts | Ideas only |
-| OSS-03 | Calibration **check tool** with match/close/wrong grades from displayed % error | OpenTakeoff `checkVerdict` | Apache ideas / reimplement |
+| OSS-01 | Upgrade `diffEstimateVersions` to bucket+pair duplicates; classify quantity/rate/total; money epsilon | Bidwright revision-compare | ✅ shipped (ideas only) |
+| OSS-02 | Add branded money helpers (`asPerUnit`, `asLineTotal`, `asMarkupRatio`) used by write paths | Bidwright money.ts | ✅ shipped (ideas only) |
+| OSS-03 | Calibration **check tool** with match/close/wrong grades from displayed % error | OpenTakeoff `checkVerdict` | ✅ pure helpers shipped |
 | OSS-04 | Persist measurement `origin` (`actor`, `method`, `edited`, `author_id`) on canvas shapes / takeoff items | OpenTakeoff provenance | Apache ideas / reimplement |
 | OSS-05 | Estimator-only approval records distinct from AI suggestions | OpenTakeoff approvals | Apache ideas / reimplement |
-| OSS-06 | Edge-only unit conversion module (`internal feet`, display imperial/metric) | OpenTakeoff units.ts | Apache ideas / reimplement |
+| OSS-06 | Edge-only unit conversion module (`internal feet`, display imperial/metric) | OpenTakeoff units.ts | ✅ `portal/lib/takeoff/units.ts` |
 
 ### P2 — Product depth
 
