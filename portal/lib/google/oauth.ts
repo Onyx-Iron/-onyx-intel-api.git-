@@ -1,4 +1,5 @@
 import { createServiceClient } from "@/lib/supabase/server";
+import { getAppOrigin } from "@/lib/appUrl";
 import { headerSafe } from "@/lib/http";
 import { GOOGLE_SCOPES } from "./scopes";
 
@@ -11,7 +12,7 @@ import { GOOGLE_SCOPES } from "./scopes";
 const CLIENT_ID     = headerSafe(process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID);
 const CLIENT_SECRET = headerSafe(process.env.GOOGLE_CLIENT_SECRET);
 export const REDIRECT_URI =
-  headerSafe(process.env.GOOGLE_REDIRECT_URI) || "https://app.onyx-iron.com/api/google/callback";
+  headerSafe(process.env.GOOGLE_REDIRECT_URI) || `${getAppOrigin()}/api/google/callback`;
 
 export { GOOGLE_SCOPES };
 

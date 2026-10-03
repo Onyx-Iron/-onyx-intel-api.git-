@@ -9,27 +9,12 @@
  * Requires the Google Sheets API enabled on the Cloud project.
  */
 
-import { createGisTokenClient } from "./gisTokenClient";
+import { createGisTokenClient, loadGisScript } from "./gisTokenClient";
 
 const CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? "";
 const SCOPE = "https://www.googleapis.com/auth/drive.file";
 
-function loadGis(): Promise<void> {
-  return new Promise((resolve) => {
-    if (window.__gisLoaded) return resolve();
-    const existing = document.querySelector('script[src="https://accounts.google.com/gsi/client"]');
-    if (existing) {
-      window.__gisLoaded = true;
-      return resolve();
-    }
-    const s = document.createElement("script");
-    s.src = "https://accounts.google.com/gsi/client";
-    s.async = true;
-    s.defer = true;
-    s.onload = () => { window.__gisLoaded = true; resolve(); };
-    document.head.appendChild(s);
-  });
-}
+const loadGis = loadGisScript;
 
 function getToken(): Promise<string> {
   return new Promise((resolve, reject) => {

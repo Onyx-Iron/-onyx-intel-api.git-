@@ -17,5 +17,8 @@ describe("GIS token client", () => {
     for (const src of [picker, client, sheets]) {
       assert.match(src, /createGisTokenClient/);
     }
+    assert.match(client, /loadGisScript/);
+    assert.match(sheets, /loadGisScript/);
   });
 });
+

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import HeatmapCanvas from "./HeatmapCanvas";
 import { parseSurfaceCsv } from "@/lib/cutfill/sampling";
 
@@ -161,12 +162,20 @@ export default function CutFillTab({ projectId }: CutFillTabProps) {
 
   return (
     <div className="space-y-6 text-neutral-100">
-      <div>
-        <h2 className="text-xl font-semibold tracking-tight">Cut / Fill Earthwork</h2>
-        <p className="mt-1 text-sm text-neutral-400">
-          Upload existing and proposed grade points as CSV (columns: x,y,z or northing,easting,elevation).
-          We interpolate Δz on a uniform grid and tally cut/fill volumes.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-semibold tracking-tight">Cut / Fill Earthwork</h2>
+          <p className="mt-1 text-sm text-neutral-400">
+            Upload existing and proposed grade points as CSV (columns: x,y,z or northing,easting,elevation).
+            We interpolate Δz on a uniform grid and tally cut/fill volumes.
+          </p>
+        </div>
+        <Link
+          href={`/dashboard/projects/${projectId}/civil-earthwork`}
+          className="shrink-0 rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+        >
+          Mass haul matrix
+        </Link>
       </div>
 
       {error && (

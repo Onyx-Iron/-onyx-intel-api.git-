@@ -8,7 +8,7 @@
  * Docs, Drive, Sheets) so the user connects once.
  */
 
-import { createGisTokenClient } from "./gisTokenClient";
+import { createGisTokenClient, loadGisScript } from "./gisTokenClient";
 import { GOOGLE_SCOPES } from "./scopes";
 
 const CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? "";
@@ -17,18 +17,7 @@ export { GOOGLE_SCOPES };
 const TOKEN_KEY = "onyx_g_token";
 const EXP_KEY = "onyx_g_exp";
 
-function loadGis(): Promise<void> {
-  return new Promise((resolve) => {
-    if (window.google?.accounts?.oauth2) return resolve();
-    const existing = document.querySelector('script[src="https://accounts.google.com/gsi/client"]');
-    if (existing) { existing.addEventListener("load", () => resolve()); if (window.google) resolve(); return; }
-    const s = document.createElement("script");
-    s.src = "https://accounts.google.com/gsi/client";
-    s.async = true; s.defer = true;
-    s.onload = () => resolve();
-    document.head.appendChild(s);
-  });
-}
+const loadGis = loadGisScript;
 
 function store(token: string, expiresIn: number) {
   sessionStorage.setItem(TOKEN_KEY, token);
