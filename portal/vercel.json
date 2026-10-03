@@ -6,7 +6,7 @@
     },
     {
       "path": "/api/internal/sheets/process",
-      "schedule": "*/5 * * * *"
+      "schedule": "30 6 * * *"
     }
   ]
 }

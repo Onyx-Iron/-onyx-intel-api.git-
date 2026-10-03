@@ -5,6 +5,12 @@ import { processSheetBatch } from "@/lib/sheets/sheet-worker";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
+/**
+ * Secret-gated sheet-index worker. Vercel Cron on the Hobby plan can only
+ * run once per day (`portal/vercel.json`). A tighter schedule belongs on
+ * pg_cron or a Pro plan; this route still accepts either secret.
+ */
+
 function authorize(req: NextRequest): boolean {
   const workerSecret = process.env.INTERNAL_WORKER_SECRET;
   const cronSecret = process.env.CRON_SECRET;
