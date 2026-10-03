@@ -1,9 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { Info, Mountain } from "lucide-react";
 import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
+import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
+import { useProjectContext } from "@/components/project/ProjectContext";
 
 interface VolumeRow {
   id: string;
@@ -24,8 +27,8 @@ function cy(n: number): string {
 }
 
 export default function GlobalCivilIntelligencePage() {
+  const { activeProjectId, activeProject } = useProjectContext();
   const [rows, setRows] = useState<VolumeRow[]>([]);
-  const [totals, setTotals] = useState<{ cut_bcy: number; fill_bcy: number; net_bcy: number } | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -38,12 +41,11 @@ export default function GlobalCivilIntelligencePage() {
       fetch("/api/projects").then((r) => r.json()),
     ])
       .then(([volRes, projectsRes]: [unknown, unknown]) => {
-        const v = volRes as { items?: VolumeRow[]; totals?: { cut_bcy: number; fill_bcy: number; net_bcy: number }; error?: string };
+        const v = volRes as { items?: VolumeRow[]; error?: string };
         const p = projectsRes as { projects?: Project[]; error?: string };
         if (v.error) throw new Error(v.error);
         if (p.error) throw new Error(p.error);
         setRows(v.items ?? []);
-        setTotals(v.totals ?? null);
         setProjects(p.projects ?? []);
         setLoading(false);
       })
@@ -59,39 +61,73 @@ export default function GlobalCivilIntelligencePage() {
     return m;
   }, [projects]);
 
+  const filteredRows = useMemo(
+    () => filterByActiveProject(rows, activeProjectId),
+    [rows, activeProjectId],
+  );
+
+  const scopedTotals = useMemo(() => {
+    if (filteredRows.length === 0) return null;
+    return filteredRows.reduce(
+      (acc, row) => ({
+        cut_bcy: acc.cut_bcy + row.cut_volume_cy,
+        fill_bcy: acc.fill_bcy + row.fill_volume_cy,
+        net_bcy: acc.net_bcy + row.net_balance_cy,
+      }),
+      { cut_bcy: 0, fill_bcy: 0, net_bcy: 0 },
+    );
+  }, [filteredRows]);
+
+  const openWorkspaceHref = activeProject
+    ? `/dashboard/projects/${activeProject.id}?phase=takeoff&tab=cutfill`
+    : "/dashboard/projects";
+
   return (
     <div>
       <PageHero
         eyebrow="Workspace"
         title="Civil Intelligence"
-        description="Earthwork cut/fill volumes across all projects"
+        description={
+          activeProject
+            ? `Earthwork cut/fill volumes for ${activeProject.name}`
+            : "Earthwork cut/fill volumes across all projects"
+        }
         compact
       />
 
       <div className="px-4 py-6 sm:px-6 lg:px-10 lg:py-8">
         {error && <div className="mb-4"><ErrorState message={error} onRetry={load} /></div>}
 
-        <div className="mb-6 flex items-start gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
-          <Info size={12} className="mt-0.5 shrink-0" />
-          <span>
-            Read-only roll-up of earthwork cut/fill/mass-haul volumes, sourced from each project&apos;s Civil scope panel.
-            Utility pipe runs, construction entrances, stockpiles, and material ledger entries are project-level only for
-            now — see the Cut/Fill tab inside a project&apos;s Takeoff section for that detail.
-          </span>
+        <div className="mb-6 flex flex-wrap items-start gap-3">
+          <div className="flex flex-1 items-start gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
+            <Info size={12} className="mt-0.5 shrink-0" />
+            <span>
+              Read-only roll-up of earthwork cut/fill volumes from each project&apos;s Cut/Fill tab.
+              {activeProject && (
+                <>
+                  {" "}
+                  <Link href={openWorkspaceHref} className="text-[#CCFF00] hover:underline">
+                    Open {activeProject.name} cut/fill
+                  </Link>
+                </>
+              )}
+            </span>
+          </div>
+          <ProjectScopeSelect className="w-56" label="" />
         </div>
 
-        {!loading && !error && totals && (
+        {!loading && !error && scopedTotals && (
           <div className="mb-6 grid grid-cols-3 gap-3">
             <div className="rounded-xl border border-white/8 bg-[#111113] p-4">
-              <p className="text-2xl font-black leading-none text-white">{cy(totals.cut_bcy)}</p>
+              <p className="text-2xl font-black leading-none text-white">{cy(scopedTotals.cut_bcy)}</p>
               <p className="mt-2 text-[10px] font-semibold uppercase tracking-widest text-white/30">Total Cut</p>
             </div>
             <div className="rounded-xl border border-white/8 bg-[#111113] p-4">
-              <p className="text-2xl font-black leading-none text-white">{cy(totals.fill_bcy)}</p>
+              <p className="text-2xl font-black leading-none text-white">{cy(scopedTotals.fill_bcy)}</p>
               <p className="mt-2 text-[10px] font-semibold uppercase tracking-widest text-white/30">Total Fill</p>
             </div>
-            <div className={`rounded-xl border p-4 ${totals.net_bcy !== 0 ? "border-[#F5A623]/30 bg-[#F5A623]/[0.04]" : "border-white/8 bg-[#111113]"}`}>
-              <p className={`text-2xl font-black leading-none ${totals.net_bcy !== 0 ? "text-[#F5A623]" : "text-white"}`}>{cy(totals.net_bcy)}</p>
+            <div className={`rounded-xl border p-4 ${scopedTotals.net_bcy !== 0 ? "border-[#F5A623]/30 bg-[#F5A623]/[0.04]" : "border-white/8 bg-[#111113]"}`}>
+              <p className={`text-2xl font-black leading-none ${scopedTotals.net_bcy !== 0 ? "text-[#F5A623]" : "text-white"}`}>{cy(scopedTotals.net_bcy)}</p>
               <p className="mt-2 text-[10px] font-semibold uppercase tracking-widest text-white/30">Net Balance</p>
             </div>
           </div>
@@ -114,7 +150,7 @@ export default function GlobalCivilIntelligencePage() {
                   [...Array(4)].map((_, i) => (
                     <tr key={i}><td colSpan={5} className="px-4 py-3"><div className="h-3 w-2/3 bg-white/5 animate-pulse rounded" /></td></tr>
                   ))
-                ) : rows.length === 0 && !error ? (
+                ) : filteredRows.length === 0 && !error ? (
                   <tr>
                     <td colSpan={5}>
                       <div className="py-4">
@@ -123,7 +159,7 @@ export default function GlobalCivilIntelligencePage() {
                     </td>
                   </tr>
                 ) : (
-                  rows.map((row) => (
+                  filteredRows.map((row) => (
                     <tr key={row.id} className="hover:bg-white/[0.02] transition-colors">
                       <td className="px-4 py-3 text-white text-xs">{row.layer_name}</td>
                       <td className="px-4 py-3 text-gray-400 text-xs">{projectNameById.get(row.project_id) ?? row.project_id}</td>

@@ -5,6 +5,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, CalendarDays, ClipboardCheck, ListChecks, RefreshCw, Users } from "lucide-react";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import PageHero from "@/components/layout/PageHero";
+import ProjectScopeSelect from "@/components/project/ProjectScopeSelect";
+import { useProjectContext } from "@/components/project/ProjectContext";
 
 type WorkKind = "RFI" | "Submittal" | "Change Order" | "Schedule" | "Punch";
 
@@ -104,6 +106,7 @@ function statusText(value: string | null): string {
 }
 
 export default function ProjectManagementPage() {
+  const { activeProjectId, activeProject } = useProjectContext();
   const [data, setData] = useState<OverviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -112,7 +115,8 @@ export default function ProjectManagementPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/project-management/overview", { cache: "no-store" });
+      const qs = activeProjectId ? `?project_id=${encodeURIComponent(activeProjectId)}` : "";
+      const res = await fetch(`/api/project-management/overview${qs}`, { cache: "no-store" });
       const json = await res.json() as OverviewResponse;
       if (!res.ok) throw new Error(json.error ?? "Could not load project management overview");
       setData(json);
@@ -121,7 +125,7 @@ export default function ProjectManagementPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeProjectId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -134,13 +138,20 @@ export default function ProjectManagementPage() {
   const hasOpenItems = (data?.open_items.length ?? 0) > 0;
   const fieldLogs = useMemo(() => data?.recent_daily_logs ?? [], [data]);
   const weeklyLogs = useMemo(() => data?.recent_weekly_logs ?? [], [data]);
+  const openWorkspaceHref = activeProject
+    ? `/dashboard/projects/${activeProject.id}?phase=controls&tab=controls`
+    : "/dashboard/projects";
 
   return (
     <div>
       <PageHero
         eyebrow="Workspace"
         title="Project Management"
-        description="Cross-project control center for schedule, field logs, RFIs, submittals, change orders, punch list, and staffing."
+        description={
+          activeProject
+            ? `Schedule, field logs, RFIs, and punch list scoped to ${activeProject.name}`
+            : "Cross-project control center for schedule, field logs, RFIs, submittals, change orders, punch list, and staffing."
+        }
         compact
         actions={
           <button
@@ -155,6 +166,23 @@ export default function ProjectManagementPage() {
 
       <main className="px-4 py-6 sm:px-6 lg:px-10 lg:py-8">
         {error && <div className="mb-4"><ErrorState message={error} onRetry={load} /></div>}
+
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <p className="flex-1 text-xs text-white/45">
+            {activeProject ? (
+              <>
+                Showing open work for{" "}
+                <Link href={openWorkspaceHref} className="text-[#CCFF00] hover:underline">
+                  {activeProject.name}
+                </Link>
+                . Switch to All projects for the portfolio view.
+              </>
+            ) : (
+              "Portfolio roll-up. Pick a project to focus open work and field logs."
+            )}
+          </p>
+          <ProjectScopeSelect className="w-56" label="" />
+        </div>
 
         <section className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
           <Metric loading={loading} label="Active Projects" value={summary ? String(summary.active_project_count) : "-"} sub={summary ? `${summary.project_count} total` : ""} />
@@ -172,7 +200,9 @@ export default function ProjectManagementPage() {
 
         <section className="mb-8 overflow-hidden rounded-xl border border-white/8 bg-[#0E0F12]">
           <div className="flex items-center justify-between border-b border-white/8 px-4 py-3">
-            <h2 className="text-xs font-bold uppercase tracking-[0.18em] text-white/55">Open Work Across Projects</h2>
+            <h2 className="text-xs font-bold uppercase tracking-[0.18em] text-white/55">
+              {activeProject ? "Open Work" : "Open Work Across Projects"}
+            </h2>
             {summary && summary.overdue_items > 0 && (
               <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-widest text-[#F5A623]">
                 <AlertTriangle size={12} /> {summary.overdue_items} overdue
@@ -228,7 +258,7 @@ export default function ProjectManagementPage() {
             {fieldLogs.map((log) => (
               <LogRow
                 key={log.id}
-                href={`/dashboard/projects/${log.project_id}?section=field`}
+                href={`/dashboard/projects/${log.project_id}?phase=field&tab=daily-log`}
                 title={log.work_performed || log.notes || "Daily log"}
                 meta={`${log.project_name} / ${fmtDate(log.log_date)}${log.crew_count ? ` / Crew ${log.crew_count}` : ""}${log.weather ? ` / ${log.weather}` : ""}`}
               />
@@ -239,7 +269,7 @@ export default function ProjectManagementPage() {
             {weeklyLogs.map((log) => (
               <LogRow
                 key={log.id}
-                href={`/dashboard/projects/${log.project_id}?section=field`}
+                href={`/dashboard/projects/${log.project_id}?phase=field&tab=weekly-log`}
                 title={log.summary || log.open_issues || log.decisions_needed || "Weekly log"}
                 meta={`${log.project_name} / ${fmtDate(log.week_start)}-${fmtDate(log.week_end)}`}
               />
