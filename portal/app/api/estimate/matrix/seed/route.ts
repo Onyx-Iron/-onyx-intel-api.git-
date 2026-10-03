@@ -88,7 +88,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .or("review_status.is.null,review_status.eq.approved"),
     db
       .from("projects")
-      .select("state")
+      .select("state, zip_code")
       .eq("id", body.project_id)
       .eq("tenant_id", tenantId)
       .maybeSingle(),
@@ -116,7 +116,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     ? await resolveCostsBatch(codes.map((cost_code) => ({
         cost_code,
         tenant_id: tenantId,
-        region: { state: project?.state ?? undefined },
+        region: { state: project?.state ?? undefined, zip: project?.zip_code ?? undefined },
       })))
     : [];
   const resolvedByCode = new Map(resolved.map((row) => [row.cost_code, row]));
