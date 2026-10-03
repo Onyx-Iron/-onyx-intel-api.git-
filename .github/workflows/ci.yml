@@ -121,7 +121,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          # Pin version: `latest` hits GitHub Releases rate limits and fails
+          # setup before migrations ever run.
+          version: 2.119.0
       # `supabase start` boots the full local stack (Postgres + the
       # auth/vault/pg_cron/pg_net extensions several of this repo's
       # migrations depend on) in Docker, then `db push` replays every
