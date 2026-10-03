@@ -7,6 +7,10 @@
 --
 -- SECURITY DEFINER + search_path=public: the tenants lookup bypasses RLS on
 -- tenants (exact same privilege model as the original helper).
+--
+-- Execute grants are intentionally unchanged from
+-- 20260803191017_close_remaining_supabase_advisors.sql (service_role only in
+-- production; pgTAP re-grants authenticated inside a rolled-back transaction).
 
 CREATE OR REPLACE FUNCTION public.current_tenant_id()
 RETURNS uuid
@@ -23,7 +27,3 @@ AS $$
   )
   LIMIT 1;
 $$;
-
-REVOKE EXECUTE ON FUNCTION public.current_tenant_id() FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.current_tenant_id() FROM anon;
-GRANT EXECUTE ON FUNCTION public.current_tenant_id() TO authenticated, service_role;
