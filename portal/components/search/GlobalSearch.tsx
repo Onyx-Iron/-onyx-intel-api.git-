@@ -2,7 +2,14 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Search, X, Folder, FileText, Users, Sparkles, Loader2 } from "lucide-react";
+import { Search, X, Folder, FileText, Users, Sparkles, Loader2, CornerDownLeft } from "lucide-react";
+import { useOptionalProjectContext } from "@/components/project/ProjectContext";
+import {
+  filterDestinations,
+  projectDestinations,
+  WORKSPACE_DESTINATIONS,
+  type Destination,
+} from "@/lib/navigation/destinations";
 
 type SearchKind = "project" | "document" | "contact" | "generated_document";
 
@@ -49,6 +56,7 @@ function hrefFor(r: SearchResult): string {
 }
 
 export default function GlobalSearch() {
+  const projectCtx = useOptionalProjectContext();
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
@@ -126,6 +134,17 @@ export default function GlobalSearch() {
     return () => document.removeEventListener("keydown", onKey);
   }, [open]);
 
+  const jumps = useMemo(() => {
+    const active = projectCtx?.activeProject;
+    const project = active ? projectDestinations(active.id, active.name) : [];
+    const primaryProject = project.filter(
+      (item, index, all) => all.findIndex((other) => other.hint === item.hint) === index,
+    );
+    const catalog = [...primaryProject, ...WORKSPACE_DESTINATIONS];
+    const trimmedQuery = query.trim();
+    return (trimmedQuery ? filterDestinations(catalog, trimmedQuery) : catalog).slice(0, 6);
+  }, [projectCtx, query]);
+
   const grouped = useMemo(() => {
     const map = new Map<SearchKind, SearchResult[]>();
     for (const r of results) {
@@ -155,8 +174,8 @@ export default function GlobalSearch() {
           setOpen(true);
         }}
         onFocus={() => setOpen(true)}
-        placeholder="Search projects, docs, contacts…"
-        aria-label="Search projects, documents, and contacts"
+        placeholder="Search or jump to a function…"
+        aria-label="Search projects, documents, contacts, and functions"
         className="h-9 w-full rounded-full border border-white/10 bg-white/[0.03] pl-9 pr-9 text-sm text-white outline-none placeholder:text-white/25 focus:border-[#CCFF00]/40"
       />
       {query ? (
@@ -176,11 +195,31 @@ export default function GlobalSearch() {
 
       {showDropdown ? (
         <div className="absolute left-0 right-0 top-[calc(100%+8px)] z-50 max-h-[420px] overflow-y-auto rounded-2xl border border-white/10 bg-[#0B0D12] shadow-2xl shadow-black/40 sm:left-auto sm:right-0 sm:w-[420px]">
-          {!trimmed ? (
-            <div className="px-4 py-6 text-center text-xs text-white/45">
-              Type to search projects, documents, contacts…
+          {jumps.length > 0 && (
+            <div className="border-b border-white/8 px-2 py-2">
+              <div className="px-2 pb-1 pt-1 text-[10px] font-bold uppercase tracking-[0.24em] text-white/35">
+                {trimmed ? "Go to" : "Jump"}
+              </div>
+              <ul>
+                {jumps.map((item: Destination) => (
+                  <li key={item.id}>
+                    <Link
+                      href={item.href}
+                      onClick={() => setOpen(false)}
+                      className="flex items-center justify-between gap-3 rounded-xl px-2 py-2 transition-colors hover:bg-white/[0.04]"
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm text-white">{item.label}</span>
+                        <span className="block truncate text-[11px] text-white/40">{item.hint}</span>
+                      </span>
+                      <CornerDownLeft size={12} className="shrink-0 text-white/25" />
+                    </Link>
+                  </li>
+                ))}
+              </ul>
             </div>
-          ) : loading ? (
+          )}
+          {!trimmed ? null : loading ? (
             <div className="flex items-center justify-center gap-2 px-4 py-6 text-xs text-white/55">
               <Loader2 size={12} className="animate-spin" />
               Searching…
@@ -190,9 +229,11 @@ export default function GlobalSearch() {
               {error}
             </div>
           ) : results.length === 0 ? (
-            <div className="px-4 py-6 text-center text-xs text-white/45">
-              No matches for &ldquo;{trimmed}&rdquo;.
-            </div>
+            jumps.length > 0 ? null : (
+              <div className="px-4 py-6 text-center text-xs text-white/45">
+                No matches for &ldquo;{trimmed}&rdquo;.
+              </div>
+            )
           ) : (
             <ul className="py-2">
               {grouped.map(([kind, items]) => {
