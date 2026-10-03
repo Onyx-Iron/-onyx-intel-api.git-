@@ -30,6 +30,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { captureException } from "../_shared/errors.ts";
 
 const SUPABASE_URL     = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -185,6 +186,10 @@ Deno.serve(async (req) => {
         created_by: null,
         review_status: r.extraction_method === "ai_vision" ? "suggested" : "approved",
         source_method: r.extraction_method ?? "deterministic",
+        // OSS-04 provenance: agent vs deterministic_parser vs human.
+        origin_actor: r.extraction_method === "ai_vision" ? "agent" : "deterministic_parser",
+        origin_method: r.extraction_method ?? "deterministic",
+        origin_edited: false,
         confidence_score: r.confidence ?? null,
         meta: {
           trade: r.trade ?? null,
@@ -192,6 +197,8 @@ Deno.serve(async (req) => {
           drawing_ref: r.drawing_ref ?? null,
           location_tag: r.location_tag ?? null,
           extraction_method: r.extraction_method ?? "deterministic",
+          origin_actor: r.extraction_method === "ai_vision" ? "agent" : "deterministic_parser",
+          origin_method: r.extraction_method ?? "deterministic",
         },
       }));
       const { data: insertedRows, error: insErr } = await db.from("takeoff_items").insert(payload).select("id,review_status");
@@ -232,6 +239,7 @@ Deno.serve(async (req) => {
     });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
+    captureException(err, { fn: "page-takeoff-worker", page_id: body?.page_id });
     console.error("[page-takeoff-worker]", err);
     const message = String(err?.message ?? err);
     await recordEvent("failed", message);

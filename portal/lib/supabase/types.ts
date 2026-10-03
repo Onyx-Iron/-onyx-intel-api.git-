@@ -982,18 +982,21 @@ export type Database = {
         Row: {
           csi_division: string | null
           last_value: number | null
+          pct_change_90d: number | null
           series_id: string
           updated_at: string | null
         }
         Insert: {
           csi_division?: string | null
           last_value?: number | null
+          pct_change_90d?: number | null
           series_id: string
           updated_at?: string | null
         }
         Update: {
           csi_division?: string | null
           last_value?: number | null
+          pct_change_90d?: number | null
           series_id?: string
           updated_at?: string | null
         }
@@ -4520,6 +4523,8 @@ export type Database = {
         Row: {
           classification_confidence: number | null
           classification_method: string | null
+          claimed_at: string | null
+          claimed_by: string | null
           created_at: string
           created_by: string | null
           discipline: string | null
@@ -4527,6 +4532,7 @@ export type Database = {
           document_page_id: string | null
           embedded_text_available: boolean
           id: string
+          is_calibrated: boolean
           is_current: boolean
           ocr_available: boolean
           page_number: number | null
@@ -4551,6 +4557,8 @@ export type Database = {
         Insert: {
           classification_confidence?: number | null
           classification_method?: string | null
+          claimed_at?: string | null
+          claimed_by?: string | null
           created_at?: string
           created_by?: string | null
           discipline?: string | null
@@ -4558,6 +4566,7 @@ export type Database = {
           document_page_id?: string | null
           embedded_text_available?: boolean
           id?: string
+          is_calibrated?: boolean
           is_current?: boolean
           ocr_available?: boolean
           page_number?: number | null
@@ -4582,6 +4591,8 @@ export type Database = {
         Update: {
           classification_confidence?: number | null
           classification_method?: string | null
+          claimed_at?: string | null
+          claimed_by?: string | null
           created_at?: string
           created_by?: string | null
           discipline?: string | null
@@ -4589,6 +4600,7 @@ export type Database = {
           document_page_id?: string | null
           embedded_text_available?: boolean
           id?: string
+          is_calibrated?: boolean
           is_current?: boolean
           ocr_available?: boolean
           page_number?: number | null
@@ -4845,6 +4857,9 @@ export type Database = {
           id: string
           label: string | null
           meta: Json
+          origin_actor: string | null
+          origin_edited: boolean
+          origin_method: string | null
           page: number
           points: Json | null
           project_id: string
@@ -4886,6 +4901,9 @@ export type Database = {
           id?: string
           label?: string | null
           meta?: Json
+          origin_actor?: string | null
+          origin_edited?: boolean
+          origin_method?: string | null
           page: number
           points?: Json | null
           project_id: string
@@ -4927,6 +4945,9 @@ export type Database = {
           id?: string
           label?: string | null
           meta?: Json
+          origin_actor?: string | null
+          origin_edited?: boolean
+          origin_method?: string | null
           page?: number
           points?: Json | null
           project_id?: string

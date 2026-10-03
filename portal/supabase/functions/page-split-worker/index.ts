@@ -35,6 +35,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { PDFDocument } from "https://esm.sh/pdf-lib@1.17.1";
+import { captureException } from "../_shared/errors.ts";
 
 const SUPABASE_URL       = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY   = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -198,17 +199,52 @@ Deno.serve(async (req) => {
       });
     }
 
-    if (pageRows.length > 0) {
-      const { error: insErr } = await db.from("document_pages").insert(pageRows);
-      if (insErr) throw new Error(`insert document_pages: ${insErr.message}`);
+    if (pageRows.length === 0) {
+      throw new Error(
+        pageCount === 0
+          ? "PDF has zero pages"
+          : `All ${pageCount} page upload(s) failed — nothing to process`,
+      );
     }
 
-    // ── 6. Fan out: fire-and-forget each page to page-processor (OCR/embed
-    // for search) AND page-takeoff-worker (real CSI takeoff rows) ───────────
+    // Retry / rekick can re-run split for the same document — clear prior
+    // page rows so UNIQUE(document_id, page_number) doesn't fail the job.
+    {
+      const { error: delErr } = await db.from("document_pages")
+        .delete()
+        .eq("document_id", body.document_id)
+        .eq("tenant_id", body.tenant_id);
+      if (delErr) throw new Error(`clear document_pages: ${delErr.message}`);
+      const { error: insErr } = await db.from("document_pages").insert(pageRows);
+      if (insErr) throw new Error(`insert document_pages: ${insErr.message}`);
+
+      const sheetRows = pageRows.map((p) => ({
+        tenant_id: p.tenant_id,
+        project_id: body.project_id,
+        document_id: p.document_id,
+        document_page_id: p.id,
+        page_number: p.page_number,
+        processing_status: "pending",
+      }));
+      const { error: sheetErr } = await db.from("sheets").insert(sheetRows);
+      if (sheetErr) console.warn("[page-split] insert sheets failed:", sheetErr.message);
+      else {
+        const { error: sheetStatusErr } = await db.rpc("refresh_sheet_index_status", {
+          p_document_id: body.document_id,
+        });
+        if (sheetStatusErr) console.warn("[page-split] sheet_index_status refresh failed:", sheetStatusErr.message);
+      }
+    }
+
+    // ── 6. Fan out page jobs; keep isolate alive until kicks are sent ───────
+    // Returning before the fetches leave the isolate can drop OCR/takeoff
+    // enqueues on cold Edge isolates. waitUntil keeps them alive without
+    // blocking the portal's HTTP response on OCR completion.
     const base = SUPABASE_URL.replace(/\/$/, "");
     const processorUrl = `${base}/functions/v1/page-processor`;
     const takeoffWorkerUrl = `${base}/functions/v1/page-takeoff-worker`;
-    const fanoutResults = await Promise.allSettled(pageRows.flatMap((p) => [
+    const fanoutJobs = pageRows.length * 2;
+    const fanout = Promise.allSettled(pageRows.flatMap((p) => [
       fetch(processorUrl, {
         method: "POST",
         headers: {
@@ -223,7 +259,7 @@ Deno.serve(async (req) => {
           page_number: p.page_number,
           storage_path: p.storage_path,
         }),
-      }),
+      }).catch((err) => console.warn(`[page-split] processor enqueue failed page ${p.page_number}`, err)),
       fetch(takeoffWorkerUrl, {
         method: "POST",
         headers: {
@@ -238,24 +274,21 @@ Deno.serve(async (req) => {
           page_number: p.page_number,
           storage_path: p.storage_path,
         }),
-      }),
+      }).catch((err) => console.warn(`[page-split] takeoff enqueue failed page ${p.page_number}`, err)),
     ]));
-    // fetch() fulfills on HTTP 4xx/5xx — count those as failures too so a
-    // cold-start 5xx doesn't look like a successful enqueue.
-    let fanoutFailures = 0;
-    for (const r of fanoutResults) {
-      if (r.status === "rejected") {
-        fanoutFailures++;
-        continue;
-      }
-      if (!r.value.ok) fanoutFailures++;
-    }
-    if (fanoutFailures > 0) {
-      await recordEvent("failed", `fan-out failed for ${fanoutFailures}/${fanoutResults.length} page jobs`);
+    // EdgeRuntime is injected by the Supabase Edge runtime.
+    // deno-lint-ignore no-explicit-any
+    const edgeWaitUntil = (globalThis as any).EdgeRuntime?.waitUntil as
+      | ((p: Promise<unknown>) => void)
+      | undefined;
+    if (typeof edgeWaitUntil === "function") {
+      edgeWaitUntil(fanout);
+    } else {
+      // Local/dev fallback — don't block the response path in production.
+      void fanout;
     }
 
     // Mark documents.status="split" — pages are now the unit of work.
-    // Persist fan-out summary so clients can surface partial enqueue failures.
     const { data: docMetaRow } = await db
       .from("documents")
       .select("meta")
@@ -274,8 +307,8 @@ Deno.serve(async (req) => {
           ...prevMeta,
           processing_summary: {
             pages_enqueued: pageRows.length,
-            fanout_jobs: fanoutResults.length,
-            fanout_failures: fanoutFailures,
+            fanout_jobs: fanoutJobs,
+            fanout_mode: "fire_and_forget",
             failed_uploads: failedUploads,
             updated_at: new Date().toISOString(),
           },
@@ -285,7 +318,10 @@ Deno.serve(async (req) => {
               last_error: `${failedUploads} of ${pageCount} pages failed to upload`,
               last_error_step: "split",
             }
-          : {}),
+          : {
+              last_error: null,
+              last_error_step: null,
+            }),
       })
       .eq("id", body.document_id)
       .eq("tenant_id", body.tenant_id);
@@ -293,19 +329,19 @@ Deno.serve(async (req) => {
       p_document_id: body.document_id,
     });
     if (summaryErr) console.warn("[page-split] summary refresh failed", summaryErr.message);
-    if (fanoutFailures === 0) await recordEvent("succeeded");
-    else await recordEvent("succeeded", `split ok with ${fanoutFailures} fan-out failures`);
+    await recordEvent("succeeded", `split ok; ${pageRows.length} pages enqueued`);
 
     return new Response(JSON.stringify({
       ok: true,
       document_id: body.document_id,
       page_count: pageCount,
       pages_enqueued: pageRows.length,
-      fanout_failures: fanoutFailures,
+      fanout_jobs: fanoutJobs,
       elapsed_ms: Date.now() - started,
     }), { status: 200, headers: { "Content-Type": "application/json" } });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
+    captureException(err, { fn: "page-split-worker", document_id: body?.document_id });
     console.error("[page-split-worker]", err);
     await recordEvent("failed", String(err?.message ?? err));
     await db.from("documents")

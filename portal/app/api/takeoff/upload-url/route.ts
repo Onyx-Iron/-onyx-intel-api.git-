@@ -2,6 +2,12 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { buildDocumentRevisionMeta } from "@/lib/documents/revisions";
+import {
+  assertUploadSize,
+  buildOriginalStoragePath,
+  parseSignedUploadPayload,
+  PLANS_UPLOAD_BUCKET,
+} from "@/lib/documents/signed-upload";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { auditInsert } from "@/lib/audit";
@@ -13,7 +19,7 @@ export const runtime = "nodejs";
 // which read/write everything under `plans-bucket/`. Keeping a single bucket
 // name avoids silent cross-bucket drift where uploads land in one place and
 // downstream workers look for them in another.
-const BUCKET = "plans-bucket";
+const BUCKET = PLANS_UPLOAD_BUCKET;
 
 /**
  * POST /api/takeoff/upload-url
@@ -60,13 +66,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!project_id || !file_name) {
       return NextResponse.json({ error: "project_id and file_name are required" }, { status: 400 });
     }
-    // Matches plans-bucket's file_size_limit (raised to 1GB after the
-    // Supabase Pro upgrade — was 200MB, capped to fit under the Free tier's
-    // 50MB global Storage ceiling that this route was originally built to
-    // route around).
-    if (typeof body.size === "number" && body.size > 1024 * 1024 * 1024) {
-      return NextResponse.json({ error: "File exceeds the 1GB limit. Split the drawing set and retry." }, { status: 413 });
-    }
+    const sizeErr = assertUploadSize(body.size);
+    if (sizeErr) return NextResponse.json({ error: sizeErr }, { status: 413 });
 
     try {
       await assertProjectBelongsToTenant(project_id, tenantId);
@@ -82,7 +83,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // uses for Drive imports, so both paths are truly unified — the worker
     // doesn't need to know or care which route created the document.
     const documentId = crypto.randomUUID();
-    const storagePath = `originals/${documentId}.pdf`;
+    const storagePath = buildOriginalStoragePath(documentId, file_name);
 
     // Create the signed upload URL. Supabase returns a short-lived token that the
     // browser can PUT to directly.
@@ -95,6 +96,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         { status: 500 },
       );
     }
+    const parsed = parseSignedUploadPayload(signed as Record<string, unknown>);
+    if (!parsed.url) {
+      return NextResponse.json({ error: "Storage did not return a signed upload URL" }, { status: 500 });
+    }
 
     // Pre-insert the document row so `from-document` can find it after the client uploads.
     const insertRow: TablesInsert<"documents"> = {
@@ -106,7 +111,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       uploaded_at: new Date().toISOString(),
       meta: buildDocumentRevisionMeta(file_name, {
         source: "local_upload",
-        storage: "supabase",
+        storage: BUCKET,
         storage_path: storagePath,
         size: body.size ?? null,
         content_type,
@@ -129,13 +134,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({
       document_id: doc.id,
       upload: {
-        // Different Supabase client versions expose these keys; return all so the
-        // client can pick whichever is present.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        url:   (signed as any).signedUrl ?? (signed as any).signedURL ?? (signed as any).url,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        token: (signed as any).token,
-        path:  storagePath,
+        url: parsed.url,
+        token: parsed.token,
+        path: storagePath,
         method: "PUT" as const,
       },
     });

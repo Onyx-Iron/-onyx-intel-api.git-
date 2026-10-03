@@ -30,10 +30,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const body = (await req.json()) as {
       plan?: string;
+      plan_tier?: string;
       billing_cycle?: string;
+      cycle?: string;
     };
-    const plan = body.plan as Plan | undefined;
-    const cycle = body.billing_cycle as Cycle | undefined;
+    // Accept both API names and the onboarding UI names (plan_tier / cycle).
+    const plan = (body.plan ?? body.plan_tier) as Plan | undefined;
+    const cycle = (body.billing_cycle ?? body.cycle) as Cycle | undefined;
     if (!plan || !["solo", "crew", "business"].includes(plan)) {
       return NextResponse.json({ error: "Invalid plan" }, { status: 400 });
     }

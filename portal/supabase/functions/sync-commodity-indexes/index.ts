@@ -20,6 +20,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { captureException } from "../_shared/errors.ts";
 
 const SUPABASE_URL     = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -149,6 +150,7 @@ Deno.serve(async () => {
           series_id: t.series_id,
           csi_division: t.csi_division,
           last_value: t.last_value,
+          pct_change_90d: t.pct_change_90d,
           updated_at: new Date().toISOString(),
         })),
         { onConflict: "series_id" },
@@ -157,6 +159,10 @@ Deno.serve(async () => {
     }
 
     // ── 4. Escalate stale catalog items ──────────────────────────────────────
+    // Estimators primarily resolve from cost_prices (regional/national). Older
+    // builds only aged cost_overrides (often empty), so PPI never reached the
+    // resolve path. Age both tables here; resolveCost also ages at read time
+    // using pct_change_90d as a belt-and-suspenders.
     const deltaByDivision = new Map(
       trends.filter((t) => t.pct_change_90d !== null).map((t) => [t.csi_division, t.pct_change_90d as number]),
     );
@@ -169,12 +175,13 @@ Deno.serve(async () => {
     if (staleErr) throw new Error(`stale catalog lookup: ${staleErr.message}`);
 
     let escalated = 0;
+    let pricesEscalated = 0;
     const historyRows: Record<string, unknown>[] = [];
     const priceUpdates: { id: string; unit_cost: number }[] = [];
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     for (const row of (staleRows ?? []) as any[]) {
-      const division = row.cost_codes?.division as string | undefined;
+      const division = String(row.cost_codes?.division ?? "").trim().padStart(2, "0").slice(-2);
       if (!division) continue;
       const delta = deltaByDivision.get(division);
       if (delta == null || delta === 0) continue; // no matching signal, or no movement
@@ -212,6 +219,35 @@ Deno.serve(async () => {
       if (histErr) throw new Error(`catalog_pricing_history insert: ${histErr.message}`);
     }
 
+    // Age shared cost_prices rows the same way (these feed resolveCost).
+    const { data: stalePrices, error: stalePriceErr } = await db
+      .from("cost_prices")
+      .select("id, unit_cost, observed_at, cost_code_id, cost_codes(division)")
+      .lt("observed_at", staleCutoff);
+    if (stalePriceErr) throw new Error(`stale cost_prices lookup: ${stalePriceErr.message}`);
+
+    const costPriceUpdates: { id: string; unit_cost: number }[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    for (const row of (stalePrices ?? []) as any[]) {
+      const division = String(row.cost_codes?.division ?? "").trim().padStart(2, "0").slice(-2);
+      if (!division) continue;
+      const delta = deltaByDivision.get(division);
+      if (delta == null || delta === 0) continue;
+      const oldPrice = Number(row.unit_cost);
+      if (!Number.isFinite(oldPrice) || oldPrice <= 0) continue;
+      const newPrice = Math.round(oldPrice * (1 + delta / 100) * 100) / 100;
+      if (newPrice === oldPrice) continue;
+      costPriceUpdates.push({ id: row.id, unit_cost: newPrice });
+      pricesEscalated++;
+    }
+    await Promise.all(
+      costPriceUpdates.map((u) =>
+        db.from("cost_prices")
+          .update({ unit_cost: u.unit_cost, observed_at: new Date().toISOString() })
+          .eq("id", u.id),
+      ),
+    );
+
     return new Response(
       JSON.stringify({
         ok: true,
@@ -219,11 +255,14 @@ Deno.serve(async () => {
         trends,
         catalog_items_evaluated: (staleRows ?? []).length,
         catalog_items_escalated: escalated,
+        cost_prices_evaluated: (stalePrices ?? []).length,
+        cost_prices_escalated: pricesEscalated,
       }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     );
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
+    captureException(err, { fn: "sync-commodity-indexes" });
     console.error("[sync-commodity-indexes]", err);
     return new Response(JSON.stringify({ ok: false, error: String(err?.message ?? err) }), {
       status: 500,

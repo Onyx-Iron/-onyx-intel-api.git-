@@ -5,6 +5,7 @@ import { Activity, CircleDollarSign, ClipboardCheck, FileQuestion, Pencil, Plus,
 import UniversalImportButton from "@/components/common/UniversalImportButton";
 import { useBulkImport, toStr, toNum } from "@/components/common/useBulkImport";
 import EmptyState from "@/components/common/EmptyState";
+import ProjectContactsInline from "@/components/preconstruction/ProjectContactsInline";
 
 function pickCtrl(row: Record<string, string | number | null>, keys: string[]): string | null {
   for (const k of keys) {
@@ -322,10 +323,18 @@ export default function ProjectControlsTab({ projectId }: { projectId: string })
     ]);
 
     const [rfiData, submittalData, changeOrderData] = await Promise.all([
-      rfiRes.json() as Promise<{ items?: RfiItem[] }>,
-      submittalRes.json() as Promise<{ items?: SubmittalItem[] }>,
-      changeOrderRes.json() as Promise<{ items?: ChangeOrderItem[] }>,
+      rfiRes.json() as Promise<{ items?: RfiItem[]; error?: string; code?: string }>,
+      submittalRes.json() as Promise<{ items?: SubmittalItem[]; error?: string; code?: string }>,
+      changeOrderRes.json() as Promise<{ items?: ChangeOrderItem[]; error?: string; code?: string }>,
     ]);
+
+    const unavailable = [rfiData, submittalData, changeOrderData]
+      .filter((d) => d.code === "FEATURE_UNAVAILABLE" || (!d.items && d.error))
+      .map((d) => d.error)
+      .filter((msg): msg is string => typeof msg === "string");
+    // Deduplicate identical FEATURE_UNAVAILABLE messages across the three endpoints.
+    const uniqueUnavailable = Array.from(new Set(unavailable));
+    setErrorMsg(uniqueUnavailable.length > 0 ? uniqueUnavailable.join(" ") : null);
 
     setRfis(rfiData.items ?? []);
     setSubmittals(submittalData.items ?? []);
@@ -603,13 +612,18 @@ export default function ProjectControlsTab({ projectId }: { projectId: string })
         </div>
 
         {activeKind === "rfi" && (
-          <RfiTable
-            items={rfis}
-            loading={loading}
-            onEdit={(item) => openEdit("rfi", item)}
-            onDelete={(id) => deleteItem("rfi", id)}
-            onCycle={(item) => cycleStatus("rfi", item)}
-          />
+          <>
+            <div className="px-4 pt-3">
+              <ProjectContactsInline projectId={projectId} />
+            </div>
+            <RfiTable
+              items={rfis}
+              loading={loading}
+              onEdit={(item) => openEdit("rfi", item)}
+              onDelete={(id) => deleteItem("rfi", id)}
+              onCycle={(item) => cycleStatus("rfi", item)}
+            />
+          </>
         )}
         {activeKind === "submittal" && (
           <SubmittalTable

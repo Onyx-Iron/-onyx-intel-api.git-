@@ -27,6 +27,18 @@ interface PlanDocument {
   takeoff_status: string | null;
 }
 
+interface UnprocessedSheet {
+  id: string;
+  project_id: string;
+  document_id: string;
+  page_number: number | null;
+  processing_status: string;
+  is_calibrated: boolean;
+  file_name: string | null;
+  project_name: string | null;
+  updated_at: string;
+}
+
 const REVIEW_STYLES: Record<string, string> = {
   suggested: "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
   reviewed: "bg-white/5 text-white/60 border-white/10",
@@ -59,21 +71,29 @@ export default function GlobalTakeoffPage() {
   const { projects, activeProjectId, activeProject } = useProjectContext();
   const [items, setItems] = useState<TakeoffItem[]>([]);
   const [openPlans, setOpenPlans] = useState<PlanDocument[]>([]);
+  const [unprocessedSheets, setUnprocessedSheets] = useState<UnprocessedSheet[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
     setError(null);
+    const sheetsUrl = activeProjectId
+      ? `/api/takeoff/unprocessed-sheets?project_id=${encodeURIComponent(activeProjectId)}&limit=50`
+      : "/api/takeoff/unprocessed-sheets?limit=50";
+
     Promise.all([
       fetch("/api/takeoff/items?limit=500").then((r) => r.json()),
       fetch("/api/documents").then((r) => r.json()),
+      fetch(sheetsUrl).then((r) => r.json()),
     ])
-      .then(([takeoffRes, documentsRes]: [unknown, unknown]) => {
+      .then(([takeoffRes, documentsRes, sheetsRes]: [unknown, unknown, unknown]) => {
         const t = takeoffRes as { items?: TakeoffItem[]; error?: string };
         const d = documentsRes as { documents?: PlanDocument[]; error?: string };
+        const s = sheetsRes as { sheets?: UnprocessedSheet[]; error?: string };
         if (t.error) throw new Error(t.error);
         if (d.error) throw new Error(d.error);
+        if (s.error) throw new Error(s.error);
         setItems(t.items ?? []);
         const docs = d.documents ?? [];
         setOpenPlans(
@@ -83,6 +103,7 @@ export default function GlobalTakeoffPage() {
             return true;
           }),
         );
+        setUnprocessedSheets(s.sheets ?? []);
         setLoading(false);
       })
       .catch((e) => { setError(e?.message ?? "Network error"); setLoading(false); });
@@ -149,19 +170,49 @@ export default function GlobalTakeoffPage() {
           <ProjectScopeSelect className="w-56" label="" />
         </div>
 
-        {!loading && openPlans.length > 0 && (
-          <div className="mb-5 rounded-xl border border-white/8 bg-[#0E0F12] px-4 py-3">
-            <p className="text-[10px] uppercase tracking-widest text-white/40">Plans still in takeoff</p>
-            <ul className="mt-2 space-y-1">
-              {openPlans.map((doc) => (
-                <li key={doc.id} className="flex items-center justify-between gap-3 text-xs">
-                  <span className="truncate text-white/80">{doc.file_name}</span>
-                  <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-[#00D2FF]">
-                    {doc.takeoff_status ?? "pending"}
-                  </span>
-                </li>
-              ))}
-            </ul>
+        {!loading && (openPlans.length > 0 || unprocessedSheets.length > 0) && (
+          <div className="mb-5 grid gap-4 md:grid-cols-2">
+            {openPlans.length > 0 && (
+              <div className="rounded-xl border border-white/8 bg-[#0E0F12] px-4 py-3">
+                <p className="text-[10px] uppercase tracking-widest text-white/40">Plans still in takeoff</p>
+                <ul className="mt-2 space-y-1">
+                  {openPlans.map((doc) => (
+                    <li key={doc.id} className="flex items-center justify-between gap-3 text-xs">
+                      <span className="truncate text-white/80">{doc.file_name}</span>
+                      <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-[#00D2FF]">
+                        {doc.takeoff_status ?? "pending"}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {unprocessedSheets.length > 0 && (
+              <div className="rounded-xl border border-[#CCFF00]/20 bg-[#0E0F12] px-4 py-3">
+                <p className="text-[10px] uppercase tracking-widest text-[#CCFF00]/70">Sheets needing calibration</p>
+                <ul className="mt-2 space-y-1">
+                  {unprocessedSheets.map((sheet) => {
+                    const href = `/dashboard/projects/${sheet.project_id}?phase=takeoff&tab=takeoff`;
+                    const label = sheet.file_name
+                      ? `${sheet.file_name}${sheet.page_number != null ? ` · p.${sheet.page_number}` : ""}`
+                      : `Sheet ${sheet.page_number ?? "?"}`;
+                    return (
+                      <li key={sheet.id} className="flex items-center justify-between gap-3 text-xs">
+                        <a href={href} className="truncate text-white/80 hover:text-[#CCFF00] hover:underline">
+                          {label}
+                          {!activeProjectId && sheet.project_name && (
+                            <span className="ml-1 text-white/40">({sheet.project_name})</span>
+                          )}
+                        </a>
+                        <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-[#CCFF00]/80">
+                          {sheet.processing_status}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
           </div>
         )}
 

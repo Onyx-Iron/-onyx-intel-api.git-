@@ -4,6 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import { Upload } from "lucide-react";
 
 import { useToast } from "@/components/common/Toast";
+import { uploadDocumentDirect } from "@/lib/documents/browser-upload";
 
 interface ProjectUploadButtonProps {
   projectId: string;
@@ -12,6 +13,11 @@ interface ProjectUploadButtonProps {
   onUploaded?: () => void;
 }
 
+/**
+ * Project-header "Upload Plans" control.
+ * Direct-to-Supabase signed PUT / TUS — local files never depend on Google
+ * Drive. Drive import stays on Documents → From Drive.
+ */
 export default function ProjectUploadButton({
   projectId,
   variant = "primary",
@@ -20,6 +26,7 @@ export default function ProjectUploadButton({
 }: ProjectUploadButtonProps) {
   const { toast } = useToast();
   const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const onChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -27,83 +34,17 @@ export default function ProjectUploadButton({
     if (files.length === 0) return;
     e.target.value = "";
     setUploading(true);
+    setProgress(0);
     const failures: string[] = [];
+    let uploaded = 0;
     try {
       for (const file of files) {
         try {
-          const sessionRes = await fetch("/api/documents/upload", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              storage_type: "drive",
-              file_name: file.name,
-              content_type: file.type || "application/octet-stream",
-              project_id: projectId,
-            }),
+          setProgress(0);
+          await uploadDocumentDirect(file, projectId, {
+            onProgress: (p) => setProgress(p.percent),
           });
-          const sessionData = await sessionRes.json() as { upload_url?: string; error?: string; code?: string };
-          if (!sessionRes.ok) {
-            if (sessionData.code === "NEED_GOOGLE") {
-              failures.push(`${file.name}: Google Drive not connected. Connect Google from the dashboard, then retry.`);
-            } else {
-              failures.push(`${file.name}: ${sessionData.error ?? "could not start upload"}`);
-            }
-            continue;
-          }
-
-          // 10-minute timeout so a hung PUT (e.g. Drive token expiring mid-upload)
-          // surfaces as a clear error rather than leaving the button stuck on "Uploading…".
-          const ctrl = new AbortController();
-          const timer = setTimeout(() => ctrl.abort(), 10 * 60 * 1000);
-          let uploadRes: Response;
-          try {
-            uploadRes = await fetch(sessionData.upload_url!, {
-              method: "PUT",
-              headers: { "Content-Type": file.type || "application/octet-stream" },
-              body: file,
-              signal: ctrl.signal,
-            });
-          } catch (err) {
-            if ((err as { name?: string }).name === "AbortError") {
-              failures.push(`${file.name}: Drive upload timed out (Google sign-in may have expired — reconnect Google and retry)`);
-              continue;
-            }
-            throw err;
-          } finally {
-            clearTimeout(timer);
-          }
-          if (!uploadRes.ok) {
-            if (uploadRes.status === 401 || uploadRes.status === 403) {
-              failures.push(`${file.name}: Drive rejected upload (${uploadRes.status}) — Google sign-in expired. Reconnect Google and retry.`);
-            } else {
-              failures.push(`${file.name}: Drive upload failed (${uploadRes.status})`);
-            }
-            continue;
-          }
-          const driveFile = await uploadRes.json() as { id?: string };
-          if (!driveFile.id) {
-            failures.push(`${file.name}: Drive did not return file id`);
-            continue;
-          }
-
-          // Unified endpoint inserts the row and auto-fires ingest
-          const regRes = await fetch("/api/documents/upload", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              storage_type: "drive",
-              project_id: projectId,
-              file_name: file.name,
-              drive_file_id: driveFile.id,
-              mime_type: file.type,
-              size: file.size,
-            }),
-          });
-          if (!regRes.ok) {
-            const d = await regRes.json().catch(() => ({})) as { error?: string };
-            failures.push(`${file.name}: ${d.error ?? "registration failed"}`);
-            continue;
-          }
+          uploaded += 1;
         } catch (err) {
           failures.push(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -111,11 +52,21 @@ export default function ProjectUploadButton({
       onUploaded?.();
       if (failures.length > 0) {
         toast({ title: String(`Some files could not be uploaded:\n\n${failures.join("\n")}`), kind: "error" });
+      } else if (uploaded > 0) {
+        toast({
+          title: String(
+            uploaded === 1
+              ? "Plan uploaded — page-split / ingest is running in the background."
+              : `${uploaded} plans uploaded — processing continues in the background.`,
+          ),
+          kind: "success",
+        });
       }
     } finally {
       setUploading(false);
+      setProgress(null);
     }
-  }, [projectId, onUploaded]);
+  }, [projectId, onUploaded, toast]);
 
   const isPrimary = variant === "primary";
   const cls = isPrimary
@@ -140,7 +91,9 @@ export default function ProjectUploadButton({
         className={cls}
       >
         <Upload size={13} />
-        {uploading ? "Uploading…" : label}
+        {uploading
+          ? (progress != null ? `Uploading ${progress}%` : "Uploading…")
+          : label}
       </button>
     </>
   );

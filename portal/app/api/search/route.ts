@@ -10,7 +10,7 @@ import {
 export const runtime = "nodejs";
 
 type SearchResult = {
-  kind: "project" | "document" | "contact" | "generated_document";
+  kind: "project" | "document" | "contact" | "generated_document" | "bid_opportunity" | "campaign" | "takeoff";
   id: string;
   title: string;
   project_id?: string | null;
@@ -59,7 +59,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const db = await createServiceClient();
     const pat = `%${escapeIlikePattern(q)}%`;
 
-    const [projectsRes, documentsRes, contactsRes, generatedRes] =
+    const [projectsRes, documentsRes, contactsRes, generatedRes, bidsRes, campaignsRes, takeoffsRes] =
       await Promise.all([
         db
           .from("projects")
@@ -84,6 +84,26 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           .select("id, title, doc_type, project_id")
           .eq("tenant_id", tenantId)
           .ilike("title", pat)
+          .limit(PER_CATEGORY),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (db as any)
+          .from("bid_opportunities")
+          .select("id, name, client_name, stage, project_id")
+          .eq("tenant_id", tenantId)
+          .or(`name.ilike.${pat},client_name.ilike.${pat}`)
+          .limit(PER_CATEGORY),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (db as any)
+          .from("marketing_campaigns")
+          .select("id, campaign_name, platform, project_id")
+          .eq("tenant_id", tenantId)
+          .ilike("campaign_name", pat)
+          .limit(PER_CATEGORY),
+        db
+          .from("takeoff_items")
+          .select("id, label, csi_code, project_id")
+          .eq("tenant_id", tenantId)
+          .or(`label.ilike.${pat},csi_code.ilike.${pat}`)
           .limit(PER_CATEGORY),
       ]);
 
@@ -150,6 +170,46 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           project_id: row.project_id,
           snippet: row.doc_type ?? null,
           score: score(row.title, q),
+        });
+      }
+    }
+
+    if (!bidsRes.error && bidsRes.data) {
+      for (const row of bidsRes.data as Array<{ id: string; name: string; client_name: string | null; stage: string; project_id: string | null }>) {
+        results.push({
+          kind: "bid_opportunity",
+          id: row.id,
+          title: row.name,
+          project_id: row.project_id,
+          snippet: [row.stage, row.client_name].filter(Boolean).join(" · ") || null,
+          score: Math.max(score(row.name, q), score(row.client_name, q)),
+        });
+      }
+    }
+
+    if (!campaignsRes.error && campaignsRes.data) {
+      for (const row of campaignsRes.data as Array<{ id: string; campaign_name: string; platform: string; project_id: string | null }>) {
+        results.push({
+          kind: "campaign",
+          id: row.id,
+          title: row.campaign_name,
+          project_id: row.project_id,
+          snippet: row.platform,
+          score: score(row.campaign_name, q),
+        });
+      }
+    }
+
+    if (!takeoffsRes.error && takeoffsRes.data) {
+      for (const row of takeoffsRes.data as Array<{ id: string; label: string | null; csi_code: string | null; project_id: string }>) {
+        const title = row.label || row.csi_code || "Takeoff item";
+        results.push({
+          kind: "takeoff",
+          id: row.id,
+          title,
+          project_id: row.project_id,
+          snippet: row.csi_code,
+          score: Math.max(score(row.label, q), score(row.csi_code, q)),
         });
       }
     }

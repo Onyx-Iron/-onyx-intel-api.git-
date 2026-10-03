@@ -2,6 +2,13 @@
 -- pipeline (`document_chunks`). Adds document-scoped search for Q&A.
 -- Hybrid RRF uses FULL OUTER JOIN + ordered keyword LIMIT (keyword-only hits
 -- must survive) and search_path public,extensions for vector ops.
+--
+-- DROP first: prior overloads returned document_id uuid; this migration
+-- widens to text. Postgres rejects CREATE OR REPLACE when OUT row types change
+-- (SQLSTATE 42P13).
+
+DROP FUNCTION IF EXISTS public.match_chunks(vector, uuid, uuid, integer);
+DROP FUNCTION IF EXISTS public.match_chunks(vector, uuid, uuid, text, integer, integer);
 
 CREATE OR REPLACE FUNCTION public.match_chunks(
   query_embedding vector,

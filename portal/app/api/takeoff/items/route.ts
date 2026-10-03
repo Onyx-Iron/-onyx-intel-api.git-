@@ -9,6 +9,7 @@ import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { takeoffItemsSchema, parseBody } from "@/lib/validation";
 import { recordTakeoffHistory, recordTakeoffHistoryBatch } from "@/lib/takeoff/history";
+import { isVisionMeta, provenanceForNewItem } from "@/lib/takeoff/provenance";
 import type { Json } from "@/lib/supabase/types";
 
 function jsonObject(value: Json | null | undefined): Record<string, unknown> | null {
@@ -111,6 +112,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const payload = prepared.rows.map((row) => {
       const isUpdate = row.id != null && existingById.has(row.id);
+      const meta = (row.meta ?? {}) as Record<string, unknown>;
+      const vision = isVisionMeta(meta);
+      const stamp = provenanceForNewItem({
+        sourceMethod: vision ? "ai_vision" : "manual",
+        isVisionSourced: vision,
+      });
+      const metaWithOrigin = {
+        ...meta,
+        extraction_method: stamp.source_method,
+        origin_actor: stamp.origin_actor,
+        origin_method: stamp.origin_method,
+      } as Json;
       return {
         id: row.id ?? crypto.randomUUID(),
         tenant_id: tenantId,
@@ -124,14 +137,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         type: row.type ?? "general",
         page: row.page ?? 0,
         document_id: row.document_id ?? null,
-        meta: (row.meta ?? {}) as Json,
+        meta: metaWithOrigin,
         updated_by: userId,
-        // Manual/deterministic saves through this route are either
-        // human-created or grounded in deterministic math — they don't
-        // need the AI-review gate, so they're implicitly approved. Only
-        // set created_by/source_method on genuinely new rows; preserve
-        // the original creator on an edit.
-        ...(isUpdate ? {} : { created_by: userId, review_status: "approved" as const, source_method: "manual" }),
+        // New human/deterministic rows are approved. AI vision rows land as
+        // suggested with origin_actor=agent and must be sealed via the
+        // review endpoint before estimate sync (OSS-04/05).
+        ...(isUpdate
+          ? {}
+          : {
+              created_by: vision ? null : userId,
+              review_status: stamp.review_status,
+              source_method: stamp.source_method,
+              origin_actor: stamp.origin_actor,
+              origin_method: stamp.origin_method,
+              origin_edited: stamp.origin_edited,
+            }),
       };
     });
 

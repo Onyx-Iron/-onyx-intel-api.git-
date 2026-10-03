@@ -252,8 +252,32 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     setSaving(true);
     try {
       const res = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}/approve`, { method: "POST" });
-      if (res.ok) await load();
-      else setSeedResult(`Approve failed: ${(await res.json().catch(() => ({}))).error ?? res.status}`);
+      const data = await res.json().catch(() => ({})) as {
+        error?: string;
+        bid_stage_suggestion?: { opportunity_id: string; suggested_stage: string; name?: string };
+      };
+      if (!res.ok) {
+        setSeedResult(`Approve failed: ${data.error ?? res.status}`);
+        return;
+      }
+      await load();
+      const sug = data.bid_stage_suggestion;
+      if (sug?.opportunity_id && sug.suggested_stage) {
+        const ok = window.confirm(
+          `Linked bid "${sug.name ?? sug.opportunity_id}" can move to "${sug.suggested_stage}". Update the bid board now?`,
+        );
+        if (ok) {
+          const patch = await fetch(`/api/preconstruction/opportunities/${encodeURIComponent(sug.opportunity_id)}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ stage: sug.suggested_stage }),
+          });
+          if (patch.ok) setSeedResult(`Approved — bid stage set to ${sug.suggested_stage}.`);
+          else setSeedResult("Approved — bid stage update failed (update from Bid Board).");
+        } else {
+          setSeedResult("Approved — bid stage left unchanged.");
+        }
+      }
     } finally {
       setSaving(false);
     }

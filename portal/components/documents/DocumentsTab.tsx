@@ -4,9 +4,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { FolderOpen, FileText, X, RefreshCw, Sparkles, Send, Upload, ChevronDown, ChevronRight } from "lucide-react";
 import GoogleDrivePicker from "./GoogleDrivePicker";
+import EmailImportPanel from "./EmailImportPanel";
+import CloudImportPanel from "./CloudImportPanel";
 import GenerateDocDropdown from "@/components/common/GenerateDocDropdown";
 
 import { useToast } from "@/components/common/Toast";
+import { uploadDocumentDirect } from "@/lib/documents/browser-upload";
 import {
   isInFlightStatus,
   isRetryable,
@@ -267,82 +270,20 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     e.target.value = "";
     setUploading(true);
     try {
-      // Step 1: ask the unified upload endpoint for a Drive resumable upload URL
-      const sessionRes = await fetch("/api/documents/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ storage_type: "drive", file_name: file.name, content_type: file.type || "application/octet-stream", project_id: projectId }),
-      });
-      const sessionData = await sessionRes.json() as { upload_url?: string; error?: string; code?: string };
-      if (!sessionRes.ok) {
-        if (sessionData.code === "NEED_GOOGLE") {
-          toast({ title: String("Google Drive is not connected.\n\nClick \"From Drive\" to connect Google, then try uploading again."), kind: "error" });
-        } else {
-          toast({ title: String(sessionData.error ?? "Could not start upload"), kind: "error" });
-        }
-        return;
-      }
-
-      // Step 2: upload file bytes directly to Google Drive (bypasses Vercel + Supabase size limits)
-      // Use an AbortController-backed timeout so a hung PUT doesn't leave the UI
-      // stuck on "Uploading…" forever (e.g. Drive token expired between session
-      // create and the PUT — Drive sometimes hangs the connection instead of 401-ing fast).
-      const PUT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — large PDFs are slow on flaky links
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), PUT_TIMEOUT_MS);
-      let uploadRes: Response;
-      try {
-        uploadRes = await fetch(sessionData.upload_url!, {
-          method: "PUT",
-          headers: { "Content-Type": file.type || "application/octet-stream" },
-          body: file,
-          signal: ctrl.signal,
-        });
-      } catch (err) {
-        if ((err as { name?: string }).name === "AbortError") {
-          toast({ title: String(`Upload to Google Drive timed out after ${Math.round(PUT_TIMEOUT_MS / 60000)} minutes. The Google sign-in may have expired — click "From Drive" to reconnect Google, then try again.`), kind: "error" });
-          return;
-        }
-        throw err;
-      } finally {
-        clearTimeout(timer);
-      }
-      if (!uploadRes.ok) {
-        const detail = await uploadRes.text().catch(() => "");
-        if (uploadRes.status === 401 || uploadRes.status === 403) {
-          toast({ title: String(`Google Drive rejected the upload (${uploadRes.status}). Your Google sign-in likely expired between starting and finishing the upload. Click "From Drive" to reconnect Google, then try again.\n\n${detail.slice(0, 200)}`), kind: "error" });
-        } else {
-          toast({ title: String(`Upload to Google Drive failed (${uploadRes.status}): ${detail.slice(0, 200)}`), kind: "error" });
-        }
-        return;
-      }
-      const driveFile = await uploadRes.json() as { id?: string };
-      const driveFileId = driveFile.id;
-      if (!driveFileId) {
-        toast({ title: String("Drive upload completed but did not return a file ID. Please try again."), kind: "error" });
-        return;
-      }
-
-      // Step 3: register the document row via the unified endpoint
-      // (the server auto-fires ingest — no separate call needed)
-      const regRes = await fetch("/api/documents/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ storage_type: "drive", project_id: projectId, file_name: file.name, drive_file_id: driveFileId, mime_type: file.type, size: file.size }),
-      });
-      if (!regRes.ok) {
-        const d = await regRes.json().catch(() => ({})) as { error?: string };
-        toast({ title: String(d.error ?? "Registration failed"), kind: "error" });
-        return;
-      }
-
-      loadDocuments();
+      // Direct-to-Supabase signed PUT / TUS — no Google Drive required; bytes
+      // never touch Vercel's 4.5MB limit. Large PDFs complete via
+      // upload-url/complete → ingest → page-split-worker. "From Drive" stays
+      // the Drive import path.
+      await uploadDocumentDirect(file, projectId);
+      toast({ title: String(`Uploaded ${file.name}`), kind: "info" });
+      setPollTimedOut(false);
+      await loadDocuments(false);
     } catch (err) {
       toast({ title: String(`Upload failed: ${err instanceof Error ? err.message : String(err)}`), kind: "error" });
     } finally {
       setUploading(false);
     }
-  }, [projectId, loadDocuments]);
+  }, [projectId, loadDocuments, toast]);
 
   const handleDriveFiles = useCallback(async (
     driveFiles: { id: string; name: string; mimeType: string; sizeBytes?: number }[],
@@ -387,7 +328,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     } finally {
       setDriveImporting(false);
     }
-  }, [projectId, loadDocuments]);
+  }, [projectId, loadDocuments, toast]);
 
   const openAsk = (doc: Document) => {
     setAskDoc({ id: doc.id, name: doc.file_name });
@@ -431,6 +372,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   }, [askDoc]);
 
   const retryIngest = useCallback(async (doc: Document) => {
+    if (retryingDocId) return;
     if (!documentHasAskableSource(doc)) {
       toast({ title: String("No stored file to retry — re-upload this document."), kind: "error" });
       return;
@@ -442,17 +384,38 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
-      const data = await res.json().catch(() => ({})) as { error?: string; skipped?: boolean; reason?: string };
-      if (!res.ok && res.status !== 409) {
+      const data = await res.json().catch(() => ({})) as {
+        error?: string;
+        skipped?: boolean;
+        reason?: string;
+        queued?: boolean;
+      };
+      if (!res.ok && res.status !== 409 && res.status !== 202) {
         toast({ title: String(data.error ?? `Retry failed (${res.status})`), kind: "error" });
         return;
       }
       if (data.skipped && data.reason === "already_complete") {
         toast({ title: String("Document is already processed."), kind: "info" });
-      } else if (data.skipped && data.reason === "already_processing") {
+      } else if (
+        data.skipped
+        && (data.reason === "already_processing" || data.reason === "concurrent_claim")
+      ) {
+        toast({ title: String("Document is already being processed."), kind: "info" });
+      } else if (res.status === 409 && data.skipped) {
         toast({ title: String("Document is already being processed."), kind: "info" });
       } else {
-        toast({ title: String("Re-processing started."), kind: "info" });
+        toast({
+          title: data.queued
+            ? `${doc.file_name} re-queued for page-split.`
+            : `${doc.file_name} ingest restarted.`,
+          kind: "success",
+        });
+        // Optimistically flip so polling resumes immediately.
+        setDocuments((prev) => prev.map((d) => (
+          d.id === doc.id
+            ? { ...d, status: data.queued ? "queued" : "processing", last_error: null, last_error_step: null }
+            : d
+        )));
       }
       setPollTimedOut(false);
       await loadDocuments(false);
@@ -461,7 +424,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     } finally {
       setRetryingDocId(null);
     }
-  }, [loadDocuments, toast]);
+  }, [retryingDocId, loadDocuments, toast]);
 
   return (
     <div className="space-y-3">
@@ -507,6 +470,16 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
               <Upload size={12} />
               {uploading ? "Uploading…" : "Upload File"}
             </button>
+            <EmailImportPanel
+              projectId={projectId}
+              onImported={loadDocuments}
+              disabled={uploading || driveImporting}
+            />
+            <CloudImportPanel
+              projectId={projectId}
+              onImported={loadDocuments}
+              disabled={uploading || driveImporting}
+            />
             <GoogleDrivePicker onFilesSelected={handleDriveFiles} disabled={driveImporting}>
               <span className={`flex items-center gap-2 border rounded-lg px-3 py-1.5 text-[11px] font-bold tracking-widest uppercase transition-colors ${
                 driveImporting
@@ -634,15 +607,17 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                               <span className="text-[10px] uppercase tracking-widest font-mono">Ask</span>
                             </button>
                           )}
-                          {isRetryable(doc.status) && (
+                          {(isRetryable(doc.status) || (pollTimedOut && isProcessing)) && (
                             <button
                               onClick={() => void retryIngest(doc)}
                               disabled={retryingDocId === doc.id}
                               className="flex items-center gap-1.5 text-gray-600 hover:text-[#00D2FF] transition-colors disabled:opacity-40"
-                              title="Retry processing"
+                              title="Retry ingest / page-split"
                             >
-                              <RefreshCw size={12} className={retryingDocId === doc.id ? "animate-spin" : ""} />
-                              <span className="text-[10px] uppercase tracking-widest font-mono">Retry</span>
+                              <RefreshCw size={12} className={retryingDocId === doc.id ? "animate-spin" : undefined} />
+                              <span className="text-[10px] uppercase tracking-widest font-mono">
+                                {retryingDocId === doc.id ? "Retrying…" : "Retry"}
+                              </span>
                             </button>
                           )}
                           <button

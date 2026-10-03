@@ -1,4 +1,10 @@
 import { createServiceClient } from "@/lib/supabase/server";
+import {
+  escalateStaleUnitCost,
+  scaleOptionalCost,
+  type EscalateResult,
+} from "@/lib/cost/ppi";
+import { scoreCostConfidence } from "@/lib/cost/confidence";
 
 export interface CostResolveInput {
   cost_code: string;
@@ -22,6 +28,59 @@ export interface CostResolveResult {
   observed_at?: string;
   region_code?: string;
   detail?: string;
+  /** True when unit_cost was aged by commodity PPI at resolve time. */
+  ppi_escalated?: boolean;
+  ppi_pct_applied?: number;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function loadPctChangeByDivision(db: any): Promise<Map<string, number>> {
+  const { data } = await db
+    .from("commodity_trend_series")
+    .select("csi_division, pct_change_90d");
+  const map = new Map<string, number>();
+  for (const row of data ?? []) {
+    const div = typeof row.csi_division === "string" ? row.csi_division.trim() : "";
+    const pct = Number(row.pct_change_90d);
+    if (div && Number.isFinite(pct)) map.set(div, pct);
+  }
+  return map;
+}
+
+function applyPpiAging(
+  result: CostResolveResult,
+  pctChangeByDivision: Map<string, number>,
+): CostResolveResult {
+  // Tenant overrides are human-authored — never silently age them at read time.
+  // Actuals / regional / national catalog prices age when stale.
+  if (result.source === "tenant_override" || result.source === "none") return result;
+
+  const aged: EscalateResult = escalateStaleUnitCost({
+    unitCost: result.unit_cost,
+    observedAt: result.observed_at,
+    csiCodeOrDivision: result.cost_code,
+    pctChangeByDivision,
+  });
+  if (!aged.escalated) return result;
+
+  const from = result.unit_cost;
+  return {
+    ...result,
+    unit_cost: aged.unitCost,
+    labor_cost: scaleOptionalCost(result.labor_cost, from, aged.unitCost),
+    material_cost: scaleOptionalCost(result.material_cost, from, aged.unitCost),
+    equipment_cost: scaleOptionalCost(result.equipment_cost, from, aged.unitCost),
+    ppi_escalated: true,
+    ppi_pct_applied: aged.pctApplied ?? undefined,
+    detail: [
+      result.detail,
+      `PPI-aged +${aged.pctApplied?.toFixed(2)}% (div ${aged.division})`,
+    ]
+      .filter(Boolean)
+      .join("; "),
+    // Confidence drops one notch when we age a catalog price.
+    confidence: result.confidence === "high" ? "medium" : "low",
+  };
 }
 
 // Pure resolver — precedence: tenant override (region-specific → any) →
@@ -33,6 +92,7 @@ export async function resolveCost(
   const { cost_code, tenant_id, region } = input;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const db = (await createServiceClient()) as any;
+  const pctChangeByDivision = await loadPctChangeByDivision(db);
 
   // 1) Look up cost_code row
   const { data: codeRow } = await db
@@ -73,7 +133,7 @@ export async function resolveCost(
       .limit(1);
     if (ovRegion && ovRegion.length > 0) {
       const r = ovRegion[0];
-      return {
+      return applyPpiAging({
         cost_code,
         unit_cost: Number(r.unit_cost),
         labor_cost: r.labor_cost ?? undefined,
@@ -83,7 +143,7 @@ export async function resolveCost(
         confidence: "high",
         observed_at: r.effective_from,
         region_code: r.region_code ?? undefined,
-      };
+      }, pctChangeByDivision);
     }
   }
 
@@ -98,7 +158,7 @@ export async function resolveCost(
     .limit(1);
   if (ovAny && ovAny.length > 0) {
     const r = ovAny[0];
-    return {
+    return applyPpiAging({
       cost_code,
       unit_cost: Number(r.unit_cost),
       labor_cost: r.labor_cost ?? undefined,
@@ -107,7 +167,7 @@ export async function resolveCost(
       source: "tenant_override",
       confidence: "high",
       observed_at: r.effective_from,
-    };
+    }, pctChangeByDivision);
   }
 
   // 4) Tenant actuals — last 6 months, same csi_code + state
@@ -130,14 +190,31 @@ export async function resolveCost(
           s + Number(a.actual_unit_cost),
         0,
       ) / n;
-    return {
+    const newest = actuals.reduce(
+      (best: string | undefined, a: { observed_at?: string }) => {
+        if (!a.observed_at) return best;
+        if (!best || a.observed_at > best) return a.observed_at;
+        return best;
+      },
+      undefined as string | undefined,
+    );
+    // Multi-source confidence helper (Company Hub M6) — ages + variance aware.
+    const scored = scoreCostConfidence(
+      (actuals as Array<{ actual_unit_cost: number | string; observed_at?: string | null }>).map((a) => ({
+        unitCost: Number(a.actual_unit_cost),
+        observedAt: a.observed_at ?? null,
+        source: "tenant_actual",
+      })),
+    );
+    return applyPpiAging({
       cost_code,
       unit_cost: avg,
       source: "actuals_avg",
-      confidence: n >= 3 ? "high" : "medium",
-      detail: `avg of ${n} actuals (last 6mo)`,
+      confidence: scored.confidence,
+      detail: `avg of ${n} actuals (last 6mo); confidence_score=${scored.score}`,
       region_code: state,
-    };
+      observed_at: newest,
+    }, pctChangeByDivision);
   }
 
   // 5) Regional cost_prices — try zip, metro, state in order
@@ -151,7 +228,7 @@ export async function resolveCost(
       .limit(1);
     if (regional && regional.length > 0) {
       const r = regional[0];
-      return {
+      return applyPpiAging({
         cost_code,
         unit_cost: Number(r.unit_cost),
         labor_cost: r.labor_cost ?? undefined,
@@ -161,7 +238,7 @@ export async function resolveCost(
         confidence: "medium",
         observed_at: r.observed_at,
         region_code: rc,
-      };
+      }, pctChangeByDivision);
     }
   }
 
@@ -175,7 +252,7 @@ export async function resolveCost(
     .limit(1);
   if (nat && nat.length > 0) {
     const r = nat[0];
-    return {
+    return applyPpiAging({
       cost_code,
       unit_cost: Number(r.unit_cost),
       labor_cost: r.labor_cost ?? undefined,
@@ -185,7 +262,7 @@ export async function resolveCost(
       confidence: "low",
       observed_at: r.observed_at,
       region_code: r.region_code,
-    };
+    }, pctChangeByDivision);
   }
 
   return {
@@ -219,6 +296,7 @@ export async function resolveCostsBatch(
   if (inputs.length === 0) return [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const db = (await createServiceClient()) as any;
+  const pctChangeByDivision = await loadPctChangeByDivision(db);
 
   const results = new Map<CostResolveInput, CostResolveResult>();
 
@@ -342,7 +420,7 @@ export async function resolveCostsBatch(
         : undefined;
       const anyOverride = regionOverride ?? codeOverrides.find((r) => !r.region_code);
       if (anyOverride) {
-        results.set(input, {
+        results.set(input, applyPpiAging({
           cost_code,
           unit_cost: Number(anyOverride.unit_cost),
           labor_cost: anyOverride.labor_cost ?? undefined,
@@ -352,7 +430,7 @@ export async function resolveCostsBatch(
           confidence: "high",
           observed_at: anyOverride.effective_from,
           region_code: anyOverride.region_code ?? undefined,
-        });
+        }, pctChangeByDivision));
         continue;
       }
 
@@ -361,14 +439,20 @@ export async function resolveCostsBatch(
       if (codeActuals.length > 0) {
         const n = codeActuals.length;
         const avg = codeActuals.reduce((s, a) => s + Number(a.actual_unit_cost), 0) / n;
-        results.set(input, {
+        const newest = codeActuals.reduce((best: string | undefined, a) => {
+          if (!a.observed_at) return best;
+          if (!best || a.observed_at > best) return a.observed_at;
+          return best;
+        }, undefined as string | undefined);
+        results.set(input, applyPpiAging({
           cost_code,
           unit_cost: avg,
           source: "actuals_avg",
           confidence: n >= 3 ? "high" : "medium",
           detail: `avg of ${n} actuals (last 6mo)`,
           region_code: state,
-        });
+          observed_at: newest,
+        }, pctChangeByDivision));
         continue;
       }
 
@@ -378,7 +462,7 @@ export async function resolveCostsBatch(
         .map((rc) => codeRegional.find((r) => r.region_code === rc))
         .find((r) => r != null);
       if (regional) {
-        results.set(input, {
+        results.set(input, applyPpiAging({
           cost_code,
           unit_cost: Number(regional.unit_cost),
           labor_cost: regional.labor_cost ?? undefined,
@@ -388,14 +472,14 @@ export async function resolveCostsBatch(
           confidence: "medium",
           observed_at: regional.observed_at,
           region_code: regional.region_code,
-        });
+        }, pctChangeByDivision));
         continue;
       }
 
       // Precedence 6: national.
       const nat = nationalByCodeId.get(codeId);
       if (nat) {
-        results.set(input, {
+        results.set(input, applyPpiAging({
           cost_code,
           unit_cost: Number(nat.unit_cost),
           labor_cost: nat.labor_cost ?? undefined,
@@ -405,7 +489,7 @@ export async function resolveCostsBatch(
           confidence: "low",
           observed_at: nat.observed_at,
           region_code: nat.region_code,
-        });
+        }, pctChangeByDivision));
         continue;
       }
 

@@ -7,7 +7,8 @@ import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { auditDelete } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
-import { reclaimStuckProcessingDocuments, reclaimStuckProcessingPages } from "@/lib/documents/reclaimStuck";
+import { reclaimStuckProcessingDocuments, reclaimStuckProcessingPages, reclaimStuckProcessingSheets } from "@/lib/documents/reclaimStuck";
+import { finalizeDocumentsFromOcr } from "@/lib/documents/finalizeDocument";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
@@ -21,13 +22,19 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const { page, limit, offset } = parsePagination(req.nextUrl.searchParams);
 
     const db = await createServiceClient();
-    // Opportunistic reclaim: docs/pages left in "processing" after a platform
-    // kill never get markError() — surface them as retryable errors on list.
-    void reclaimStuckProcessingDocuments(db, tenantId).catch((err) =>
+    // Opportunistic reclaim + OCR finalize so list polls advance stuck / split
+    // docs instead of spinning forever in the Documents UI.
+    await reclaimStuckProcessingDocuments(db, tenantId).catch((err) =>
       console.error("[GET /api/documents] stuck reclaim failed", err),
     );
-    void reclaimStuckProcessingPages(db, tenantId).catch((err) =>
+    await reclaimStuckProcessingPages(db, tenantId).catch((err) =>
       console.error("[GET /api/documents] stuck page reclaim failed", err),
+    );
+    await reclaimStuckProcessingSheets(db, tenantId).catch((err) =>
+      console.error("[GET /api/documents] stuck sheet reclaim failed", err),
+    );
+    await finalizeDocumentsFromOcr(db, tenantId).catch((err) =>
+      console.error("[GET /api/documents] OCR finalize failed", err),
     );
 
     let query = db
