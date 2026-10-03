@@ -121,6 +121,11 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     changed: { key: string; quantityDelta: number | null; totalDelta: number | null; right: { description?: string | null } }[];
   } | null>(null);
   const saveTimer = useRef<number | null>(null);
+  const rowsRef = useRef(rows);
+  const settingsRef = useRef(settings);
+  const savingRef = useRef(false);
+  rowsRef.current = rows;
+  settingsRef.current = settings;
   const gridScrollRef = useRef<HTMLDivElement>(null);
 
   const rowVirtualizer = useVirtualizer({
@@ -400,27 +405,34 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     setRows((prev) => prev.filter((_, i) => i !== idx));
   }
 
-  const scheduleAutoSave = useCallback(() => {
-    if (locked) return;
-    if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => { void saveAll(); }, 900);
-  }, [locked]);
-
   // Converts a row's edited per-unit rates back into cost-category dollar
   // totals for the authoritative estimate_items shape. contingency/overhead/
   // profit are intentionally omitted — the server derives them from the
   // version's percentages (the sliders below), never trusted from here.
-  async function saveAll(includeSettings = true) {
-    if (saving || locked || !versionId) return;
-    const dirty = rows.filter((r) => r._dirty);
+  // Reads the latest rows through a ref so a debounced save is not stuck on
+  // the render that scheduled it, and merges the PATCH result in place so
+  // typing does not refetch and reset the whole matrix.
+  const saveAll = useCallback(async (includeSettings = true) => {
+    if (savingRef.current || locked || !versionId) return;
+    const currentRows = rowsRef.current;
+    const dirty = currentRows.filter((r) => r._dirty).map((r) => (
+      r.id ? r : { ...r, id: crypto.randomUUID() }
+    ));
     if (dirty.length === 0 && !includeSettings) return;
+    if (dirty.some((r, i) => r.id !== currentRows.filter((row) => row._dirty)[i]?.id)) {
+      setRows((prev) => prev.map((row) => {
+        const match = dirty.find((saved) => saved._local && saved._local === row._local && !row.id);
+        return match?.id ? { ...row, id: match.id } : row;
+      }));
+    }
+    savingRef.current = true;
     setSaving(true);
     try {
       const res = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          items: dirty.map((r, i) => ({
+          items: dirty.map((r) => ({
             id: r.id,
             cost_code: r.cost_code || null,
             description: r.description,
@@ -433,18 +445,44 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
             trucking_cost: r.quantity * r.trucking_unit,
             disposal_cost: r.quantity * r.disposal_unit,
             notes: r.notes,
-            sort_order: i,
+            sort_order: r.sort_order,
           })),
-          settings: includeSettings ? settings : undefined,
+          settings: includeSettings ? settingsRef.current : undefined,
         }),
       });
-      if (res.ok) {
-        await load(); // reload to pick up server-assigned IDs + recalculated totals
-      }
+      if (!res.ok) return;
+      const saved = await res.json() as { items?: Parameters<typeof itemToRow>[0][] };
+      const savedById = new Map((saved.items ?? []).map((item) => [item.id, item]));
+      setRows((prev) => prev.map((row) => {
+        if (!row.id || !savedById.has(row.id)) return row;
+        const sent = dirty.find((item) => item.id === row.id);
+        if (!sent) return row;
+        const unchanged =
+          row.quantity === sent.quantity &&
+          row.cost_code === sent.cost_code &&
+          row.description === sent.description &&
+          row.unit === sent.unit &&
+          row.notes === sent.notes &&
+          row.labor_unit === sent.labor_unit &&
+          row.material_unit === sent.material_unit &&
+          row.equipment_unit === sent.equipment_unit &&
+          row.subcontractor_unit === sent.subcontractor_unit &&
+          row.trucking_unit === sent.trucking_unit &&
+          row.disposal_unit === sent.disposal_unit;
+        if (!unchanged) return { ...row, _dirty: true };
+        return { ...itemToRow(savedById.get(row.id)!, row.sort_order), _local: row._local, _dirty: false };
+      }));
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
-  }
+  }, [locked, versionId]);
+
+  const scheduleAutoSave = useCallback(() => {
+    if (locked) return;
+    if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => { void saveAll(); }, 900);
+  }, [locked, saveAll]);
 
   function updateSetting(key: keyof FinancialSettings, value: number) {
     if (pricingRestricted || locked) return; // markup sliders are locked for these roles / locked versions

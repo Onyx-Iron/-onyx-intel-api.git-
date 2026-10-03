@@ -84,7 +84,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const anyDb = db as any;
     const { data: existing, error: existingError } = await db
       .from("takeoff_items")
-      .select("*")
+      .select("id, label, csi_code, division, quantity, unit, type, meta")
       .eq("tenant_id", tenantId)
       .eq("project_id", project_id);
 
