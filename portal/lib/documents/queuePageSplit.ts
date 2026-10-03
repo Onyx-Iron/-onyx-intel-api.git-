@@ -5,6 +5,7 @@
  * which entry point created the row.
  */
 
+import { after } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getAccessToken } from "@/lib/google/oauth";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
@@ -211,30 +212,36 @@ export async function queueLocalDocumentForPageSplit(args: QueueLocalArgs): Prom
     last_error_step: null,
   }).eq("id", documentId).eq("tenant_id", tenantId);
 
-  void invokePageSplitWorker({
-    document_id: documentId,
-    tenant_id: tenantId,
-    project_id: projectId,
-    original_path: originalPath,
-    is_local_upload: true,
-    user_id: userId,
-  }).then(async () => {
-    await logDocumentProcessingEvent({
-      tenantId,
-      projectId,
-      documentId,
-      step: "split",
-      status: "started",
-      worker: "portal:queue-local",
-    });
-  }).catch(async (err) => {
-    console.error("[queueLocalDocumentForPageSplit] invoke failed", err);
-    const detail = err instanceof Error ? err.message : String(err);
-    await anyDb.from("documents").update({
-      status: "error",
-      last_error: detail.slice(0, 1000),
-      last_error_step: "page_split_worker_invoke",
-    }).eq("id", documentId).eq("tenant_id", tenantId);
+  // after() keeps the serverless invoke alive after the 202 response —
+  // bare `void fetch` can be frozen before the Edge Function is contacted.
+  after(async () => {
+    try {
+      await invokePageSplitWorker({
+        document_id: documentId,
+        tenant_id: tenantId,
+        project_id: projectId,
+        original_path: originalPath,
+        is_local_upload: true,
+        user_id: userId,
+      });
+      await logDocumentProcessingEvent({
+        tenantId,
+        projectId,
+        documentId,
+        step: "split",
+        status: "started",
+        worker: "portal:queue-local",
+      });
+    } catch (err) {
+      console.error("[queueLocalDocumentForPageSplit] invoke failed", err);
+      const detail = err instanceof Error ? err.message : String(err);
+      // Don't clobber status if the worker already advanced the row.
+      await anyDb.from("documents").update({
+        status: "error",
+        last_error: detail.slice(0, 1000),
+        last_error_step: "page_split_worker_invoke",
+      }).eq("id", documentId).eq("tenant_id", tenantId).in("status", ["queued", "pending"]);
+    }
   });
 }
 
@@ -260,40 +267,43 @@ async function kickPageSplit(args: {
     last_error_step: null,
   }).eq("id", documentId).eq("tenant_id", tenantId);
 
-  void invokePageSplitWorker({
-    document_id: documentId,
-    tenant_id: tenantId,
-    project_id: projectId,
-    drive_file_id: driveFileId,
-    original_path: originalPath,
-    access_token: accessToken,
-    user_id: userId,
-  }).then(async () => {
-    await logDocumentProcessingEvent({
-      tenantId,
-      projectId,
-      documentId,
-      step: "split",
-      status: "started",
-      worker: source,
-    });
-  }).catch(async (err) => {
-    console.error(`[${source}] page-split invoke failed`, err);
-    const detail = err instanceof Error ? err.message : String(err);
-    await db.from("documents").update({
-      status: "error",
-      last_error: detail.slice(0, 1000),
-      last_error_step: "page_split_worker_invoke",
-    }).eq("id", documentId).eq("tenant_id", tenantId);
-    await logDocumentProcessingEvent({
-      tenantId,
-      projectId,
-      documentId,
-      step: "split",
-      status: "failed",
-      worker: source,
-      errorCode: "worker_invoke_failed",
-      errorMessage: detail,
-    });
+  after(async () => {
+    try {
+      await invokePageSplitWorker({
+        document_id: documentId,
+        tenant_id: tenantId,
+        project_id: projectId,
+        drive_file_id: driveFileId,
+        original_path: originalPath,
+        access_token: accessToken,
+        user_id: userId,
+      });
+      await logDocumentProcessingEvent({
+        tenantId,
+        projectId,
+        documentId,
+        step: "split",
+        status: "started",
+        worker: source,
+      });
+    } catch (err) {
+      console.error(`[${source}] page-split invoke failed`, err);
+      const detail = err instanceof Error ? err.message : String(err);
+      await db.from("documents").update({
+        status: "error",
+        last_error: detail.slice(0, 1000),
+        last_error_step: "page_split_worker_invoke",
+      }).eq("id", documentId).eq("tenant_id", tenantId).in("status", ["queued", "pending"]);
+      await logDocumentProcessingEvent({
+        tenantId,
+        projectId,
+        documentId,
+        step: "split",
+        status: "failed",
+        worker: source,
+        errorCode: "worker_invoke_failed",
+        errorMessage: detail,
+      });
+    }
   });
 }

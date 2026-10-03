@@ -4,7 +4,12 @@ import { describe, it } from "node:test";
 import { finalizeDocumentsFromOcr } from "./finalizeDocument.ts";
 
 type FakePage = { document_id: string; status: string | null };
-type FakeDoc = { id: string; status: string; meta: Record<string, unknown> | null };
+type FakeDoc = {
+  id: string;
+  status: string;
+  page_count?: number | null;
+  meta: Record<string, unknown> | null;
+};
 
 function makeDb(args: {
   docs: FakeDoc[];
@@ -69,7 +74,7 @@ describe("finalizeDocumentsFromOcr", () => {
   it("finalizes split docs when every page OCR is terminal", async () => {
     const updates: Array<{ id: string; patch: Record<string, unknown> }> = [];
     const db = makeDb({
-      docs: [{ id: "d1", status: "split", meta: {} }],
+      docs: [{ id: "d1", status: "split", page_count: 2, meta: {} }],
       pages: [
         { document_id: "d1", status: "done" },
         { document_id: "d1", status: "done" },
@@ -87,7 +92,7 @@ describe("finalizeDocumentsFromOcr", () => {
   it("marks complete_with_errors when some OCR pages failed", async () => {
     const updates: Array<{ id: string; patch: Record<string, unknown> }> = [];
     const db = makeDb({
-      docs: [{ id: "d2", status: "split", meta: null }],
+      docs: [{ id: "d2", status: "split", page_count: 2, meta: null }],
       pages: [
         { document_id: "d2", status: "done" },
         { document_id: "d2", status: "error" },
@@ -97,6 +102,27 @@ describe("finalizeDocumentsFromOcr", () => {
 
     const results = await finalizeDocumentsFromOcr(db, "tenant-1");
     assert.equal(results[0]?.status, "complete_with_errors");
+  });
+
+  it("marks complete_with_errors when split omitted pages", async () => {
+    const updates: Array<{ id: string; patch: Record<string, unknown> }> = [];
+    const db = makeDb({
+      docs: [{
+        id: "d4",
+        status: "split",
+        page_count: 10,
+        meta: { processing_summary: { failed_uploads: 2 } },
+      }],
+      pages: Array.from({ length: 8 }, (_, i) => ({
+        document_id: "d4",
+        status: "done",
+      })),
+      updates,
+    });
+
+    const results = await finalizeDocumentsFromOcr(db, "tenant-1");
+    assert.equal(results[0]?.status, "complete_with_errors");
+    assert.match(String(updates[0]?.patch.last_error), /missing/i);
   });
 
   it("does not finalize while pages are still pending", async () => {

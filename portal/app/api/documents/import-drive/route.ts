@@ -6,6 +6,8 @@ import { logEvent } from "@/lib/activity";
 import { queueDriveDocumentForPageSplit } from "@/lib/documents/queuePageSplit";
 
 export const runtime = "nodejs";
+/** Covers after()-scheduled page-split invoke for large Drive plans. */
+export const maxDuration = 300;
 
 /**
  * POST /api/documents/import-drive

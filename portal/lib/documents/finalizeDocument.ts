@@ -35,7 +35,7 @@ export async function finalizeDocumentsFromOcr(
 ): Promise<FinalizeResult[]> {
   let docsQ = db
     .from("documents")
-    .select("id, status, meta")
+    .select("id, status, page_count, meta")
     .eq("tenant_id", tenantId)
     .in("status", ["split", "processing", "queued"]);
   if (documentIds?.length) {
@@ -71,18 +71,12 @@ export async function finalizeDocumentsFromOcr(
   const results: FinalizeResult[] = [];
   const now = new Date().toISOString();
 
-  for (const doc of docs as Array<{ id: string; status: string; meta: unknown }>) {
+  for (const doc of docs as Array<{ id: string; status: string; page_count: number | null; meta: unknown }>) {
     if (TERMINAL_DOC.has(String(doc.status))) continue;
     const stats = byDoc.get(doc.id);
     if (!stats || stats.total === 0) continue;
     const settled = stats.done + stats.errored;
     if (settled !== stats.total) continue;
-
-    const finalStatus = stats.errored === stats.total
-      ? "failed"
-      : stats.errored > 0
-        ? "complete_with_errors"
-        : "complete";
 
     const prevMeta = (doc.meta && typeof doc.meta === "object")
       ? doc.meta as Record<string, unknown>
@@ -91,27 +85,50 @@ export async function finalizeDocumentsFromOcr(
       ? prevMeta.processing_summary as Record<string, unknown>
       : {};
 
+    // Split may omit pages whose storage upload failed — those never get a
+    // document_pages row. Treat missing pages as errors so we don't mark a
+    // clean "complete" that hides lost sheets and disables Retry.
+    const expectedPages = typeof doc.page_count === "number" && doc.page_count > 0
+      ? doc.page_count
+      : stats.total;
+    const failedUploads = typeof prevSummary.failed_uploads === "number"
+      ? prevSummary.failed_uploads
+      : 0;
+    const missingPages = Math.max(0, expectedPages - stats.total, failedUploads);
+    const effectiveErrors = stats.errored + missingPages;
+
+    const finalStatus = effectiveErrors >= expectedPages && stats.done === 0
+      ? "failed"
+      : effectiveErrors > 0
+        ? "complete_with_errors"
+        : "complete";
+
+    const errorParts: string[] = [];
+    if (stats.errored > 0) errorParts.push(`${stats.errored} of ${stats.total} page(s) failed OCR`);
+    if (missingPages > 0) errorParts.push(`${missingPages} page(s) missing after split`);
+
     const { error: updErr } = await db.from("documents").update({
       status: finalStatus,
       split_status: "done",
-      ocr_status: stats.errored === 0
+      ocr_status: effectiveErrors === 0
         ? "done"
         : stats.done > 0
           ? "partially_completed"
           : "error",
       processed_at: now,
-      page_count: stats.total,
-      last_error: stats.errored > 0
-        ? `${stats.errored} of ${stats.total} page(s) failed OCR`
-        : null,
-      last_error_step: stats.errored > 0 ? "ocr" : null,
+      // Keep the expected PDF page count when split recorded it; otherwise
+      // fall back to rows that actually exist.
+      page_count: expectedPages,
+      last_error: errorParts.length ? errorParts.join("; ") : null,
+      last_error_step: errorParts.length ? (stats.errored > 0 ? "ocr" : "split") : null,
       meta: {
         ...prevMeta,
         processing_summary: {
           ...prevSummary,
-          pages_total: stats.total,
+          pages_total: expectedPages,
           pages_ocr_ok: stats.done,
           pages_ocr_failed: stats.errored,
+          pages_missing: missingPages,
           ocr_finalized_at: now,
         },
       },
