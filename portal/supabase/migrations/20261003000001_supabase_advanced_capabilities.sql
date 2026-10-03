@@ -45,7 +45,7 @@ RETURNS TABLE(
   rrf_score double precision
 )
 LANGUAGE plpgsql
-SET search_path TO 'public'
+SET search_path TO 'public', 'extensions'
 AS $function$
 DECLARE
   use_hybrid boolean := query_text IS NOT NULL AND length(trim(query_text)) > 0;
@@ -58,7 +58,7 @@ BEGIN
         dc.content,
         dc.document_id,
         dc.page_number,
-        1 - (dc.embedding <=> query_embedding) AS sim,
+        (1 - (dc.embedding <=> query_embedding))::double precision AS sim,
         ROW_NUMBER() OVER (ORDER BY dc.embedding <=> query_embedding) AS vec_rank
       FROM document_chunks dc
       INNER JOIN documents d ON d.id = dc.document_id
@@ -89,7 +89,7 @@ BEGIN
       (
         COALESCE(1.0 / (rrf_k + vr.vec_rank), 0) +
         COALESCE(1.0 / (rrf_k + kr.kw_rank), 0)
-      ) AS rrf_score
+      )::double precision AS rrf_score
     FROM vector_ranked vr
     LEFT JOIN keyword_ranked kr ON kr.id = vr.id
     ORDER BY rrf_score DESC
@@ -100,8 +100,8 @@ BEGIN
       dc.content,
       dc.document_id,
       dc.page_number,
-      1 - (dc.embedding <=> query_embedding) AS similarity,
-      1.0 / (rrf_k + ROW_NUMBER() OVER (ORDER BY dc.embedding <=> query_embedding)) AS rrf_score
+      (1 - (dc.embedding <=> query_embedding))::double precision AS similarity,
+      (1.0 / (rrf_k + ROW_NUMBER() OVER (ORDER BY dc.embedding <=> query_embedding)))::double precision AS rrf_score
     FROM document_chunks dc
     INNER JOIN documents d ON d.id = dc.document_id
     WHERE dc.tenant_id = match_tenant_id
@@ -113,11 +113,17 @@ BEGIN
 END;
 $function$;
 
+ALTER FUNCTION public.match_document_chunks(vector, uuid, uuid, text, integer, integer) SET search_path = public, extensions;
 REVOKE ALL ON FUNCTION public.match_document_chunks(vector, uuid, uuid, text, integer, integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.match_document_chunks(vector, uuid, uuid, text, integer, integer) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.match_document_chunks(vector, uuid, uuid, text, integer, integer) TO service_role;
 
--- Expand hybrid match_chunks to RRF across both `chunks` and `document_chunks`
+-- Expand hybrid match_chunks to RRF across both `chunks` and `document_chunks`.
+-- DROP first: production still declares document_id uuid in OUT params while
+-- the underlying columns are text — CREATE OR REPLACE cannot change that.
+DROP FUNCTION IF EXISTS public.match_chunks(vector, uuid, uuid, text, integer, integer);
+DROP FUNCTION IF EXISTS public.match_chunks(vector, uuid, uuid, integer);
+
 CREATE OR REPLACE FUNCTION public.match_chunks(
   query_embedding vector,
   match_tenant_id uuid,
@@ -134,7 +140,7 @@ RETURNS TABLE(
   rrf_score double precision
 )
 LANGUAGE plpgsql
-SET search_path TO 'public'
+SET search_path TO 'public', 'extensions'
 AS $function$
 DECLARE
   use_hybrid boolean := query_text IS NOT NULL AND length(trim(query_text)) > 0;
@@ -176,7 +182,7 @@ BEGIN
         corpus.content,
         corpus.document_id,
         corpus.page_number,
-        1 - (corpus.embedding <=> query_embedding) AS sim,
+        (1 - (corpus.embedding <=> query_embedding))::double precision AS sim,
         ROW_NUMBER() OVER (ORDER BY corpus.embedding <=> query_embedding) AS vec_rank
       FROM corpus
       ORDER BY corpus.embedding <=> query_embedding
@@ -201,7 +207,7 @@ BEGIN
       (
         COALESCE(1.0 / (rrf_k + vr.vec_rank), 0) +
         COALESCE(1.0 / (rrf_k + kr.kw_rank), 0)
-      ) AS rrf_score
+      )::double precision AS rrf_score
     FROM vector_ranked vr
     LEFT JOIN keyword_ranked kr ON kr.id = vr.id AND kr.src = vr.src
     ORDER BY rrf_score DESC
@@ -234,8 +240,8 @@ BEGIN
       corpus.content,
       corpus.document_id,
       corpus.page_number,
-      1 - (corpus.embedding <=> query_embedding) AS similarity,
-      1.0 / (rrf_k + ROW_NUMBER() OVER (ORDER BY corpus.embedding <=> query_embedding)) AS rrf_score
+      (1 - (corpus.embedding <=> query_embedding))::double precision AS similarity,
+      (1.0 / (rrf_k + ROW_NUMBER() OVER (ORDER BY corpus.embedding <=> query_embedding)))::double precision AS rrf_score
     FROM corpus
     ORDER BY corpus.embedding <=> query_embedding
     LIMIT match_count;
@@ -243,7 +249,45 @@ BEGIN
 END;
 $function$;
 
-ALTER FUNCTION public.match_chunks(vector, uuid, uuid, text, integer, integer) SET search_path = public;
+ALTER FUNCTION public.match_chunks(vector, uuid, uuid, text, integer, integer) SET search_path = public, extensions;
+
+-- Preserve the simpler vector-only overload used by older callers.
+CREATE OR REPLACE FUNCTION public.match_chunks(
+  query_embedding vector,
+  match_tenant_id uuid,
+  match_project_id uuid,
+  match_count integer DEFAULT 5
+)
+RETURNS TABLE(
+  content text,
+  document_id text,
+  page_number integer,
+  similarity double precision
+)
+LANGUAGE plpgsql
+SET search_path TO 'public', 'extensions'
+AS $function$
+BEGIN
+  RETURN QUERY
+  SELECT m.content, m.document_id, m.page_number, m.similarity
+  FROM public.match_chunks(
+    query_embedding,
+    match_tenant_id,
+    match_project_id,
+    ''::text,
+    match_count,
+    60
+  ) AS m;
+END;
+$function$;
+
+ALTER FUNCTION public.match_chunks(vector, uuid, uuid, integer) SET search_path = public, extensions;
+REVOKE ALL ON FUNCTION public.match_chunks(vector, uuid, uuid, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.match_chunks(vector, uuid, uuid, integer) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.match_chunks(vector, uuid, uuid, integer) TO service_role;
+REVOKE ALL ON FUNCTION public.match_chunks(vector, uuid, uuid, text, integer, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.match_chunks(vector, uuid, uuid, text, integer, integer) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.match_chunks(vector, uuid, uuid, text, integer, integer) TO service_role;
 
 -- ── C. Nightly commodity sync at 02:00 UTC (replace monthly schedule) ───────
 DO $$
@@ -263,7 +307,7 @@ END $$;
 SELECT cron.schedule(
   'sync-commodity-indexes-nightly',
   '0 2 * * *', -- 02:00 UTC every day
-  $$
+  $cron$
   SELECT net.http_post(
     url := 'https://vvnigrbdsipriufhrwbs.supabase.co/functions/v1/sync-commodity-indexes',
     headers := jsonb_build_object(
@@ -274,7 +318,7 @@ SELECT cron.schedule(
     ),
     body := '{}'::jsonb
   ) AS request_id;
-  $$
+  $cron$
 );
 
 -- Outbox minutely job is already scheduled by 20261002000001; re-assert it.
@@ -288,7 +332,7 @@ END $$;
 SELECT cron.schedule(
   'estimate-sync-outbox-minutely',
   '* * * * *',
-  $$
+  $cron$
   SELECT net.http_post(
     url := 'https://app.onyx-iron.com/api/internal/outbox/process',
     headers := jsonb_build_object(
@@ -299,5 +343,5 @@ SELECT cron.schedule(
     ),
     body := '{"batch_size":20}'::jsonb
   ) AS request_id;
-  $$
+  $cron$
 );
