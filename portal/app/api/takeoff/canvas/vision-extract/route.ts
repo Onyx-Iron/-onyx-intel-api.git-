@@ -9,6 +9,10 @@ import { runScopeGapAgent } from "@/lib/agents/scope-gap";
 import { runRfiDrafterAgent } from "@/lib/agents/rfi-drafter";
 import { quantitiesAllowedForDocType, takeoffBlockReason } from "@/lib/documents/processing-display";
 import { countAlreadyDecided } from "@/lib/takeoff/extraction-skip";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database, Json } from "@/lib/supabase/types";
+
+type ServiceClient = SupabaseClient<Database>;
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
@@ -58,15 +62,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
   const db = await createServiceClient();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const anyDb = db as any;
-  const { data } = await anyDb
+  const { data } = await db
     .from("document_pages")
     .select("vision_extractions, vision_extracted_at, document_id")
     .eq("id", pageId).eq("tenant_id", tenantId)
     .maybeSingle();
 
-  const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, data?.document_id ?? null, pageId);
+  const takeoffItems = await fetchVisionTakeoffItems(db, tenantId, data?.document_id ?? null, pageId);
 
   return NextResponse.json({
     result: (data?.vision_extractions ?? null) as VisionResult | null,
@@ -85,9 +87,8 @@ interface VisionTakeoffItemRef {
 // content key (meta.item_key, set by the SQL function at insert time),
 // returned as a key -> ref map rather than an array — the caller looks up
 // by key, never by position.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function fetchVisionTakeoffItems(anyDb: any, tenantId: string, documentId: string | null, pageId: string): Promise<Record<string, VisionTakeoffItemRef>> {
-  const { data } = await anyDb
+async function fetchVisionTakeoffItems(db: ServiceClient, tenantId: string, documentId: string | null, pageId: string): Promise<Record<string, VisionTakeoffItemRef>> {
+  const { data } = await db
     .from("takeoff_items")
     .select("id, review_status, rejected_reason, meta")
     .eq("tenant_id", tenantId)
@@ -115,9 +116,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (denied) return denied;
   const db = await createServiceClient();
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const anyDb = db as any;
-  const { data: page } = await anyDb
+  const { data: page } = await db
     .from("document_pages")
     .select("id, storage_path, page_number, vision_extractions, vision_extracted_at, document_id")
     .eq("id", body.page_id).eq("tenant_id", tenantId).single();
@@ -125,7 +124,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   {
     const { data: doc } = page.document_id
-      ? await anyDb.from("documents").select("project_id").eq("id", page.document_id).eq("tenant_id", tenantId).maybeSingle()
+      ? await db.from("documents").select("project_id").eq("id", page.document_id).eq("tenant_id", tenantId).maybeSingle()
       : { data: null };
     const projectIdForPage = (doc as { project_id?: string } | null)?.project_id;
     if (projectIdForPage) {
@@ -139,13 +138,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
   }
 
-  const quantityGate = await assertDrawingQuantities(anyDb, tenantId, page.document_id ?? null);
+  const quantityGate = await assertDrawingQuantities(db, tenantId, page.document_id ?? null);
   if (quantityGate) return quantityGate;
 
   if (page.vision_extractions && !body.force) {
-    const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, page.document_id ?? null, body.page_id);
-    const alreadyDecided = await countDecidedVisionItems(anyDb, tenantId, page.document_id ?? null, body.page_id, (page.vision_extractions as VisionResult).items ?? []);
-    return NextResponse.json({ result: page.vision_extractions as VisionResult, cached: true, takeoffItems, already_decided: alreadyDecided });
+    const takeoffItems = await fetchVisionTakeoffItems(db, tenantId, page.document_id ?? null, body.page_id);
+    const cached = page.vision_extractions as unknown as VisionResult;
+    const alreadyDecided = await countDecidedVisionItems(db, tenantId, page.document_id ?? null, body.page_id, cached.items ?? []);
+    return NextResponse.json({ result: cached, cached: true, takeoffItems, already_decided: alreadyDecided });
   }
 
   // Download page PDF bytes
@@ -260,9 +260,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     model: GEMINI_MODEL,
   };
 
-  await anyDb
+  await db
     .from("document_pages")
-    .update({ vision_extractions: result, vision_extracted_at: result.extracted_at })
+    .update({ vision_extractions: result as unknown as Json, vision_extracted_at: result.extracted_at })
     .eq("id", body.page_id).eq("tenant_id", tenantId);
 
   auditUpdate({
@@ -299,12 +299,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let projectId: string | null = null;
   {
     const { data: doc } = page.document_id
-      ? await anyDb.from("documents").select("project_id").eq("id", page.document_id).eq("tenant_id", tenantId).maybeSingle()
+      ? await db.from("documents").select("project_id").eq("id", page.document_id).eq("tenant_id", tenantId).maybeSingle()
       : { data: null };
     projectId = (doc as { project_id?: string } | null)?.project_id ?? null;
   }
   if (projectId && page.document_id) {
-    const { error: rpcErr } = await anyDb.rpc("apply_vision_extraction_takeoff_items", {
+    const { error: rpcErr } = await db.rpc("apply_vision_extraction_takeoff_items", {
       p_tenant_id: tenantId,
       p_project_id: projectId,
       p_document_id: page.document_id,
@@ -332,7 +332,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // 'pending_human_review'. They cannot mutate estimates, send RFIs, or push
   // purchasing metrics until the human clicks Approve.
   void runBackgroundAgents({
-    db: anyDb,
+    db: db,
     tenantId,
     projectId: null,
     pageId: page.id,
@@ -341,15 +341,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     visionItems: items,
   }).catch((e) => console.error("[agents]", e));
 
-  const takeoffItems = await fetchVisionTakeoffItems(anyDb, tenantId, page.document_id ?? null, body.page_id);
-  const alreadyDecided = await countDecidedVisionItems(anyDb, tenantId, page.document_id ?? null, body.page_id, items);
+  const takeoffItems = await fetchVisionTakeoffItems(db, tenantId, page.document_id ?? null, body.page_id);
+  const alreadyDecided = await countDecidedVisionItems(db, tenantId, page.document_id ?? null, body.page_id, items);
   return NextResponse.json({ result, cached: false, takeoffItems, already_decided: alreadyDecided });
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function assertDrawingQuantities(anyDb: any, tenantId: string, documentId: string | null): Promise<NextResponse | null> {
+async function assertDrawingQuantities(db: ServiceClient, tenantId: string, documentId: string | null): Promise<NextResponse | null> {
   if (!documentId) return null;
-  const { data: doc } = await anyDb
+  const { data: doc } = await db
     .from("documents")
     .select("status, doc_type, page_count, last_error, last_error_step, split_status, ocr_status, vector_status, meta")
     .eq("id", documentId)
@@ -359,14 +358,16 @@ async function assertDrawingQuantities(anyDb: any, tenantId: string, documentId:
   if (!quantitiesAllowedForDocType(doc.doc_type)) {
     return NextResponse.json({ error: "Only drawings produce quantities. This file stays available to search.", code: "not_a_drawing" }, { status: 422 });
   }
-  const block = takeoffBlockReason(doc);
+  const meta = doc.meta && typeof doc.meta === "object" && !Array.isArray(doc.meta)
+    ? doc.meta as Record<string, unknown>
+    : null;
+  const block = takeoffBlockReason({ ...doc, meta });
   if (block) return NextResponse.json({ error: block, code: "takeoff_blocked" }, { status: 422 });
   return null;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function countDecidedVisionItems(anyDb: any, tenantId: string, documentId: string | null, pageId: string, items: Array<{ description?: string | null; quantity?: number | null; unit?: string | null }>): Promise<number> {
-  const { data } = await anyDb
+async function countDecidedVisionItems(db: ServiceClient, tenantId: string, documentId: string | null, pageId: string, items: Array<{ description?: string | null; quantity?: number | null; unit?: string | null }>): Promise<number> {
+  const { data } = await db
     .from("takeoff_items")
     .select("review_status, meta")
     .eq("tenant_id", tenantId)
@@ -379,8 +380,7 @@ async function countDecidedVisionItems(anyDb: any, tenantId: string, documentId:
   return countAlreadyDecided(items, keys);
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function runBackgroundAgents(args: { db: any; tenantId: string; projectId: string | null; pageId: string; documentId: string | null; pageNumber: number; visionItems: any[] }): Promise<void> {
+async function runBackgroundAgents(args: { db: ServiceClient; tenantId: string; projectId: string | null; pageId: string; documentId: string | null; pageNumber: number; visionItems: VisionItem[] }): Promise<void> {
   const { db, tenantId, pageId, pageNumber, visionItems } = args;
   let projectId = args.projectId;
   let documentName: string | null = null;

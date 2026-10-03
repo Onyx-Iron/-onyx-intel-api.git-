@@ -17,9 +17,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const { page, limit, offset } = parsePagination(req.nextUrl.searchParams);
 
     const db = await createServiceClient();
-    void reclaimStuckProcessingSheets(db, tenantId).catch((err) =>
-      console.error("[GET /api/takeoff/unprocessed-sheets] stuck reclaim failed", err),
-    );
+    try {
+      await reclaimStuckProcessingSheets(db, tenantId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return NextResponse.json({ error: `[GET /api/takeoff/unprocessed-sheets] ${msg}` }, { status: 500 });
+    }
 
     let query = db
       .from("sheets")
