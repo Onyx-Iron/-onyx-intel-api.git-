@@ -1,13 +1,14 @@
 [phases.setup]
-nixPkgs = ["python312"]
+nixPkgs = ["python312", "python312Packages.pip"]
 
 [phases.install]
 # Docling is optional at runtime (ENABLE_DOCLING=1), but the package must be
 # present on the image for /api/parse/docling to work. Keep requirements.txt
 # first so core deps install even if Docling resolution is slow.
+# Use `python -m pip` — Railpack/Nixpacks images often lack a bare `pip` on PATH.
 cmds = [
-  "pip install -r requirements.txt",
-  "pip install -r requirements-docling.txt",
+  "python -m pip install -r requirements.txt",
+  "python -m pip install -r requirements-docling.txt",
 ]
 
 [start]
