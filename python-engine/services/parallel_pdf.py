@@ -76,7 +76,8 @@ def _extract_page_chunk(payload: tuple[str, list[int], int]) -> dict[str, Any]:
                 complexity = 9999
 
             if complexity > complexity_limit:
-                ai_pages.append(idx)
+                # Drawing page. Geometry is measured from the vectors; do not
+                # send the page to a model and do not run the table finder here.
                 if hasattr(page, "close"):
                     try:
                         page.close()
@@ -111,10 +112,8 @@ def _extract_page_chunk(payload: tuple[str, list[int], int]) -> dict[str, Any]:
                         continue
                     qty = _to_float(raw[qty_col]) if (qty_col is not None and qty_col < len(raw)) else None
                     if qty is None:
-                        qty = 1.0
-                        basis = f"Schedule row, p.{idx} (count defaulted to 1 — no qty column)"
-                    else:
-                        basis = f"Schedule table, p.{idx}, col '{header[qty_col] or 'qty'}'"
+                        continue
+                    basis = f"Schedule table, p.{idx}, col '{header[qty_col] or 'qty'}'"
                     unit = raw[unit_col] if (unit_col is not None and unit_col < len(raw)) else None
                     rows.append(
                         _row(
@@ -129,8 +128,6 @@ def _extract_page_chunk(payload: tuple[str, list[int], int]) -> dict[str, Any]:
 
             if page_made_rows:
                 pages_with_tables += 1
-            else:
-                ai_pages.append(idx)
 
             if hasattr(page, "close"):
                 try:
@@ -179,7 +176,7 @@ def extract_pdf_parallel(
         page_count = len(pdf.pages)
 
     table_pages = list(range(1, min(page_count, max_table_pages) + 1))
-    overflow_ai = list(range(max_table_pages + 1, page_count + 1))
+    overflow_ai: list[int] = []
 
     if workers <= 1 or len(table_pages) < min_pages:
         # Sequential path — reuse chunk worker once for identical semantics.

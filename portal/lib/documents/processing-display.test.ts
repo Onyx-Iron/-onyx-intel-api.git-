@@ -53,6 +53,15 @@ describe("processing display", () => {
     assert.equal(takeoffBlockReason({ ...doc, meta: { ...doc.meta, partial_acknowledged: true } }), null);
   });
 
+  it("leaves Splitting once the split has finished", () => {
+    assert.notEqual(processingStage({ status: "split", split_status: "done" }), "Splitting");
+    assert.equal(processingStage({ status: "split", split_status: "done" }), "Reading pages");
+    assert.equal(processingStage({ status: "queued", split_status: "pending" }), "Splitting");
+    const blocked = takeoffBlockReason({ status: "split", split_status: "done", doc_type: "drawing" });
+    assert.match(blocked ?? "", /reading pages/i);
+    assert.doesNotMatch(blocked ?? "", /splitting/i);
+  });
+
   it("does not emit quantities from a spec, an unclassified file, or other", () => {
     assert.equal(quantitiesAllowedForDocType("spec"), false);
     assert.equal(quantitiesAllowedForDocType(null), false);

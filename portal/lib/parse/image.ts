@@ -1,89 +1,18 @@
 /**
- * Image parser — sends the image to Gemini with a construction-doc prompt
- * and returns extracted entities (sheet numbers, dimensions, materials,
- * vendors, line items, etc., biased by the optional hint).
+ * Image parser. The file is stored. A raster sheet has no embedded text to
+ * measure, and this path does not call a vision model to invent any.
  */
-import type { ParseResult, ParseContext, ParseEntity } from "./index";
-import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
-
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
-const VISION_MODEL = process.env.GEMINI_VISION_MODEL ?? "gemini-2.0-flash-001";
-
-const HINT_FOCUS: Record<string, string> = {
-  takeoff:   "quantities, materials, dimensions, areas, CSI codes, sheet numbers",
-  estimate:  "line items, unit prices, quantities, totals, vendors",
-  vendors:   "company names, contacts, phone numbers, emails, addresses, trades",
-  invoices:  "invoice number, vendor, line items, amounts, totals, dates, terms",
-  punch:     "punch items, locations, trades, status, dates",
-  contacts:  "person names, roles, companies, phones, emails",
-  docs:      "sheet numbers, spec sections, RFI/submittal IDs, dates, titles",
-};
-
-function mimeFor(filename: string, fallback: string): string {
-  const ext = filename.toLowerCase().split(".").pop() ?? "";
-  if (ext === "tif" || ext === "tiff") return "image/tiff";
-  if (ext === "png") return "image/png";
-  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
-  if (ext === "webp") return "image/webp";
-  if (ext === "gif") return "image/gif";
-  if (ext === "bmp") return "image/bmp";
-  return fallback || "application/octet-stream";
-}
+import type { ParseResult, ParseContext } from "./index";
 
 export async function parseImage(
-  bytes: Buffer,
+  _bytes: Buffer,
   base: { filename: string; mime: string },
-  ctx: ParseContext,
+  _ctx: ParseContext,
 ): Promise<ParseResult> {
-  if (!GEMINI_API_KEY) {
-    return { kind: "error", ...base, error: "GEMINI_API_KEY not configured" };
-  }
-
-  const mime = mimeFor(base.filename, base.mime);
-  const focus = ctx.hint ? HINT_FOCUS[ctx.hint] ?? "" : "";
-
-  const prompt = `You are analyzing a construction/engineering document image.
-Extract structured entities. Return ONLY a JSON object — no markdown — shaped:
-{ "entities": [ { "type": "<short label>", "value": "<the value>", "confidence": <0..1> } ] }
-
-${focus ? `Focus on: ${focus}.` : ""}
-Common types include: sheet_number, spec_section, dimension, material, vendor,
-contact, phone, email, address, line_item, quantity, unit_price, total, date,
-rfi_id, submittal_id, room, drawing_title.
-Skip purely decorative items. If nothing readable, return an empty entities array.`;
-
-  const res = await fetchGemini(
-    `https://generativelanguage.googleapis.com/v1beta/models/${VISION_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { inlineData: { mimeType: mime, data: bytes.toString("base64") } },
-            { text: prompt },
-          ],
-        }],
-        generationConfig: { responseMimeType: "application/json" },
-      }),
-    },
-    { label: "Gemini vision extraction", timeoutMs: 60_000 },
-  );
-
-  if (!res.ok) {
-    await readGeminiError(res, "Gemini vision extraction");
-  }
-
-  const data = (await res.json()) as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  return {
+    kind: "image",
+    ...base,
+    text: "",
+    entities: [],
   };
-  const raw = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-  let parsed: { entities?: ParseEntity[] } = {};
-  try { parsed = JSON.parse(raw); } catch { parsed = {}; }
-
-  const entities: ParseEntity[] = Array.isArray(parsed.entities)
-    ? parsed.entities.filter((e) => e && typeof e.type === "string" && typeof e.value === "string")
-    : [];
-
-  return { kind: "image", ...base, mime, entities };
 }
