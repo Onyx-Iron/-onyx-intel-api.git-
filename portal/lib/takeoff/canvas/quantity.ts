@@ -54,9 +54,40 @@ export function calculatePerimeter(points: Point[], pageSpaceScaleFactor: number
   return applyWasteAndMultiplier(realWorldPerimeter, opts);
 }
 
+function cross(origin: Point, a: Point, b: Point): number {
+  return (a.x - origin.x) * (b.y - origin.y) - (a.y - origin.y) * (b.x - origin.x);
+}
+
+function segmentsProperlyIntersect(a: Point, b: Point, c: Point, d: Point): boolean {
+  const d1 = cross(c, d, a);
+  const d2 = cross(c, d, b);
+  const d3 = cross(a, b, c);
+  const d4 = cross(a, b, d);
+  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+}
+
+/** A bowtie cancels through the shoelace formula. That area is not stored. */
+export function polygonSelfIntersects(points: Point[]): boolean {
+  const n = points.length;
+  if (n < 4) return false;
+  for (let i = 0; i < n; i++) {
+    const a1 = points[i];
+    const a2 = points[(i + 1) % n];
+    for (let j = i + 1; j < n; j++) {
+      if (j === i + 1) continue;
+      if (i === 0 && j === n - 1) continue;
+      const b1 = points[j];
+      const b2 = points[(j + 1) % n];
+      if (segmentsProperlyIntersect(a1, a2, b1, b2)) return true;
+    }
+  }
+  return false;
+}
+
 /** Shoelace-formula polygon area, in real-world units squared. */
 export function calculatePolygonArea(points: Point[], pageSpaceScaleFactor: number, opts?: WasteAndMultiplier): number {
   if (points.length < 3) return 0;
+  if (polygonSelfIntersects(points)) return 0;
   let sum = 0;
   for (let i = 0; i < points.length; i++) {
     const a = points[i];
@@ -112,17 +143,63 @@ export function calculateSlopeAdjustedLength(points: Point[], pageSpaceScaleFact
   return applyWasteAndMultiplier(slopeLength, opts);
 }
 
-/** Server and canvas share this switch so a perimeter cannot be priced as an area. */
+export interface QuantityGeometry {
+  measure?: string | null;
+  thickness?: number | null;
+  width?: number | null;
+  depth?: number | null;
+  slope_pct?: number | null;
+  slopePct?: number | null;
+}
+
+function finitePositive(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function readQuantityGeometry(measureOrGeometry?: string | null | QuantityGeometry): QuantityGeometry {
+  if (typeof measureOrGeometry === "string" || measureOrGeometry == null) {
+    return { measure: measureOrGeometry ?? null };
+  }
+  return measureOrGeometry;
+}
+
+/**
+ * Server and canvas share this switch so a perimeter cannot be priced as an area.
+ * A self-crossing polygon returns null: the shoelace sum would cancel and look like a real area.
+ * Thickness, width, depth, and slope on the geometry are part of the stored quantity.
+ */
 export function quantityForMeasurement(
   takeoffType: string,
   points: Point[],
   pageSpaceScaleFactor: number,
-  measure?: string | null,
-): number {
+  measureOrGeometry?: string | null | QuantityGeometry,
+): number | null {
+  const geometry = readQuantityGeometry(measureOrGeometry);
+  const measure = geometry.measure ?? null;
+  const closed = takeoffType === "area" || takeoffType === "perimeter" || measure === "perimeter";
+  if (closed && polygonSelfIntersects(points)) return null;
   if (takeoffType === "count") return calculateCount(points);
   if (takeoffType === "perimeter" || measure === "perimeter") return calculatePerimeter(points, pageSpaceScaleFactor);
-  if (takeoffType === "area") return calculatePolygonArea(points, pageSpaceScaleFactor);
+  const thickness = finitePositive(geometry.thickness);
+  const width = finitePositive(geometry.width);
+  const depth = finitePositive(geometry.depth);
+  const slope = geometry.slope_pct ?? geometry.slopePct;
+  const slopePct = typeof slope === "number" && Number.isFinite(slope) ? slope : null;
+  if (takeoffType === "area") {
+    const thick = thickness ?? depth;
+    if (thick != null) return calculateAreaVolume(points, pageSpaceScaleFactor, thick);
+    return calculatePolygonArea(points, pageSpaceScaleFactor);
+  }
+  if (width != null && depth != null) return calculateBoxVolume(points, pageSpaceScaleFactor, width, depth);
+  if (slopePct != null && slopePct !== 0) return calculateSlopeAdjustedLength(points, pageSpaceScaleFactor, slopePct);
   return calculateLinearLength(points, pageSpaceScaleFactor);
+}
+
+/** An unscaled sheet has no calculated quantity. A verified sheet stores the formula result. */
+export function calculatedQuantityForSave(verified: boolean, serverQuantity: number | null): number | null {
+  if (!verified) return null;
+  return serverQuantity;
 }
 
 // ── Unit conversion ─────────────────────────────────────────────────────────

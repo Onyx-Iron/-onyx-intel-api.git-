@@ -73,6 +73,8 @@ export interface CalibrationUpsertBody {
   known_unit?: string;
   /** Apply a confirmed recalibration to draft measurements on this sheet. */
   apply_to_drafts?: boolean;
+  scale_preset?: string;
+  suggestion_only?: boolean;
 }
 
 // ── Civil utility pipe runs ─────────────────────────────────────────────────

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   ageInDays,
   csiDivisionFromCode,
+  actualsNeedPpiAging,
   escalateStaleUnitCost,
   PPI_STALE_AFTER_DAYS,
   scaleOptionalCost,
@@ -59,6 +60,16 @@ describe("escalateStaleUnitCost", () => {
 
   it("respects staleAfterDays default", () => {
     assert.ok(ageInDays(stale, now)! >= PPI_STALE_AFTER_DAYS);
+  });
+});
+
+describe("actuals window", () => {
+  it("does not PPI-age actuals already inside six months", () => {
+    const now = new Date("2026-10-01T00:00:00Z");
+    const inside = new Date("2026-06-15T00:00:00Z");
+    const outside = new Date("2026-01-01T00:00:00Z");
+    assert.equal(actualsNeedPpiAging(inside, now), false);
+    assert.equal(actualsNeedPpiAging(outside, now), true);
   });
 });
 
