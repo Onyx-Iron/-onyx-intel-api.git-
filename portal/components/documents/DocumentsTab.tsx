@@ -31,7 +31,7 @@ import {
   partialWasAcknowledged,
   plainLanguageError,
   processingStage,
-  takeoffBlockReason,
+  sheetMeasureNote,
 } from "@/lib/documents/processing-display";
 
 type DocPipelineSnapshot = PipelineProgress & {
@@ -137,7 +137,9 @@ function SkeletonRows() {
   );
 }
 
-export default function DocumentsTab({ projectId }: { projectId: string }) {
+const CLOSEOUT_TYPES = new Set(["report", "submittal", "contract", "other"]);
+
+export default function DocumentsTab({ projectId, mode = "all" }: { projectId: string; mode?: "all" | "closeout" }) {
   const { toast } = useToast();
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
@@ -270,7 +272,11 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     try {
       const r = await fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}&page=${page}&limit=200`);
       const d = await r.json() as { documents?: Document[]; pagination?: { hasMore?: boolean } };
-      const incoming = d.documents ?? [];
+      const incoming = (d.documents ?? []).filter((doc) => {
+        if (mode !== "closeout") return true;
+        const name = doc.file_name.toLowerCase();
+        return CLOSEOUT_TYPES.has(doc.doc_type ?? "") || /as-built|closeout|warranty|o&m|manual/.test(name);
+      });
       let next = incoming;
       setDocuments((prev) => {
         if (page === 1) {
@@ -290,7 +296,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
       setLoading(false);
       return [];
     }
-  }, [projectId]);
+  }, [projectId, mode]);
 
   useEffect(() => {
     loadDocuments();
@@ -792,7 +798,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                   const isReady = isTerminalSuccess(doc.status);
                   const isExpanded = expandedDocId === doc.id;
                   const insights = pagesByDoc[doc.id];
-                  const block = takeoffBlockReason(doc);
+                  const measureNote = sheetMeasureNote(doc);
                   const missing = listedMissingPages(doc);
                   const readableError = plainLanguageError(doc.last_error, doc.last_error_step);
                   const needsPassword = isPasswordRequired(doc.last_error);
@@ -907,18 +913,19 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-3">
                           {doc.file_name.toLowerCase().endsWith(".pdf") && (
-                            block ? (
-                              <span className="max-w-[8rem] text-left text-[10px] uppercase tracking-widest font-mono text-[#F5A623]" title={block}>
-                                Takeoff blocked
-                              </span>
-                            ) : (
+                            <div className="flex max-w-[14rem] flex-col items-end gap-1">
                               <Link
                                 href={`/dashboard/projects/${projectId}/takeoff/canvas?document_id=${encodeURIComponent(doc.id)}`}
                                 className="text-[10px] uppercase tracking-widest font-mono text-gray-600 hover:text-[#CCFF00] transition-colors"
                               >
-                                Canvas
+                                Measure
                               </Link>
-                            )
+                              {measureNote && (
+                                <span className="text-right text-[10px] normal-case tracking-normal text-white/45">
+                                  {measureNote}
+                                </span>
+                              )}
+                            </div>
                           )}
                           {documentHasAskableSource(doc) && (
                             <button

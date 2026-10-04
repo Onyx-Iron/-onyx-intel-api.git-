@@ -5,6 +5,8 @@ import type { TablesUpdate } from "@/lib/supabase/types";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditUpdate, auditDelete } from "@/lib/audit";
+import { recomputeProjectSchedule } from "@/lib/project-file/schedule-store";
+import { CpmCycleError } from "@/lib/project-file/cpm";
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -36,6 +38,8 @@ export async function PUT(req: NextRequest, context: RouteContext): Promise<Next
       lf,
       total_float,
       free_float,
+      deps,
+      percent_complete,
     } = body as {
       name?: string;
       status?: string;
@@ -49,6 +53,8 @@ export async function PUT(req: NextRequest, context: RouteContext): Promise<Next
       lf?: number;
       total_float?: number;
       free_float?: number;
+      deps?: string[];
+      percent_complete?: number | null;
     };
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
@@ -68,6 +74,8 @@ export async function PUT(req: NextRequest, context: RouteContext): Promise<Next
     if (lf !== undefined) updates.lf = lf;
     if (total_float !== undefined) updates.total_float = total_float;
     if (free_float !== undefined) updates.free_float = free_float;
+    if (deps !== undefined) updates.deps = deps;
+    if (percent_complete !== undefined) updates.percent_complete = percent_complete;
 
     if (Object.keys(updates).length === 0) {
       return NextResponse.json({ error: "No fields to update" }, { status: 400 });
@@ -101,6 +109,17 @@ export async function PUT(req: NextRequest, context: RouteContext): Promise<Next
       old_values: (before ?? null) as Record<string, unknown> | null,
       new_values: data as Record<string, unknown>,
     });
+
+    if (before && (deps !== undefined || duration !== undefined || start_date !== undefined || end_date !== undefined)) {
+      try {
+        await recomputeProjectSchedule(db, tenantId, before.project_id);
+      } catch (err) {
+        if (err instanceof CpmCycleError) {
+          return NextResponse.json({ task: data, error: err.message }, { status: 409 });
+        }
+        throw err;
+      }
+    }
 
     return NextResponse.json({ task: data });
   } catch (err: unknown) {

@@ -2,6 +2,7 @@
 
 import * as tus from "tus-js-client";
 import { TUS_THRESHOLD_BYTES } from "@/lib/documents/signed-upload";
+import { shouldRetryUploadComplete } from "@/lib/documents/ingest-start";
 
 export type UploadProgress = { bytesSent: number; bytesTotal: number; percent: number };
 
@@ -183,15 +184,27 @@ export async function uploadDocumentDirect(
     await putToSignedUrl(session.upload.url, file, opts?.onProgress, opts?.signal);
   }
 
-  const completeRes = await fetch("/api/documents/upload-url/complete", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ document_id: session.document_id }),
-    signal: opts?.signal,
-  });
-  const completeData = await completeRes.json().catch(() => ({})) as { error?: string };
-  if (!completeRes.ok) {
-    throw new Error(completeData.error ?? `Could not finalize upload (${completeRes.status})`);
+  let completeRes: Response | null = null;
+  let completeData: { error?: string } = {};
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      completeRes = await fetch("/api/documents/upload-url/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_id: session.document_id }),
+        signal: opts?.signal,
+      });
+      completeData = await completeRes.json().catch(() => ({})) as { error?: string };
+      if (completeRes.ok) break;
+      if (!shouldRetryUploadComplete(completeRes.status, attempt)) break;
+    } catch (err) {
+      if (opts?.signal?.aborted || !shouldRetryUploadComplete(null, attempt)) throw err;
+      completeRes = null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+  }
+  if (!completeRes?.ok) {
+    throw new Error(completeData.error ?? `Could not finalize upload (${completeRes?.status ?? "network"})`);
   }
 
   return {

@@ -27,6 +27,7 @@ interface WeeklyLogRow {
 }
 
 interface DailyLogRow {
+  id: string;
   log_date: string;
   weather: string | null;
   temperature: string | null;
@@ -70,7 +71,7 @@ export async function POST(_req: NextRequest, ctx: RouteContext): Promise<NextRe
     const { data: dailyData, error: dailyErr } = await db
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .from("daily_logs" as any)
-      .select("log_date, weather, temperature, crew_count, work_performed, notes")
+      .select("id, log_date, weather, temperature, crew_count, work_performed, notes")
       .eq("tenant_id", tenantId)
       .eq("project_id", wk.project_id)
       .gte("log_date", wk.week_start)
@@ -82,6 +83,24 @@ export async function POST(_req: NextRequest, ctx: RouteContext): Promise<NextRe
     }
 
     const dailyRows = (dailyData ?? []) as unknown as DailyLogRow[];
+
+    const logIds = dailyRows.map((row) => row.id).filter(Boolean);
+    const [manpower, delays, quantities] = await Promise.all([
+      logIds.length
+        ? db.from("daily_log_manpower" as never).select("company_name, headcount, hours, daily_log_id").in("daily_log_id", logIds)
+        : Promise.resolve({ data: [] }),
+      logIds.length
+        ? db.from("daily_log_delays" as never).select("reason_code, hours, daily_log_id").in("daily_log_id", logIds)
+        : Promise.resolve({ data: [] }),
+      logIds.length
+        ? db.from("daily_log_quantities" as never).select("quantity, unit, daily_log_id").in("daily_log_id", logIds)
+        : Promise.resolve({ data: [] }),
+    ]);
+    const productionDigest = [
+      `Manpower rows: ${JSON.stringify(manpower.data ?? [])}`,
+      `Delay rows: ${JSON.stringify(delays.data ?? [])}`,
+      `Installed quantities: ${JSON.stringify(quantities.data ?? [])}`,
+    ].join("\n");
 
     const dailyDigest = dailyRows.length === 0
       ? "(No daily logs were recorded for this week.)"
@@ -105,6 +124,9 @@ export async function POST(_req: NextRequest, ctx: RouteContext): Promise<NextRe
 
 Daily logs from the field:
 ${dailyDigest}
+
+Structured production from those logs:
+${productionDigest}
 
 ${manualContext ? `Additional PM context:\n${manualContext}\n` : ""}
 Write the weekly status report now. Max 200 words total.`;

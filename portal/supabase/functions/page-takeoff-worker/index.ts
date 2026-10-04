@@ -234,7 +234,7 @@ Deno.serve(async (req) => {
       throw new Error(`takeoff extract ${res.status}: ${detail}`);
     }
     const data = await res.json() as { rows?: TakeoffRow[] };
-    const rows = Array.isArray(data.rows) ? data.rows : [];
+    const rows = (Array.isArray(data.rows) ? data.rows : []).filter((row) => row.extraction_method !== "ai_vision");
 
     // ── 3. Insert into takeoff_items ─────────────────────────────────────────
     if (rows.length > 0) {

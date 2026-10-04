@@ -13,6 +13,13 @@ export function shouldMarkIngestStartError(status: number): boolean {
   return true;
 }
 
+/** Retry the upload-complete call on a dropped connection or a server error. */
+export function shouldRetryUploadComplete(status: number | null, attemptIndex: number, maxAttempts = 3): boolean {
+  if (attemptIndex >= maxAttempts - 1) return false;
+  if (status == null) return true;
+  return status >= 500;
+}
+
 /**
  * A fresh `processing_started_at` only means a run is in flight when this
  * ingest already claimed the row. Upload complete used to write that

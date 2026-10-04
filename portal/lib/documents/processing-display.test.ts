@@ -8,6 +8,7 @@ import {
   plainLanguageError,
   processingStage,
   quantitiesAllowedForDocType,
+  sheetMeasureNote,
   takeoffBlockReason,
 } from "./processing-display.ts";
 
@@ -51,6 +52,22 @@ describe("processing display", () => {
     const blocked = takeoffBlockReason(doc);
     assert.match(blocked ?? "", /Missing pages: 2/);
     assert.equal(takeoffBlockReason({ ...doc, meta: { ...doc.meta, partial_acknowledged: true } }), null);
+  });
+
+  it("keeps manual measuring open while automatic quantities are still running", () => {
+    const splitting = { status: "split", split_status: "pending", doc_type: "drawing" };
+    assert.match(sheetMeasureNote(splitting) ?? "", /You can measure this sheet now/);
+    assert.equal(sheetMeasureNote({ status: "complete", doc_type: "drawing" }), null);
+    assert.equal(sheetMeasureNote({ status: "queued", doc_type: "spec" }), null);
+  });
+
+  it("leaves Splitting once the split has finished", () => {
+    assert.notEqual(processingStage({ status: "split", split_status: "done" }), "Splitting");
+    assert.equal(processingStage({ status: "split", split_status: "done" }), "Reading pages");
+    assert.equal(processingStage({ status: "queued", split_status: "pending" }), "Splitting");
+    const blocked = takeoffBlockReason({ status: "split", split_status: "done", doc_type: "drawing" });
+    assert.match(blocked ?? "", /reading pages/i);
+    assert.doesNotMatch(blocked ?? "", /splitting/i);
   });
 
   it("does not emit quantities from a spec, an unclassified file, or other", () => {

@@ -12,6 +12,8 @@ import {
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { auditInsert } from "@/lib/audit";
 import { parsePagination, paginationMeta } from "@/lib/pagination";
+import { getUserRole } from "@/lib/project-controls/permissions";
+import { rowsForSubcontractor } from "@/lib/project-file/api";
 
 export const runtime = "nodejs";
 
@@ -36,7 +38,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       .range(offset, offset + limit - 1);
 
     if (error) return NextResponse.json({ items: [] });
-    return NextResponse.json({ items: data ?? [], pagination: paginationMeta(count ?? 0, page, limit) });
+    const role = await getUserRole(tenantId, userId);
+    const items = await rowsForSubcontractor(
+      role,
+      db,
+      tenantId,
+      projectId,
+      userId,
+      (data ?? []) as Array<{ ball_contact_id?: string | null }>,
+    );
+    return NextResponse.json({ items, pagination: paginationMeta(count ?? 0, page, limit) });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     const status = msg.includes("project_id") ? 400 : 500;

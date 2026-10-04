@@ -17,6 +17,9 @@
 /.next/
 /out/
 
+# Copied from pdfjs-dist when next.config.ts loads.
+/public/pdf.worker.min.mjs
+
 # production
 /build
 

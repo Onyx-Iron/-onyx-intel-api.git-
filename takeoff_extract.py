@@ -268,10 +268,8 @@ def _rows_from_pdf_page(page, idx: int) -> list[dict]:
                 continue
             qty = _to_float(raw[qty_col]) if (qty_col is not None and qty_col < len(raw)) else None
             if qty is None:
-                qty = 1.0
-                basis = f"Schedule row, p.{idx} (count defaulted to 1 — no qty column)"
-            else:
-                basis = f"Schedule table, p.{idx}, col '{header[qty_col] or 'qty'}'"
+                continue
+            basis = f"Schedule table, p.{idx}, col '{header[qty_col] or 'qty'}'"
             unit = raw[unit_col] if (unit_col is not None and unit_col < len(raw)) else None
             rows.append(_row(desc, qty, basis, uom=str(unit) if unit else None, drawing_ref=f"PDF p.{idx}"))
     return rows
@@ -311,16 +309,13 @@ def extract_from_pdf(path: str) -> dict:
 
     from services.parallel_pdf import extract_pdf_parallel
 
-    # Drawing pages are dense with vector lines; pdfplumber's table finder can
-    # explode (time + memory) on them and OOM the worker. Skip table detection on
-    # graphical pages (route them to the AI vision path) and cap total work.
-    MAX_TABLE_PAGES = 30           # only run deterministic table-detection on the first N pages
-    LINE_COMPLEXITY_LIMIT = 1200   # above this many vector objects, treat page as a drawing
-
+    # Schedule tables are a second source. Dense drawing pages are measured from
+    # their vectors in the portal; the table finder still skips those pages so it
+    # does not run instead of that measurement, and it does not mark them for a model.
     return extract_pdf_parallel(
         path,
-        max_table_pages=MAX_TABLE_PAGES,
-        complexity_limit=LINE_COMPLEXITY_LIMIT,
+        max_table_pages=10**9,
+        complexity_limit=1200,
     )
 
 
