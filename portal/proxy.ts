@@ -19,6 +19,7 @@ const isPublicRoute = createRouteMatcher([
   "/api/internal/outbox/process",
   "/api/internal/sheets/process",
   "/api/internal/gmail/plan-poll",
+  "/api/internal/documents/supervise",
   // Paddle billing webhooks verify their own signature; no Clerk session.
   "/api/billing/webhook",
 ]);

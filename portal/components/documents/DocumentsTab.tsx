@@ -31,7 +31,7 @@ import {
   partialWasAcknowledged,
   plainLanguageError,
   processingStage,
-  takeoffBlockReason,
+  sheetMeasureNote,
 } from "@/lib/documents/processing-display";
 
 type DocPipelineSnapshot = PipelineProgress & {
@@ -798,7 +798,7 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
                   const isReady = isTerminalSuccess(doc.status);
                   const isExpanded = expandedDocId === doc.id;
                   const insights = pagesByDoc[doc.id];
-                  const block = takeoffBlockReason(doc);
+                  const measureNote = sheetMeasureNote(doc);
                   const missing = listedMissingPages(doc);
                   const readableError = plainLanguageError(doc.last_error, doc.last_error_step);
                   const needsPassword = isPasswordRequired(doc.last_error);
@@ -913,18 +913,19 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-3">
                           {doc.file_name.toLowerCase().endsWith(".pdf") && (
-                            block ? (
-                              <span className="max-w-[8rem] text-left text-[10px] uppercase tracking-widest font-mono text-[#F5A623]" title={block}>
-                                Takeoff blocked
-                              </span>
-                            ) : (
+                            <div className="flex max-w-[14rem] flex-col items-end gap-1">
                               <Link
                                 href={`/dashboard/projects/${projectId}/takeoff/canvas?document_id=${encodeURIComponent(doc.id)}`}
                                 className="text-[10px] uppercase tracking-widest font-mono text-gray-600 hover:text-[#CCFF00] transition-colors"
                               >
-                                Canvas
+                                Measure
                               </Link>
-                            )
+                              {measureNote && (
+                                <span className="text-right text-[10px] normal-case tracking-normal text-white/45">
+                                  {measureNote}
+                                </span>
+                              )}
+                            </div>
                           )}
                           {documentHasAskableSource(doc) && (
                             <button
