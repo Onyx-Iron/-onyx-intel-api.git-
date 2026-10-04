@@ -51,7 +51,9 @@ export function useCanvasRealtime({
     Exclude<CanvasRealtimeStatus, "off">
   >("connecting");
   const [reconnectNonce, setReconnectNonce] = useState(0);
-  const [resolvedName, setResolvedName] = useState(displayName);
+  /** Set from realtime-auth preflight; falls back to prop until then. */
+  const [authDisplayName, setAuthDisplayName] = useState<string | null>(null);
+  const resolvedName = authDisplayName ?? displayName;
   const [senderId, setSenderId] = useState(() =>
     typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
@@ -63,10 +65,6 @@ export function useCanvasRealtime({
   useEffect(() => {
     onRemoteRef.current = onRemoteEvent;
   }, [onRemoteEvent]);
-
-  useEffect(() => {
-    setResolvedName(displayName);
-  }, [displayName]);
 
   const color = useMemo(() => peerColorForKey(senderId), [senderId]);
   const status: CanvasRealtimeStatus = active ? connectionStatus : "off";
@@ -113,7 +111,6 @@ export function useCanvasRealtime({
     let reconnectTimer: number | null = null;
 
     async function join() {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset connection phase when (re)joining
       setConnectionStatus("connecting");
 
       let auth: AuthPayload | null = null;
@@ -134,7 +131,7 @@ export function useCanvasRealtime({
         return;
       }
 
-      setResolvedName(auth.displayName || displayName);
+      setAuthDisplayName(auth.displayName || displayName);
       setSenderId(auth.senderId);
       const presenceKey = auth.senderId;
       const peerName = auth.displayName || displayName;

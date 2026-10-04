@@ -93,6 +93,7 @@ export default function OutboxSyncPanel({ projectId }: Props) {
   }, [projectId]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount/project fetch
     void load();
   }, [load]);
 
