@@ -33,7 +33,9 @@ export interface ProjectStatusReportResult {
 export async function generateProjectStatusReport(
   tenantId: string,
   projectId: string,
+  options?: { includeFinancials?: boolean },
 ): Promise<ProjectStatusReportResult> {
+  const includeFinancials = options?.includeFinancials !== false;
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
@@ -73,10 +75,13 @@ export async function generateProjectStatusReport(
   const changeOrderRows = changeOrders.error ? [] : (changeOrders.data ?? []) as Array<{ number: string | null; description: string; status: string; amount: number | null }>;
 
   const ctx = [
+    ...(includeFinancials ? [] : ["Do not state budget, estimate, change-order, invoice, or unit-price dollar amounts. Say that pricing is hidden."]),
     `PROJECT: ${p.name} (${[p.city, p.state].filter(Boolean).join(", ") || "location n/a"})`,
     `Status: ${p.status} | Timeline: ${p.start_date ?? "TBD"} -> ${p.end_date ?? "TBD"}`,
     `Schedule: ${done}/${taskRows.length} tasks complete (${completion}%)`,
-    `Budget: ${p.budget != null ? `$${p.budget.toLocaleString()}` : "not set"} | Estimated cost so far: $${Math.round(estVal).toLocaleString()}`,
+    includeFinancials
+      ? `Budget: ${p.budget != null ? `$${p.budget.toLocaleString()}` : "not set"} | Estimated cost so far: $${Math.round(estVal).toLocaleString()}`
+      : "Budget and estimate dollars are omitted for this reader.",
     `Estimate QC: ${estimateQuality.ready_for_proposal ? "ready for proposal" : "not ready for proposal"} | Risk score: ${estimateQuality.risk_score}/100 | Source-backed: ${estimateQuality.counts.source_backed}/${estimateQuality.counts.total_items} | Needs pricing: ${estimateQuality.counts.unpriced} | Needs review: ${estimateQuality.counts.review} | Missing evidence: ${estimateQuality.counts.missing_evidence}`,
     ...estimateQuality.blockers.map((x) => `Estimate blocker: ${x}`),
     "",
@@ -90,7 +95,7 @@ export async function generateProjectStatusReport(
     ...submittalRows.map((x) => `  - ${x.number ?? "Submittal"} [${x.status}] ${x.title}${x.responsible ? `, ${x.responsible}` : ""}${x.due_date ? `, due ${x.due_date}` : ""}`),
     "",
     `CHANGE ORDERS (${changeOrderRows.length}):`,
-    ...changeOrderRows.map((x) => `  - ${x.number ?? "CO"} [${x.status}] ${x.description}${x.amount != null ? `, $${Number(x.amount).toLocaleString()}` : ""}`),
+    ...changeOrderRows.map((x) => `  - ${x.number ?? "CO"} [${x.status}] ${x.description}${includeFinancials && x.amount != null ? `, $${Number(x.amount).toLocaleString()}` : ""}`),
     "",
     `PERMITS (${permitRows.length}):`,
     ...permitRows.map((x) => `  - ${x.permit_type}: ${x.status}`),

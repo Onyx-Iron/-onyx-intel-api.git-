@@ -2,6 +2,8 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { canReadFinancial, getUserRole } from "@/lib/project-controls/permissions";
+import { redactAuditSnapshot } from "@/lib/project-controls/financial-redaction";
 
 export const runtime = "nodejs";
 
@@ -34,5 +36,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const { data, error } = await q;
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ items: data ?? [] });
+  const canRead = canReadFinancial(await getUserRole(tenantId, userId));
+  const items = ((data ?? []) as Array<Record<string, unknown>>).map((row) => (
+    canRead
+      ? row
+      : {
+        ...row,
+        old_values: redactAuditSnapshot(row.old_values, false),
+        new_values: redactAuditSnapshot(row.new_values, false),
+      }
+  ));
+  return NextResponse.json({ items });
 }

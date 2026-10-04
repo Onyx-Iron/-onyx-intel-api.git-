@@ -2,7 +2,8 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
-import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { assertPermission, getUserRole, PermissionError, redactFinancialFields } from "@/lib/project-controls/permissions";
+import { VERSION_MARKUP_FIELDS } from "@/lib/project-controls/financial-redaction";
 import { createDraftFromVersion, loadVersionForTenant, NotFoundError } from "@/lib/estimating/versioning";
 import { recordEstimateAudit } from "@/lib/estimating/audit";
 
@@ -49,7 +50,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     .order("version_number", { ascending: false });
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  return NextResponse.json({ estimate, versions: versions ?? [] });
+  const role = await getUserRole(tenantId, userId);
+  const visibleVersions = redactFinancialFields(
+    (versions ?? []) as Record<string, unknown>[],
+    role,
+    VERSION_MARKUP_FIELDS,
+  );
+
+  return NextResponse.json({ estimate, versions: visibleVersions });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {

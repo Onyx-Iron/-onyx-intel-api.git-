@@ -5,6 +5,8 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { uuidSchema } from "@/lib/validation";
 import { logEvent } from "@/lib/activity";
 import { requirePermission } from "@/lib/project-controls/route-guards";
+import { getUserRole, redactFinancialFields } from "@/lib/project-controls/permissions";
+import { PROJECT_FINANCIAL_FIELDS } from "@/lib/project-controls/financial-redaction";
 import { auditUpdate, auditDelete } from "@/lib/audit";
 
 export const runtime = "nodejs";
@@ -37,7 +39,13 @@ export async function GET(
       .single();
 
     if (error || !data) return NextResponse.json({ error: "Project not found" }, { status: 404 });
-    return NextResponse.json({ project: data });
+    const role = await getUserRole(ctx.tenantId, ctx.userId);
+    const [project] = redactFinancialFields(
+      [data as unknown as Record<string, unknown>],
+      role,
+      PROJECT_FINANCIAL_FIELDS,
+    );
+    return NextResponse.json({ project });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[GET /api/projects/:id] ${msg}` }, { status: 500 });
@@ -66,6 +74,10 @@ export async function PATCH(
 
     const denied = await requirePermission(ctx.tenantId, ctx.userId, "field", "write");
     if (denied) return denied;
+    if ("budget" in patch) {
+      const financialDenied = await requirePermission(ctx.tenantId, ctx.userId, "financial", "write");
+      if (financialDenied) return financialDenied;
+    }
 
     const db = await createServiceClient();
     // Snapshot old values for the audit log before mutation
@@ -83,6 +95,13 @@ export async function PATCH(
 
     if (error) return NextResponse.json({ error: error.message }, { status: 422 });
 
+    const role = await getUserRole(ctx.tenantId, ctx.userId);
+    const [project] = redactFinancialFields(
+      [data as unknown as Record<string, unknown>],
+      role,
+      PROJECT_FINANCIAL_FIELDS,
+    );
+
     auditUpdate({
       tenant_id: ctx.tenantId,
       user_id: ctx.userId,
@@ -99,10 +118,10 @@ export async function PATCH(
       entityId: parsed.data,
       action: "updated",
       title: "Project updated",
-      meta: patch,
+      meta: Object.fromEntries(Object.entries(patch).filter(([key]) => key !== "budget")),
     });
 
-    return NextResponse.json({ project: data });
+    return NextResponse.json({ project });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[PATCH /api/projects/:id] ${msg}` }, { status: 500 });

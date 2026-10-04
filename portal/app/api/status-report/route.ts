@@ -4,6 +4,8 @@ import { NoProviderError, availableProviders } from "@/lib/ai/providers";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { generateProjectStatusReport } from "@/lib/reports/project-status";
+import { canReadFinancial, getUserRole } from "@/lib/project-controls/permissions";
+import { redactEstimateQuality } from "@/lib/project-controls/financial-redaction";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -30,9 +32,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       if (owned) return owned;
       throw err;
     }
+    const showFinancial = canReadFinancial(await getUserRole(tenantId, userId));
     let result;
     try {
-      result = await generateProjectStatusReport(tenantId, project_id);
+      result = await generateProjectStatusReport(tenantId, project_id, { includeFinancials: showFinancial });
     } catch (e) {
       if (e instanceof NoProviderError) {
         return NextResponse.json({ error: e.message, code: "NO_PROVIDER", available: availableProviders() }, { status: 503 });
@@ -47,8 +50,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       report: result.report,
       provider: result.provider,
       completion: result.completion,
-      estimate_value: result.estimate_value,
-      estimate_quality: result.estimate_quality,
+      estimate_value: showFinancial ? result.estimate_value : null,
+      estimate_quality: showFinancial ? result.estimate_quality : redactEstimateQuality(result.estimate_quality),
+      financials_redacted: !showFinancial,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

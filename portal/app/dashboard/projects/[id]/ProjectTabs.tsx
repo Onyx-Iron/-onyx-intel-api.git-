@@ -370,11 +370,13 @@ interface OverviewCounts {
   punch_total: number; punch_open: number;
   permits_total: number; permits_approved: number;
   rfis_open: number; submittals_open: number;
-  change_orders_pending: number; pending_change_order_value: number;
-  estimate_value: number; completion: number;
+  change_orders_pending: number; pending_change_order_value: number | null;
+  approved_change_order_value?: number | null;
+  estimate_value: number | null; completion: number;
 }
 
-function money(n: number): string {
+function money(n: number | null | undefined): string {
+  if (n == null) return "—";
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`;
   return `$${n}`;

@@ -1,6 +1,8 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { getControlSummary } from "@/lib/project-controls/schema";
+import { overviewMoneyForReader } from "@/lib/project-controls/financial-redaction";
+import { canReadFinancial, getUserRole } from "@/lib/project-controls/permissions";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 
@@ -27,6 +29,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     if (!projectId) return NextResponse.json({ error: "project_id is required" }, { status: 400 });
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const showFinancial = canReadFinancial(await getUserRole(tenantId, userId));
     const db = await createServiceClient();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const anyDb = db as any;
@@ -73,12 +76,19 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       changeOrders: changeOrderRows.error ? [] : (changeOrderRows.data ?? []),
     });
 
+    const money = overviewMoneyForReader(showFinancial, {
+      estimate_value: Math.round(estimate_value),
+      pending_change_order_value: controls.pending_change_order_value,
+      approved_change_order_value: controls.approved_change_order_value,
+    });
+
     return NextResponse.json({
       takeoff_items, documents, schedule_tasks, contacts, daily_logs, generated_docs,
       procurement_total, procurement_pending, punch_total, punch_open,
       permits_total, permits_approved,
       ...controls,
-      estimate_value: Math.round(estimate_value),
+      ...money,
+      financials_redacted: !showFinancial,
       completion,
     });
   } catch (err: unknown) {

@@ -17,11 +17,12 @@ interface ReportRun {
   summary: {
     project_name?: string;
     completion?: number;
-    estimate_value?: number;
+    estimate_value?: number | null;
     estimate_ready?: boolean;
     risk_score?: number;
   } | null;
-  body?: string;
+  body?: string | null;
+  financials_redacted?: boolean;
   generated_at: string | null;
   created_at: string;
   projects?: { name?: string } | null;
@@ -38,7 +39,7 @@ function fmtDate(value: string | null): string {
   });
 }
 
-function money(value?: number): string {
+function money(value?: number | null): string {
   if (value == null) return "-";
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(value);
 }
@@ -241,7 +242,9 @@ export default function ReportsPage() {
                   <Metric label="Risk" value={`${selectedReport.summary?.risk_score ?? "-"} / 100`} />
                 </div>
                 <article className="whitespace-pre-wrap rounded-lg border border-white/8 bg-black/20 p-4 text-sm leading-7 text-white/75">
-                  {selectedReport.body ?? "Loading report body..."}
+                  {selectedReport.financials_redacted
+                    ? "This report includes pricing, so the narrative is hidden for your role."
+                    : (selectedReport.body ?? "Loading report body...")}
                 </article>
               </div>
             )}
