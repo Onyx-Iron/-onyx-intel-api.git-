@@ -9,14 +9,18 @@ import { after } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getAccessToken } from "@/lib/google/oauth";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
+import { splitOversizedPdfOnPython } from "@/lib/documents/python-page-split";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import { buildDocumentRevisionMeta } from "@/lib/documents/revisions";
 import { auditInsert } from "@/lib/audit";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const PLANS_BUCKET = "plans-bucket";
-/** Above this size, sync Gemini ingest is unreliable on Vercel — always async-split PDFs. */
+/** Above this size, synchronous ingest is unreliable — always async-split PDFs. */
 export const ASYNC_SPLIT_BYTES = 3.5 * 1024 * 1024;
+
+/** pdf-lib on the edge isolate keeps the whole PDF. Larger files split on the Python service. */
+export const EDGE_PDF_SPLIT_MAX_BYTES = 80 * 1024 * 1024;
 
 export function isPdfFileName(fileName: string): boolean {
   return fileName.toLowerCase().endsWith(".pdf");
@@ -96,6 +100,7 @@ export async function queueDriveDocumentForPageSplit(args: QueueDriveArgs): Prom
         driveFileId,
         originalPath: `originals/${existing.id}.pdf`,
         source: "portal:queue-drive-rekick",
+        sizeBytes: sizeBytes ?? existingSize(existing),
       });
       return { ok: true, documentId: existing.id, status: "queued", deduped: true, queued: true };
     }
@@ -152,6 +157,7 @@ export async function queueDriveDocumentForPageSplit(args: QueueDriveArgs): Prom
           driveFileId,
           originalPath: `originals/${raced.id}.pdf`,
           source: "portal:queue-drive-race-rekick",
+          sizeBytes,
         });
         return { ok: true, documentId: raced.id, status: "queued", deduped: true, queued: true };
       }
@@ -184,6 +190,7 @@ export async function queueDriveDocumentForPageSplit(args: QueueDriveArgs): Prom
     driveFileId,
     originalPath,
     source: "portal:queue-drive",
+    sizeBytes,
   });
 
   return { ok: true, documentId, status: "queued", deduped: false, queued: true };
@@ -195,11 +202,12 @@ interface QueueLocalArgs {
   projectId: string;
   documentId: string;
   originalPath: string;
+  sizeBytes?: number | null;
 }
 
 /** Kick page-split for a PDF already in plans-bucket (local/multipart upload). */
 export async function queueLocalDocumentForPageSplit(args: QueueLocalArgs): Promise<void> {
-  const { tenantId, userId, projectId, documentId, originalPath } = args;
+  const { tenantId, userId, projectId, documentId, originalPath, sizeBytes } = args;
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
@@ -219,14 +227,25 @@ export async function queueLocalDocumentForPageSplit(args: QueueLocalArgs): Prom
   // bare `void fetch` can be frozen before the Edge Function is contacted.
   after(async () => {
     try {
-      await invokePageSplitWorker({
-        document_id: documentId,
-        tenant_id: tenantId,
-        project_id: projectId,
-        original_path: originalPath,
-        is_local_upload: true,
-        user_id: userId,
-      });
+      const oversized = await pdfExceedsEdgeSplit(anyDb, documentId, tenantId, sizeBytes);
+      if (oversized) {
+        await splitOversizedPdfOnPython({
+          tenantId,
+          projectId,
+          documentId,
+          userId,
+          originalPath,
+        });
+      } else {
+        await invokePageSplitWorker({
+          document_id: documentId,
+          tenant_id: tenantId,
+          project_id: projectId,
+          original_path: originalPath,
+          is_local_upload: true,
+          user_id: userId,
+        });
+      }
       await logDocumentProcessingEvent({
         tenantId,
         projectId,
@@ -259,8 +278,9 @@ async function kickPageSplit(args: {
   driveFileId: string;
   originalPath: string;
   source: string;
+  sizeBytes?: number | null;
 }): Promise<void> {
-  const { db, documentId, tenantId, projectId, userId, accessToken, driveFileId, originalPath, source } = args;
+  const { db, documentId, tenantId, projectId, userId, accessToken, driveFileId, originalPath, source, sizeBytes } = args;
 
   await db.from("documents").update({
     status: "queued",
@@ -275,15 +295,29 @@ async function kickPageSplit(args: {
 
   after(async () => {
     try {
-      await invokePageSplitWorker({
-        document_id: documentId,
-        tenant_id: tenantId,
-        project_id: projectId,
-        drive_file_id: driveFileId,
-        original_path: originalPath,
-        access_token: accessToken,
-        user_id: userId,
-      });
+      const oversized = await pdfExceedsEdgeSplit(db, documentId, tenantId, sizeBytes);
+      if (oversized) {
+        await splitOversizedPdfOnPython({
+          tenantId,
+          projectId,
+          documentId,
+          userId,
+          originalPath,
+          sourceUrl: `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveFileId)}?alt=media`,
+          downloadAuthorization: `Bearer ${accessToken}`,
+          uploadOriginalPath: originalPath,
+        });
+      } else {
+        await invokePageSplitWorker({
+          document_id: documentId,
+          tenant_id: tenantId,
+          project_id: projectId,
+          drive_file_id: driveFileId,
+          original_path: originalPath,
+          access_token: accessToken,
+          user_id: userId,
+        });
+      }
       await logDocumentProcessingEvent({
         tenantId,
         projectId,
@@ -312,4 +346,28 @@ async function kickPageSplit(args: {
       });
     }
   });
+}
+
+function existingSize(row: { meta?: unknown; file_size?: number | null }): number | null {
+  if (typeof row.file_size === "number" && row.file_size > 0) return row.file_size;
+  return sizeFromMeta(row.meta);
+}
+
+function sizeFromMeta(meta: unknown): number | null {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+  const size = (meta as { size?: unknown }).size;
+  return typeof size === "number" && size > 0 ? size : null;
+}
+
+async function pdfExceedsEdgeSplit(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: any,
+  documentId: string,
+  tenantId: string,
+  hinted?: number | null,
+): Promise<boolean> {
+  if (typeof hinted === "number" && hinted > EDGE_PDF_SPLIT_MAX_BYTES) return true;
+  const { data } = await db.from("documents").select("file_size, meta").eq("id", documentId).eq("tenant_id", tenantId).maybeSingle();
+  const size = existingSize((data ?? {}) as { meta?: unknown; file_size?: number | null });
+  return typeof size === "number" && size > EDGE_PDF_SPLIT_MAX_BYTES;
 }

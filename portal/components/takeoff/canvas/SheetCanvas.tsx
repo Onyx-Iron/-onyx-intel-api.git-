@@ -10,7 +10,7 @@ import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { utilityRecipeFromRun, wallRecipeLines } from "@/lib/math/scope-recipes";
 import type { RebarSize } from "@/lib/math/assemblies";
 import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
-import { quantityForMeasurement } from "@/lib/takeoff/canvas/quantity";
+import { polygonSelfIntersects, quantityForMeasurement, scaleFactorForPoints } from "@/lib/takeoff/canvas/quantity";
 import { SCALE_PRESETS, matchScalePreset, pageSpaceFactorForPreset } from "@/lib/takeoff/scale-presets";
 import QuantityGrid from "@/components/takeoff/QuantityGrid";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
@@ -20,6 +20,7 @@ import { buildQuantitySummary } from "@/lib/takeoff/canvas/quantity-summary";
 import { CommandStack } from "@/lib/takeoff/canvas/command-stack";
 import TakeoffLayersPanel from "./TakeoffLayersPanel";
 import PlaceAssemblyPanel from "./PlaceAssemblyPanel";
+import ToolChestPanel, { type ChestTool } from "./ToolChestPanel";
 import {
   DEFAULT_SNAP_THRESHOLD_PX,
   type VectorPoint,
@@ -57,6 +58,7 @@ const SNAP_TOOLS: ReadonlySet<Tool> = new Set([
   "spot_elevation",
   "contour_line",
   "civil_area_bounds",
+  "scale_region",
 ]);
 
 interface Pt { x: number; y: number }
@@ -236,10 +238,36 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [hiddenLayerIds, setHiddenLayerIds] = useState<Set<string>>(new Set());
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const [markupMode, setMarkupMode] = useState(false);
+  const [pinMode, setPinMode] = useState(false);
+  const [pinNote, setPinNote] = useState("");
+  const [pinKind, setPinKind] = useState<"punch" | "rfi">("punch");
+  const [pinPoint, setPinPoint] = useState<Pt | null>(null);
+  const [armedTool, setArmedTool] = useState<ChestTool | null>(null);
+  const [scaleRegions, setScaleRegions] = useState<Array<{
+    id: string;
+    polygon: Pt[];
+    label: string | null;
+    page_space_scale_factor: number | null;
+    verified: boolean;
+  }>>([]);
+  const [regionNotice, setRegionNotice] = useState<string | null>(null);
+  const [pendingRegionId, setPendingRegionId] = useState<string | null>(null);
+  const [regionLabel, setRegionLabel] = useState("Detail");
+  const [regionKnownFeet, setRegionKnownFeet] = useState("10");
+  const [regionCalibPts, setRegionCalibPts] = useState<Pt[]>([]);
   const [markups, setMarkups] = useState<Array<{
     id: string;
     markup_type: string;
-    geometry: { points?: Pt[]; text?: string };
+    geometry: {
+      points?: Pt[];
+      point?: Pt;
+      text?: string;
+      coordinate_space?: string;
+      page_number?: number;
+      punch_item_id?: string;
+      rfi_id?: string;
+      kind?: string;
+    };
     label: string | null;
     color: string;
   }>>([]);
@@ -316,6 +344,36 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     })();
     return () => { cancelled = true; };
   }, [projectId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const res = await fetch(
+        `/api/takeoff/canvas/scale-regions?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok || cancelled) return;
+      const data = await res.json() as {
+        regions?: Array<{
+          id: string;
+          polygon?: Pt[];
+          label: string | null;
+          page_space_scale_factor: number | null;
+          verified: boolean;
+        }>;
+      };
+      if (!cancelled) {
+        setScaleRegions((data.regions ?? []).map((region) => ({
+          id: region.id,
+          polygon: Array.isArray(region.polygon) ? region.polygon : [],
+          label: region.label,
+          page_space_scale_factor: region.page_space_scale_factor,
+          verified: region.verified,
+        })));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [pageId, projectId]);
 
   // ── Load signed URL + saved takeoffs (calibration via React Query) ───────
   useEffect(() => {
@@ -703,6 +761,37 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
     return calibration?.scale_ratio ?? 1;
   }, [calibration, renderScale]);
+
+  const regionChoices = useMemo(() => scaleRegions.map((region) => ({
+    id: region.id,
+    polygon: region.polygon,
+    pageSpaceScaleFactor: region.page_space_scale_factor,
+    verified: region.verified,
+  })), [scaleRegions]);
+
+  const scaleForPoints = useCallback((points: Pt[], coordinateSpace: CoordinateSpace) => {
+    if (renderScale <= 0) return scale;
+    const pagePoints = coordinateSpace === "page_space" ? points : pointsToPageSpace(points, renderScale);
+    const choice = scaleFactorForPoints(
+      pagePoints,
+      regionChoices,
+      calibration?.page_space_scale_factor ?? null,
+      calibration?.status === "verified",
+    );
+    if (choice.regionId && !choice.verified) return 0;
+    if (choice.verified && choice.factor != null) return choice.factor / renderScale;
+    return scale;
+  }, [calibration, regionChoices, renderScale, scale]);
+
+  function withArmed(shape: Shape): Shape {
+    if (!armedTool) return shape;
+    const kind = shape.tool === "perimeter" ? "length" : shape.tool;
+    if (armedTool.tool !== kind) return shape;
+    const unit = armedTool.unit === "EA" || armedTool.unit === "LF" || armedTool.unit === "SF"
+      ? armedTool.unit
+      : shape.unit;
+    return { ...shape, cost_code: armedTool.cost_code, unit, label: shape.label ?? armedTool.name };
+  }
   const pixelDistance = (a: Pt, b: Pt) => Math.hypot(b.x - a.x, b.y - a.y);
   const totalLen = (pts: Pt[]) => {
     let s = 0;
@@ -723,11 +812,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // Preview quantity for the in-progress draft (before commit).
   const draftQuantity = useMemo(() => {
     if (draftPoints.length === 0) return 0;
-    if (tool === "length") return totalLen(draftPoints) * scale;
-    if (tool === "perimeter" && draftPoints.length >= 2) return (totalLen(draftPoints) + pixelDistance(draftPoints[draftPoints.length - 1], draftPoints[0])) * scale;
-    if (tool === "area")   return polygonArea(draftPoints) * scale * scale;
+    const live = scaleForPoints(draftPoints, "legacy_pixel");
+    if (tool === "length") return totalLen(draftPoints) * live;
+    if (tool === "perimeter" && draftPoints.length >= 2) return (totalLen(draftPoints) + pixelDistance(draftPoints[draftPoints.length - 1], draftPoints[0])) * live;
+    if (tool === "area")   return polygonArea(draftPoints) * live * live;
     return 0;
-  }, [draftPoints, tool, scale]);
+  }, [draftPoints, tool, scaleForPoints]);
 
   const onCanvasMouseLeave = () => setSnapTarget(null);
 
@@ -736,6 +826,22 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (!renderSize) return;
     const raw = toLocal(e.clientX, e.clientY, e.currentTarget);
     const p = resolveSnapPoint(raw);
+
+    if (pinMode) {
+      setPinPoint(p);
+      return;
+    }
+
+    if (tool === "scale_region" && pendingRegionId) {
+      const next = [...regionCalibPts, p];
+      setRegionCalibPts(next.length > 2 ? [p] : next);
+      return;
+    }
+
+    if (tool === "scale_region") {
+      setDraftPoints((prev) => [...prev, p]);
+      return;
+    }
 
     // Non-quantity markups (excluded from estimate sync).
     if (markupMode) {
@@ -781,7 +887,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
 
     if (tool === "count") {
-      const shape: Shape = {
+      const shape: Shape = withArmed({
         // eslint-disable-next-line react-hooks/purity
         key: `c-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         tool: "count",
@@ -793,7 +899,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         quantity: 1,
         unit: "EA",
         layer_id: activeLayerId,
-      };
+      });
       setShapes((prev) => [...prev, shape]);
       return;
     }
@@ -945,14 +1051,60 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (tool === "utility_pipe") { finishUtilityDraft(); return; }
     if (tool === "contour_line") { finishContourDraft(); return; }
     if (tool === "civil_area_bounds") { finishAreaBoundsDraft(); return; }
+    if (tool === "scale_region") {
+      if (draftPoints.length < 3 || renderScale <= 0) {
+        setRegionNotice("A scale region needs at least three points.");
+        setDraftPoints([]);
+        return;
+      }
+      const pagePoints = pointsToPageSpace(draftPoints, renderScale);
+      if (polygonSelfIntersects(pagePoints)) {
+        setRegionNotice("This scale region crosses itself, so it is not stored.");
+        setDraftPoints([]);
+        return;
+      }
+      setRegionNotice(null);
+      setDraftPoints([]);
+      void (async () => {
+        const res = await fetch("/api/takeoff/canvas/scale-regions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            project_id: projectId,
+            page_id: pageId,
+            polygon: pagePoints,
+            label: regionLabel,
+          }),
+        });
+        const data = await res.json().catch(() => ({})) as {
+          region?: { id: string; polygon?: Pt[]; label: string | null; page_space_scale_factor: number | null; verified: boolean };
+          error?: string;
+        };
+        if (!res.ok || !data.region) {
+          setRegionNotice(data.error ?? "The scale region was not stored.");
+          return;
+        }
+        setScaleRegions((prev) => [...prev, {
+          id: data.region!.id,
+          polygon: pagePoints,
+          label: data.region!.label,
+          page_space_scale_factor: data.region!.page_space_scale_factor,
+          verified: data.region!.verified,
+        }]);
+        setPendingRegionId(data.region.id);
+        setRegionCalibPts([]);
+      })();
+      return;
+    }
     if (draftPoints.length < 2) { setDraftPoints([]); return; }
+    const live = scaleForPoints(draftPoints, "legacy_pixel");
     if (tool === "length" && wallMode) {
       setWallModalPts(draftPoints);
       return;
     }
     if (tool === "length") {
-      const quantity = totalLen(draftPoints) * scale;
-      setShapes((prev) => [...prev, {
+      const quantity = totalLen(draftPoints) * live;
+      setShapes((prev) => [...prev, withArmed({
         key: `l-${Date.now()}`,
         tool: "length",
         points: draftPoints,
@@ -960,21 +1112,21 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         quantity,
         unit: "LF",
         layer_id: activeLayerId,
-      }]);
+      })]);
     } else if (tool === "perimeter" && draftPoints.length >= 3) {
       const closed = totalLen(draftPoints) + pixelDistance(draftPoints[draftPoints.length - 1], draftPoints[0]);
-      setShapes((prev) => [...prev, {
+      setShapes((prev) => [...prev, withArmed({
         key: `p-${Date.now()}`,
         tool: "perimeter",
         points: draftPoints,
         coordinateSpace: "legacy_pixel",
-        quantity: closed * scale,
+        quantity: closed * live,
         unit: "LF",
         layer_id: activeLayerId,
-      }]);
+      })]);
     } else if (tool === "area" && draftPoints.length >= 3) {
-      const quantity = polygonArea(draftPoints) * scale * scale;
-      setShapes((prev) => [...prev, {
+      const quantity = polygonArea(draftPoints) * live * live;
+      setShapes((prev) => [...prev, withArmed({
         key: `a-${Date.now()}`,
         tool: "area",
         points: draftPoints,
@@ -982,10 +1134,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         quantity,
         unit: "SF",
         layer_id: activeLayerId,
-      }]);
+      })]);
     }
     setDraftPoints([]);
-  }, [draftPoints, tool, scale, wallMode, activeLayerId, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft]);
+  }, [draftPoints, tool, scaleForPoints, wallMode, activeLayerId, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft, renderScale, projectId, pageId, regionLabel, armedTool]);
 
   const clearDrafts = useCallback(() => {
     setDraftPoints([]);
@@ -993,11 +1145,21 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     setUtilityDraftPts([]);
     setContourDraftPts([]);
     setAreaDraftPts([]);
+    setRegionCalibPts([]);
   }, []);
 
   const selectTool = useCallback((next: Tool) => {
     toolBeforeSpacePan.current = null;
+    setArmedTool(null);
+    setPendingRegionId(null);
     setTool(next);
+    clearDrafts();
+  }, [clearDrafts]);
+
+  const armChestTool = useCallback((chest: ChestTool) => {
+    toolBeforeSpacePan.current = null;
+    setArmedTool(chest);
+    setTool(chest.tool);
     clearDrafts();
   }, [clearDrafts]);
 
@@ -1564,24 +1726,34 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
       let manualSaveRequest: Promise<Response> | null = null;
       if (unsaved.length > 0) {
-        const items = unsaved.map((s) => ({
-          project_id: projectId,
-          page_id: pageId,
-          cost_code: s.cost_code || null,
-          takeoff_type: s.tool === "perimeter" ? "perimeter" : s.tool,
-          quantity: Number(s.quantity.toFixed(3)),
-          unit: s.unit,
-          client_key: s.key,
-          layer_id: s.layer_id ?? activeLayerId ?? null,
-          geometry: {
-            points: toPersistedPoints(s.points, s.coordinateSpace),
-            coordinate_space: "page_space",
-            page_number: pageNumber,
-            label: s.label,
-            assembly_key: s.assembly_key,
-            ...(s.tool === "perimeter" ? { measure: "perimeter" } : {}),
-          },
-        }));
+        const items = unsaved.map((s) => {
+          const points = toPersistedPoints(s.points, s.coordinateSpace);
+          const choice = s.tool === "count" ? null : scaleFactorForPoints(
+            points,
+            regionChoices,
+            calibration?.page_space_scale_factor ?? null,
+            calibration?.status === "verified",
+          );
+          return {
+            project_id: projectId,
+            page_id: pageId,
+            cost_code: s.cost_code || null,
+            takeoff_type: s.tool === "perimeter" ? "perimeter" : s.tool,
+            quantity: Number(s.quantity.toFixed(3)),
+            unit: s.unit,
+            client_key: s.key,
+            layer_id: s.layer_id ?? activeLayerId ?? null,
+            geometry: {
+              points,
+              coordinate_space: "page_space",
+              page_number: pageNumber,
+              label: s.label,
+              assembly_key: s.assembly_key,
+              ...(s.tool === "perimeter" ? { measure: "perimeter" } : {}),
+              ...(choice?.regionId ? { scale_region_id: choice.regionId } : {}),
+            },
+          };
+        });
         manualSaveRequest = fetch("/api/takeoff/canvas/manual", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1875,7 +2047,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           {/* Tool switcher */}
           <div className="flex flex-col items-end gap-1">
             <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] p-1">
-              {(["pan", "calibrate", "count", "length", "perimeter", "area", "utility_pipe", "spot_elevation", "contour_line", "civil_area_bounds"] as Tool[]).map((t) => (
+              {(["pan", "calibrate", "count", "length", "perimeter", "area", "scale_region", "utility_pipe", "spot_elevation", "contour_line", "civil_area_bounds"] as Tool[]).map((t) => (
                 <button
                   key={t}
                   type="button"
@@ -1886,7 +2058,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                       : "text-white/60 hover:text-white hover:bg-white/[0.06]"
                   }`}
                 >
-                  {t}
+                  {t === "scale_region" ? "region" : t}
                 </button>
               ))}
             </div>
@@ -2175,18 +2347,48 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   pointerEvents="none"
                 />
               )}
+              {scaleRegions.map((region) => {
+                const pts = toDisplayPoints(region.polygon, "page_space");
+                if (pts.length < 3) return null;
+                const d = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + " Z";
+                return (
+                  <path
+                    key={region.id}
+                    d={d}
+                    fill={region.verified ? "rgba(125,211,252,0.08)" : "rgba(245,166,35,0.08)"}
+                    stroke={region.verified ? "#7DD3FC" : "#F5A623"}
+                    strokeWidth={1}
+                    strokeDasharray="6 4"
+                    pointerEvents="none"
+                  />
+                );
+              })}
               {/* Non-quantity markups */}
               {markups.map((m) => {
-                const pts = m.geometry?.points ?? [];
-                const p0 = pts[0];
-                if (!p0) return null;
-                return (
-                  <g key={m.id} pointerEvents="none">
-                    <circle cx={p0.x} cy={p0.y} r={5} fill={m.color} opacity={0.85} />
-                    <text x={p0.x + 8} y={p0.y + 4} fill={m.color} fontSize={11} fontFamily="monospace">
+                const raw = m.geometry?.point ?? m.geometry?.points?.[0];
+                if (!raw) return null;
+                const p0 = m.geometry?.coordinate_space === "page_space"
+                  ? toDisplayPoints([raw], "page_space")[0]
+                  : raw;
+                const href = m.markup_type === "pin"
+                  ? (m.geometry?.rfi_id
+                    ? `/dashboard/projects/${projectId}?phase=controls&tab=controls`
+                    : `/dashboard/projects/${projectId}?phase=closeout&tab=punchlist`)
+                  : null;
+                const mark = (
+                  <g>
+                    <circle cx={p0.x} cy={p0.y} r={m.markup_type === "pin" ? 7 : 5} fill={m.color} opacity={0.9} />
+                    {m.markup_type === "pin" && <circle cx={p0.x} cy={p0.y} r={2} fill="#06070A" />}
+                    <text x={p0.x + 10} y={p0.y + 4} fill={m.color} fontSize={11} fontFamily="monospace">
                       {m.label ?? m.geometry?.text ?? "note"}
                     </text>
                   </g>
+                );
+                if (!href) return <g key={m.id} pointerEvents="none">{mark}</g>;
+                return (
+                  <a key={m.id} href={href}>
+                    {mark}
+                  </a>
                 );
               })}
 
@@ -2297,7 +2499,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               {draftPoints.length > 0 && (
                 <g>
                   <path
-                    d={draftPoints.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + (tool === "area" && draftPoints.length >= 3 ? " Z" : "")}
+                    d={draftPoints.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ") + ((tool === "area" || tool === "scale_region") && draftPoints.length >= 3 ? " Z" : "")}
                     stroke={tool === "area" ? "#f97316" : "#00D2FF"}
                     strokeWidth={2}
                     strokeDasharray="6 4"
@@ -2433,14 +2635,13 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           </div>
         )}
 
-        {(tool === "length" || tool === "area") && draftPoints.length > 0 && (
+        {(tool === "length" || tool === "area" || tool === "scale_region") && draftPoints.length > 0 && (
           <div className="fixed bottom-4 left-4 z-10 rounded-lg border border-white/10 bg-black/80 px-3 py-2 backdrop-blur">
             <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Draft</div>
             <div className="mt-0.5 text-sm">
-              {tool === "length"
-                ? <><span className="text-[#00D2FF] font-mono">{draftQuantity.toFixed(2)}</span> LF</>
-                : <><span className="text-orange-400 font-mono">{draftQuantity.toFixed(2)}</span> SF</>
-              }
+              {tool === "length" && <><span className="text-[#00D2FF] font-mono">{draftQuantity.toFixed(2)}</span> LF</>}
+              {tool === "area" && <><span className="text-orange-400 font-mono">{draftQuantity.toFixed(2)}</span> SF</>}
+              {tool === "scale_region" && <span className="text-[#7DD3FC]">Detail outline</span>}
               <span className="ml-3 text-[10px] text-white/40">Enter = commit · Esc = cancel</span>
             </div>
           </div>
@@ -2475,6 +2676,11 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               setHiddenLayerIds(new Set(layers.filter((l) => !l.visible).map((l) => l.id)));
             }}
           />
+          <ToolChestPanel
+            projectId={projectId}
+            armedId={armedTool?.id ?? null}
+            onArm={armChestTool}
+          />
           <PlaceAssemblyPanel
             onPlace={(rows) => {
               setShapes((prev) => [
@@ -2505,6 +2711,172 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           >
             {markupMode ? "Markup on — click sheet" : "Markup (non-qty)"}
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              setPinMode((on) => !on);
+              setMarkupMode(false);
+              setPinPoint(null);
+            }}
+            className={`w-full rounded-lg border px-2 py-1.5 text-[10px] font-semibold uppercase tracking-widest ${
+              pinMode
+                ? "border-sky-400/60 bg-sky-500/20 text-sky-200"
+                : "border-white/10 text-white/50 hover:text-white"
+            }`}
+            title="A pin creates a punch item or an RFI. It does not create an estimate line."
+          >
+            {pinMode ? "Pin on — click sheet" : "Pin punch or RFI"}
+          </button>
+          {pinMode && (
+            <div className="space-y-1 rounded border border-white/10 p-2">
+              <input
+                value={pinNote}
+                onChange={(e) => setPinNote(e.target.value)}
+                placeholder="Short note"
+                className="w-full rounded border border-white/10 bg-black/40 px-2 py-1 text-[11px]"
+              />
+              <div className="flex gap-1">
+                <button type="button" onClick={() => setPinKind("punch")} className={`flex-1 rounded px-2 py-1 text-[10px] uppercase ${pinKind === "punch" ? "bg-[#CCFF00] text-black" : "border border-white/10 text-white/60"}`}>Punch</button>
+                <button type="button" onClick={() => setPinKind("rfi")} className={`flex-1 rounded px-2 py-1 text-[10px] uppercase ${pinKind === "rfi" ? "bg-[#CCFF00] text-black" : "border border-white/10 text-white/60"}`}>RFI</button>
+              </div>
+              <button
+                type="button"
+                disabled={!pinPoint || !pinNote.trim() || renderScale <= 0}
+                onClick={() => {
+                  if (!pinPoint || renderScale <= 0) return;
+                  const point = toPageSpace(pinPoint, renderScale);
+                  void (async () => {
+                    const res = await fetch("/api/takeoff/markups", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        project_id: projectId,
+                        page_id: pageId,
+                        markup_type: "pin",
+                        kind: pinKind,
+                        note: pinNote.trim(),
+                        page_number: pageNumber,
+                        label: pinNote.trim(),
+                        geometry: { point, coordinate_space: "page_space", page_number: pageNumber, kind: pinKind },
+                      }),
+                    });
+                    if (!res.ok) {
+                      setRegionNotice("The pin was not saved.");
+                      return;
+                    }
+                    const data = await res.json() as { markup: (typeof markups)[number] };
+                    setMarkups((prev) => [...prev, data.markup]);
+                    setPinNote("");
+                    setPinPoint(null);
+                  })();
+                }}
+                className="w-full rounded border border-white/10 px-2 py-1 text-[10px] uppercase tracking-widest text-white/70 disabled:opacity-40"
+              >
+                {pinPoint ? "Save pin" : "Click the sheet"}
+              </button>
+            </div>
+          )}
+          {tool === "scale_region" && (
+            <div className="space-y-1 rounded border border-white/10 p-2">
+              <div className="text-[10px] uppercase tracking-widest text-white/40">Scale region</div>
+              <input
+                value={regionLabel}
+                onChange={(e) => setRegionLabel(e.target.value)}
+                className="w-full rounded border border-white/10 bg-black/40 px-2 py-1 text-[11px]"
+              />
+              <p className="text-[10px] text-white/40">Draw the detail, then press Enter. Confirm a preset or a known distance.</p>
+              {pendingRegionId && (
+                <>
+                  <div className="flex flex-wrap gap-1">
+                    {SCALE_PRESETS.slice(0, 4).map((preset) => (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        className="rounded-full border border-white/15 px-2 py-0.5 text-[10px] text-white/70"
+                        onClick={() => {
+                          void (async () => {
+                            const res = await fetch("/api/takeoff/canvas/scale-regions", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                id: pendingRegionId,
+                                project_id: projectId,
+                                preset_label: preset.label,
+                              }),
+                            });
+                            const data = await res.json().catch(() => ({})) as { region?: { page_space_scale_factor: number | null; verified: boolean } };
+                            if (!res.ok || !data.region?.verified) return;
+                            setScaleRegions((prev) => prev.map((region) => (
+                              region.id === pendingRegionId
+                                ? { ...region, verified: true, page_space_scale_factor: data.region?.page_space_scale_factor ?? null }
+                                : region
+                            )));
+                            setPendingRegionId(null);
+                            setRegionNotice(null);
+                          })();
+                        }}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex gap-1">
+                    <input
+                      value={regionKnownFeet}
+                      onChange={(e) => setRegionKnownFeet(e.target.value)}
+                      className="w-16 rounded border border-white/10 bg-black/40 px-2 py-1 text-[11px]"
+                    />
+                    <span className="self-center text-[10px] text-white/40">ft on the sheet</span>
+                  </div>
+                  <p className="text-[10px] text-white/40">
+                    {regionCalibPts.length < 2 ? "Click the two ends of that known length." : "Known length is marked."}
+                  </p>
+                  <button
+                    type="button"
+                    disabled={regionCalibPts.length < 2 || renderScale <= 0}
+                    className="w-full rounded border border-white/10 px-2 py-1 text-[10px] uppercase tracking-widest text-white/70 disabled:opacity-40"
+                    onClick={() => {
+                      const feet = Number(regionKnownFeet);
+                      if (regionCalibPts.length < 2 || !Number.isFinite(feet) || feet <= 0) return;
+                      const segment = pointsToPageSpace(regionCalibPts, renderScale);
+                      void (async () => {
+                        const res = await fetch("/api/takeoff/canvas/scale-regions", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            id: pendingRegionId,
+                            project_id: projectId,
+                            known_distance: feet,
+                            known_unit: "ft",
+                            calibration_points: segment,
+                          }),
+                        });
+                        const data = await res.json().catch(() => ({})) as { region?: { page_space_scale_factor: number | null; verified: boolean } };
+                        if (!res.ok || !data.region?.verified) return;
+                        setScaleRegions((prev) => prev.map((region) => (
+                          region.id === pendingRegionId
+                            ? { ...region, verified: true, page_space_scale_factor: data.region?.page_space_scale_factor ?? null }
+                            : region
+                        )));
+                        setPendingRegionId(null);
+                        setRegionCalibPts([]);
+                      })();
+                    }}
+                  >
+                    Confirm known distance
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full rounded border border-white/10 px-2 py-1 text-[10px] uppercase tracking-widest text-white/40"
+                    onClick={() => { setPendingRegionId(null); setRegionCalibPts([]); }}
+                  >
+                    Leave unverified
+                  </button>
+                </>
+              )}
+              {regionNotice && <p className="text-[11px] text-amber-300">{regionNotice}</p>}
+            </div>
+          )}
           <QuantityGrid projectId={projectId} />
           <div className="flex items-center justify-between gap-2">
             <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Measurements</div>

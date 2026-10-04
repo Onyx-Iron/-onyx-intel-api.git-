@@ -5,6 +5,7 @@ import {
   calculateRectangleArea, calculateCircleArea, calculateCount,
   calculateAreaVolume, calculateBoxVolume, calculateSlopeAdjustedLength,
   calculatedQuantityForSave, convertLinearUnit, polygonSelfIntersects, quantityForMeasurement,
+  scaleFactorForPoints,
 } from "./quantity";
 
 // All inputs here are PAGE-SPACE points — the whole point of this module is
@@ -130,6 +131,70 @@ describe("quantityForMeasurement", () => {
   it("leaves calculated quantity null until the sheet scale is verified", () => {
     assert.equal(calculatedQuantityForSave(false, 42), null);
     assert.equal(calculatedQuantityForSave(true, 42), 42);
+  });
+});
+
+describe("scaleFactorForPoints", () => {
+  const detail = [
+    { x: 0, y: 0 },
+    { x: 20, y: 0 },
+    { x: 20, y: 20 },
+    { x: 0, y: 20 },
+  ];
+  const inside = [{ x: 4, y: 4 }, { x: 8, y: 4 }];
+  const outside = [{ x: 40, y: 40 }, { x: 50, y: 40 }];
+
+  it("uses a verified region that contains the measurement centroid", () => {
+    const choice = scaleFactorForPoints(inside, [{
+      id: "detail-1",
+      polygon: detail,
+      pageSpaceScaleFactor: 0.25,
+      verified: true,
+    }], 1, true);
+    assert.equal(choice.factor, 0.25);
+    assert.equal(choice.regionId, "detail-1");
+    assert.equal(choice.verified, true);
+  });
+
+  it("produces no quantity when the covering region is unverified", () => {
+    const choice = scaleFactorForPoints(inside, [{
+      id: "detail-1",
+      polygon: detail,
+      pageSpaceScaleFactor: 0.25,
+      verified: false,
+    }], 1, true);
+    assert.equal(choice.factor, null);
+    assert.equal(choice.regionId, "detail-1");
+    assert.equal(choice.verified, false);
+  });
+
+  it("uses the sheet factor outside every region", () => {
+    const choice = scaleFactorForPoints(outside, [{
+      id: "detail-1",
+      polygon: detail,
+      pageSpaceScaleFactor: 0.25,
+      verified: true,
+    }], 0.5, true);
+    assert.equal(choice.factor, 0.5);
+    assert.equal(choice.regionId, null);
+    assert.equal(choice.verified, true);
+  });
+
+  it("ignores a self-crossing region polygon", () => {
+    const bowtie = [
+      { x: 0, y: 0 },
+      { x: 10, y: 10 },
+      { x: 0, y: 10 },
+      { x: 10, y: 0 },
+    ];
+    const choice = scaleFactorForPoints(inside, [{
+      id: "bad",
+      polygon: bowtie,
+      pageSpaceScaleFactor: 9,
+      verified: true,
+    }], 0.5, true);
+    assert.equal(choice.regionId, null);
+    assert.equal(choice.factor, 0.5);
   });
 });
 

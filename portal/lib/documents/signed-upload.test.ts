@@ -7,6 +7,7 @@ import {
   extensionOf,
   MAX_UPLOAD_BYTES,
   parseSignedUploadPayload,
+  uploadLimitLabel,
   sanitizeFileName,
   TUS_THRESHOLD_BYTES,
   VERCEL_SAFE_UPLOAD_BYTES,
@@ -31,9 +32,12 @@ describe("signed-upload helpers", () => {
     assert.equal(parseSignedUploadPayload({ url: "https://c" }).url, "https://c");
   });
 
-  it("enforces the 1GB ceiling and exposes size thresholds", () => {
+  it("enforces the plans-bucket ceiling and exposes size thresholds", () => {
+    assert.equal(MAX_UPLOAD_BYTES, 1073741824);
     assert.equal(assertUploadSize(100), null);
-    assert.match(assertUploadSize(MAX_UPLOAD_BYTES + 1) ?? "", /1GB/);
+    const message = assertUploadSize(MAX_UPLOAD_BYTES + 1) ?? "";
+    assert.match(message, new RegExp(uploadLimitLabel()));
+    assert.match(message, /1073741824|1GB/);
     assert.ok(VERCEL_SAFE_UPLOAD_BYTES < TUS_THRESHOLD_BYTES);
     assert.ok(TUS_THRESHOLD_BYTES < MAX_UPLOAD_BYTES);
   });

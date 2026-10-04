@@ -13,10 +13,9 @@
 //
 // Pipeline:
 //   1. Download the single-page PDF from `plans-bucket/{storage_path}`.
-//   2. POST it to the Railway takeoff service's `/api/takeoff/extract`
-//      (deterministic + AI-vision fallback, same engine the synchronous
-//      path uses) — one page per call, so it's always well within any
-//      request time ceiling regardless of the source document's size.
+//   2. POST it to the Python takeoff service's `/api/takeoff/extract`
+//      for schedule tables, DXF, and IFC only — one page per call, so it
+//      stays inside the request ceiling regardless of the source set size.
 //   3. Insert returned rows into `takeoff_items`, tagged with page_number +
 //      document_id so multi-page results all land in the same project.
 //   4. Update `document_pages.takeoff_status` = "done" | "error" for this

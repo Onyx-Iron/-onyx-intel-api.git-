@@ -7,6 +7,7 @@ import { calculateAssemblyQuantities, type RebarSize, REBAR_UNIT_WEIGHT_LBS_PER_
 import { applyVersionPercentages, calculateEstimateTotals, calculateItem } from "@/lib/estimating/calculations";
 import { ESTIMATE_LINE_TYPES, listCsiSections, lookupCsi, normalizeLineType } from "@/lib/estimating/csi-catalog";
 import { quantitySourceLabel } from "@/lib/estimating/estimate-export";
+import CostCodeBudget from "@/components/estimate/CostCodeBudget";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -804,6 +805,8 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
           </ul>
         )}
       </div>
+
+      <CostCodeBudget projectId={projectId} />
 
       {/* Grid — virtualized tbody keeps DOM node count bounded for large estimates */}
       <div ref={gridScrollRef} className="flex-1 overflow-auto">

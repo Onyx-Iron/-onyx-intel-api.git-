@@ -5,14 +5,12 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { getAccessToken } from "@/lib/google/oauth";
 import { logEvent } from "@/lib/activity";
-import { requireEnv } from "@/lib/env";
-import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
 import { fetchDriveFileSize } from "@/lib/google/driveFile";
 import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
 import { looksLikePdf, publishSheetPages } from "@/lib/documents/sheet-pages";
 import { missingPageNumbers, normalizeDocumentClass, pdfDeclaresEncryption } from "@/lib/documents/processing-display";
-import { extractionFromPageText, mergeExtractions, parseModelJson, readPdfPageText } from "@/lib/documents/extraction-fallback";
+import { extractionFromPageText, mergeExtractions, readPdfPageText } from "@/lib/documents/extraction-fallback";
 import { unlockPdf } from "@/lib/documents/pdf-unlock";
 import {
   PLANS_BUCKET,
@@ -27,41 +25,11 @@ import type { TablesInsert } from "@/lib/supabase/types";
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const EMBED_MODEL = "text-embedding-004";
-const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
 /** Leave headroom under Vercel maxDuration=300 so we can write error status before kill. */
 const INGEST_BUDGET_MS = 270_000;
 /** Skip duplicate fire-and-forget ingest while another run is in-flight. */
 const CONCURRENT_INGEST_MS = INGEST_BUDGET_MS;
 const TERMINAL_STATUSES = new Set(["complete", "ready", "done"]);
-
-function geminiApiKey(): string {
-  return requireEnv("GEMINI_API_KEY");
-}
-
-const EXTRACTION_PROMPT = `Analyze this construction document and return ONLY a JSON object with this exact structure — no markdown, no explanation:
-{
-  "doc_type": "<one of: drawing, spec, rfi, submittal, report, contract, correspondence, other>",
-  "page_count": <integer>,
-  "title": "<document title or main subject>",
-  "pages": [
-    {
-      "page_number": 1,
-      "summary": "<2-4 sentences describing this page: what it shows/contains, key identifiers such as sheet numbers, spec section numbers, room names, dimensions, materials, or notable content>",
-      "key_terms": ["<term1>", "<term2>", "<term3>"]
-    }
-  ]
-}
-
-Classification:
-- drawing: architectural/structural/MEP/civil drawings, floor plans, elevations, sections, details, site plans
-- spec: CSI specifications, division sections, material/installation requirements, standards
-- rfi: request for information forms or RFI logs
-- submittal: submittal forms, shop drawings, product data sheets, cut sheets
-- report: inspection reports, test results, engineering reports
-- contract: agreements, general conditions, supplementary conditions
-- correspondence: letters, memos, meeting minutes, emails
-- other: schedules or anything that does not fit the categories above`;
 
 interface GeminiPage {
   page_number: number;
@@ -89,100 +57,11 @@ function splitChunks(text: string, chunkSize = 2200, overlap = 260): string[] {
   return chunks;
 }
 
-async function uploadToGeminiFiles(
-  pdfBytes: Buffer,
-  fileName: string,
-): Promise<{ uri: string; name: string }> {
-  const boundary = "onyx_boundary_gemini";
-  const meta = JSON.stringify({ file: { displayName: fileName } });
-  const body = Buffer.concat([
-    Buffer.from(`--${boundary}\r\nContent-Type: application/json\r\n\r\n`),
-    Buffer.from(meta),
-    Buffer.from(`\r\n--${boundary}\r\nContent-Type: application/pdf\r\n\r\n`),
-    pdfBytes,
-    Buffer.from(`\r\n--${boundary}--`),
-  ]);
-
-  const res = await fetchGemini(
-    `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=multipart`,
-    {
-      method: "POST",
-      headers: {
-        "X-Goog-Api-Key": geminiApiKey(),
-        "Content-Type": `multipart/related; boundary=${boundary}`,
-        "Content-Length": String(body.length),
-      },
-      body,
-    },
-    { label: "Gemini Files upload", timeoutMs: 60_000 },
-  );
-  if (!res.ok) {
-    await readGeminiError(res, "Gemini Files upload");
-  }
-  const data = (await res.json()) as { file: { name: string; uri: string; state: string } };
-  return { uri: data.file.uri, name: data.file.name };
-}
-
-async function waitForActive(geminiName: string, maxMs = 60_000): Promise<void> {
-  const deadline = Date.now() + maxMs;
-  while (Date.now() < deadline) {
-    const res = await fetchGemini(
-      `https://generativelanguage.googleapis.com/v1beta/${geminiName}`,
-      { headers: { "X-Goog-Api-Key": geminiApiKey() } },
-      { label: "Gemini file status", timeoutMs: 20_000 },
-    );
-    const data = (await res.json()) as { state: string };
-    if (data.state === "ACTIVE") return;
-    if (data.state === "FAILED") throw new Error("Gemini file processing failed");
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  throw new Error("Gemini file did not become active within 60 s");
-}
-
-async function deleteGeminiFile(geminiName: string): Promise<void> {
-  await fetch(`https://generativelanguage.googleapis.com/v1beta/${geminiName}`, {
-    method: "DELETE",
-    headers: { "X-Goog-Api-Key": geminiApiKey() },
-  }).catch(() => {});
-}
-
-async function embedText(text: string): Promise<number[]> {
-  const values = await embedBatch([text]);
-  if (!values[0]) throw new Error("Gemini embedding returned empty values");
-  return values[0];
-}
-
-/** Batch-embed texts via Gemini batchEmbedContents (same path as page-processor). */
-async function embedBatch(inputs: string[]): Promise<Array<number[] | null>> {
-  if (inputs.length === 0) return [];
-  const res = await fetchGemini(
-    `https://generativelanguage.googleapis.com/v1beta/models/${EMBED_MODEL}:batchEmbedContents?key=${geminiApiKey()}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        requests: inputs.map((text) => ({
-          model: `models/${EMBED_MODEL}`,
-          content: { parts: [{ text }] },
-          taskType: "RETRIEVAL_DOCUMENT",
-          outputDimensionality: 768,
-        })),
-      }),
-    },
-    { label: "Gemini batch embedding", timeoutMs: 60_000 },
-  );
-  if (!res.ok) await readGeminiError(res, "Gemini batch embedding");
-  const data = (await res.json()) as { embeddings?: Array<{ values?: number[] }> };
-  return (data.embeddings ?? []).map((e) => (Array.isArray(e?.values) ? e.values : null));
-}
-
-
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<NextResponse> {
   const { id: docId } = await params;
-  let geminiName: string | null = null;
   let tenantId: string | null = null;
   const startedAt = Date.now();
 
@@ -510,68 +389,25 @@ export async function POST(
       });
     }
 
-    // 2–4. Model extraction. A failed upload, timeout, or unreadable JSON
-    // continues into embedded page text, then page split.
-    let fileUri = "";
-    let modelExtraction: ExtractionResult | null = null;
-    try {
-      await assertWithinBudget("gemini_upload");
-      const uploaded = await uploadToGeminiFiles(pdfBytes, doc.file_name);
-      fileUri = uploaded.uri;
-      geminiName = uploaded.name;
-      await assertWithinBudget("gemini_active");
-      await waitForActive(geminiName);
-      await assertWithinBudget("extraction");
-      const extractRes = await fetchGemini(
-        `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${geminiApiKey()}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{
-              parts: [
-                { fileData: { mimeType: "application/pdf", fileUri } },
-                { text: EXTRACTION_PROMPT },
-              ],
-            }],
-            generationConfig: { responseMimeType: "application/json" },
-          }),
-        },
-        { label: "Gemini document extraction", timeoutMs: 60_000 },
-      );
-      if (extractRes.ok) {
-        const extractData = (await extractRes.json()) as {
-          candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
-        };
-        const rawJson = extractData.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-        modelExtraction = parseModelJson(rawJson) as ExtractionResult | null;
-      } else {
-        await readGeminiError(extractRes, "Gemini document extraction").catch(() => undefined);
-      }
-    } catch {
-      modelExtraction = null;
-    }
-
+    // Classification, title, scale, and page text come from the embedded text layer.
+    await assertWithinBudget("pdf_text");
     let pdfPageCount = 0;
     try {
       const { PDFDocument } = await import("pdf-lib");
       const parsedPdf = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
       pdfPageCount = parsedPdf.getPageCount();
     } catch {
-      pdfPageCount = modelExtraction?.page_count ?? modelExtraction?.pages?.length ?? 0;
+      pdfPageCount = 0;
     }
-    const modelPages = modelExtraction?.pages ?? [];
-    const modelMissing = missingPageNumbers(pdfPageCount, modelPages.filter((page) => page.summary?.trim()).map((page) => page.page_number));
     let localExtraction: ExtractionResult | null = null;
-    if (!modelExtraction || modelMissing.length > 0) {
-      try {
-        const localPages = await readPdfPageText(pdfBytes);
-        localExtraction = extractionFromPageText(localPages, pdfPageCount) as ExtractionResult;
-      } catch {
-        localExtraction = null;
-      }
+    try {
+      const localPages = await readPdfPageText(pdfBytes);
+      if (pdfPageCount === 0) pdfPageCount = localPages.length;
+      localExtraction = extractionFromPageText(localPages, pdfPageCount) as ExtractionResult;
+    } catch {
+      localExtraction = null;
     }
-    const merged = mergeExtractions(modelExtraction, localExtraction, pdfPageCount);
+    const merged = mergeExtractions(null, localExtraction, pdfPageCount);
     const extraction = merged.extraction as ExtractionResult;
     if (extraction.pages.length === 0 && storagePath && projectIdForSplit) {
       await queueLocalDocumentForPageSplit({
@@ -588,7 +424,7 @@ export async function POST(
       }, { status: 202 });
     }
     if (extraction.pages.length === 0) {
-      throw new Error("Neither the model nor the embedded page text produced a readable page.");
+      throw new Error("The embedded page text produced no readable page.");
     }
 
     const docType = normalizeDocumentClass(extraction.doc_type);
@@ -603,7 +439,6 @@ export async function POST(
       meta: {
         ...meta,
         title: extraction.title ?? null,
-        gemini_file_uri: fileUri,
         processing_summary: {
           pages_total: pageCount,
           pages_summarized: pages.length,
@@ -625,73 +460,23 @@ export async function POST(
       if (upsertErr) throw new Error(`Pages upsert failed: ${upsertErr.message}`);
     }
 
-    // 7. Chunk + embed via batchEmbedContents (one API call per page-batch,
-    // not one call per chunk). Caps request size to stay within rate limits.
+    // 7. Store text chunks. The embedding column stays null; search uses the text.
     const projectId = doc.project_id as string;
     const chunkRows: TablesInsert<"chunks">[] = [];
-
-    type PendingChunk = { page_number: number; content: string };
-    const pending: PendingChunk[] = [];
     for (const page of pages) {
       const text = `${page.summary}\nKey terms: ${(page.key_terms ?? []).join(", ")}`;
       for (const chunk of splitChunks(text)) {
-        pending.push({ page_number: page.page_number, content: chunk });
-      }
-    }
-
-    // Prefer a partial flush + 504 over throwing so completed embeds are kept.
-    const EMBED_BATCH = 16;
-    for (let i = 0; i < pending.length; i += EMBED_BATCH) {
-      await assertWithinBudget("embedding");
-      if (Date.now() - startedAt > INGEST_BUDGET_MS) {
-        if (chunkRows.length > 0) {
-          const { error: partialErr } = await db.from("chunks").insert(chunkRows);
-          if (partialErr) throw new Error(`Chunks insert failed: ${partialErr.message}`);
-        }
-        const message = `Ingest stopped after ${Math.round((Date.now() - startedAt) / 1000)}s with ${chunkRows.length} chunks saved. Re-run page split for the remaining sheets.`;
-        await markError(message, "ingest_timeout");
-        return NextResponse.json({ error: message, partial_chunks: chunkRows.length }, { status: 504 });
-      }
-      const batch = pending.slice(i, i + EMBED_BATCH);
-      const vectors = await embedBatch(batch.map((c) => c.content));
-      for (let j = 0; j < batch.length; j++) {
-        const values = vectors[j];
-        if (!values) {
-          // Fall back to single-embed for any slot the batch response omitted.
-          const solo = await embedText(batch[j].content);
-          chunkRows.push({
-            document_id: docId,
-            tenant_id: resolvedTenantId,
-            project_id: projectId,
-            page_number: batch[j].page_number,
-            content: batch[j].content,
-            embedding: `[${solo.join(",")}]` as unknown as never,
-          });
-          continue;
-        }
         chunkRows.push({
           document_id: docId,
           tenant_id: resolvedTenantId,
           project_id: projectId,
-          page_number: batch[j].page_number,
-          content: batch[j].content,
-          embedding: `[${values.join(",")}]` as unknown as never,
+          page_number: page.page_number,
+          content: chunk,
+          embedding: null,
         });
       }
-      // Checkpoint progress so a timeout/retry can see how far we got.
-      await db.from("documents").update({
-        meta: {
-          ...meta,
-          title: extraction.title ?? null,
-          gemini_file_uri: fileUri,
-          ingest_progress: {
-            chunks_embedded_through: Math.min(i + EMBED_BATCH, pending.length),
-            chunks_total: pending.length,
-            updated_at: new Date().toISOString(),
-          },
-        },
-      }).eq("id", docId).eq("tenant_id", resolvedTenantId);
     }
+    await assertWithinBudget("chunks");
 
     if (chunkRows.length > 0) {
       const { error: chunksErr } = await db.from("chunks").insert(chunkRows);
@@ -707,9 +492,6 @@ export async function POST(
       last_error_step: missingPages.length > 0 ? "parse" : null,
     }).eq("id", docId).eq("tenant_id", resolvedTenantId);
 
-    // 9. Cleanup Gemini file (best effort)
-    if (geminiName) await deleteGeminiFile(geminiName);
-    geminiName = null;
     await logDocumentProcessingEvent({
       tenantId: resolvedTenantId,
       projectId,
@@ -732,7 +514,6 @@ export async function POST(
 
     return NextResponse.json({ ok: true, doc_type: docType, page_count: pageCount, chunk_count: chunkRows.length });
   } catch (err: unknown) {
-    if (geminiName) await deleteGeminiFile(geminiName);
     const msg = err instanceof Error ? err.message : String(err);
     await markError(msg, "ingest");
     if (tenantId) {

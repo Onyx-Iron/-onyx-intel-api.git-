@@ -5,7 +5,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { logEvent } from "@/lib/activity";
 import { processOutboxBatch } from "@/lib/estimating/outbox-worker";
-import { quantityForMeasurement, calculatedQuantityForSave, FORMULA_VERSION, type QuantityGeometry } from "@/lib/takeoff/canvas/quantity";
+import { quantityForMeasurement, calculatedQuantityForSave, FORMULA_VERSION, scaleFactorForPoints, type QuantityGeometry, type ScaleRegionInput } from "@/lib/takeoff/canvas/quantity";
 import { measurementUnit, storedTakeoffType } from "@/lib/takeoff/measure-kind";
 import type { Point } from "@/lib/takeoff/canvas/coordinates";
 import type { ManualTakeoffItem, ManualTakeoffUpdateBody, TakeoffGeometry } from "@/lib/types/takeoff";
@@ -76,6 +76,28 @@ type Item = ManualTakeoffItem;
 
 const QUANTITY_TOLERANCE_PCT = 1; // >1% discrepancy between submitted and server-calculated quantity is flagged
 
+function parseRegionPolygon(raw: unknown): Point[] {
+  if (!Array.isArray(raw)) return [];
+  const points: Point[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const x = Number((item as { x?: unknown }).x);
+    const y = Number((item as { y?: unknown }).y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    points.push({ x, y });
+  }
+  return points;
+}
+
+function regionInputs(rows: Array<{ id: string; polygon: unknown; page_space_scale_factor: number | null; verified: boolean }>): ScaleRegionInput[] {
+  return rows.map((row) => ({
+    id: row.id,
+    polygon: parseRegionPolygon(row.polygon),
+    pageSpaceScaleFactor: row.page_space_scale_factor,
+    verified: row.verified === true,
+  }));
+}
+
 function quantityGeometry(geo: TakeoffGeometry): QuantityGeometry {
   const num = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
   return {
@@ -140,13 +162,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const distinctPageIds = [...new Set(items.map((it) => it.page_id).filter((p): p is string => Boolean(p)))];
   const pageInfoById = new Map<string, { documentId: string }>();
   const calibrationByPageId = new Map<string, { page_space_scale_factor: number | null; status: string }>();
+  const regionsByPageId = new Map<string, ScaleRegionInput[]>();
   if (distinctPageIds.length > 0) {
-    const [{ data: pages }, { data: calibrations }] = await Promise.all([
+    const [{ data: pages }, { data: calibrations }, regionResult] = await Promise.all([
       db.from("document_pages").select("id, document_id").in("id", distinctPageIds),
       db.from("sheet_calibrations").select("page_id, page_space_scale_factor, status").eq("tenant_id", tenantId).in("page_id", distinctPageIds),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (db as any).from("sheet_scale_regions").select("id, page_id, polygon, page_space_scale_factor, verified").eq("tenant_id", tenantId).in("page_id", distinctPageIds),
     ]);
     for (const p of pages ?? []) pageInfoById.set(p.id, { documentId: p.document_id });
     for (const c of calibrations ?? []) calibrationByPageId.set(c.page_id, c);
+    const grouped = new Map<string, Array<{ id: string; polygon: unknown; page_space_scale_factor: number | null; verified: boolean }>>();
+    for (const region of (regionResult.data ?? []) as Array<{ id: string; page_id: string; polygon: unknown; page_space_scale_factor: number | null; verified: boolean }>) {
+      const list = grouped.get(region.page_id) ?? [];
+      list.push(region);
+      grouped.set(region.page_id, list);
+    }
+    for (const [pageId, rows] of grouped) regionsByPageId.set(pageId, regionInputs(rows));
   }
 
   const results: Array<{ id: string; client_key: string; was_update: boolean; quantity: number; unit: string; row_version: number; calculation_formula_version: string | null; discrepancy_warning: string | null; calibration_warning: string | null }> = [];
@@ -158,18 +190,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const isVisionSourced = geo.source === "vision_extraction";
     const documentId = it.page_id ? pageInfoById.get(it.page_id)?.documentId ?? null : null;
     const calibration = it.page_id ? calibrationByPageId.get(it.page_id) : undefined;
+    const regions = it.page_id ? regionsByPageId.get(it.page_id) ?? [] : [];
 
     let quantity = it.quantity;
     let calculationFormulaVersion: string | null = null;
     let discrepancyWarning: string | null = null;
     let calibrationWarning: string | null = null;
+    let scaleRegionId: string | null = null;
 
     const isPageSpace = geo.coordinate_space === "page_space" && Array.isArray(geo.points);
-    const verified = calibration?.status === "verified" && calibration.page_space_scale_factor != null;
+    const sheetVerified = calibration?.status === "verified" && calibration.page_space_scale_factor != null;
     const countOnly = it.takeoff_type === "count";
-    if (isPageSpace && (countOnly || verified)) {
+    const choice = isPageSpace
+      ? scaleFactorForPoints(geo.points as Point[], regions, calibration?.page_space_scale_factor ?? null, sheetVerified)
+      : null;
+    if (!countOnly && choice?.regionId) scaleRegionId = choice.regionId;
+    const verified = countOnly || (choice?.verified === true && choice.factor != null);
+    if (isPageSpace && verified) {
       const points = geo.points as Point[];
-      const factor = countOnly ? (calibration?.page_space_scale_factor ?? 1) : calibration!.page_space_scale_factor!;
+      const factor = countOnly ? 1 : choice!.factor!;
       const serverQuantity = quantityForMeasurement(it.takeoff_type, points, factor, quantityGeometry(geo));
       if (serverQuantity == null) {
         return NextResponse.json({
@@ -183,16 +222,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         discrepancyWarning = `submitted quantity ${it.quantity} differed from server-calculated ${serverQuantity.toFixed(4)} by ${pctDiff.toFixed(1)}% — server value used`;
       }
       quantity = serverQuantity;
-      calculationFormulaVersion = calculatedQuantityForSave(countOnly || verified, serverQuantity) == null ? null : FORMULA_VERSION;
-      if (verified) anyVerifiedCalibrationUsed = true;
+      calculationFormulaVersion = calculatedQuantityForSave(true, serverQuantity) == null ? null : FORMULA_VERSION;
+      if (choice?.verified || sheetVerified) anyVerifiedCalibrationUsed = true;
     } else if (it.page_id) {
-      // No verified page-space calibration for this sheet — cannot
-      // authoritatively recompute, so the submitted quantity is trusted
-      // as-is (STEP 4/18: never fabricate a scale that doesn't exist).
-      // The save function withholds estimate sync until the sheet has a verified scale.
-      calibrationWarning = calibration
-        ? "this sheet's calibration is legacy/unverified — recalibrate before this measurement can sync to the estimate"
-        : "this sheet has no calibration yet — recalibrate before this measurement can sync to the estimate";
+      calibrationWarning = choice?.regionId
+        ? "this detail's scale region is not confirmed — confirm it before this measurement can sync to the estimate"
+        : calibration
+          ? "this sheet's calibration is legacy/unverified — recalibrate before this measurement can sync to the estimate"
+          : "this sheet has no calibration yet — recalibrate before this measurement can sync to the estimate";
     }
 
     const { data, error } = await db.rpc("save_manual_takeoff_tx", {
@@ -207,6 +244,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       p_geometry: {
         ...(it.geometry ?? {}),
         ...(it.takeoff_type === "perimeter" ? { measure: "perimeter" } : {}),
+        ...(scaleRegionId ? { scale_region_id: scaleRegionId } : {}),
       } as unknown as Json,
       p_client_key: clientKey,
       p_actor_user_id: userId,
@@ -382,14 +420,25 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     ...(typeof (body.geometry ?? {}).measure !== "string" && storedMeasure === "perimeter" ? { measure: "perimeter" } : {}),
   };
   const isPageSpace = geo.coordinate_space === "page_space" && Array.isArray(geo.points);
-    if (existing.page_id && isPageSpace) {
-    const { data: calibration } = await db
-      .from("sheet_calibrations").select("page_space_scale_factor, status").eq("tenant_id", tenantId).eq("page_id", existing.page_id).maybeSingle();
-    const verified = calibration?.status === "verified" && calibration.page_space_scale_factor != null;
+  if (existing.page_id && isPageSpace) {
+    const [{ data: calibration }, regionResult] = await Promise.all([
+      db.from("sheet_calibrations").select("page_space_scale_factor, status").eq("tenant_id", tenantId).eq("page_id", existing.page_id).maybeSingle(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (db as any).from("sheet_scale_regions").select("id, polygon, page_space_scale_factor, verified").eq("tenant_id", tenantId).eq("page_id", existing.page_id),
+    ]);
+    const sheetVerified = calibration?.status === "verified" && calibration.page_space_scale_factor != null;
     const countOnly = existing.takeoff_type === "count";
-    if (countOnly || verified) {
+    const choice = scaleFactorForPoints(
+      geo.points as Point[],
+      regionInputs((regionResult.data ?? []) as Array<{ id: string; polygon: unknown; page_space_scale_factor: number | null; verified: boolean }>),
+      calibration?.page_space_scale_factor ?? null,
+      sheetVerified,
+    );
+    if (!countOnly && choice.regionId) (geo as TakeoffGeometry).scale_region_id = choice.regionId;
+    const verified = countOnly || (choice.verified && choice.factor != null);
+    if (verified) {
       const points = geo.points as Point[];
-      const factor = countOnly ? (calibration?.page_space_scale_factor ?? 1) : calibration!.page_space_scale_factor!;
+      const factor = countOnly ? 1 : choice.factor!;
       const serverQuantity = quantityForMeasurement(existing.takeoff_type, points, factor, quantityGeometry(geo));
       if (serverQuantity == null) {
         return NextResponse.json({
@@ -403,7 +452,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
         discrepancyWarning = `submitted quantity ${body.quantity} differed from server-calculated ${serverQuantity.toFixed(4)} by ${pctDiff.toFixed(1)}% — server value used`;
       }
       quantity = serverQuantity;
-      calculationFormulaVersion = calculatedQuantityForSave(countOnly || verified, serverQuantity) == null ? null : FORMULA_VERSION;
+      calculationFormulaVersion = calculatedQuantityForSave(true, serverQuantity) == null ? null : FORMULA_VERSION;
     }
   }
 

@@ -348,6 +348,7 @@ export type Database = {
         Row: {
           amount: number | null
           approved_date: string | null
+          cost_code: string | null
           created_at: string
           description: string
           equipment_cost: number | null
@@ -371,6 +372,7 @@ export type Database = {
         Insert: {
           amount?: number | null
           approved_date?: string | null
+          cost_code?: string | null
           created_at?: string
           description: string
           equipment_cost?: number | null
@@ -394,6 +396,7 @@ export type Database = {
         Update: {
           amount?: number | null
           approved_date?: string | null
+          cost_code?: string | null
           created_at?: string
           description?: string
           equipment_cost?: number | null
@@ -2784,6 +2787,7 @@ export type Database = {
       invoices: {
         Row: {
           amount: number
+          cost_code: string | null
           created_at: string
           description: string | null
           direction: string
@@ -2804,6 +2808,7 @@ export type Database = {
         }
         Insert: {
           amount?: number
+          cost_code?: string | null
           created_at?: string
           description?: string | null
           direction?: string
@@ -2824,6 +2829,7 @@ export type Database = {
         }
         Update: {
           amount?: number
+          cost_code?: string | null
           created_at?: string
           description?: string | null
           direction?: string
@@ -4118,6 +4124,7 @@ export type Database = {
       }
       purchase_orders: {
         Row: {
+          cost_code: string | null
           created_at: string | null
           created_by: string | null
           email_sent_at: string | null
@@ -4131,6 +4138,7 @@ export type Database = {
           vendor_bid_id: string
         }
         Insert: {
+          cost_code?: string | null
           created_at?: string | null
           created_by?: string | null
           email_sent_at?: string | null
@@ -4144,6 +4152,7 @@ export type Database = {
           vendor_bid_id: string
         }
         Update: {
+          cost_code?: string | null
           created_at?: string | null
           created_by?: string | null
           email_sent_at?: string | null
