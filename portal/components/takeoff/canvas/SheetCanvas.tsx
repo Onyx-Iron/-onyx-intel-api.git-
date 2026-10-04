@@ -25,6 +25,7 @@ import {
   type VectorPoint,
 } from "@/lib/takeoff/canvas/vector-snap";
 import { canEditVertex, recomputeShapeQuantity } from "@/lib/takeoff/canvas/shape-edit";
+import { heldForScaleMessage, planCanvasSave } from "@/lib/takeoff/canvas/save-batch";
 import { takeoffQueryKeys, useSheetCalibration } from "@/lib/takeoff/queries";
 import type { SnapResult } from "@/lib/takeoff/canvas/snap-algorithm";
 
@@ -1544,6 +1545,14 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     const unsavedWalls = wallRuns.filter((w) => !w.saved);
     if (unsaved.length === 0 && unsavedRuns.length === 0 && unsavedTopo.length === 0 && unsavedAreas.length === 0 && unsavedWalls.length === 0) return;
     const pageSpaceReady = calibration?.status === "verified" && calibration.page_space_scale_factor != null;
+    const savePlan = planCanvasSave({
+      shapes: unsaved.length,
+      utilities: unsavedRuns.length,
+      topo: unsavedTopo.length,
+      areas: unsavedAreas.length,
+      walls: unsavedWalls.length,
+      pageSpaceReady,
+    });
     setSaving(true);
     try {
       const requests: Promise<Response>[] = [];
@@ -1563,7 +1572,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         coordinateSpace === "page_space" ? points : pointsToPageSpace(points, renderScale);
 
       let manualSaveRequest: Promise<Response> | null = null;
-      if (unsaved.length > 0) {
+      if (savePlan.postShapes) {
         const items = unsaved.map((s) => ({
           project_id: projectId,
           page_id: pageId,
@@ -1590,7 +1599,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         requests.push(manualSaveRequest);
       }
 
-      if (pageSpaceReady && unsavedRuns.length > 0) {
+      if (savePlan.postUtilities) {
         const items = unsavedRuns.map((r) => ({
           project_id: projectId,
           page_id: pageId,
@@ -1611,7 +1620,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         }));
       }
 
-      if (unsavedTopo.length > 0) {
+      if (savePlan.postTopo) {
         const items = unsavedTopo.map((n) => ({
           project_id: projectId,
           page_id: pageId,
@@ -1628,7 +1637,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         }));
       }
 
-      if (unsavedAreas.length > 0) {
+      if (savePlan.postAreas) {
         const items = unsavedAreas.map((a) => ({
           project_id: projectId,
           page_id: pageId,
@@ -1647,7 +1656,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         }));
       }
 
-      if (pageSpaceReady && unsavedWalls.length > 0) {
+      if (savePlan.postWalls) {
         const items = unsavedWalls.map((w) => ({
           project_id: projectId,
           page_id: pageId,
@@ -1666,6 +1675,14 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         }));
       }
 
+      if (requests.length === 0) {
+        if (savePlan.heldForScale.length > 0) {
+          alert(heldForScaleMessage(savePlan.heldForScale, false));
+          selectTool("calibrate");
+        }
+        return;
+      }
+
       const results = await Promise.all(requests);
       const allOk = results.every((r) => r.ok);
       if (allOk) {
@@ -1679,13 +1696,27 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           const manualData = await (await manualSaveRequest).json().catch(() => ({})) as { items?: Array<{ id: string; client_key: string; row_version: number }> };
           byClientKey = new Map((manualData.items ?? []).map((it) => [it.client_key, { id: it.id, row_version: it.row_version }]));
         }
-        setShapes((prev) => prev.map((s) => (s.saved
-          ? s
-          : { ...s, points: toPersistedPoints(s.points, s.coordinateSpace), coordinateSpace: "page_space", saved: true, ...(byClientKey.get(s.key) ?? {}) })));
-        setUtilityRuns((prev) => prev.map((r) => (r.saved ? r : { ...r, points: toPersistedPoints(r.points, r.coordinateSpace), coordinateSpace: "page_space", saved: true })));
-        setTopoNodes((prev) => prev.map((n) => (n.saved ? n : { ...n, points: toPersistedPoints(n.points, n.coordinateSpace), coordinateSpace: "page_space", saved: true })));
-        setAreaBounds((prev) => prev.map((a) => (a.saved ? a : { ...a, points: toPersistedPoints(a.points, a.coordinateSpace), coordinateSpace: "page_space", saved: true })));
-        setWallRuns((prev) => prev.map((w) => (w.saved ? w : { ...w, points: toPersistedPoints(w.points, w.coordinateSpace), coordinateSpace: "page_space", saved: true })));
+        if (savePlan.postShapes) {
+          setShapes((prev) => prev.map((s) => (s.saved
+            ? s
+            : { ...s, points: toPersistedPoints(s.points, s.coordinateSpace), coordinateSpace: "page_space", saved: true, ...(byClientKey.get(s.key) ?? {}) })));
+        }
+        if (savePlan.postUtilities) {
+          setUtilityRuns((prev) => prev.map((r) => (r.saved ? r : { ...r, points: toPersistedPoints(r.points, r.coordinateSpace), coordinateSpace: "page_space", saved: true })));
+        }
+        if (savePlan.postTopo) {
+          setTopoNodes((prev) => prev.map((n) => (n.saved ? n : { ...n, points: toPersistedPoints(n.points, n.coordinateSpace), coordinateSpace: "page_space", saved: true })));
+        }
+        if (savePlan.postAreas) {
+          setAreaBounds((prev) => prev.map((a) => (a.saved ? a : { ...a, points: toPersistedPoints(a.points, a.coordinateSpace), coordinateSpace: "page_space", saved: true })));
+        }
+        if (savePlan.postWalls) {
+          setWallRuns((prev) => prev.map((w) => (w.saved ? w : { ...w, points: toPersistedPoints(w.points, w.coordinateSpace), coordinateSpace: "page_space", saved: true })));
+        }
+        if (savePlan.heldForScale.length > 0) {
+          alert(heldForScaleMessage(savePlan.heldForScale, true));
+          selectTool("calibrate");
+        }
       } else {
         const failed = results.find((r) => !r.ok);
         const err = failed ? await failed.json().catch(() => ({})) as { error?: string; code?: string } : {};
