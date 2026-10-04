@@ -63,7 +63,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   // Group requests by batch_id so the UI can render one RFQ card with
   // multiple line items instead of one card per row.
-  const batches = new Map<string, { batch_id: string; batch_label: string | null; required_date: string | null; items: unknown[] }>();
+  const batches = new Map<string, { batch_id: string; batch_label: string | null; required_date: string | null; items: Array<Record<string, unknown> & { bids?: Array<Record<string, unknown>> }> }>();
   for (const r of requests ?? []) {
     const key = r.batch_id;
     if (!batches.has(key)) batches.set(key, { batch_id: key, batch_label: r.batch_label, required_date: r.required_date, items: [] });
