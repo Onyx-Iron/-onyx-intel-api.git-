@@ -1,8 +1,14 @@
+# DEPRECATED for Railway web: builds use Dockerfile (see railway.toml).
+# Kept for local/nixpacks experimentation only.
 [phases.setup]
 nixPkgs = ["python312"]
 
 [phases.install]
-cmds = ["pip install -r requirements.txt"]
+cmds = [
+  "python -m venv /opt/venv",
+  ". /opt/venv/bin/activate && pip install -r requirements.txt",
+  ". /opt/venv/bin/activate && pip install -r requirements-docling.txt",
+]
 
 [start]
 cmd = "uvicorn takeoff_api:app --host 0.0.0.0 --port $PORT --workers 2"

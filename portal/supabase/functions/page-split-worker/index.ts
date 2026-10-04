@@ -62,6 +62,21 @@ async function fetchWithRetry(url: string, options: RequestInit, maxAttempts = 3
   throw lastErr;
 }
 
+async function vectorsForSinglePage(pageBytes: Uint8Array): Promise<unknown[] | null> {
+  try {
+    const pdfjs = await import("https://esm.sh/pdfjs-dist@5.4.624/legacy/build/pdf.mjs");
+    const { extractVectorsFromPdfPage } = await import("../../../lib/cad/pdf-vector-extract.ts");
+    const doc = await pdfjs.getDocument({ data: pageBytes, disableWorker: true, isEvalSupported: false }).promise;
+    const page = await doc.getPage(1);
+    const vectors = await extractVectorsFromPdfPage(page);
+    if (typeof doc.destroy === "function") await doc.destroy();
+    return Array.isArray(vectors) ? vectors : [];
+  } catch (err) {
+    console.warn("[page-split] vector extract failed", err);
+    return null;
+  }
+}
+
 interface Payload {
   document_id: string;
   tenant_id: string;
@@ -163,6 +178,7 @@ Deno.serve(async (req) => {
     const pageRows: Array<{
       id: string; tenant_id: string; document_id: string; page_number: number;
       storage_path: string; status: string;
+      vectors: unknown[] | null; vector_status: string; vectors_extracted_at: string | null;
     }> = [];
 
     // pdf-lib doesn't stream; iterate sequentially. For huge decks (500+ pages)
@@ -189,6 +205,7 @@ Deno.serve(async (req) => {
         continue;
       }
 
+      const vectors = await vectorsForSinglePage(pageBytes);
       pageRows.push({
         id: crypto.randomUUID(),
         tenant_id: body.tenant_id,
@@ -196,6 +213,9 @@ Deno.serve(async (req) => {
         page_number: pageNumber,
         storage_path: storagePath,
         status: "pending",
+        vectors: vectors ?? null,
+        vector_status: vectors && vectors.length > 0 ? "done" : "pending",
+        vectors_extracted_at: vectors && vectors.length > 0 ? new Date().toISOString() : null,
       });
     }
 

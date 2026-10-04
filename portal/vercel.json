@@ -6,11 +6,19 @@
     },
     {
       "path": "/api/internal/gmail/plan-poll",
+<<<<<<< HEAD
       "schedule": "0 7 * * *"
     },
     {
       "path": "/api/internal/sheets/process",
       "schedule": "0 8 * * *"
+=======
+      "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/api/internal/sheets/process",
+      "schedule": "*/5 * * * *"
+>>>>>>> origin/main
     }
   ]
 }

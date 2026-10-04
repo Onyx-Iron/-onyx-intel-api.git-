@@ -9,6 +9,13 @@
  */
 
 export const PPI_STALE_AFTER_DAYS = 90;
+export const ACTUALS_WINDOW_DAYS = 182;
+
+/** Actuals inside the six-month window are already current. PPI aging starts after that window. */
+export function actualsNeedPpiAging(observedAt: string | Date | null | undefined, now: Date = new Date()): boolean {
+  const age = ageInDays(observedAt, now);
+  return age == null || age >= ACTUALS_WINDOW_DAYS;
+}
 
 /** Leading two-digit CSI MasterFormat division from a cost code. */
 export function csiDivisionFromCode(csiCode: string | null | undefined): string | null {

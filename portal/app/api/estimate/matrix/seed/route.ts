@@ -4,10 +4,20 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 import { getOrCreateDraftVersion, getServiceDb } from "@/lib/estimating/versioning";
 import { calculateItem } from "@/lib/estimating/calculations";
-import { resolveCostsBatch } from "@/lib/cost/resolver";
+import { regionFromProject, resolveCostsBatch, type CostResolveResult } from "@/lib/cost/resolver";
 import { legacyHeuristicUnitCost, seedLineCosts } from "@/lib/estimating/seed-pricing";
+import { unitsCompatible } from "@/lib/estimating/takeoff-import";
 
 export const runtime = "nodejs";
+
+function usableResolved(
+  resolved: CostResolveResult | null | undefined,
+  quantityUnit: string | null | undefined,
+): CostResolveResult | null {
+  if (!resolved || resolved.source === "none" || !(resolved.unit_cost > 0)) return null;
+  if (!unitsCompatible(resolved.uom, quantityUnit)) return null;
+  return resolved;
+}
 
 /**
  * POST /api/estimate/matrix/seed { project_id }
@@ -67,6 +77,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     cost_code: string | null;
     csi_code: string | null;
     quantity: number | null;
+    uom: string | null;
     labor_cost: number | null;
     material_cost: number | null;
     equipment_cost: number | null;
@@ -88,13 +99,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .or("review_status.is.null,review_status.eq.approved"),
     db
       .from("projects")
-      .select("state")
+      .select("state, city, zip_code")
       .eq("id", body.project_id)
       .eq("tenant_id", tenantId)
       .maybeSingle(),
     db
       .from("estimate_items")
-      .select("id, source_takeoff_id, cost_code, csi_code, quantity, labor_cost, material_cost, equipment_cost")
+      .select("id, source_takeoff_id, cost_code, csi_code, quantity, uom, labor_cost, material_cost, equipment_cost")
       .eq("tenant_id", tenantId)
       .eq("estimate_version_id", versionId),
   ]);
@@ -116,7 +127,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     ? await resolveCostsBatch(codes.map((cost_code) => ({
         cost_code,
         tenant_id: tenantId,
-        region: { state: project?.state ?? undefined },
+        region: regionFromProject(project),
       })))
     : [];
   const resolvedByCode = new Map(resolved.map((row) => [row.cost_code, row]));
@@ -139,7 +150,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const costs = seedLineCosts(
       quantity,
       takeoffUnit,
-      code ? resolvedByCode.get(code) ?? null : null,
+      usableResolved(code ? resolvedByCode.get(code) : null, row.uom),
     );
     const calc = calculateItem({
       laborCost: costs.labor_cost,
@@ -190,7 +201,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const costs = seedLineCosts(
       quantity,
       t.estimated_unit_cost == null ? null : Number(t.estimated_unit_cost),
-      t.cost_code ? resolvedByCode.get(t.cost_code) ?? null : null,
+      usableResolved(t.cost_code ? resolvedByCode.get(t.cost_code) : null, t.uom),
     );
     const calc = calculateItem({
       laborCost: costs.labor_cost,

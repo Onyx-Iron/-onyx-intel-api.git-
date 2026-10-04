@@ -18,7 +18,8 @@
 # Sync POST /api/takeoff/extract remains for interactive small files.
 
 [build]
-builder = "nixpacks"
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
 restartPolicyType = "ON_FAILURE"

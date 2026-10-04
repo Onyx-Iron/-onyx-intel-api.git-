@@ -1,6 +1,6 @@
 import { createServiceClient } from "@/lib/supabase/server";
 import { buildEstimateImportRows, scaledDirectCosts, type CostCatalogForImport, type EstimateImportRow, type ExistingEstimateForImport } from "@/lib/estimating/takeoff-import";
-import { resolveCostsBatch } from "@/lib/cost/resolver";
+import { regionFromProject, resolveCostsBatch } from "@/lib/cost/resolver";
 import { applyVersionPercentages, calculateItem } from "@/lib/estimating/calculations";
 import { getOrCreateDraftVersion } from "@/lib/estimating/versioning";
 import { allocateDirectCosts } from "../../supabase/functions/_shared/estimate-sync-contract";
@@ -48,7 +48,7 @@ export async function syncTakeoffToEstimate(
   const [takeoff, versionIds, catalog, project, versionRow, pendingReviewCount] = await Promise.all([
     anyDb
       .from("takeoff_items")
-      .select("id,label,csi_code,division,quantity,unit,type,meta,review_status")
+      .select("id,label,csi_code,division,quantity,unit,type,meta,review_status,source_method")
       .eq("tenant_id", tenantId)
       .eq("project_id", projectId)
       .or("review_status.is.null,review_status.eq.approved")
@@ -63,7 +63,7 @@ export async function syncTakeoffToEstimate(
       .eq("tenant_id", tenantId),
     anyDb
       .from("projects")
-      .select("state,city")
+      .select("state, city, zip_code")
       .eq("id", projectId)
       .eq("tenant_id", tenantId)
       .maybeSingle(),
@@ -104,7 +104,7 @@ export async function syncTakeoffToEstimate(
       .map((t: { csi_code?: string | null }) => t.csi_code)
       .filter((c: string | null | undefined): c is string => Boolean(c)),
   )] as string[];
-  const region = { state: project.data?.state ?? undefined, city: undefined, metro: undefined, zip: undefined };
+  const region = regionFromProject(project.data);
   const resolved = distinctCodes.length > 0
     ? await resolveCostsBatch(distinctCodes.map((code) => ({ cost_code: code, tenant_id: tenantId, region })))
     : [];
@@ -128,8 +128,17 @@ export async function syncTakeoffToEstimate(
   const mergedCatalog: CostCatalogForImport[] = [
     ...resolved.filter((r) => r.source !== "none" && r.unit_cost > 0).map((r) => ({
       csi_code: r.cost_code,
-      uom: null,
+      uom: r.uom ?? null,
       unit_cost: r.unit_cost,
+      labor_cost: r.labor_cost ?? null,
+      material_cost: r.material_cost ?? null,
+      equipment_cost: r.equipment_cost ?? null,
+      confidence: r.confidence,
+      basis: r.price_scope === "national"
+        ? "national" as const
+        : r.price_scope === "location_index"
+          ? "location_index" as const
+          : "section" as const,
     })),
     ...(catalog.data ?? []),
   ];
@@ -211,7 +220,9 @@ function linePayload(
 ) {
   const quantity = row.quantity ?? 0;
   const preserved = existing ? scaledDirectCosts(existing, row.quantity) : null;
-  const breakdown = row.csi_code ? categoryBreakdownByCsi.get(row.csi_code) : undefined;
+  const breakdown = row.labor_cost != null || row.material_cost != null || row.equipment_cost != null
+    ? { labor: row.labor_cost ?? 0, material: row.material_cost ?? 0, equipment: row.equipment_cost ?? 0 }
+    : row.csi_code ? categoryBreakdownByCsi.get(row.csi_code) : undefined;
   // No breakdown available: the whole resolved unit_cost is booked as
   // material_cost. Do not fabricate a labor/equipment split that was not
   // resolved. An existing unit price is scaled instead of replaced.

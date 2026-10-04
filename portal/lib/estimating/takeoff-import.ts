@@ -1,3 +1,5 @@
+import { type EstimateLineType } from "./csi-catalog";
+
 export interface TakeoffFingerprintInput {
   id?: string | null;
   label?: string | null;
@@ -26,6 +28,7 @@ export interface TakeoffItemForEstimate extends TakeoffFingerprintInput {
   // migration backfills existing rows to 'approved' via its column
   // default, so this fallback is a belt-and-suspenders match).
   review_status?: "suggested" | "reviewed" | "approved" | "rejected" | null;
+  source_method?: string | null;
 }
 
 export interface TakeoffRowForSave extends TakeoffFingerprintInput {
@@ -52,6 +55,12 @@ export interface CostCatalogForImport {
   csi_code?: string | null;
   uom?: string | null;
   unit_cost?: number | null;
+  labor_cost?: number | null;
+  material_cost?: number | null;
+  equipment_cost?: number | null;
+  confidence?: "high" | "medium" | "low" | null;
+  /** section = this CSI code and unit. location_index = national price moved by a regional index. national = US average only. */
+  basis?: "section" | "location_index" | "national" | null;
 }
 
 export interface EstimateImportRow {
@@ -59,7 +68,10 @@ export interface EstimateImportRow {
   description: string;
   csi_code: string | null;
   trade: string | null;
-  item_type: "material";
+  item_type: EstimateLineType;
+  labor_cost?: number | null;
+  material_cost?: number | null;
+  equipment_cost?: number | null;
   quantity: number | null;
   uom: string | null;
   unit_cost: number | null;
@@ -200,6 +212,16 @@ export function buildEstimateImportRows(input: BuildEstimateImportInput): BuildE
 
   for (const takeoff of input.takeoffItems) {
     const fingerprint = takeoffFingerprint(takeoff);
+    const aiVision = takeoff.meta?.extraction_method === "ai_vision" || takeoff.source_method === "ai_vision";
+    const manual = takeoff.source_method === "manual" || takeoff.meta?.extraction_method === "manual";
+    if (takeoff.review_status == null && !manual) {
+      blockedByReview++;
+      continue;
+    }
+    if (aiVision && takeoff.review_status !== "approved") {
+      blockedByReview++;
+      continue;
+    }
     // Hard gate: only 'approved' items may reach the estimate. 'suggested'
     // and 'reviewed' are both still unapproved — a human having looked at
     // an item (reviewed) is not the same as having approved it — and
@@ -263,24 +285,33 @@ function toImportRow(
   projectId: string,
   takeoff: TakeoffItemForEstimate,
   fingerprint: string,
-  costLookup: Map<string, number>,
+  costLookup: Map<string, CatalogRate>,
 ): EstimateImportRow {
   const description = cleanText(takeoff.label) ?? "Takeoff item";
   const csi = cleanText(takeoff.csi_code);
   const uom = cleanText(takeoff.unit)?.toUpperCase() ?? null;
-  const unitCost = findUnitCost(costLookup, csi, uom);
+  const matched = findUnitCost(costLookup, csi, uom);
+  const unitCost = matched?.unitCost ?? null;
   const quantityBasis = cleanText(takeoff.meta?.quantity_basis);
   const drawingRef = cleanText(takeoff.meta?.drawing_ref);
   const locationTag = cleanText(takeoff.meta?.location_tag);
   const aiVision = takeoff.meta?.extraction_method === "ai_vision";
-  const notes = buildSourceNotes({ drawingRef, locationTag, quantityBasis, aiVision });
+  const notes = buildSourceNotes({ drawingRef, locationTag, quantityBasis, aiVision, rateNote: matched?.note ?? null });
+  const pricingStatus = unitCost == null
+    ? "unpriced"
+    : aiVision || matched?.basis === "national" || matched?.confidence === "low"
+      ? "review"
+      : "priced";
 
   return {
     project_id: projectId,
     description,
     csi_code: csi,
     trade: cleanText(takeoff.meta?.trade),
-    item_type: "material",
+    item_type: lineTypeFromSplit(matched?.laborCost, matched?.materialCost, matched?.equipmentCost),
+    labor_cost: matched?.laborCost ?? null,
+    material_cost: matched?.materialCost ?? null,
+    equipment_cost: matched?.equipmentCost ?? null,
     quantity: takeoff.quantity ?? null,
     uom,
     unit_cost: unitCost,
@@ -289,32 +320,132 @@ function toImportRow(
     quantity_basis: quantityBasis,
     drawing_ref: drawingRef,
     location_tag: locationTag,
-    pricing_status: aiVision ? "review" : unitCost != null ? "priced" : "unpriced",
+    pricing_status: pricingStatus,
     notes,
   };
 }
 
-function buildCostLookup(catalog: CostCatalogForImport[]): Map<string, number> {
-  const lookup = new Map<string, number>();
+const UNIT_FAMILY: Record<string, string> = {
+  LF: "LF", FT: "LF", FEET: "LF", FOOT: "LF",
+  SF: "SF", SQFT: "SF",
+  SY: "SY",
+  CY: "CY",
+  EA: "EA", EACH: "EA",
+  TON: "TON", TN: "TON",
+  LS: "LS",
+  AC: "AC", ACRE: "AC",
+};
+
+interface CatalogRate {
+  unitCost: number;
+  basis: "section" | "location_index" | "national";
+  unit: string | null;
+  laborCost: number | null;
+  materialCost: number | null;
+  equipmentCost: number | null;
+  confidence: "high" | "medium" | "low" | null;
+}
+
+function lineTypeFromSplit(labor?: number | null, material?: number | null, equipment?: number | null): EstimateLineType {
+  const parts: Array<{ type: EstimateLineType; value: number }> = [
+    { type: "labour", value: labor ?? 0 },
+    { type: "material", value: material ?? 0 },
+    { type: "equipment", value: equipment ?? 0 },
+  ];
+  const best = parts.reduce((current, next) => next.value > current.value ? next : current);
+  return best.value > 0 ? best.type : "material";
+}
+
+function csiDigits(code: string): string {
+  return code.replace(/\D/g, "");
+}
+
+export function unitsCompatible(rateUnit: string | null | undefined, quantityUnit: string | null | undefined): boolean {
+  const rate = unitFamily(cleanText(rateUnit));
+  const quantity = unitFamily(cleanText(quantityUnit));
+  if (!rate || !quantity) return false;
+  return rate === quantity;
+}
+
+function unitFamily(unit: string | null): string | null {
+  if (!unit) return null;
+  const key = unit.toUpperCase().replace(/\./g, "").replace(/\s+/g, "");
+  return UNIT_FAMILY[key] ?? key;
+}
+
+function basisRank(basis: CatalogRate["basis"]): number {
+  if (basis === "section") return 3;
+  if (basis === "location_index") return 2;
+  return 1;
+}
+
+function buildCostLookup(catalog: CostCatalogForImport[]): Map<string, CatalogRate> {
+  const lookup = new Map<string, CatalogRate>();
   for (const item of catalog) {
     const cost = item.unit_cost ?? null;
     const csi = cleanText(item.csi_code);
     if (!csi || cost == null || cost <= 0) continue;
-    const uom = cleanText(item.uom)?.toUpperCase();
-    if (uom && !lookup.has(`${csi}|${uom}`)) lookup.set(`${csi}|${uom}`, cost);
-    if (!lookup.has(`${csi}|*`)) lookup.set(`${csi}|*`, cost);
+    const basis: CatalogRate["basis"] = item.basis === "national" || item.basis === "location_index" ? item.basis : "section";
+    const family = unitFamily(cleanText(item.uom));
+    const key = `${csiDigits(csi)}|${family ?? ""}`;
+    const current = lookup.get(key);
+    const next: CatalogRate = {
+      unitCost: cost,
+      basis,
+      unit: family,
+      laborCost: item.labor_cost ?? null,
+      materialCost: item.material_cost ?? null,
+      equipmentCost: item.equipment_cost ?? null,
+      confidence: item.confidence ?? null,
+    };
+    if (!current || basisRank(next.basis) > basisRank(current.basis)) lookup.set(key, next);
   }
   return lookup;
 }
 
-function findUnitCost(lookup: Map<string, number>, csi: string | null, uom: string | null): number | null {
+function findUnitCost(
+  lookup: Map<string, CatalogRate>,
+  csi: string | null,
+  uom: string | null,
+): { unitCost: number | null; basis: CatalogRate["basis"] | null; note: string | null; laborCost: number | null; materialCost: number | null; equipmentCost: number | null; confidence: CatalogRate["confidence"] } | null {
   if (!csi) return null;
-  if (uom && lookup.has(`${csi}|${uom}`)) return lookup.get(`${csi}|${uom}`) ?? null;
-  if (lookup.has(`${csi}|*`)) return lookup.get(`${csi}|*`) ?? null;
-  // Fall back to 2-char division prefix (allows seeding with division-level rates)
-  const div = csi.replace(/-/g, "").slice(0, 2);
-  if (uom && lookup.has(`${div}|${uom}`)) return lookup.get(`${div}|${uom}`) ?? null;
-  return lookup.get(`${div}|*`) ?? null;
+  const digits = csiDigits(csi);
+  if (!digits) return null;
+  const family = unitFamily(uom);
+  const exact = lookup.get(`${digits}|${family ?? ""}`);
+  if (exact) {
+    return {
+      unitCost: exact.unitCost,
+      basis: exact.basis,
+      laborCost: exact.laborCost,
+      materialCost: exact.materialCost,
+      equipmentCost: exact.equipmentCost,
+      confidence: exact.confidence,
+      note: exact.basis === "national"
+        ? "National average only. Confirm a local rate before this line enters the sell price."
+        : exact.basis === "location_index"
+          ? "National price adjusted by this region's location index."
+          : null,
+    };
+  }
+  const otherUnits = [...new Set(
+    [...lookup.entries()]
+      .filter(([key]) => key.startsWith(`${digits}|`) && key.slice(digits.length + 1) !== (family ?? ""))
+      .map(([, rate]) => rate.unit)
+      .filter((unit): unit is string => Boolean(unit)),
+  )];
+  if (family && otherUnits.length > 0) {
+    return {
+      unitCost: null,
+      basis: null,
+      laborCost: null,
+      materialCost: null,
+      equipmentCost: null,
+      confidence: null,
+      note: `A rate is on file for ${otherUnits.join(", ")}, not ${family}. The other unit was not applied.`,
+    };
+  }
+  return null;
 }
 
 function buildSourceNotes({
@@ -322,14 +453,17 @@ function buildSourceNotes({
   locationTag,
   quantityBasis,
   aiVision,
+  rateNote,
 }: {
   drawingRef: string | null;
   locationTag: string | null;
   quantityBasis: string | null;
   aiVision?: boolean;
+  rateNote?: string | null;
 }): string {
   const visible = [
     aiVision ? "Review required: AI vision quantity" : null,
+    rateNote,
     drawingRef ? `Source: ${drawingRef}` : null,
     locationTag ? `Location: ${locationTag}` : null,
     quantityBasis ? `Basis: ${quantityBasis}` : null,
