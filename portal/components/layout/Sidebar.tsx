@@ -147,9 +147,12 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const primaryNav = firstRun
     ? PRIMARY_NAV.filter((item) => item.href === "/dashboard" || item.href === "/dashboard/projects")
     : PRIMARY_NAV;
-  const moreTools = firstRun
-    ? [...PRIMARY_NAV.filter((item) => item.href !== "/dashboard" && item.href !== "/dashboard/projects"), ...MORE_TOOLS]
-    : MORE_TOOLS;
+  const moreTools = useMemo(
+    () => (firstRun
+      ? [...PRIMARY_NAV.filter((item) => item.href !== "/dashboard" && item.href !== "/dashboard/projects"), ...MORE_TOOLS]
+      : MORE_TOOLS),
+    [firstRun],
+  );
   const moreActive = useMemo(
     () => moreTools.some((item) => pathMatches(pathname, item)),
     [pathname, moreTools],
