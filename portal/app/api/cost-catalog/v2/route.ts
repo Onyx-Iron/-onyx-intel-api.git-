@@ -6,6 +6,8 @@ import {
   authTenantName,
 } from "@/lib/project-controls/server";
 import { resolveCostsBatch, type CostResolveResult } from "@/lib/cost/resolver";
+import { getUserRole } from "@/lib/project-controls/permissions";
+import { redactResolvedCosts } from "@/lib/project-controls/financial-redaction";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,12 +34,15 @@ function getServiceTenantId(req: NextRequest): string | null {
 // Batch resolver returning one CostResolveResult per code.
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
-    let tenantId = getServiceTenantId(req);
+    const serviceTenantId = getServiceTenantId(req);
+    let tenantId = serviceTenantId;
+    let clerkUserId: string | null = null;
     if (!tenantId) {
       const { userId, orgId, orgSlug } = await auth();
       if (!userId) {
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
       }
+      clerkUserId = userId;
       tenantId = await getOrCreateTenant(
         authTenantKey(userId, orgId),
         authTenantName(userId, orgSlug),
@@ -72,7 +77,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       })),
     );
 
-    return NextResponse.json({ items: results });
+    const items = clerkUserId
+      ? redactResolvedCosts(results as unknown as Record<string, unknown>[], await getUserRole(tenantId, clerkUserId))
+      : results;
+    return NextResponse.json({ items });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }

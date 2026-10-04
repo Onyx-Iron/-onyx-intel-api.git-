@@ -15,7 +15,7 @@ interface VendorBid {
   id: string;
   vendor_name: string;
   contact_email: string;
-  unit_price: number;
+  unit_price: number | null;
   lead_time_days: number | null;
   status: "pending" | "awarded" | "declined";
   submitted_at: string;
@@ -40,7 +40,7 @@ interface Batch {
 interface PurchaseOrder {
   id: string;
   po_number: number;
-  total_amount: number;
+  total_amount: number | null;
   status: string;
   vendor_bid_id: string;
   email_sent_at: string | null;
@@ -130,7 +130,10 @@ export default function ProcurementBoard({ projectId, projectName }: { projectId
               </div>
               <div className="divide-y divide-white/5">
                 {batch.items.map((item) => {
-                  const lowest = item.bids.length > 0 ? Math.min(...item.bids.map((b) => b.unit_price)) : null;
+                  const priced = item.bids
+                    .map((b) => b.unit_price)
+                    .filter((price): price is number => typeof price === "number" && Number.isFinite(price));
+                  const lowest = priced.length > 0 ? Math.min(...priced) : null;
                   return (
                     <div key={item.id} className="px-4 py-3">
                       <div className="flex items-center justify-between">
@@ -162,13 +165,13 @@ export default function ProcurementBoard({ projectId, projectName }: { projectId
                             {item.bids.map((b) => (
                               <tr key={b.id} className={b.unit_price === lowest ? "bg-[#CCFF00]/[0.06]" : ""}>
                                 <td className="py-1 pr-2 text-white/80">{b.vendor_name}</td>
-                                <td className={`py-1 pr-2 text-right font-mono ${b.unit_price === lowest ? "text-[#CCFF00] font-bold" : "text-white/70"}`}>
-                                  ${b.unit_price.toFixed(2)}{b.unit_price === lowest ? " ★" : ""}
+                                <td className={`py-1 pr-2 text-right font-mono ${b.unit_price != null && b.unit_price === lowest ? "text-[#CCFF00] font-bold" : "text-white/70"}`}>
+                                  {typeof b.unit_price === "number" ? `$${b.unit_price.toFixed(2)}` : "—"}{b.unit_price != null && b.unit_price === lowest ? " ★" : ""}
                                 </td>
                                 <td className="py-1 pr-2 text-right text-white/60">{b.lead_time_days != null ? `${b.lead_time_days}d` : "—"}</td>
                                 <td className="py-1 pr-2 text-white/50 uppercase text-[10px]">{b.status}</td>
                                 <td className="py-1 text-right">
-                                  {b.status === "pending" && item.status === "open" && (
+                                  {b.status === "pending" && item.status === "open" && typeof b.unit_price === "number" && (
                                     <button
                                       type="button"
                                       onClick={() => approve(b.id)}
@@ -200,7 +203,7 @@ export default function ProcurementBoard({ projectId, projectName }: { projectId
             {purchaseOrders.map((po) => (
               <div key={po.id} className="flex items-center justify-between px-4 py-2 text-xs">
                 <span className="font-mono text-white/80">PO #{po.po_number}</span>
-                <span className="font-mono text-[#CCFF00]">${Number(po.total_amount).toFixed(2)}</span>
+                <span className="font-mono text-[#CCFF00]">{typeof po.total_amount === "number" ? `$${po.total_amount.toFixed(2)}` : "—"}</span>
                 <span className="text-white/40 uppercase text-[10px]">{po.status}</span>
                 <span className="text-white/30 text-[10px]">{po.email_sent_at ? "Emailed" : "Not emailed"}</span>
               </div>

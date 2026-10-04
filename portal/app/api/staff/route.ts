@@ -3,10 +3,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { getUserRole } from "@/lib/project-controls/permissions";
+import { redactStaffItems } from "@/lib/project-controls/financial-redaction";
 import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
-import { canReadFinancial, getUserRole } from "@/lib/project-controls/permissions";
-import { MONEY_FIELDS, redactAmounts } from "@/lib/project-file/api";
 
 export const runtime = "nodejs";
 
@@ -34,8 +34,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
     if (error) return NextResponse.json({ error: `[GET /api/staff] ${error.message}` }, { status: 500 });
     const role = await getUserRole(tenantId, userId);
-    const allowed = canReadFinancial(role);
-    const items = ((data ?? []) as unknown as Record<string, unknown>[]).map((row) => redactAmounts(row, allowed, MONEY_FIELDS));
+    const items = redactStaffItems((data ?? []) as unknown as Record<string, unknown>[], role);
     return NextResponse.json({ items });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });

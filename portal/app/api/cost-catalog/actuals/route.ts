@@ -8,6 +8,8 @@ import {
   assertProjectBelongsToTenant,
 } from "@/lib/project-controls/server";
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { getUserRole } from "@/lib/project-controls/permissions";
+import { redactCostActualRows } from "@/lib/project-controls/financial-redaction";
 import { auditInsert } from "@/lib/audit";
 
 export const runtime = "nodejs";
@@ -167,7 +169,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
-    return NextResponse.json({ items: data ?? [] });
+    const role = await getUserRole(tenantId, userId);
+    const items = redactCostActualRows((data ?? []) as Record<string, unknown>[], role);
+    return NextResponse.json({ items });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
