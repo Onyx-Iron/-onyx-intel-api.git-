@@ -5,6 +5,7 @@ import { assertPermission, PermissionError } from "@/lib/project-controls/permis
 import { assertVersionEditable, getServiceDb, loadVersionForTenant, NotFoundError, VersionLockedError } from "@/lib/estimating/versioning";
 import { applyVersionPercentages, calculateEstimateTotals, calculateItem } from "@/lib/estimating/calculations";
 import { quantityForLinkedLine } from "@/lib/estimating/linked-quantity";
+import { pricingStatusAfterEdit, type PricingStatusLine } from "@/lib/estimating/pricing-status";
 import { recordEstimateAudit, recordEstimateAuditBatch } from "@/lib/estimating/audit";
 
 export const runtime = "nodejs";
@@ -193,10 +194,22 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       contingency: derived.contingency, overhead: derived.overhead, profit: derived.profit,
     });
     const isUpdate = item.id != null && existingById.has(item.id);
-    const existing = isUpdate ? existingById.get(item.id) as { quantity?: number | null; source_takeoff_id?: string | null } : undefined;
+    const existing = isUpdate ? existingById.get(item.id) as PricingStatusLine & { source_takeoff_id?: string | null } : undefined;
     const unlinking = Object.prototype.hasOwnProperty.call(item, "source_takeoff_id") && item.source_takeoff_id == null;
     const linked = Boolean(existing?.source_takeoff_id) && !unlinking;
-    const quantity = quantityForLinkedLine(existing?.quantity, item.quantity, linked ? existing?.source_takeoff_id : null, unlinking);
+    const existingQuantity = typeof existing?.quantity === "number" || existing?.quantity == null
+      ? existing?.quantity
+      : Number(existing.quantity);
+    const quantity = quantityForLinkedLine(existingQuantity, item.quantity, linked ? existing?.source_takeoff_id : null, unlinking);
+    const nextCosts: PricingStatusLine = {
+      quantity,
+      labor_cost: item.labor_cost ?? 0,
+      material_cost: item.material_cost ?? 0,
+      equipment_cost: item.equipment_cost ?? 0,
+      trucking_cost: item.trucking_cost ?? 0,
+      subcontract_cost: item.subcontract_cost ?? 0,
+      disposal_cost: item.disposal_cost ?? 0,
+    };
     return {
       id: item.id ?? crypto.randomUUID(),
       tenant_id: tenantId,
@@ -232,7 +245,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       is_alternate: item.is_alternate ?? false,
       alternate_accepted: item.alternate_accepted ?? false,
       updated_by: userId,
-      pricing_status: "manual",
+      pricing_status: pricingStatusAfterEdit(isUpdate ? existing : null, nextCosts),
       ...(isUpdate ? {} : { created_by: userId }),
     };
   });
