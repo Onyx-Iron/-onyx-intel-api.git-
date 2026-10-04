@@ -7,8 +7,8 @@ import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { utilityRecipeLines } from "@/lib/math/scope-recipes";
 import type { UtilityRunItem } from "@/lib/types/takeoff";
 import { logEvent } from "@/lib/activity";
-import { auditInsert, auditDelete } from "@/lib/audit";
-import { mirrorCivilItemsToTakeoff, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
+import { auditInsert, auditUpdate, auditDelete } from "@/lib/audit";
+import { mirrorCivilItemsToTakeoff, removeCivilMirrors, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
 
 export const runtime = "nodejs";
 
@@ -84,16 +84,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
   }
   const db = await createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const anyDb = db as any;
 
-  const rows = items.map((it) => {
+  const ids: string[] = [];
+  const trenches: unknown[] = [];
+
+  for (const it of items) {
     const embedment = calcPipeEmbedment({
       length_lf: it.run_length_lf,
       diameter_in: it.pipe_diameter_in,
       trench_width_ft: it.trench_width_ft,
       avg_depth_ft: DEFAULT_COVER_FT,
     });
-    return {
-      tenant_id: tenantId,
+    const fields = {
       project_id: it.project_id,
       page_id: it.page_id ?? null,
       cost_code: it.cost_code ?? null,
@@ -106,50 +110,84 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       run_length_lf: Number(it.run_length_lf.toFixed(2)),
       computed_trench_json: embedment,
       geometry: it.geometry,
-      created_by: userId,
-      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     };
-  });
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const anyDb = db as any;
-  const { data, error } = await anyDb.from("civil_utility_takeoffs").insert(rows).select("id");
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    let rowId = it.id ?? null;
+    let projectId = it.project_id;
+    if (rowId) {
+      const { data: existing, error: existingErr } = await anyDb
+        .from("civil_utility_takeoffs")
+        .select("id, project_id")
+        .eq("id", rowId)
+        .eq("tenant_id", tenantId)
+        .maybeSingle();
+      if (existingErr) return NextResponse.json({ error: existingErr.message }, { status: 500 });
+      if (!existing) return NextResponse.json({ error: "Utility run not found" }, { status: 404 });
+      projectId = existing.project_id;
+      fields.project_id = projectId;
 
-  for (const row of data ?? []) {
-    auditInsert({
-      tenant_id: tenantId,
-      user_id: userId,
-      table_name: "civil_utility_takeoffs",
-      record_id: row.id,
-      new_values: { project_id: items[0].project_id },
+      const { error: updateErr } = await anyDb
+        .from("civil_utility_takeoffs")
+        .update(fields)
+        .eq("id", rowId)
+        .eq("tenant_id", tenantId);
+      if (updateErr) return NextResponse.json({ error: updateErr.message }, { status: 500 });
+      auditUpdate({
+        tenant_id: tenantId,
+        user_id: userId,
+        table_name: "civil_utility_takeoffs",
+        record_id: rowId,
+        old_values: { project_id: existing.project_id },
+        new_values: fields as unknown as Record<string, unknown>,
+      });
+    } else {
+      const { data, error } = await anyDb
+        .from("civil_utility_takeoffs")
+        .insert({ ...fields, tenant_id: tenantId, created_by: userId, created_at: new Date().toISOString() })
+        .select("id")
+        .single();
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      rowId = data.id as string;
+      auditInsert({
+        tenant_id: tenantId,
+        user_id: userId,
+        table_name: "civil_utility_takeoffs",
+        record_id: rowId,
+        new_values: { project_id: it.project_id },
+      });
+    }
+
+    const takeoffRows: CivilMirrorRow[] = utilityRecipeLines({
+      name: it.system_type,
+      system: it.system_type,
+      diameter_in: Math.round(it.pipe_diameter_in),
+      length_lf: Number(it.run_length_lf.toFixed(2)),
+      embedment,
+      pipe_csi: it.cost_code,
     });
+    await mirrorCivilItemsToTakeoff(
+      anyDb,
+      tenantId,
+      projectId,
+      it.page_id ?? null,
+      "civil_utility_takeoffs",
+      rowId,
+      takeoffRows,
+      userId,
+    );
+    ids.push(rowId);
+    trenches.push(embedment);
   }
 
   const projectId = items[0].project_id;
-
-  // Mirror into takeoff_items so pipe runs feed the estimate — this table
-  // exists to carry trench-engineering inputs an estimate line can't hold,
-  // but the computed excavation/pipe quantities themselves need to reach
-  // pricing the same way any other takeoff finding does.
-  const takeoffRows: CivilMirrorRow[] = rows.flatMap((r) =>
-    utilityRecipeLines({
-      name: r.system_type,
-      system: r.system_type,
-      diameter_in: r.pipe_diameter_in,
-      length_lf: r.run_length_lf,
-      embedment: r.computed_trench_json,
-      pipe_csi: r.cost_code,
-    }).map((line) => ({ ...line, drawing_ref: null })),
-  );
-  await mirrorCivilItemsToTakeoff(anyDb, tenantId, projectId, items[0].page_id ?? null, "civil_utility_takeoffs", (data?.[0]?.id as string) ?? "", takeoffRows, userId);
 
   void logEvent({
     projectId,
     tenantId,
     userId,
     entityType: "takeoff",
-    entityId: (data?.[0]?.id as string) ?? projectId,
+    entityId: ids[0] ?? projectId,
     action: "created",
     title: `Utility takeoff: ${items.length} pipe run${items.length === 1 ? "" : "s"} saved`,
     meta: { count: items.length },
@@ -157,9 +195,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   return NextResponse.json({
     ok: true,
-    inserted: rows.length,
-    ids: (data ?? []).map((d: { id: string }) => d.id),
-    trench: rows.map((r) => r.computed_trench_json),
+    inserted: ids.length,
+    ids,
+    trench: trenches,
   });
 }
 
@@ -182,6 +220,13 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     .eq("id", id)
     .eq("tenant_id", tenantId)
     .maybeSingle();
+
+  await removeCivilMirrors(anyDb, tenantId, {
+    sourceTable: "civil_utility_takeoffs",
+    sourceId: id,
+    projectId: before?.project_id,
+  }, userId);
+
   const { error } = await anyDb
     .from("civil_utility_takeoffs")
     .delete()

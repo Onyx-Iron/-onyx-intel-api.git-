@@ -6,7 +6,7 @@ import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditInsert, auditUpdate, auditDelete } from "@/lib/audit";
 import { calcPipeEmbedment, type PipeRunInput } from "@/lib/math/civil-scope";
 import { utilityRecipeLines } from "@/lib/math/scope-recipes";
-import { mirrorCivilItemsToTakeoff, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
+import { mirrorCivilItemsToTakeoff, removeCivilMirrors, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
 
 export const runtime = "nodejs";
 
@@ -144,6 +144,25 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     new_values: (updated ?? { ...patch }) as unknown as Record<string, unknown>,
   });
 
+  const saved = updated ?? { ...existing, ...patch, computed };
+  const takeoffRows: CivilMirrorRow[] = utilityRecipeLines({
+    name: String(saved.name ?? existing.name ?? ""),
+    system: String(saved.system ?? existing.system ?? ""),
+    diameter_in: Number(saved.diameter_in ?? existing.diameter_in),
+    length_lf: Number(saved.length_lf ?? existing.length_lf),
+    embedment: saved.computed,
+  });
+  await mirrorCivilItemsToTakeoff(
+    anyDb,
+    tenantId,
+    existing.project_id,
+    saved.page_id ?? existing.page_id ?? null,
+    "civil_pipe_runs",
+    id,
+    takeoffRows,
+    userId,
+  );
+
   return NextResponse.json({ ok: true, computed });
 }
 
@@ -161,6 +180,12 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
 
   const { data: before } = await anyDb.from("civil_pipe_runs")
     .select("*").eq("id", id).eq("tenant_id", tenantId).maybeSingle();
+
+  await removeCivilMirrors(anyDb, tenantId, {
+    sourceTable: "civil_pipe_runs",
+    sourceId: id,
+    projectId: before?.project_id,
+  }, userId);
 
   const { error } = await anyDb.from("civil_pipe_runs").delete().eq("id", id).eq("tenant_id", tenantId);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

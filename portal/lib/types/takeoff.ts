@@ -80,6 +80,8 @@ export interface CalibrationUpsertBody {
 export type SystemType = "Sanitary Sewer" | "Storm Drain" | "Water Line" | "Fire Line";
 
 export interface UtilityRunItem {
+  /** Set when re-saving a run that already has a row. Omit for a new run. */
+  id?: string | null;
   project_id: string;
   page_id?: string | null;
   cost_code?: string | null;

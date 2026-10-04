@@ -1517,6 +1517,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         coordinateSpace === "page_space" ? points : pointsToPageSpace(points, renderScale);
 
       let manualSaveRequest: Promise<Response> | null = null;
+      let utilitySaveRequest: Promise<Response> | null = null;
       if (unsaved.length > 0) {
         const items = unsaved.map((s) => ({
           project_id: projectId,
@@ -1556,13 +1557,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           trench_width_ft: r.inputs.trench_width_ft,
           run_length_lf: r.run_length_lf,
           client_key: r.key,
+          id: r.id ?? null,
           geometry: { points: toPersistedPoints(r.points, r.coordinateSpace), coordinate_space: "page_space", page_number: pageNumber },
         }));
-        requests.push(fetch("/api/takeoff/canvas/utility", {
+        utilitySaveRequest = fetch("/api/takeoff/canvas/utility", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ items }),
-        }));
+        });
+        requests.push(utilitySaveRequest);
       }
 
       if (unsavedTopo.length > 0) {
@@ -1633,10 +1636,23 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           const manualData = await (await manualSaveRequest).json().catch(() => ({})) as { items?: Array<{ id: string; client_key: string; row_version: number }> };
           byClientKey = new Map((manualData.items ?? []).map((it) => [it.client_key, { id: it.id, row_version: it.row_version }]));
         }
+        let utilityIds: string[] = [];
+        if (utilitySaveRequest) {
+          const utilityData = await (await utilitySaveRequest).json().catch(() => ({})) as { ids?: string[] };
+          utilityIds = utilityData.ids ?? [];
+        }
         setShapes((prev) => prev.map((s) => (s.saved
           ? s
           : { ...s, points: toPersistedPoints(s.points, s.coordinateSpace), coordinateSpace: "page_space", saved: true, ...(byClientKey.get(s.key) ?? {}) })));
-        setUtilityRuns((prev) => prev.map((r) => (r.saved ? r : { ...r, points: toPersistedPoints(r.points, r.coordinateSpace), coordinateSpace: "page_space", saved: true })));
+        setUtilityRuns((prev) => {
+          let utilityIndex = 0;
+          return prev.map((r) => {
+            if (r.saved) return r;
+            const id = utilityIds[utilityIndex] ?? r.id;
+            utilityIndex += 1;
+            return { ...r, id, points: toPersistedPoints(r.points, r.coordinateSpace), coordinateSpace: "page_space", saved: true };
+          });
+        });
         setTopoNodes((prev) => prev.map((n) => (n.saved ? n : { ...n, points: toPersistedPoints(n.points, n.coordinateSpace), coordinateSpace: "page_space", saved: true })));
         setAreaBounds((prev) => prev.map((a) => (a.saved ? a : { ...a, points: toPersistedPoints(a.points, a.coordinateSpace), coordinateSpace: "page_space", saved: true })));
         setWallRuns((prev) => prev.map((w) => (w.saved ? w : { ...w, points: toPersistedPoints(w.points, w.coordinateSpace), coordinateSpace: "page_space", saved: true })));
@@ -1663,8 +1679,32 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   function updateUtilityCostCode(key: string, code: string) {
     setUtilityRuns((prev) => prev.map((r) => (r.key === key ? { ...r, cost_code: code, saved: false } : r)));
   }
-  function removeUtilityRun(key: string) {
+  async function removeUtilityRun(key: string) {
+    const run = utilityRuns.find((r) => r.key === key);
+    if (run?.id) {
+      const res = await fetch(`/api/takeoff/canvas/utility?id=${encodeURIComponent(run.id)}`, { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({})) as { error?: string };
+        alert(`Delete failed: ${err.error ?? res.status}`);
+        return;
+      }
+    }
     setUtilityRuns((prev) => prev.filter((r) => r.key !== key));
+  }
+  async function removeWallRun(key: string) {
+    const wall = wallRuns.find((w) => w.key === key);
+    if (wall?.saved) {
+      const res = await fetch(
+        `/api/takeoff/canvas/wall?client_key=${encodeURIComponent(key)}&project_id=${encodeURIComponent(projectId)}`,
+        { method: "DELETE" },
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({})) as { error?: string };
+        alert(`Delete failed: ${err.error ?? res.status}`);
+        return;
+      }
+    }
+    setWallRuns((prev) => prev.filter((x) => x.key !== key));
   }
   function removeTopoNode(key: string) {
     setTopoNodes((prev) => prev.filter((n) => n.key !== key));
@@ -2666,7 +2706,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                       {w.length_lf.toFixed(1)} <span className="text-white/40">LF</span>
                       <span className="text-white/40 text-xs"> · {w.height_ft}&apos; H · {w.thickness_in}&quot;</span>
                     </div>
-                    <button type="button" onClick={() => setWallRuns((prev) => prev.filter((x) => x.key !== w.key))} className="text-[10px] text-white/30 hover:text-red-400">✕</button>
+                    <button type="button" onClick={() => void removeWallRun(w.key)} className="text-[10px] text-white/30 hover:text-red-400">✕</button>
                   </div>
                   <div className="mt-1 space-y-0.5 text-[10px] font-mono text-white/50">
                     {recipe.map((line) => (
