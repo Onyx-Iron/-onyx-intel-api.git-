@@ -42,20 +42,23 @@ export default function OnboardingTour() {
   const hasProject = (projectCtx?.projects.length ?? 0) > 0;
   const projectId = projectCtx?.activeProjectId ?? projectCtx?.projects[0]?.id ?? null;
 
-  const [welcome, setWelcome] = useState(false);
+  const [welcome, setWelcome] = useState(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return !window.localStorage.getItem(WELCOME_KEY);
+    } catch {
+      return false;
+    }
+  });
   const [flags, setFlags] = useState<FirstRunFlags>(() => readFirstRun());
   const [highlight, setHighlight] = useState<DOMRect | null>(null);
 
+  if (hasProject && !flags.project_created) {
+    setFlags(patchFirstRun({ project_created: true }));
+  }
+
   const step = nextFirstRunStep(flags, hasProject);
   const done = isFirstRunComplete(flags, hasProject);
-
-  useEffect(() => {
-    try {
-      if (!window.localStorage.getItem(WELCOME_KEY)) setWelcome(true);
-    } catch {
-      // ignore
-    }
-  }, []);
 
   useEffect(() => {
     const sync = () => setFlags(readFirstRun());
@@ -67,14 +70,9 @@ export default function OnboardingTour() {
     };
   }, []);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- measure highlight target on the current page */
   useEffect(() => {
-    if (hasProject && !flags.project_created) {
-      setFlags(patchFirstRun({ project_created: true }));
-    }
-  }, [hasProject, flags.project_created]);
-
-  useEffect(() => {
-    if (welcome || done || step === "done") {
+    if (welcome || done || step === "done" || step === "welcome") {
       setHighlight(null);
       return;
     }
@@ -92,6 +90,7 @@ export default function OnboardingTour() {
     setHighlight(rect);
     el.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [welcome, done, step, pathname]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   function dismissWelcome() {
     try {

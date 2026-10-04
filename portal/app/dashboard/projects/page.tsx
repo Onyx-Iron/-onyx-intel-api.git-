@@ -138,7 +138,7 @@ function ProjectsPageInner() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [showForm, setShowForm] = useState(false);
+  const [showForm, setShowForm] = useState(() => searchParams.get("new") === "1");
 
   const loadProjects = useCallback(async () => {
     setLoading(true);
@@ -162,9 +162,9 @@ function ProjectsPageInner() {
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { loadProjects(); }, [loadProjects]);
 
-  useEffect(() => {
-    if (searchParams.get("new") === "1") setShowForm(true);
-  }, [searchParams]);
+  if (searchParams.get("new") === "1" && !showForm) {
+    setShowForm(true);
+  }
 
   return (
     <div>
