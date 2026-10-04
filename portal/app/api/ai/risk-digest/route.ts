@@ -2,7 +2,9 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { canReadFinancial, getUserRole } from "@/lib/project-controls/permissions";
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { redactRiskDigest } from "@/lib/ai/risk-digest";
 import { headerSafe } from "@/lib/http";
 import { logEvent } from "@/lib/activity";
 import { auditInsert } from "@/lib/audit";
@@ -166,7 +168,20 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       .limit(1)
       .maybeSingle();
 
-    return NextResponse.json({ digest: data ?? null });
+    if (!data) return NextResponse.json({ digest: null });
+
+    const role = await getUserRole(tenantId, userId);
+    const bullets = Array.isArray(data.bullets)
+      ? data.bullets.filter((bullet): bullet is string => typeof bullet === "string")
+      : [];
+    const snapshot = data.data_snapshot && typeof data.data_snapshot === "object" && !Array.isArray(data.data_snapshot)
+      ? data.data_snapshot as Record<string, unknown>
+      : null;
+    const digest = redactRiskDigest(
+      { ...data, bullets, data_snapshot: snapshot },
+      canReadFinancial(role),
+    );
+    return NextResponse.json({ digest });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
@@ -184,6 +199,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const denied = await requirePermission(tenantId, userId, "field", "write");
     if (denied) return denied;
+    // Generation embeds budget and estimate in the model prompt and the stored
+    // bullets. Field write alone would let a superintendent or subcontractor
+    // produce that text on the project overview.
+    const deniedMoney = await requirePermission(tenantId, userId, "financial", "read");
+    if (deniedMoney) return deniedMoney;
     try {
       await assertProjectBelongsToTenant(project_id, tenantId);
     } catch (err) {
