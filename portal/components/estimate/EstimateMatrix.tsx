@@ -56,8 +56,8 @@ interface FinancialSettings {
 // sliders, and the assembly-mix pricing action are hidden/disabled, while
 // quantities and descriptions (which mirror drawing/field takeoff data) stay
 // visible so these roles can still confirm scope.
-type RestrictedRole = "FieldSuperintendent" | "ClientView";
-const RESTRICTED_ROLES: ReadonlySet<string> = new Set<RestrictedRole>(["FieldSuperintendent", "ClientView"]);
+type RestrictedRole = "FieldSuperintendent" | "Subcontractor" | "ClientView";
+const RESTRICTED_ROLES: ReadonlySet<string> = new Set<RestrictedRole>(["FieldSuperintendent", "Subcontractor", "ClientView"]);
 
 interface Props {
   projectId: string;
@@ -86,24 +86,25 @@ const ESTIMATE_ROW_HEIGHT_PX = 36;
 // rounded) so a round-trip load -> save reproduces the same dollar totals.
 function itemToRow(it: {
   id: string; cost_code: string | null; csi_code?: string | null; description: string | null; quantity: number | null; uom: string | null;
-  labor_cost: number; material_cost: number; equipment_cost: number; trucking_cost: number;
-  subcontract_cost: number; disposal_cost: number; notes: string | null; sort_order?: number;
+  labor_cost: number | null; material_cost: number | null; equipment_cost: number | null; trucking_cost: number | null;
+  subcontract_cost: number | null; disposal_cost: number | null; notes: string | null; sort_order?: number;
   item_type?: string | null; drawing_ref?: string | null; location_tag?: string | null;
   source_takeoff_id?: string | null; pricing_status?: string | null; quantity_basis?: string | null;
 }, index: number): EstimateRow {
   const q = it.quantity && it.quantity !== 0 ? it.quantity : 1;
+  const perUnit = (value: number | null) => (typeof value === "number" && Number.isFinite(value) ? value / q : 0);
   return {
     id: it.id,
     cost_code: it.csi_code || it.cost_code || "",
     description: it.description ?? "",
     quantity: it.quantity ?? 0,
     unit: it.uom ?? "EA",
-    labor_unit: it.labor_cost / q,
-    material_unit: it.material_cost / q,
-    equipment_unit: it.equipment_cost / q,
-    subcontractor_unit: it.subcontract_cost / q,
-    trucking_unit: it.trucking_cost / q,
-    disposal_unit: it.disposal_cost / q,
+    labor_unit: perUnit(it.labor_cost),
+    material_unit: perUnit(it.material_cost),
+    equipment_unit: perUnit(it.equipment_cost),
+    subcontractor_unit: perUnit(it.subcontract_cost),
+    trucking_unit: perUnit(it.trucking_cost),
+    disposal_unit: perUnit(it.disposal_cost),
     notes: it.notes ?? "",
     sort_order: it.sort_order ?? index,
     item_type: normalizeLineType(it.item_type),
@@ -134,6 +135,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   const [seedResult, setSeedResult] = useState<string | null>(null);
   const [assemblyModalOpen, setAssemblyModalOpen] = useState(false);
   const [role, setRole] = useState<string | null>(null);
+  const [moneyHidden, setMoneyHidden] = useState(false);
   const [versionId, setVersionId] = useState<string | null>(null);
   const [versionNumber, setVersionNumber] = useState<number | null>(null);
   const [versionStatus, setVersionStatus] = useState<string | null>(null);
@@ -190,7 +192,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     overscan: 12,
   });
 
-  const pricingRestricted = role != null && RESTRICTED_ROLES.has(role);
+  const pricingRestricted = moneyHidden || (role != null && RESTRICTED_ROLES.has(role));
   const showMoney = moneyView === "priced" && !pricingRestricted;
   const matrixColCount = 8 + (showMoney ? UNIT_COL_KEYS.length + 1 : 0);
   const locked = versionStatus === "approved" || versionStatus === "superseded" || versionStatus === "void";
@@ -236,16 +238,20 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
       const ver = await verRes.json() as {
         version: { id: string; version_number: number; status: string; contingency_pct: number | null; overhead_pct: number | null; profit_pct: number | null };
         items: Parameters<typeof itemToRow>[0][];
+        financials_redacted?: boolean;
       };
       setVersionId(ver.version.id);
       setVersionNumber(ver.version.version_number);
       setVersionStatus(ver.version.status);
+      setMoneyHidden(Boolean(ver.financials_redacted));
       setRows(ver.items.map((it, i) => itemToRow(it, i)));
-      setSettings({
-        overhead_pct: numericOr(ver.version.overhead_pct, 10),
-        profit_pct:   numericOr(ver.version.profit_pct, 15),
-        contingency_pct: numericOr(ver.version.contingency_pct, 5),
-      });
+      setSettings(ver.financials_redacted
+        ? { overhead_pct: 0, profit_pct: 0, contingency_pct: 0 }
+        : {
+          overhead_pct: numericOr(ver.version.overhead_pct, 10),
+          profit_pct:   numericOr(ver.version.profit_pct, 15),
+          contingency_pct: numericOr(ver.version.contingency_pct, 5),
+        });
     } catch (e) {
       console.error("[estimate] load failed", e);
     } finally {
@@ -768,7 +774,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
               <option value="quantity">Quantity</option>
             </select>
           </label>
-          {groupSubtotals.map((group) => (
+          {!pricingRestricted && groupSubtotals.map((group) => (
             <span key={group.label} className="text-white/50">{group.label}: ${fmt(group.total)}</span>
           ))}
         </div>
@@ -1033,8 +1039,8 @@ function SliderControl({ label, value, onChange, tone, disabled }: { label: stri
         <span className={`text-sm font-mono font-bold ${tone}`}>{disabled ? "•••" : `${value.toFixed(1)}%`}</span>
       </div>
       <div className="flex items-center gap-2">
-        <input type="range" min={0} max={50} step={0.5} value={value} disabled={disabled} onChange={(e) => onChange(Number(e.target.value))} className="flex-1 accent-[#CCFF00] disabled:cursor-not-allowed" />
-        <input type="number" min={0} max={100} step={0.1} value={value} disabled={disabled} onChange={(e) => onChange(Number(e.target.value))} className="w-16 bg-black/40 border border-white/10 rounded px-1.5 py-1 text-xs font-mono text-right focus:outline-none focus:border-[#CCFF00] disabled:cursor-not-allowed" />
+        <input type="range" min={0} max={50} step={0.5} value={disabled ? 0 : value} disabled={disabled} onChange={(e) => onChange(Number(e.target.value))} className="flex-1 accent-[#CCFF00] disabled:cursor-not-allowed" />
+        <input type="number" min={0} max={100} step={0.1} value={disabled ? "" : value} disabled={disabled} onChange={(e) => onChange(Number(e.target.value))} className="w-16 bg-black/40 border border-white/10 rounded px-1.5 py-1 text-xs font-mono text-right focus:outline-none focus:border-[#CCFF00] disabled:cursor-not-allowed" />
       </div>
     </label>
   );

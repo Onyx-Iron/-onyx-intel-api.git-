@@ -1,10 +1,32 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { canReadFinancial, getUserRole } from "@/lib/project-controls/permissions";
 import { getServiceDb, loadVersionForTenant, NotFoundError } from "@/lib/estimating/versioning";
-import { diffEstimateVersions, type VersionDiffItem } from "@/lib/estimating/version-diff";
+import { diffEstimateVersions, type VersionDiff, type VersionDiffItem } from "@/lib/estimating/version-diff";
 
 export const runtime = "nodejs";
+
+function stripDiffMoney(diff: VersionDiff): VersionDiff {
+  const stripItem = (item: VersionDiffItem): VersionDiffItem => ({
+    ...item,
+    unit_cost: null,
+    total_price: null,
+  });
+  return {
+    added: diff.added.map(stripItem),
+    removed: diff.removed.map(stripItem),
+    unchangedCount: diff.unchangedCount,
+    changed: diff.changed.map((change) => ({
+      ...change,
+      left: stripItem(change.left),
+      right: stripItem(change.right),
+      changes: change.changes.filter((kind) => kind === "quantity" || kind === "source"),
+      unitCostDelta: null,
+      totalDelta: null,
+    })),
+  };
+}
 
 async function loadItems(db: Awaited<ReturnType<typeof getServiceDb>>, versionId: string): Promise<VersionDiffItem[]> {
   const { data, error } = await db
@@ -38,11 +60,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       loadItems(db, leftVersion.id),
       loadItems(db, rightVersion.id),
     ]);
+    const diff = diffEstimateVersions(leftItems, rightItems);
+    const canRead = canReadFinancial(await getUserRole(tenantId, userId));
     return NextResponse.json({
       left: leftVersion.id,
       right: rightVersion.id,
       tenant_id: tenantId,
-      diff: diffEstimateVersions(leftItems, rightItems),
+      diff: canRead ? diff : stripDiffMoney(diff),
+      financials_redacted: !canRead,
     });
   } catch (e) {
     if (e instanceof NotFoundError) return NextResponse.json({ error: e.message }, { status: 404 });

@@ -6,6 +6,8 @@ import { authTenantKey, authTenantName, getOrCreateTenant, assertProjectBelongsT
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { auditInsert } from "@/lib/audit";
 import { generateProjectStatusReport } from "@/lib/reports/project-status";
+import { canReadFinancial, getUserRole } from "@/lib/project-controls/permissions";
+import { redactEstimateQuality, redactReportSummary } from "@/lib/project-controls/financial-redaction";
 import { createServiceClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -41,8 +43,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const { data, error, count } = await query;
     if (error) return NextResponse.json({ error: `[GET /api/reports] ${error.message}` }, { status: 500 });
 
+    const showFinancial = canReadFinancial(await getUserRole(tenantId, userId));
+    const reports = ((data ?? []) as Array<{ summary?: { estimate_value?: number | null } | null }>).map((row) => ({
+      ...row,
+      summary: redactReportSummary(row.summary, showFinancial),
+      financials_redacted: !showFinancial,
+    }));
+
     return NextResponse.json({
-      reports: data ?? [],
+      reports,
       pagination: paginationMeta(count ?? 0, page, limit),
     });
   } catch (err: unknown) {
@@ -68,9 +77,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     await assertProjectBelongsToTenant(projectId, tenantId);
     const db = await createServiceClient();
 
+    const showFinancial = canReadFinancial(await getUserRole(tenantId, userId));
     let generated;
     try {
-      generated = await generateProjectStatusReport(tenantId, projectId);
+      generated = await generateProjectStatusReport(tenantId, projectId, { includeFinancials: showFinancial });
     } catch (e) {
       if (e instanceof NoProviderError) {
         return NextResponse.json({ error: e.message, code: "NO_PROVIDER", available: availableProviders() }, { status: 503 });
@@ -92,14 +102,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       summary: {
         project_name: generated.project.name,
         completion: generated.completion,
-        estimate_value: generated.estimate_value,
+        estimate_value: showFinancial ? generated.estimate_value : null,
         estimate_ready: generated.estimate_quality.ready_for_proposal,
         risk_score: generated.estimate_quality.risk_score,
       },
       inputs: {
         completion: generated.completion,
-        estimate_value: generated.estimate_value,
-        estimate_quality: generated.estimate_quality,
+        estimate_value: showFinancial ? generated.estimate_value : null,
+        estimate_quality: showFinancial ? generated.estimate_quality : redactEstimateQuality(generated.estimate_quality),
       },
       generated_by: userId,
       generated_at: new Date().toISOString(),

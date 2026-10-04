@@ -1,7 +1,8 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
-import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
+import { assertPermission, canReadFinancial, getUserRole, PermissionError, redactFinancialFields } from "@/lib/project-controls/permissions";
+import { ESTIMATE_FINANCIAL_FIELDS, VERSION_MARKUP_FIELDS } from "@/lib/project-controls/financial-redaction";
 import { assertVersionEditable, getServiceDb, loadVersionForTenant, NotFoundError, VersionLockedError } from "@/lib/estimating/versioning";
 import { applyVersionPercentages, calculateEstimateTotals, calculateItem } from "@/lib/estimating/calculations";
 import { quantityForLinkedLine } from "@/lib/estimating/linked-quantity";
@@ -76,20 +77,39 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     .order("created_at", { ascending: true });
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  const totals = calculateEstimateTotals(
-    (items ?? []).map((it: Record<string, unknown>) => ({
-      totalDirectCost: it.total_direct_cost as number,
-      indirectCost: it.indirect_cost as number,
-      contingency: it.contingency as number,
-      overhead: it.overhead as number,
-      profit: it.profit as number,
-      totalPrice: it.total_price as number,
-      isAlternate: it.is_alternate as boolean,
-      alternateAccepted: it.alternate_accepted as boolean,
-    })),
+  const role = await getUserRole(tenantId, userId);
+  const canRead = canReadFinancial(role);
+  const visibleItems = redactFinancialFields(
+    (items ?? []) as Record<string, unknown>[],
+    role,
+    ESTIMATE_FINANCIAL_FIELDS,
   );
+  const [visibleVersion] = redactFinancialFields(
+    [version as unknown as Record<string, unknown>],
+    role,
+    VERSION_MARKUP_FIELDS,
+  );
+  const totals = canRead
+    ? calculateEstimateTotals(
+      (items ?? []).map((it: Record<string, unknown>) => ({
+        totalDirectCost: it.total_direct_cost as number,
+        indirectCost: it.indirect_cost as number,
+        contingency: it.contingency as number,
+        overhead: it.overhead as number,
+        profit: it.profit as number,
+        totalPrice: it.total_price as number,
+        isAlternate: it.is_alternate as boolean,
+        alternateAccepted: it.alternate_accepted as boolean,
+      })),
+    )
+    : null;
 
-  return NextResponse.json({ version, items: items ?? [], totals });
+  return NextResponse.json({
+    version: visibleVersion,
+    items: visibleItems,
+    totals,
+    financials_redacted: !canRead,
+  });
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }): Promise<NextResponse> {

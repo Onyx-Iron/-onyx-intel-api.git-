@@ -1,3 +1,5 @@
+import type { EstimateQualityReport } from "@/lib/estimating/estimate-qc";
+
 // Field lists for server-side financial redaction (frontend-backend
 // reconciliation, item 4). Kept separate from permissions.ts so each API
 // route only needs to name which of its own columns are financial —
@@ -50,6 +52,28 @@ export const RESOLVED_COST_FINANCIAL_FIELDS = [
   "unit_cost", "labor_cost", "material_cost", "equipment_cost",
 ] as const;
 
+/** estimate_versions columns that reveal markup strategy. */
+export const VERSION_MARKUP_FIELDS = [
+  "contingency_pct", "overhead_pct", "profit_pct",
+] as const;
+
+/** projects columns a restricted role must never receive. */
+export const PROJECT_FINANCIAL_FIELDS = ["budget"] as const;
+
+/** Keys that show up in audit old/new snapshots and activity-adjacent JSON. */
+export const AUDIT_MONEY_KEYS = [
+  ...ESTIMATE_FINANCIAL_FIELDS,
+  ...CHANGE_ORDER_FINANCIAL_FIELDS,
+  ...INVOICE_FINANCIAL_FIELDS,
+  ...PROJECT_FINANCIAL_FIELDS,
+  "unit_price",
+  "total_amount",
+  "estimated_unit_cost",
+  "actual_unit_cost",
+  "hourly_rate",
+  "bid_value",
+] as const;
+
 type MoneyRow = Record<string, unknown>;
 
 export function redactStaffItems<T extends MoneyRow>(rows: T[], role: Role): T[] {
@@ -92,5 +116,60 @@ export function redactProcurementRead<TItem extends MoneyRow & { bids?: MoneyRow
       })),
     })),
     purchaseOrders: redactFinancialFields(purchaseOrders, role, PURCHASE_ORDER_FINANCIAL_FIELDS),
+  };
+}
+
+export function redactAuditSnapshot(value: unknown, canRead: boolean): unknown {
+  if (canRead || value == null || typeof value !== "object" || Array.isArray(value)) return value;
+  const copy = { ...(value as Record<string, unknown>) };
+  for (const key of AUDIT_MONEY_KEYS) {
+    if (key in copy) copy[key] = null;
+  }
+  return copy;
+}
+
+export interface OverviewMoney {
+  estimate_value: number | null;
+  pending_change_order_value: number | null;
+  approved_change_order_value: number | null;
+}
+
+/** Project summary dollars. Restricted roles get nulls, not zeros, so the UI does not show a fake $0 bid. */
+export function overviewMoneyForReader(
+  canRead: boolean,
+  money: { estimate_value: number; pending_change_order_value: number; approved_change_order_value: number },
+): OverviewMoney {
+  if (canRead) return money;
+  return {
+    estimate_value: null,
+    pending_change_order_value: null,
+    approved_change_order_value: null,
+  };
+}
+
+export function redactReportSummary<T extends { estimate_value?: number | null }>(
+  summary: T | null | undefined,
+  canRead: boolean,
+): T | null | undefined {
+  if (summary == null || canRead) return summary;
+  return { ...summary, estimate_value: null };
+}
+
+/** Drops sell-price rollups from estimate QC. Counts and blockers stay. */
+export function redactEstimateQuality(quality: EstimateQualityReport): Omit<EstimateQualityReport, "totals" | "audit_items"> & {
+  totals: null;
+  audit_items: Array<Omit<EstimateQualityReport["audit_items"][number], "total">>;
+} {
+  return {
+    counts: quality.counts,
+    blockers: quality.blockers,
+    risk_score: quality.risk_score,
+    ready_for_proposal: quality.ready_for_proposal,
+    totals: null,
+    audit_items: quality.audit_items.map((item) => ({
+      id: item.id,
+      description: item.description,
+      reasons: item.reasons,
+    })),
   };
 }
