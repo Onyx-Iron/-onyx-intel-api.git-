@@ -692,11 +692,49 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // original render-scale-dependent scale_ratio unchanged (STEP 4 — never
   // fabricate a page-space factor for a calibration that predates one).
   const scale = useMemo(() => {
-    if (calibration?.page_space_scale_factor != null && renderScale > 0) {
+    // A title-block suggestion stores a factor while status is still
+    // needs_verification. Only a confirmed scale may turn page points into feet.
+    if (calibration?.status === "verified" && calibration.page_space_scale_factor != null && renderScale > 0) {
       return calibration.page_space_scale_factor / renderScale;
     }
     return calibration?.scale_ratio ?? 1;
   }, [calibration, renderScale]);
+
+  const pricedScaleKey = useRef<string | null>(null);
+  const scaleSnapshotTaken = useRef(false);
+  useEffect(() => {
+    if (!calibrationLoaded) return;
+    const factor = calibration?.status === "verified" ? calibration.page_space_scale_factor : null;
+    const scaleKey = factor == null ? null : `${pageId}:${factor}`;
+    if (!scaleSnapshotTaken.current) {
+      scaleSnapshotTaken.current = true;
+      pricedScaleKey.current = scaleKey;
+      return;
+    }
+    if (factor == null || scaleKey == null || renderScale <= 0 || pricedScaleKey.current === scaleKey) return;
+    setShapes((prev) => {
+      if (prev.length === 0) return prev;
+      pricedScaleKey.current = scaleKey;
+      let changed = false;
+      const next = prev.map((shape) => {
+        // Saved legacy-pixel rows keep the quantity they were drawn with.
+        // Page-space rows, and drawings not yet saved, follow the confirmed factor.
+        if (shape.saved && shape.coordinateSpace !== "page_space") return shape;
+        const points = shape.coordinateSpace === "page_space" ? shape.points : pointsToPageSpace(shape.points, renderScale);
+        const measured = quantityForMeasurement(
+          shape.tool,
+          points,
+          factor,
+          shape.tool === "perimeter" ? { measure: "perimeter" } : null,
+        );
+        if (measured == null || Math.abs(measured - shape.quantity) < 1e-6) return shape;
+        changed = true;
+        return { ...shape, quantity: measured };
+      });
+      return changed ? next : prev;
+    });
+  }, [calibration, calibrationLoaded, pageId, renderScale]);
+
   const pixelDistance = (a: Pt, b: Pt) => Math.hypot(b.x - a.x, b.y - a.y);
   const totalLen = (pts: Pt[]) => {
     let s = 0;

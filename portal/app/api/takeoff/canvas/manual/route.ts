@@ -187,9 +187,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       if (verified) anyVerifiedCalibrationUsed = true;
     } else if (it.page_id) {
       // No verified page-space calibration for this sheet — cannot
-      // authoritatively recompute, so the submitted quantity is trusted
-      // as-is (STEP 4/18: never fabricate a scale that doesn't exist).
-      // The save function withholds estimate sync until the sheet has a verified scale.
+      // authoritatively recompute (STEP 4/18: never fabricate a scale).
+      // manual_takeoffs.quantity stays the client number because that column
+      // is NOT NULL. The mirror row that estimate sync reads is nulled until
+      // the sheet is verified and the geometry is recomputed.
       calibrationWarning = calibration
         ? "this sheet's calibration is legacy/unverified — recalibrate before this measurement can sync to the estimate"
         : "this sheet has no calibration yet — recalibrate before this measurement can sync to the estimate";

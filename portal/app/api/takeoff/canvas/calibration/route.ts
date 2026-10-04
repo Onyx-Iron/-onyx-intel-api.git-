@@ -4,7 +4,9 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant, assertPageBelongsToProject } from "@/lib/project-controls/server";
 import type { CalibrationPoint, CalibrationUpsertBody } from "@/lib/types/takeoff";
 import { previewRecalibration, recalibrationNeedsConfirm } from "@/lib/takeoff/recalibration";
+import { FORMULA_VERSION, quantityFromPageGeometry } from "@/lib/takeoff/canvas/quantity";
 import { matchScalePreset, pageSpaceFactorForPreset } from "@/lib/takeoff/scale-presets";
+import { processOutboxBatch } from "@/lib/estimating/outbox-worker";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 
 export const runtime = "nodejs";
@@ -199,6 +201,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     actor_user_id: userId, before: before ?? null, after: data,
   });
 
+  let recomputed = false;
   if (body.apply_to_drafts === true) {
     const draftRows = (drafts ?? []) as Array<{ id: string; geometry: unknown; unit?: string | null; cost_code?: string | null; row_version?: number }>;
     for (const line of preview) {
@@ -216,8 +219,45 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
         p_actor_user_id: userId,
         p_calculation_formula_version: "recalibration-v1",
       });
+      recomputed = true;
+    }
+  } else if (!oldVerified) {
+    // Measurements saved before this confirmation stored a client number
+    // (pixels, or a title-block suggestion). That number is not the scale
+    // the user just confirmed. Recompute from page-space geometry.
+    const { data: pending } = await anyDb
+      .from("manual_takeoffs")
+      .select("id, takeoff_type, unit, geometry, cost_code, row_version")
+      .eq("tenant_id", tenantId)
+      .eq("page_id", page_id)
+      .is("deleted_at", null);
+    for (const row of (pending ?? []) as Array<{ id: string; takeoff_type: string; unit?: string | null; geometry: unknown; cost_code?: string | null; row_version?: number | string }>) {
+      const rowVersion = typeof row.row_version === "number" ? row.row_version : Number(row.row_version);
+      if (!Number.isInteger(rowVersion)) continue;
+      const next = quantityFromPageGeometry(row.takeoff_type, row.geometry, pageSpaceScaleFactor);
+      if (next == null) continue;
+      const { data: updated, error: updateError } = await anyDb.rpc("update_manual_takeoff_tx", {
+        p_id: row.id,
+        p_tenant_id: tenantId,
+        p_expected_row_version: rowVersion,
+        p_geometry: row.geometry ?? {},
+        p_quantity: next,
+        p_unit: row.unit ?? null,
+        p_cost_code: row.cost_code ?? null,
+        p_actor_user_id: userId,
+        p_calculation_formula_version: FORMULA_VERSION,
+      }).single();
+      if (!updateError && updated?.conflict !== true) recomputed = true;
     }
   }
 
-  return NextResponse.json({ calibration: data, preview });
+  if (recomputed) {
+    try {
+      await processOutboxBatch(db, `inline-calibration-${Date.now()}`, 20);
+    } catch (err) {
+      console.error("[canvas/calibration] inline outbox processing failed", err);
+    }
+  }
+
+  return NextResponse.json({ calibration: data, preview, recomputed });
 }

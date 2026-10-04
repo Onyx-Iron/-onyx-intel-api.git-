@@ -535,6 +535,18 @@ describe("takeoff to estimate import quality", () => {
     assert.equal(manual.rows[0]?.item_type, "labour");
   });
 
+  it("does not price a measurement whose quantity is still withheld", () => {
+    const result = buildEstimateImportRows({
+      takeoffItems: [{ id: "open", label: "Pipe", csi_code: "22-11-00", quantity: null, unit: "LF", review_status: "approved", source_method: "manual" }],
+      existingEstimateItems: [],
+      costCatalog: [{ csi_code: "22-11-00", uom: "LF", unit_cost: 10 }],
+      projectId: "project-1",
+    });
+    assert.equal(result.rows.length, 0);
+    assert.equal(result.updates.length, 0);
+    assert.equal(result.skipped, 1);
+  });
+
   it("holds a low-confidence rate for review", () => {
     const result = buildEstimateImportRows({
       takeoffItems: [{ id: "soft", label: "Pipe", csi_code: "22-11-00", quantity: 10, unit: "LF", review_status: "approved" }],

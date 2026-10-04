@@ -4,7 +4,7 @@ import {
   calculateLinearLength, calculatePerimeter, calculatePolygonArea,
   calculateRectangleArea, calculateCircleArea, calculateCount,
   calculateAreaVolume, calculateBoxVolume, calculateSlopeAdjustedLength,
-  calculatedQuantityForSave, convertLinearUnit, polygonSelfIntersects, quantityForMeasurement,
+  calculatedQuantityForSave, convertLinearUnit, polygonSelfIntersects, quantityForMeasurement, quantityFromPageGeometry,
 } from "./quantity";
 
 // All inputs here are PAGE-SPACE points — the whole point of this module is
@@ -130,6 +130,16 @@ describe("quantityForMeasurement", () => {
   it("leaves calculated quantity null until the sheet scale is verified", () => {
     assert.equal(calculatedQuantityForSave(false, 42), null);
     assert.equal(calculatedQuantityForSave(true, 42), 42);
+  });
+
+  it("recomputes a page-space length from the verified factor and ignores a stored pixel quantity", () => {
+    const geometry = {
+      coordinate_space: "page_space",
+      points: [{ x: 0, y: 0 }, { x: 100, y: 0 }],
+    };
+    assert.equal(quantityFromPageGeometry("length", geometry, 0.25), 25);
+    assert.equal(quantityFromPageGeometry("length", { coordinate_space: "legacy_pixel", points: geometry.points }, 0.25), null);
+    assert.equal(quantityFromPageGeometry("area", { coordinate_space: "page_space", points: square }, 2), 400);
   });
 });
 

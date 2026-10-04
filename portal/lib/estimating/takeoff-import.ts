@@ -233,6 +233,13 @@ export function buildEstimateImportRows(input: BuildEstimateImportInput): BuildE
       blockedByReview++;
       continue;
     }
+    // An unscaled length or area is stored with a null mirror quantity so a
+    // pixel length or a title-block guess cannot become a bid line. A later
+    // verified scale writes the real quantity and this import picks it up.
+    if (takeoff.quantity == null) {
+      skipped++;
+      continue;
+    }
 
     const draftItem = input.targetVersionId
       ? input.existingEstimateItems.find((item) =>

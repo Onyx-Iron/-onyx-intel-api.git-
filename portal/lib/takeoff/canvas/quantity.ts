@@ -202,6 +202,27 @@ export function calculatedQuantityForSave(verified: boolean, serverQuantity: num
   return serverQuantity;
 }
 
+/**
+ * Quantity for a measurement the first time a sheet scale is verified.
+ * Page-space points times the new factor. Legacy pixel geometry returns null
+ * so a missing scale is not invented from whatever number was stored earlier.
+ */
+export function quantityFromPageGeometry(
+  takeoffType: string,
+  geometry: unknown,
+  pageSpaceScaleFactor: number,
+): number | null {
+  if (!geometry || typeof geometry !== "object") return null;
+  if (!Number.isFinite(pageSpaceScaleFactor) || pageSpaceScaleFactor <= 0) return null;
+  const geo = geometry as QuantityGeometry & { coordinate_space?: string; points?: Point[] };
+  if (geo.coordinate_space !== "page_space" || !Array.isArray(geo.points) || geo.points.length === 0) return null;
+  const points = geo.points.filter((point): point is Point => (
+    !!point && Number.isFinite(point.x) && Number.isFinite(point.y)
+  ));
+  if (points.length !== geo.points.length) return null;
+  return quantityForMeasurement(takeoffType, points, pageSpaceScaleFactor, geo);
+}
+
 // ── Unit conversion ─────────────────────────────────────────────────────────
 const LENGTH_TO_FEET: Record<string, number> = {
   ft: 1, feet: 1, lf: 1,
