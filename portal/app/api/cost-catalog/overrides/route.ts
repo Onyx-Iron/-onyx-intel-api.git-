@@ -7,6 +7,8 @@ import {
   authTenantName,
 } from "@/lib/project-controls/server";
 import { requirePermission } from "@/lib/project-controls/route-guards";
+import { getUserRole } from "@/lib/project-controls/permissions";
+import { redactCostOverrideRows } from "@/lib/project-controls/financial-redaction";
 import { auditDelete, auditInsert, auditUpdate } from "@/lib/audit";
 
 export const runtime = "nodejs";
@@ -38,7 +40,9 @@ export async function GET(): Promise<NextResponse> {
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
-    return NextResponse.json({ items: data ?? [] });
+    const role = await getUserRole(t.tenantId, t.userId);
+    const items = redactCostOverrideRows((data ?? []) as unknown as Record<string, unknown>[], role);
+    return NextResponse.json({ items });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }

@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { requirePermission } from "@/lib/project-controls/route-guards";
+import { getUserRole } from "@/lib/project-controls/permissions";
+import { redactOpportunityRows } from "@/lib/project-controls/financial-redaction";
 import { isBidStage } from "@/lib/preconstruction/stages";
 import { logEvent } from "@/lib/activity";
 
@@ -42,7 +44,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const { data, error } = await query;
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ opportunities: data ?? [] });
+  const role = await getUserRole(tenantId, userId);
+  const opportunities = redactOpportunityRows((data ?? []) as Record<string, unknown>[], role);
+  return NextResponse.json({ opportunities });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {

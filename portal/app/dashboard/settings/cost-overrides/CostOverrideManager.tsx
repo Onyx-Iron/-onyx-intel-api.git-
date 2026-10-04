@@ -11,7 +11,7 @@ interface CostOverride {
   description: string | null;
   region_code: string | null;
   unit: string | null;
-  unit_cost: number;
+  unit_cost: number | null;
   labor_cost: number | null;
   material_cost: number | null;
   equipment_cost: number | null;
@@ -323,7 +323,7 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
 
   function vsNational(row: CostOverride): { label: string; tone: string } | null {
     const nat = nationalPrices[row.csi_code];
-    if (!nat || nat <= 0) return null;
+    if (typeof row.unit_cost !== "number" || !nat || nat <= 0) return null;
     const pct = ((row.unit_cost - nat) / nat) * 100;
     const sign = pct > 0 ? "+" : "";
     const tone =
@@ -615,7 +615,7 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
                         )}
                       </td>
                       <td className="px-4 py-3 text-right font-mono">
-                        ${row.unit_cost.toFixed(2)}
+                        {typeof row.unit_cost === "number" ? `$${row.unit_cost.toFixed(2)}` : "—"}
                         {row.unit && <span className="ml-1 text-white/40">/{row.unit}</span>}
                       </td>
                       <td className={`px-4 py-3 text-right font-mono ${vs?.tone ?? "text-white/40"}`}>

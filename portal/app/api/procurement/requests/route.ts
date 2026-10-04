@@ -3,10 +3,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
+import { getUserRole } from "@/lib/project-controls/permissions";
+import { redactProcurementRead } from "@/lib/project-controls/financial-redaction";
 import { logEvent } from "@/lib/activity";
 import { auditInsert } from "@/lib/audit";
-import { canReadFinancial, getUserRole } from "@/lib/project-controls/permissions";
-import { MONEY_FIELDS, redactAmounts, viewerContactId } from "@/lib/project-file/api";
+import { viewerContactId } from "@/lib/project-file/api";
 
 export const runtime = "nodejs";
 
@@ -42,7 +43,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   const role = await getUserRole(tenantId, userId);
-  const showMoney = canReadFinancial(role);
   const requestIds = (requests ?? []).map((r: { id: string }) => r.id);
   const { data: rawBids } = requestIds.length > 0
     ? await anyDb.from("vendor_bids").select("*").in("request_id", requestIds).order("unit_price", { ascending: true })
@@ -69,16 +69,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     if (!batches.has(key)) batches.set(key, { batch_id: key, batch_label: r.batch_label, required_date: r.required_date, items: [] });
     batches.get(key)!.items.push({
       ...r,
-      bids: (bids ?? [])
-        .filter((b: { request_id: string }) => b.request_id === r.id)
-        .map((b: Record<string, unknown>) => redactAmounts(b, showMoney, MONEY_FIELDS)),
+      bids: (bids ?? []).filter((b: { request_id: string }) => b.request_id === r.id),
     });
   }
 
-  return NextResponse.json({
-    batches: Array.from(batches.values()),
-    purchase_orders: (pos ?? []).map((row: Record<string, unknown>) => redactAmounts(row, showMoney, MONEY_FIELDS)),
-  });
+  const visible = redactProcurementRead(Array.from(batches.values()), (pos ?? []) as Record<string, unknown>[], role);
+  return NextResponse.json({ batches: visible.batches, purchase_orders: visible.purchaseOrders });
 }
 
 interface RequestItem {

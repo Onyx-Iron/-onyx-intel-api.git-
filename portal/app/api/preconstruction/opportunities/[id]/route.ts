@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { requirePermission } from "@/lib/project-controls/route-guards";
+import { getUserRole } from "@/lib/project-controls/permissions";
+import { redactOpportunityRows } from "@/lib/project-controls/financial-redaction";
 import { isBidStage } from "@/lib/preconstruction/stages";
 import { logEvent } from "@/lib/activity";
 
@@ -25,7 +27,9 @@ export async function GET(_req: NextRequest, ctx: Ctx): Promise<NextResponse> {
     .maybeSingle();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   if (!data) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  return NextResponse.json({ opportunity: data });
+  const role = await getUserRole(tenantId, userId);
+  const [opportunity] = redactOpportunityRows([data as Record<string, unknown>], role);
+  return NextResponse.json({ opportunity });
 }
 
 export async function PATCH(req: NextRequest, ctx: Ctx): Promise<NextResponse> {
