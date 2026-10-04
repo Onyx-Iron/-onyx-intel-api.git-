@@ -122,11 +122,8 @@ export default function OnboardingTour() {
       >
         <div className="absolute inset-0 bg-black/75 backdrop-blur-sm" onClick={dismissWelcome} />
         <div className="relative z-10 mx-4 w-full max-w-md overflow-hidden rounded-2xl border border-white/10 bg-[#0E0F12] p-6 shadow-2xl">
-          <div className="mb-4 flex items-center gap-3">
-            <OILogo className="h-10 w-auto" alt="" />
-            <span className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#CCFF00]">
-              OnyxIntel
-            </span>
+          <div className="mb-5">
+            <OILogo className="h-14 w-auto" alt="Onyx Intel" />
           </div>
           <h2 className="text-2xl font-black tracking-tight text-white">Welcome to Onyx &amp; Iron</h2>
           <p className="mt-3 text-sm leading-relaxed text-white/75">

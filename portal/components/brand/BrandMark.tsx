@@ -25,7 +25,7 @@ export function OILogo({
       alt={alt}
       width={546}
       height={415}
-      className={className}
+      className={`object-contain ${className}`}
       draggable={false}
       aria-hidden={alt === "" ? true : undefined}
     />
@@ -39,9 +39,9 @@ export default function BrandMark({
   className = "",
 }: BrandMarkProps) {
   const logoClass = {
-    sm: "h-7 w-auto",
-    md: "h-10 w-auto sm:h-12",
-    lg: "h-12 w-auto sm:h-16",
+    sm: "h-8 w-auto",
+    md: "h-12 w-auto sm:h-14",
+    lg: "h-14 w-auto sm:h-20",
   }[size];
 
   const wordClass = {

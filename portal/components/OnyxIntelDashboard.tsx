@@ -848,7 +848,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
         <div className="relative px-4 pb-8 pt-5 sm:px-6 lg:px-10 lg:pb-16 lg:pt-8">
           {/* Top bar — brand mark + toolbar */}
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <BrandMark size="md" />
+            <BrandMark size="lg" />
             <div className="flex flex-wrap items-center gap-2 sm:gap-3">
               <GlobalSearch />
               <GoogleConnect compact />
