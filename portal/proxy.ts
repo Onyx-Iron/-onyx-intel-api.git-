@@ -17,6 +17,10 @@ const isPublicRoute = createRouteMatcher([
   // are never present. Without this, auth.protect() 307s/401s before the
   // route's own secret check runs.
   "/api/internal/outbox/process",
+  // Sheet-index cron (Vercel Cron every 5 min). Same secret auth as the
+  // outbox route — without this entry auth.protect() rejects the cron
+  // before the route's CRON_SECRET check, so sheets stay pending forever.
+  "/api/internal/sheets/process",
   // Paddle billing webhooks verify their own signature; no Clerk session.
   "/api/billing/webhook",
 ]);
