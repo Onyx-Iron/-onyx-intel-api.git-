@@ -3,7 +3,9 @@
 export type UploadReuse = "new" | "skip_upload" | "replace_bytes";
 
 const IN_FLIGHT = new Set(["pending", "processing", "queued", "split"]);
-const DONE = new Set(["complete", "ready", "done"]);
+// Partial parses are usable documents. The bytes are identical, so replacing
+// them cannot fill in the missing pages and must not delete the stored PDF.
+const DONE = new Set(["complete", "ready", "done", "complete_with_errors"]);
 
 export function reuseUpload(existingStatus: string | null | undefined): UploadReuse {
   if (!existingStatus) return "new";
