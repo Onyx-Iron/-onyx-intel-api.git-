@@ -48,6 +48,18 @@ import ClosedInvoicesTab        from "@/components/invoicing/ClosedInvoicesTab";
 import LienWaiversTab           from "@/components/invoicing/LienWaiversTab";
 import CutFillTab               from "@/components/cut-fill/CutFillTab";
 import ProcurementBoard         from "@/components/procurement/ProcurementBoard";
+import {
+  BudgetTab,
+  ChangeEventsPanel,
+  CloseoutAssembly,
+  MeetingsTab,
+  PayAppsTab,
+  ProjectFileBrief,
+  RecordLinker,
+  RemainingCivil,
+  SelectionsTab,
+  TimeCardsTab,
+} from "@/components/project-file/ProjectFilePanels";
 import { phaseFromSlug, PROJECT_SECTIONS, type ProjectPhase } from "@/lib/navigation/project-sections";
 
 // Target 10-section IA (docs/frontend-backend-reconciliation/INFORMATION_ARCHITECTURE.md)
@@ -99,13 +111,20 @@ const PHASES: { id: Phase; subtabs: SubTabDef[] }[] = [
     id: "Takeoff",
     subtabs: [
       { id: "takeoff", label: "Takeoff",    icon: <Layers size={13} />, render: (p) => <TakeoffTab projectId={p} /> },
-      { id: "cutfill", label: "Cut / Fill", icon: <Layers size={13} />, render: (p) => <CutFillTab projectId={p} /> },
+      { id: "cutfill", label: "Cut / Fill", icon: <Layers size={13} />, render: (p) => (
+        <div className="space-y-4">
+          <RemainingCivil projectId={p} />
+          <CutFillTab projectId={p} />
+        </div>
+      ) },
     ],
   },
   {
     id: "Estimate & Budget",
     subtabs: [
       { id: "estimates", label: "Estimate & Budget", icon: <Calculator size={13} />, render: (p, name) => <EstimateMatrix projectId={p} projectName={name} /> },
+      { id: "budget", label: "Budget", icon: <Coins size={13} />, render: (p) => <BudgetTab projectId={p} /> },
+      { id: "selections", label: "Selections", icon: <ListChecks size={13} />, render: (p) => <SelectionsTab projectId={p} /> },
     ],
   },
   {
@@ -121,7 +140,13 @@ const PHASES: { id: Phase; subtabs: SubTabDef[] }[] = [
       // Orders in one component -- see item 3 of this reconciliation
       // (confirmed live and working, not the "broken" state Phase 1
       // originally mischaracterized it as).
-      { id: "controls", label: "RFIs, Submittals & Change Orders", icon: <FileStack size={13} />, render: (p) => <ProjectControlsTab projectId={p} /> },
+      { id: "controls", label: "RFIs, Submittals & Change Orders", icon: <FileStack size={13} />, render: (p) => (
+        <div className="space-y-4">
+          <ChangeEventsPanel projectId={p} />
+          <RecordLinker projectId={p} />
+          <ProjectControlsTab projectId={p} />
+        </div>
+      ) },
     ],
   },
   {
@@ -144,6 +169,7 @@ const PHASES: { id: Phase; subtabs: SubTabDef[] }[] = [
       { id: "open",         label: "Open Invoices",       icon: <Coins size={13} />,       render: (p) => <OpenInvoicesTab projectId={p} /> },
       { id: "closed",       label: "Closed Invoices",     icon: <FileCheck size={13} />,   render: (p) => <ClosedInvoicesTab projectId={p} /> },
       { id: "lien-waivers", label: "Lien Waivers",        icon: <ShieldCheck size={13} />, render: (p) => <LienWaiversTab projectId={p} /> },
+      { id: "pay-apps", label: "Pay Applications", icon: <Receipt size={13} />, render: (p) => <PayAppsTab projectId={p} /> },
     ],
   },
   {
@@ -153,14 +179,22 @@ const PHASES: { id: Phase; subtabs: SubTabDef[] }[] = [
       { id: "weekly-log", label: "Weekly Log", icon: <FileText size={13} />,      render: (p) => <WeeklyLogTab projectId={p} /> },
       { id: "todo",       label: "To Do List", icon: <ListChecks size={13} />,    render: (p) => <TodoTab projectId={p} /> },
       { id: "staff",      label: "Staff",      icon: <HardHat size={13} />,       render: (p) => <StaffTab projectId={p} /> },
+      { id: "time",       label: "Time Cards", icon: <ClipboardList size={13} />, render: (p) => <TimeCardsTab projectId={p} /> },
+      { id: "meetings",   label: "Meetings",   icon: <CalendarDays size={13} />,  render: (p) => <MeetingsTab projectId={p} /> },
     ],
   },
   {
     id: "Closeout",
     subtabs: [
-      { id: "punchlist",  label: "Punchlist",                icon: <ListChecks size={13} />, render: (p) => <PunchListTab projectId={p} /> },
+      { id: "punchlist",  label: "Punchlist",                icon: <ListChecks size={13} />, render: (p) => (
+        <div className="space-y-4">
+          <RecordLinker projectId={p} />
+          <PunchListTab projectId={p} />
+        </div>
+      ) },
       { id: "co",         label: "Certificate of Occupancy", icon: <Award size={13} />,      render: (p) => <CertificateOfOccupancyTab projectId={p} /> },
-      { id: "final-docs", label: "Final Docs",               icon: <FileText size={13} />,   render: (p) => <DocumentsTab projectId={p} /> },
+      { id: "inspections", label: "Closeout Assembly", icon: <FileCheck size={13} />, render: (p) => <CloseoutAssembly projectId={p} /> },
+      { id: "final-docs", label: "Final Docs",               icon: <FileText size={13} />,   render: (p) => <DocumentsTab projectId={p} mode="closeout" /> },
     ],
   },
 ];
@@ -431,6 +465,7 @@ function OverviewTab({ projectId }: { projectId: string }) {
         )}
       </div>
 
+      <ProjectFileBrief projectId={projectId} />
       <ProjectMemoryPanel projectId={projectId} />
 
       {/* AI Status Report */}

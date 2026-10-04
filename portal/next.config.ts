@@ -1,4 +1,21 @@
+import { copyFileSync, mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
+import { join } from "node:path";
 import type { NextConfig } from "next";
+
+function publishPdfWorker(): void {
+  try {
+    const require = createRequire(join(__dirname, "package.json"));
+    const source = require.resolve("pdfjs-dist/build/pdf.worker.min.mjs");
+    const destDir = join(__dirname, "public");
+    mkdirSync(destDir, { recursive: true });
+    copyFileSync(source, join(destDir, "pdf.worker.min.mjs"));
+  } catch (err) {
+    console.warn("[next.config] pdf.worker.min.mjs was not copied into public/", err);
+  }
+}
+
+publishPdfWorker();
 
 const nextConfig: NextConfig = {
   turbopack: {

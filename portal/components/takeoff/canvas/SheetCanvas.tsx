@@ -9,12 +9,15 @@ import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { utilityRecipeFromRun, wallRecipeLines } from "@/lib/math/scope-recipes";
 import type { RebarSize } from "@/lib/math/assemblies";
-import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
+import { pointsToPageSpace, pointsToScreenSpace, toPageSpace, toScreenSpace } from "@/lib/takeoff/canvas/coordinates";
+import { isRecordType, recordHref, type RecordType } from "@/lib/project-file/records";
 import { quantityForMeasurement } from "@/lib/takeoff/canvas/quantity";
 import { SCALE_PRESETS, matchScalePreset, pageSpaceFactorForPreset } from "@/lib/takeoff/scale-presets";
 import QuantityGrid from "@/components/takeoff/QuantityGrid";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
-import { CANVAS_HOTKEY_HINT, resolveCanvasHotkey, type CanvasTool } from "@/lib/takeoff/canvas/hotkeys";
+import { chunkReloadDecision } from "@/lib/takeoff/canvas/chunk-reload";
+import { loadPdfjs } from "@/lib/takeoff/canvas/pdfjs-loader";
+import { CANVAS_HOTKEY_HINT, MEASURE_SHEET_HINT, measureToolLabel, resolveCanvasHotkey, type CanvasTool } from "@/lib/takeoff/canvas/hotkeys";
 import { displayTakeoffTool } from "@/lib/takeoff/measure-kind";
 import { buildQuantitySummary } from "@/lib/takeoff/canvas/quantity-summary";
 import { CommandStack } from "@/lib/takeoff/canvas/command-stack";
@@ -236,6 +239,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [hiddenLayerIds, setHiddenLayerIds] = useState<Set<string>>(new Set());
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const [markupMode, setMarkupMode] = useState(false);
+  const [pinMode, setPinMode] = useState(false);
+  const [pins, setPins] = useState<Array<{
+    id: string;
+    entity_type: RecordType;
+    entity_id: string;
+    x: number;
+    y: number;
+    label: string | null;
+  }>>([]);
   const [markups, setMarkups] = useState<Array<{
     id: string;
     markup_type: string;
@@ -476,12 +488,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     let cancelled = false;
     (async () => {
       try {
-        const pdfjs = await import("pdfjs-dist");
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (pdfjs as any).GlobalWorkerOptions.workerSrc = new URL(
-          "pdfjs-dist/build/pdf.worker.min.mjs",
-          import.meta.url,
-        ).toString();
+        const pdfjs = await loadPdfjs();
         const doc = await cachedPdfDocument(pdfUrl, () => pdfjs.getDocument({ url: pdfUrl }).promise);
         // Split plan sets store one sheet per file. Always paint page 1 of that file.
         const page = await doc.getPage(1);
@@ -503,7 +510,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           setRenderScale(scale);
         }
       } catch (e) {
-        if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
+        if (cancelled) return;
+        if (typeof window !== "undefined" && chunkReloadDecision(e, window.sessionStorage) === "reload") {
+          window.location.reload();
+          return;
+        }
+        setLoadError(e instanceof Error ? e.message : String(e));
       }
     })();
     return () => { cancelled = true; };
@@ -569,12 +581,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     let cancelled = false;
     (async () => {
       try {
-        const pdfjs = await import("pdfjs-dist");
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (pdfjs as any).GlobalWorkerOptions.workerSrc = new URL(
-          "pdfjs-dist/build/pdf.worker.min.mjs",
-          import.meta.url,
-        ).toString();
+        const pdfjs = await loadPdfjs();
         const doc = await cachedPdfDocument(priorUrl, () => pdfjs.getDocument({ url: priorUrl }).promise);
         const page = await doc.getPage(1);
         const viewport = page.getViewport({ scale: renderScale });
@@ -618,12 +625,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           finished = true;
           return;
         }
-        const pdfjs = await import("pdfjs-dist");
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (pdfjs as any).GlobalWorkerOptions.workerSrc = new URL(
-          "pdfjs-dist/build/pdf.worker.min.mjs",
-          import.meta.url,
-        ).toString();
+        const pdfjs = await loadPdfjs();
         const doc = await cachedPdfDocument(pdfUrl, () => pdfjs.getDocument({ url: pdfUrl }).promise);
         const page = await doc.getPage(1);
         const vectors = await extractVectorsFromPdfPage(page);
@@ -731,11 +733,66 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
   const onCanvasMouseLeave = () => setSnapTarget(null);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/sheet-pins?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`)
+      .then((res) => res.json())
+      .then((data: { pins?: Array<{ id: string; entity_type: string; entity_id: string; x: number; y: number; label: string | null }> }) => {
+        if (cancelled) return;
+        setPins((data.pins ?? []).flatMap((pin) => (
+          isRecordType(pin.entity_type)
+            ? [{ ...pin, entity_type: pin.entity_type }]
+            : []
+        )));
+      })
+      .catch(() => { if (!cancelled) setPins([]); });
+    return () => { cancelled = true; };
+  }, [projectId, pageId]);
+
   // ── Click handling ────────────────────────────────────────────────────────
   const onCanvasClick: React.MouseEventHandler<SVGSVGElement> = (e) => {
     if (!renderSize) return;
     const raw = toLocal(e.clientX, e.clientY, e.currentTarget);
     const p = resolveSnapPoint(raw);
+
+    // A pin is a location on this sheet. It never becomes a count takeoff.
+    if (pinMode) {
+      if (renderScale <= 0) return;
+      const pagePoint = toPageSpace(p, renderScale);
+      const entityType = window.prompt("Record type to pin (rfi, submittal, punch, schedule_task, daily_log)", "punch");
+      if (!entityType || !isRecordType(entityType)) return;
+      const entityId = window.prompt("Record id");
+      if (!entityId?.trim()) return;
+      const label = window.prompt("Pin label", "") ?? "";
+      void (async () => {
+        const res = await fetch("/api/sheet-pins", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            project_id: projectId,
+            page_id: pageId,
+            entity_type: entityType,
+            entity_id: entityId.trim(),
+            x: pagePoint.x,
+            y: pagePoint.y,
+            label: label.trim() || null,
+          }),
+        });
+        if (!res.ok) return;
+        const data = await res.json() as { pin: { id: string; entity_type: string; entity_id: string; x: number; y: number; label: string | null } };
+        const pinnedType = data.pin.entity_type;
+        if (!isRecordType(pinnedType)) return;
+        setPins((prev) => [{
+          id: data.pin.id,
+          entity_type: pinnedType,
+          entity_id: data.pin.entity_id,
+          x: data.pin.x,
+          y: data.pin.y,
+          label: data.pin.label,
+        }, ...prev]);
+      })();
+      return;
+    }
 
     // Non-quantity markups (excluded from estimate sync).
     if (markupMode) {
@@ -1865,7 +1922,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               ← Back
             </Link>
             <div>
-              <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Sheet Canvas</div>
+              <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Measure</div>
               <div className="text-sm font-semibold">
                 {projectName} <span className="text-white/40 font-normal">· Page {pageNumber}</span>
               </div>
@@ -1874,7 +1931,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
           {/* Tool switcher */}
           <div className="flex flex-col items-end gap-1">
-            <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] p-1">
+            <div className="flex max-w-[42rem] flex-wrap items-center justify-end gap-1 rounded-full border border-white/10 bg-white/[0.03] p-1">
               {(["pan", "calibrate", "count", "length", "perimeter", "area", "utility_pipe", "spot_elevation", "contour_line", "civil_area_bounds"] as Tool[]).map((t) => (
                 <button
                   key={t}
@@ -1886,13 +1943,22 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                       : "text-white/60 hover:text-white hover:bg-white/[0.06]"
                   }`}
                 >
-                  {t}
+                  {measureToolLabel(t)}
                 </button>
               ))}
             </div>
-            <p className="hidden px-1 text-[9px] font-mono uppercase tracking-widest text-white/30 sm:block">
-              {CANVAS_HOTKEY_HINT}
+            <p className="hidden px-1 text-[10px] normal-case tracking-normal text-white/45 sm:block" title={CANVAS_HOTKEY_HINT}>
+              {MEASURE_SHEET_HINT}
             </p>
+            <button
+              type="button"
+              onClick={() => setPinMode((on) => !on)}
+              className={`rounded-full border px-3 py-1 text-[10px] uppercase tracking-widest font-mono ${
+                pinMode ? "border-[#CCFF00] bg-[#CCFF00] text-black" : "border-white/15 text-white/60 hover:text-white"
+              }`}
+            >
+              {pinMode ? "Pinning" : "Pin record"}
+            </button>
           </div>
 
           <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono text-white/40">
@@ -2073,7 +2139,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               width={renderSize.w}
               height={renderSize.h}
               viewBox={`0 0 ${renderSize.w} ${renderSize.h}`}
-              className={`absolute inset-0 select-none ${tool === "pan" ? "cursor-grab" : "cursor-crosshair"}`}
+              className={`absolute inset-0 select-none ${pinMode || tool !== "pan" ? "cursor-crosshair" : "cursor-grab"}`}
               onClick={onCanvasClick}
               onMouseMove={(e) => {
                 onCanvasMouseMove(e);
@@ -2175,6 +2241,17 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   pointerEvents="none"
                 />
               )}
+              {pins.map((pin) => {
+                const screen = toScreenSpace({ x: pin.x, y: pin.y }, renderScale);
+                return (
+                  <a key={pin.id} href={recordHref(projectId, pin.entity_type)}>
+                    <circle cx={screen.x} cy={screen.y} r={7} fill="#F5A623" stroke="#000" strokeWidth={2} />
+                    <text x={screen.x + 10} y={screen.y + 4} fill="#F5A623" fontSize={11} fontFamily="monospace">
+                      {pin.label ?? pin.entity_type}
+                    </text>
+                  </a>
+                );
+              })}
               {/* Non-quantity markups */}
               {markups.map((m) => {
                 const pts = m.geometry?.points ?? [];
@@ -2394,8 +2471,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             </div>
           )}
           {loadError && (
-            <div className="absolute inset-0 flex items-center justify-center text-xs text-red-400 p-6 text-center">
-              Couldn&apos;t load the sheet: {loadError}
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-xs text-red-400 p-6 text-center">
+              <p>Couldn&apos;t load the sheet: {loadError}</p>
+              <button
+                type="button"
+                className="rounded border border-white/20 px-3 py-1 text-white/80"
+                onClick={() => window.location.reload()}
+              >
+                Reload sheet
+              </button>
             </div>
           )}
         </div>

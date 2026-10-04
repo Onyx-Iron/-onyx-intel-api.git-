@@ -5,6 +5,8 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
+import { canReadFinancial, getUserRole } from "@/lib/project-controls/permissions";
+import { MONEY_FIELDS, redactAmounts } from "@/lib/project-file/api";
 
 export const runtime = "nodejs";
 
@@ -31,7 +33,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       .order("created_at", { ascending: false });
 
     if (error) return NextResponse.json({ error: `[GET /api/staff] ${error.message}` }, { status: 500 });
-    return NextResponse.json({ items: data ?? [] });
+    const role = await getUserRole(tenantId, userId);
+    const allowed = canReadFinancial(role);
+    const items = ((data ?? []) as unknown as Record<string, unknown>[]).map((row) => redactAmounts(row, allowed, MONEY_FIELDS));
+    return NextResponse.json({ items });
   } catch (err: unknown) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }

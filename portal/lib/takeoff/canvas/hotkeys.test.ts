@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { resolveCanvasHotkey, isEditableKeyboardTarget } from "./hotkeys.ts";
+import { measureToolLabel, resolveCanvasHotkey, isEditableKeyboardTarget, type CanvasTool } from "./hotkeys.ts";
 
 function keyEvent(
   partial: Partial<KeyboardEvent> & Pick<KeyboardEvent, "key" | "type">,
@@ -48,6 +48,13 @@ describe("resolveCanvasHotkey", () => {
     assert.equal(resolveCanvasHotkey(keyEvent({ key: "l", type: "keydown", repeat: true })), null);
     assert.equal(resolveCanvasHotkey(keyEvent({ key: "l", type: "keydown", altKey: true })), null);
     assert.equal(resolveCanvasHotkey(keyEvent({ key: "q", type: "keydown" })), null);
+  });
+
+  it("names each tool in plain words", () => {
+    const tools: CanvasTool[] = ["pan", "calibrate", "count", "length", "perimeter", "area", "utility_pipe", "spot_elevation", "contour_line", "civil_area_bounds"];
+    assert.deepEqual(tools.map(measureToolLabel), [
+      "Pan", "Scale", "Count", "Length", "Perimeter", "Area", "Pipe", "Elevation", "Contour", "Paving limits",
+    ]);
   });
 
   it("ignores events from editable fields", () => {

@@ -185,33 +185,27 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       if (!draft?.subject || !draft?.body) {
         appliedResult.note = "no draft body to persist";
       } else {
-        const { data: doc, error: docErr } = await anyDb
-          .from("documents")
+        const { data: rfi, error: rfiErr } = await anyDb
+          .from("rfi_items")
           .insert({
-            id: crypto.randomUUID(),
             tenant_id: tenantId,
             project_id: audit.project_id,
-            file_name: `RFI · ${(draft.subject ?? "auto").slice(0, 80)}.txt`,
+            subject: draft.subject,
+            description: draft.body,
             status: "draft",
-            uploaded_at: new Date().toISOString(),
-            meta: {
-              source: "rfi_drafter_agent",
-              audit_id: id,
-              subject: draft.subject,
-              body: draft.body,
-              contradictions: audit.recommendations?.contradictions ?? [],
-            },
+            priority: "medium",
+            meta: { source: "rfi_drafter_agent", audit_id: id },
           })
           .select("id")
           .single();
-        if (docErr) throw new Error(`insert rfi draft: ${docErr.message}`);
-        appliedResult = { decision, rfi_document_id: doc.id };
+        if (rfiErr) throw new Error(`insert rfi draft: ${rfiErr.message}`);
+        appliedResult = { decision, rfi_id: rfi.id };
 
         auditInsert({
           tenant_id: tenantId,
           user_id: userId,
-          table_name: "documents",
-          record_id: doc.id,
+          table_name: "rfi_items",
+          record_id: rfi.id,
           new_values: { source: "rfi_drafter_agent", audit_id: id, subject: draft.subject },
         });
 
@@ -219,12 +213,43 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           projectId: audit.project_id,
           tenantId,
           userId,
-          entityType: "document",
-          entityId: doc.id,
+          entityType: "rfi",
+          entityId: rfi.id,
           action: "created",
           title: `RFI drafted: ${draft.subject}`,
           meta: { audit_id: id },
         });
+      }
+    }
+    else if (audit.agent_name === "daily_log_drafter") {
+      const draft = (audit.recommendations?.draft ?? {}) as { log_date?: string; work_performed?: string; notes?: string };
+      const { data: log, error: logErr } = await anyDb.from("daily_logs").insert({
+        tenant_id: tenantId,
+        project_id: audit.project_id,
+        log_date: draft.log_date ?? new Date().toISOString().slice(0, 10),
+        work_performed: draft.work_performed ?? null,
+        notes: draft.notes ?? null,
+        photo_urls: [],
+        created_by: userId,
+        client_visible: false,
+      }).select("id").single();
+      if (logErr) throw new Error(`insert daily log: ${logErr.message}`);
+      appliedResult = { decision, daily_log_id: log.id };
+    }
+    else if (audit.agent_name === "change_event_drafter") {
+      const draft = (audit.recommendations?.draft ?? {}) as { title?: string; day_impact?: number };
+      if (!draft.title) {
+        appliedResult.note = "no change event title";
+      } else {
+        const { data: event, error: eventErr } = await anyDb.from("change_events").insert({
+          tenant_id: tenantId,
+          project_id: audit.project_id,
+          title: draft.title,
+          status: "draft",
+          day_impact: Number(draft.day_impact ?? 0),
+        }).select("id").single();
+        if (eventErr) throw new Error(`insert change event: ${eventErr.message}`);
+        appliedResult = { decision, change_event_id: event.id, posted_budget: false };
       }
     }
     else {

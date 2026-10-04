@@ -53,6 +53,12 @@ const SKILL_TARGETS = {
   get_procurement: { label: "Procurement", slug: "procurement", tab: "procurement" },
   get_contacts: { label: "Subcontractors", slug: "procurement", tab: "subs" },
   get_takeoff_items: { label: "Takeoff", slug: "takeoff", tab: "takeoff" },
+  get_project_links: { label: "Project links", slug: "overview", tab: "summary" },
+  get_sheet_pins: { label: "Sheet pins", slug: "takeoff", tab: "takeoff" },
+  get_budget_summary: { label: "Budget", slug: "estimate", tab: "budget" },
+  get_pay_applications: { label: "Pay applications", slug: "financials", tab: "pay-apps" },
+  get_lookahead: { label: "Lookahead", slug: "schedule", tab: "scheduling" },
+  get_production_quantities: { label: "Production", slug: "field", tab: "daily-log" },
   list_workspace_sections: { label: "Project sections", slug: "overview", tab: "summary" },
 } as const;
 
@@ -296,6 +302,36 @@ export const PROJECT_SKILL_DECLARATIONS = [
       },
       required: [],
     },
+  },
+  {
+    name: "get_project_links",
+    description: "List links between records in this project: RFIs, schedule tasks, budget lines, purchase orders, and the rest.",
+    parameters: { type: "OBJECT", properties: {}, required: [] },
+  },
+  {
+    name: "get_sheet_pins",
+    description: "List pins dropped on this project's sheets and the record each pin opens.",
+    parameters: { type: "OBJECT", properties: {}, required: [] },
+  },
+  {
+    name: "get_budget_summary",
+    description: "Read this project's current budget snapshot. Amounts are omitted when the user cannot view financials.",
+    parameters: { type: "OBJECT", properties: {}, required: [] },
+  },
+  {
+    name: "get_pay_applications",
+    description: "List pay applications on this project. Amounts are omitted when the user cannot view financials.",
+    parameters: { type: "OBJECT", properties: {}, required: [] },
+  },
+  {
+    name: "get_lookahead",
+    description: "List schedule tasks whose dates fall in the next 21 days on this project.",
+    parameters: { type: "OBJECT", properties: {}, required: [] },
+  },
+  {
+    name: "get_production_quantities",
+    description: "List quantities installed on this project from daily logs.",
+    parameters: { type: "OBJECT", properties: {}, required: [] },
   },
   {
     name: "list_workspace_sections",
@@ -701,6 +737,23 @@ export async function executeProjectSkill(
       };
     }
     case "get_contacts": {
+      const linked = await db
+        .from("project_contacts")
+        .select("contact_id, role_on_project, is_primary")
+        .eq("tenant_id", ctx.tenantId)
+        .eq("project_id", ctx.projectId)
+        .limit(40);
+      if (!linked.error && (linked.data ?? []).length > 0) {
+        const ids = (linked.data as Array<{ contact_id: string }>).map((row) => row.contact_id);
+        const { data, error } = await db
+          .from("contacts")
+          .select("id, name, company, role, email, phone")
+          .in("id", ids);
+        if (error) return { error: clip(error.message) ?? "Could not read contacts.", open_in_app: href };
+        const roles = new Map((linked.data as Array<{ contact_id: string; role_on_project: string | null }>).map((row) => [row.contact_id, row.role_on_project]));
+        const rows = (data ?? []).map((row: { id: string }) => ({ ...row, role_on_project: roles.get(row.id) ?? null }));
+        return rows.length ? packed(rows, href) : empty("No contacts linked to this project.", href);
+      }
       const { data, error } = await db
         .from("contacts")
         .select("id, name, company, role, email, phone")
@@ -726,6 +779,48 @@ export async function executeProjectSkill(
       if (error) return { error: clip(error.message) ?? "Could not read takeoff items.", open_in_app: href };
       const rows = data ?? [];
       return rows.length ? packed(rows, href) : empty("No takeoff items found.", href);
+    }
+    case "get_project_links": {
+      const { data, error } = await db.from("project_record_links").select("id, from_type, from_id, to_type, to_id, link_role").eq("tenant_id", ctx.tenantId).eq("project_id", ctx.projectId).limit(40);
+      if (error) return { error: clip(error.message) ?? "Could not read links.", open_in_app: href };
+      const rows = data ?? [];
+      return rows.length ? packed(rows, href) : empty("No linked records in this project.", href);
+    }
+    case "get_sheet_pins": {
+      const { data, error } = await db.from("sheet_pins").select("id, page_id, entity_type, entity_id, label, x, y").eq("tenant_id", ctx.tenantId).eq("project_id", ctx.projectId).limit(40);
+      if (error) return { error: clip(error.message) ?? "Could not read sheet pins.", open_in_app: href };
+      const rows = data ?? [];
+      return rows.length ? packed(rows, href) : empty("No sheet pins in this project.", href);
+    }
+    case "get_budget_summary": {
+      const { data, error } = await db.from("project_budgets").select("id, total_price, line_count, is_current, version_number").eq("tenant_id", ctx.tenantId).eq("project_id", ctx.projectId).eq("is_current", true).limit(1);
+      if (error) return { error: clip(error.message) ?? "Could not read the budget.", open_in_app: href };
+      const rows = (data ?? []).map((row: Record<string, unknown>) => redact(row, ctx.canReadFinancial, ["total_price"]));
+      return rows.length ? packed(rows, href, { financials_redacted: !ctx.canReadFinancial }) : empty("No current budget snapshot on this project.", href);
+    }
+    case "get_pay_applications": {
+      const { data, error } = await db.from("pay_applications").select("id, number, side, status, draw_number, retainage_pct").eq("tenant_id", ctx.tenantId).eq("project_id", ctx.projectId).limit(20);
+      if (error) return { error: clip(error.message) ?? "Could not read pay applications.", open_in_app: href };
+      const rows = (data ?? []).map((row: Record<string, unknown>) => redact(row, ctx.canReadFinancial, ["retainage_pct"]));
+      return rows.length ? packed(rows, href, { financials_redacted: !ctx.canReadFinancial }) : empty("No pay applications on this project.", href);
+    }
+    case "get_lookahead": {
+      const { data, error } = await db.from("schedule_tasks").select("id, name, start_date, end_date, status, critical, percent_complete").eq("tenant_id", ctx.tenantId).eq("project_id", ctx.projectId).limit(40);
+      if (error) return { error: clip(error.message) ?? "Could not read the schedule.", open_in_app: href };
+      const now = Date.now();
+      const horizon = now + 21 * 86400000;
+      const rows = (data ?? []).filter((row: { start_date: string | null; end_date: string | null }) => {
+        const start = row.start_date ? new Date(row.start_date).getTime() : null;
+        const end = row.end_date ? new Date(row.end_date).getTime() : start;
+        return start != null && end != null && start <= horizon && end >= now;
+      });
+      return rows.length ? packed(rows, href) : empty("No tasks in the next 21 days.", href);
+    }
+    case "get_production_quantities": {
+      const { data, error } = await db.from("daily_log_quantities").select("id, daily_log_id, budget_line_id, quantity, unit").eq("tenant_id", ctx.tenantId).eq("project_id", ctx.projectId).limit(40);
+      if (error) return { error: clip(error.message) ?? "Could not read production quantities.", open_in_app: href };
+      const rows = data ?? [];
+      return rows.length ? packed(rows, href) : empty("No installed quantities logged on this project.", href);
     }
     default:
       return { error: `Unknown tool: ${name}` };

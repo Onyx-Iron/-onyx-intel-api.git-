@@ -81,6 +81,13 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   if (itemError) return NextResponse.json({ error: itemError.message }, { status: 500 });
 
   const snapshot = snapshotBudget((items ?? []) as BudgetSourceItem[]);
+  await db
+    .from("project_budgets")
+    .update({ is_current: false })
+    .eq("tenant_id", tenantId)
+    .eq("project_id", version.project_id)
+    .eq("is_current", true);
+
   const { data: budget, error: budgetError } = await db
     .from("project_budgets")
     .insert({
@@ -91,6 +98,7 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
       total_price: snapshot.totalPrice,
       line_count: snapshot.lineCount,
       created_by: userId,
+      is_current: true,
     })
     .select("*")
     .single();
@@ -103,10 +111,14 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
         budget_id: budget.id,
         tenant_id: tenantId,
         project_id: version.project_id,
+        original_amount: line.total_price,
+        approved_change_amount: 0,
       })),
     );
     if (lineError) return NextResponse.json({ error: lineError.message }, { status: 500 });
   }
+
+  await db.from("projects").update({ budget: snapshot.totalPrice }).eq("id", version.project_id).eq("tenant_id", tenantId);
 
   const saved = await loadSnapshot(db, tenantId, id);
   return NextResponse.json({ tenant_id: tenantId, created: true, ...saved });
