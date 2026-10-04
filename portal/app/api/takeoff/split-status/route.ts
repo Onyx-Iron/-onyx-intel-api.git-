@@ -3,11 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { reclaimStuckProcessingPages } from "@/lib/documents/reclaimStuck";
-import {
-  finalizeAsyncDocumentStatus,
-  isTerminalFailure,
-  isTerminalSuccess,
-} from "@/lib/documents/status";
+import { finalizeDocumentsFromOcr } from "@/lib/documents/finalizeDocument";
+import { isTerminalFailure } from "@/lib/documents/status";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,10 +17,9 @@ export const dynamic = "force-dynamic";
  * from `document_pages.takeoff_status` — NOT `status`, which belongs to the
  * separate OCR/embedding worker and would race with this if conflated.
  *
- * Also finalizes `documents.status` to "complete"/"error" once every split page
- * has a terminal takeoff_status — neither Edge Function has a "this was the
- * last page" signal on its own, so recomputing it here on each poll (an
- * idempotent, side-effect-safe check) is the simplest correct place for it.
+ * Does **not** mark `documents.status` complete from takeoff alone — OCR
+ * (`document_pages.status`) must also be terminal. `finalizeDocumentsFromOcr`
+ * is the shared gate used by the Documents list.
  */
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
@@ -53,12 +49,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const { data: pages, error: pagesErr } = await anyDb
     .from("document_pages")
-    .select("page_number, takeoff_status, takeoff_error")
+    .select("page_number, status, takeoff_status, takeoff_error")
     .eq("document_id", documentId).eq("tenant_id", tenantId)
     .order("page_number", { ascending: true });
   if (pagesErr) return NextResponse.json({ error: pagesErr.message }, { status: 500 });
 
-  const rows = (pages ?? []) as Array<{ page_number: number; takeoff_status: string | null; takeoff_error: string | null }>;
+  const rows = (pages ?? []) as Array<{
+    page_number: number;
+    status: string | null;
+    takeoff_status: string | null;
+    takeoff_error: string | null;
+  }>;
   const total = rows.length;
   const done = rows.filter((p) => p.takeoff_status === "done").length;
   const errored = rows.filter((p) => p.takeoff_status === "error").length;
@@ -78,43 +79,18 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     });
   }
 
-  // Finalize documents.status once every page has a terminal takeoff_status.
-  // Partial takeoff loss must not look like a quiet success — use
-  // complete_with_errors whenever any page failed but others succeeded.
-  if (
-    settled === total
-    && !isTerminalSuccess(docRow.status)
-    && !isTerminalFailure(docRow.status)
-    && docRow.status !== "complete_with_errors"
-  ) {
-    const finalStatus = finalizeAsyncDocumentStatus({
-      allFailed: errored === total,
-      partialErrors: errored > 0 && errored < total,
-    });
-    const prevMeta = (docRow.meta && typeof docRow.meta === "object")
-      ? docRow.meta as Record<string, unknown>
-      : {};
-    const summary = {
-      ...(typeof prevMeta.processing_summary === "object" && prevMeta.processing_summary
-        ? prevMeta.processing_summary as Record<string, unknown>
-        : {}),
-      pages_total: total,
-      pages_done: done,
-      pages_error: errored,
-      finalized_at: new Date().toISOString(),
-    };
-    await anyDb.from("documents")
-      .update({
-        status: finalStatus,
-        processed_at: new Date().toISOString(),
-        last_error: errored > 0
-          ? `${errored} of ${total} page(s) failed takeoff extraction`
-          : null,
-        last_error_step: errored > 0 ? "takeoff" : null,
-        meta: { ...prevMeta, processing_summary: summary },
-      })
-      .eq("id", documentId).eq("tenant_id", tenantId);
-    docRow.status = finalStatus;
+  // Takeoff-only complete was a race with OCR. Shared finalize waits for both.
+  await finalizeDocumentsFromOcr(anyDb, tenantId, [documentId]).catch((err) =>
+    console.error("[GET /api/takeoff/split-status] OCR/takeoff finalize failed", err),
+  );
+  const { data: refreshed } = await anyDb
+    .from("documents")
+    .select("id, status, last_error")
+    .eq("id", documentId).eq("tenant_id", tenantId)
+    .maybeSingle();
+  if (refreshed) {
+    docRow.status = refreshed.status;
+    docRow.last_error = refreshed.last_error;
   }
 
   // Once complete, hand back the actual extracted rows so the client can
