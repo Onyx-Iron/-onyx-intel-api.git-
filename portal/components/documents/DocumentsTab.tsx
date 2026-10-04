@@ -172,13 +172,19 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   }, []);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollStartedAtRef = useRef<number | null>(null);
+  const documentsRef = useRef(documents);
+  documentsRef.current = documents;
+  const eventSourceRef = useRef<EventSource | null>(null);
   const [pollTimedOut, setPollTimedOut] = useState(false);
+  const [liveStatus, setLiveStatus] = useState<"off" | "connecting" | "live" | "fallback">("off");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Stop polling after this many ms if status still hasn't changed —
+  // Stop watching after this many ms if status still hasn't changed —
   // a stuck "processing" usually means the fire-and-forget ingest crashed
   // before it could update the row to "error".
   const POLL_TIMEOUT_MS = 5 * 60 * 1000;
+  // Slow safety poll when SSE is live — still kicks split-status workers.
+  const SAFETY_POLL_MS = 20_000;
 
   const toggleInsights = useCallback(async (docId: string) => {
     if (expandedDocId === docId) {
@@ -290,48 +296,123 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     loadDocuments();
   }, [loadDocuments]);
 
-  // Poll while any doc is in-flight — including async split/page workers —
-  // but give up after POLL_TIMEOUT_MS so a silent failure doesn't spin forever.
+  const hasInFlightDocs = documents.some(
+    (d) => isInFlightStatus(d.status) || needsSplitStatusPoll(d),
+  );
+
+  // Prefer SSE status stream while docs are in-flight; fall back to interval
+  // polling if EventSource fails. Split-status kicks still run on a slow
+  // safety timer because those endpoints have finalize side effects.
+  // Depend on the boolean (not `documents`) so SSE merges do not reconnect.
   useEffect(() => {
-    const hasInFlight = documents.some(
-      (d) => isInFlightStatus(d.status) || needsSplitStatusPoll(d),
-    );
-    if (hasInFlight && !pollTimedOut) {
-      if (!pollRef.current) {
-        pollStartedAtRef.current = Date.now();
-        pollRef.current = setInterval(() => {
-          void (async () => {
-            const startedAt = pollStartedAtRef.current ?? Date.now();
-            if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
-              if (pollRef.current) {
-                clearInterval(pollRef.current);
-                pollRef.current = null;
-              }
-              setPollTimedOut(true);
-              return;
-            }
-            const list = await loadDocuments(false);
-            await pollSplitStatus(list);
-            await loadDocuments(false);
-          })();
-        }, 4000);
-      }
-    } else {
+    if (!hasInFlightDocs || pollTimedOut) {
       if (pollRef.current) {
         clearInterval(pollRef.current);
         pollRef.current = null;
       }
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
       pollStartedAtRef.current = null;
-      if (!hasInFlight && pollTimedOut) setPollTimedOut(false);
+      setLiveStatus("off");
+      if (!hasInFlightDocs && pollTimedOut) setPollTimedOut(false);
+      return;
     }
-    return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
+
+    let cancelled = false;
+    let mode: "sse" | "fallback" = "sse";
+    let safetyTimer: ReturnType<typeof setInterval> | null = null;
+    let fallbackTimer: ReturnType<typeof setInterval> | null = null;
+    let es: EventSource | null = null;
+    if (!pollStartedAtRef.current) pollStartedAtRef.current = Date.now();
+    setLiveStatus("connecting");
+
+    const timedOut = () => {
+      const startedAt = pollStartedAtRef.current ?? Date.now();
+      if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        setPollTimedOut(true);
+        return true;
       }
-      pollStartedAtRef.current = null;
+      return false;
     };
-  }, [documents, loadDocuments, pollSplitStatus, pollTimedOut, POLL_TIMEOUT_MS]);
+
+    const mergeDocuments = (incoming: Document[]) => {
+      setDocuments((prev) => {
+        const byId = new Map(prev.map((doc) => [doc.id, doc]));
+        for (const doc of incoming) {
+          const existing = byId.get(doc.id);
+          byId.set(doc.id, existing ? { ...existing, ...doc } : doc);
+        }
+        const seen = new Set(incoming.map((doc) => doc.id));
+        return [
+          ...incoming.map((doc) => byId.get(doc.id)!),
+          ...prev.filter((doc) => !seen.has(doc.id)),
+        ];
+      });
+    };
+
+    const startFallbackPoll = () => {
+      if (cancelled || mode === "fallback") return;
+      mode = "fallback";
+      setLiveStatus("fallback");
+      if (es) {
+        es.close();
+        es = null;
+        eventSourceRef.current = null;
+      }
+      if (fallbackTimer) return;
+      fallbackTimer = setInterval(() => {
+        void (async () => {
+          if (cancelled || timedOut()) return;
+          await pollSplitStatus(documentsRef.current);
+          await loadDocuments(false);
+        })();
+      }, 4000);
+      pollRef.current = fallbackTimer;
+    };
+
+    es = new EventSource(
+      `/api/documents/events?project_id=${encodeURIComponent(projectId)}`,
+    );
+    eventSourceRef.current = es;
+    es.addEventListener("documents", (ev) => {
+      if (cancelled || timedOut()) return;
+      try {
+        const payload = JSON.parse((ev as MessageEvent).data) as { documents?: Document[] };
+        if (payload.documents) mergeDocuments(payload.documents);
+        if (mode === "sse") setLiveStatus("live");
+      } catch {
+        /* ignore malformed frames */
+      }
+    });
+    es.addEventListener("timeout", () => startFallbackPoll());
+    es.onerror = () => startFallbackPoll();
+
+    safetyTimer = setInterval(() => {
+      void (async () => {
+        if (cancelled || timedOut() || mode !== "sse") return;
+        await pollSplitStatus(documentsRef.current);
+      })();
+    }, SAFETY_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      if (safetyTimer) clearInterval(safetyTimer);
+      if (fallbackTimer) clearInterval(fallbackTimer);
+      if (pollRef.current === fallbackTimer) pollRef.current = null;
+      if (es) es.close();
+      if (eventSourceRef.current === es) eventSourceRef.current = null;
+    };
+  }, [
+    hasInFlightDocs,
+    loadDocuments,
+    pollSplitStatus,
+    pollTimedOut,
+    POLL_TIMEOUT_MS,
+    SAFETY_POLL_MS,
+    projectId,
+  ]);
 
   // Faster 2s poll for OCR/takeoff page counts (no Clerk→Supabase Realtime JWT).
   useEffect(() => {
@@ -616,6 +697,12 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
           <div className="flex items-center gap-2">
             <FolderOpen size={12} className="text-[#00D2FF]" />
             <span className="text-[11px] uppercase tracking-widest text-gray-400">Documents</span>
+            {liveStatus === "live" && (
+              <span className="text-[9px] uppercase tracking-widest text-[#CCFF00]/80">Live</span>
+            )}
+            {liveStatus === "fallback" && (
+              <span className="text-[9px] uppercase tracking-widest text-white/40">Polling</span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <input

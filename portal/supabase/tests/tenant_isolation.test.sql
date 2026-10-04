@@ -24,6 +24,14 @@ grant select on public.tenants, public.projects, public.takeoff_items, public.es
   to authenticated;
 grant execute on function public.current_tenant_id() to authenticated;
 
+-- Belt-and-suspenders for stacks that predate
+-- 20261006120000_tenants_self_select_clerk_org_guc (production self_select
+-- now honors app.clerk_org_id). Harmless OR with the restored policy.
+drop policy if exists pgtap_tenants_by_clerk_org on public.tenants;
+create policy pgtap_tenants_by_clerk_org on public.tenants
+  for select to authenticated
+  using (clerk_org_id = current_setting('app.clerk_org_id', true));
+
 -- Fixed UUIDs for stable assertions.
 select set_config('test.tenant_a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', true);
 select set_config('test.tenant_b', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', true);
@@ -106,10 +114,10 @@ select is(
 );
 
 -- Impersonate tenant A.
--- - app.clerk_org_id feeds the recovered ALL policies
--- - request.jwt.claims.org_id feeds current_tenant_id() (per-command policies
---   and tenants.self_select). Without the JWT claim, tenants RLS hides every
---   row from the clerk_org subquery and authenticated sees 0 rows.
+-- - app.clerk_org_id feeds the recovered ALL policies and (via
+--   20261006000001) current_tenant_id() GUC fallback
+-- - request.jwt.claims.org_id feeds the classic JWT path for
+--   current_tenant_id() / tenants.self_select
 set local role authenticated;
 select set_config('app.clerk_org_id', 'org_pgtap_a', true);
 select set_config('request.jwt.claims', '{"org_id":"org_pgtap_a"}', true);

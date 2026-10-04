@@ -24,6 +24,7 @@ import {
   DEFAULT_SNAP_THRESHOLD_PX,
   type VectorPoint,
 } from "@/lib/takeoff/canvas/vector-snap";
+import { canEditVertex, recomputeShapeQuantity } from "@/lib/takeoff/canvas/shape-edit";
 import { takeoffQueryKeys, useSheetCalibration } from "@/lib/takeoff/queries";
 import type { SnapResult } from "@/lib/takeoff/canvas/snap-algorithm";
 
@@ -245,14 +246,19 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const commandStackRef = useRef(new CommandStack());
   const [, setCommandTick] = useState(0);
   const [layerOptions, setLayerOptions] = useState<Array<{ id: string; name: string }>>([]);
-  // Whole-object drag for saved shapes; vertex drag for length/area when selected.
+  // Whole-object drag state for an already-SAVED Shape (count/length/area) —
+  // manual-takeoff-productivity milestone, STEP 4/2 (core geometry editing +
+  // optimistic concurrency). Utility/topo/area-bounds dragging is still
+  // deferred — see REMAINING_RISKS.md.
   const [dragState, setDragState] = useState<{ key: string; startClient: Pt; originalPoints: Pt[]; originalRowVersion: number } | null>(null);
+  // Per-vertex drag for selected length/area (and single-point count) shapes.
   const [vertexDrag, setVertexDrag] = useState<{
     key: string;
     vertexIndex: number;
     startClient: Pt;
     originalPoints: Pt[];
-    originalRowVersion: number | null;
+    originalRowVersion: number;
+    originalQuantity: number;
   } | null>(null);
   const [vectorDescriptions, setVectorDescriptions] = useState<string[]>([]);
   const [snapPoints, setSnapPoints] = useState<VectorPoint[]>([]);
@@ -1297,46 +1303,34 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // only offered for already-saved objects (s.id/s.row_version present);
   // a not-yet-saved draft shape has no server row to PATCH against yet.
   const beginShapeDrag = useCallback((e: React.MouseEvent, s: Shape) => {
-    if (tool !== "pan" || !s.saved || !s.id || s.row_version == null) return;
+    if (tool !== "pan" || !s.saved || !s.id || s.row_version == null || vertexDrag) return;
     e.stopPropagation();
     setSelectedKey(s.key);
     setDragState({ key: s.key, startClient: { x: e.clientX, y: e.clientY }, originalPoints: s.points, originalRowVersion: s.row_version });
-  }, [tool]);
+  }, [tool, vertexDrag]);
 
-  const beginVertexDrag = useCallback((e: React.MouseEvent, s: Shape, vertexIndex: number) => {
-    if (tool !== "pan" || (s.tool !== "length" && s.tool !== "area" && s.tool !== "perimeter")) return;
-    e.stopPropagation();
-    e.preventDefault();
-    setSelectedKey(s.key);
-    setSelectedKeys(new Set([s.key]));
-    setVertexDrag({
-      key: s.key,
-      vertexIndex,
-      startClient: { x: e.clientX, y: e.clientY },
-      originalPoints: s.points,
-      originalRowVersion: s.row_version ?? null,
-    });
-  }, [tool]);
+  const pageSpaceScaleFactor = useMemo(() => {
+    if (calibration?.page_space_scale_factor != null) return calibration.page_space_scale_factor;
+    // Legacy calibrations: scale is real-units per current-render pixel;
+    // page-space factor ≈ scale * renderScale.
+    return scale * renderScale;
+  }, [calibration, scale, renderScale]);
 
-  const recomputeShapeQuantity = useCallback((toolKind: Shape["tool"], pts: Pt[], coordinateSpace: CoordinateSpace): number => {
-    const display = toDisplayPoints(pts, coordinateSpace);
-    if (toolKind === "count") return display.length || 1;
-    if (toolKind === "length") return totalLen(display) * scale;
-    if (toolKind === "perimeter" && display.length >= 2) {
-      return (totalLen(display) + pixelDistance(display[display.length - 1], display[0])) * scale;
-    }
-    return polygonArea(display) * scale * scale;
-  }, [toDisplayPoints, scale]);
-
-  const commitShapeDrag = useCallback(async (drag: { key: string; originalPoints: Pt[]; originalRowVersion: number }) => {
+  const persistShapeGeometry = useCallback(async (
+    drag: { key: string; originalPoints: Pt[]; originalRowVersion: number; originalQuantity?: number },
+    failLabel: string,
+  ) => {
     const s = shapes.find((x) => x.key === drag.key);
     if (!s || !s.id) return;
-    // No actual movement (e.g. a click that never crossed drag threshold) —
-    // nothing to persist.
     if (JSON.stringify(s.points) === JSON.stringify(drag.originalPoints)) return;
 
+    const persistPoints = s.coordinateSpace === "page_space"
+      ? s.points
+      : pointsToPageSpace(s.points, renderScale);
     const previousPoints = drag.originalPoints;
-    const nextPoints = s.points;
+    const nextPoints = persistPoints;
+    const previousQuantity = drag.originalQuantity ?? s.quantity;
+    const measureGeom = s.tool === "perimeter" ? { measure: "perimeter" as const } : {};
 
     const res = await fetch("/api/takeoff/canvas/manual", {
       method: "PATCH",
@@ -1344,50 +1338,67 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       body: JSON.stringify({
         id: s.id, row_version: drag.originalRowVersion,
         quantity: s.quantity, unit: s.unit, cost_code: s.cost_code || null,
-        geometry: { points: s.points, coordinate_space: "page_space", label: s.label, assembly_key: s.assembly_key, ...(s.tool === "perimeter" ? { measure: "perimeter" } : {}) },
+        geometry: {
+          points: persistPoints,
+          coordinate_space: "page_space",
+          label: s.label,
+          assembly_key: s.assembly_key,
+          ...measureGeom,
+        },
       }),
     });
 
     if (res.status === 409) {
       const body = await res.json().catch(() => ({}));
-      // Minimal conflict UX (STEP 2's required pair: reload server / discard
-      // local) — a fuller side-by-side diff modal with "save as new object"
-      // and "retry after review" is deferred, see REMAINING_RISKS.md.
       const reload = window.confirm(
         "This measurement was changed by someone else (or another tab) since you loaded it.\n\n" +
-        "OK = reload the server's current version (discarding your drag)\n" +
-        "Cancel = keep your local change (not saved yet — drag it again to retry)",
+        "OK = reload the server's current version (discarding your edit)\n" +
+        "Cancel = keep your local change (not saved yet — edit again to retry)",
       );
       if (reload && body.server_state) {
         const serverState = body.server_state as { points?: Pt[]; quantity: number; row_version: number };
         setShapes((prev) => prev.map((x) => (x.key === drag.key
-          ? { ...x, points: serverState.points ?? drag.originalPoints, quantity: serverState.quantity, row_version: serverState.row_version }
+          ? {
+              ...x,
+              points: serverState.points ?? drag.originalPoints,
+              quantity: serverState.quantity,
+              row_version: serverState.row_version,
+              coordinateSpace: "page_space",
+            }
           : x)));
       }
-      // else: keep the local drag position as-is (still tagged saved:true
-      // but with an unpersisted position) — the user's next drag or edit on
-      // this object will attempt to PATCH again with the same
-      // row_version and either succeed (if nothing else changed) or
-      // conflict again correctly.
       return;
     }
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      alert(`Move failed: ${err.error ?? res.status}`);
-      setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, points: drag.originalPoints } : x)));
+      alert(`${failLabel} failed: ${err.error ?? res.status}`);
+      setShapes((prev) => prev.map((x) => (x.key === drag.key
+        ? { ...x, points: drag.originalPoints, quantity: drag.originalQuantity ?? x.quantity }
+        : x)));
       return;
     }
 
     const body = await res.json() as { manual_takeoff: { row_version: number }; quantity: number };
-    setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, row_version: body.manual_takeoff.row_version, quantity: body.quantity } : x)));
+    setShapes((prev) => prev.map((x) => (x.key === drag.key
+      ? {
+          ...x,
+          points: persistPoints,
+          coordinateSpace: "page_space",
+          row_version: body.manual_takeoff.row_version,
+          quantity: body.quantity,
+        }
+      : x)));
     commandStackRef.current.record({
-      id: `move-${s.id}-${Date.now()}`,
-      label: "Move measurement",
+      id: `geo-${s.id}-${Date.now()}`,
+      label: failLabel === "Move" ? "Move measurement" : "Edit vertex",
       undo: async () => {
         const cur = shapes.find((x) => x.key === drag.key);
         if (!cur?.id || cur.row_version == null) {
-          setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, points: previousPoints } : x)));
+          setShapes((prev) => prev.map((x) => (x.key === drag.key
+            ? { ...x, points: previousPoints, quantity: previousQuantity }
+            : x)));
+          setCommandTick((t) => t + 1);
           return;
         }
         const undoRes = await fetch("/api/takeoff/canvas/manual", {
@@ -1395,14 +1406,20 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             id: cur.id, row_version: cur.row_version,
-            quantity: cur.quantity, unit: cur.unit, cost_code: cur.cost_code || null,
-            geometry: { points: previousPoints, coordinate_space: "page_space", label: cur.label, ...(cur.tool === "perimeter" ? { measure: "perimeter" } : {}) },
+            quantity: previousQuantity, unit: cur.unit, cost_code: cur.cost_code || null,
+            geometry: {
+              points: previousPoints,
+              coordinate_space: "page_space",
+              label: cur.label,
+              assembly_key: cur.assembly_key,
+              ...(cur.tool === "perimeter" ? { measure: "perimeter" } : {}),
+            },
           }),
         });
         if (undoRes.ok) {
           const undoBody = await undoRes.json() as { manual_takeoff: { row_version: number }; quantity: number };
           setShapes((prev) => prev.map((x) => (x.key === drag.key
-            ? { ...x, points: previousPoints, row_version: undoBody.manual_takeoff.row_version, quantity: undoBody.quantity }
+            ? { ...x, points: previousPoints, coordinateSpace: "page_space", row_version: undoBody.manual_takeoff.row_version, quantity: undoBody.quantity }
             : x)));
         }
         setCommandTick((t) => t + 1);
@@ -1410,7 +1427,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       redo: async () => {
         const cur = shapes.find((x) => x.key === drag.key);
         if (!cur?.id || cur.row_version == null) {
-          setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, points: nextPoints } : x)));
+          setShapes((prev) => prev.map((x) => (x.key === drag.key
+            ? { ...x, points: nextPoints, quantity: body.quantity, coordinateSpace: "page_space" }
+            : x)));
+          setCommandTick((t) => t + 1);
           return;
         }
         const redoRes = await fetch("/api/takeoff/canvas/manual", {
@@ -1418,94 +1438,53 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             id: cur.id, row_version: cur.row_version,
-            quantity: cur.quantity, unit: cur.unit, cost_code: cur.cost_code || null,
-            geometry: { points: nextPoints, coordinate_space: "page_space", label: cur.label, ...(cur.tool === "perimeter" ? { measure: "perimeter" } : {}) },
+            quantity: body.quantity, unit: cur.unit, cost_code: cur.cost_code || null,
+            geometry: {
+              points: nextPoints,
+              coordinate_space: "page_space",
+              label: cur.label,
+              assembly_key: cur.assembly_key,
+              ...(cur.tool === "perimeter" ? { measure: "perimeter" } : {}),
+            },
           }),
         });
         if (redoRes.ok) {
           const redoBody = await redoRes.json() as { manual_takeoff: { row_version: number }; quantity: number };
           setShapes((prev) => prev.map((x) => (x.key === drag.key
-            ? { ...x, points: nextPoints, row_version: redoBody.manual_takeoff.row_version, quantity: redoBody.quantity }
+            ? { ...x, points: nextPoints, coordinateSpace: "page_space", row_version: redoBody.manual_takeoff.row_version, quantity: redoBody.quantity }
             : x)));
         }
         setCommandTick((t) => t + 1);
       },
     });
     setCommandTick((t) => t + 1);
-  }, [shapes]);
+  }, [shapes, renderScale]);
+
+  const commitShapeDrag = useCallback(async (drag: { key: string; originalPoints: Pt[]; originalRowVersion: number }) => {
+    await persistShapeGeometry(drag, "Move");
+  }, [persistShapeGeometry]);
+
+  const beginVertexDrag = useCallback((e: React.MouseEvent, s: Shape, vertexIndex: number) => {
+    if (tool !== "pan" || !s.saved || !s.id || s.row_version == null) return;
+    if (!canEditVertex(s.tool, s.points.length, vertexIndex)) return;
+    e.stopPropagation();
+    e.preventDefault();
+    setSelectedKey(s.key);
+    setSelectedKeys(new Set([s.key]));
+    setDragState(null);
+    setVertexDrag({
+      key: s.key,
+      vertexIndex,
+      startClient: { x: e.clientX, y: e.clientY },
+      originalPoints: s.points,
+      originalRowVersion: s.row_version,
+      originalQuantity: s.quantity,
+    });
+  }, [tool]);
 
   const commitVertexDrag = useCallback(async (drag: NonNullable<typeof vertexDrag>) => {
-    const s = shapes.find((x) => x.key === drag.key);
-    if (!s) return;
-    if (JSON.stringify(s.points) === JSON.stringify(drag.originalPoints)) return;
-
-    const quantity = recomputeShapeQuantity(s.tool, s.points, s.coordinateSpace);
-    setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, quantity, saved: s.id ? x.saved : false } : x)));
-
-    if (!s.id || drag.originalRowVersion == null) {
-      commandStackRef.current.record({
-        id: `vtx-local-${Date.now()}`,
-        label: "Edit vertex",
-        undo: () => {
-          const q = recomputeShapeQuantity(s.tool, drag.originalPoints, s.coordinateSpace);
-          setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, points: drag.originalPoints, quantity: q } : x)));
-          setCommandTick((t) => t + 1);
-        },
-        redo: () => {
-          const q = recomputeShapeQuantity(s.tool, s.points, s.coordinateSpace);
-          setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, points: s.points, quantity: q } : x)));
-          setCommandTick((t) => t + 1);
-        },
-      });
-      setCommandTick((t) => t + 1);
-      return;
-    }
-
-    const res = await fetch("/api/takeoff/canvas/manual", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: s.id,
-        row_version: drag.originalRowVersion,
-        quantity,
-        unit: s.unit,
-        cost_code: s.cost_code || null,
-        geometry: { points: s.points, coordinate_space: "page_space", label: s.label, assembly_key: s.assembly_key, ...(s.tool === "perimeter" ? { measure: "perimeter" } : {}) },
-      }),
-    });
-    if (!res.ok) {
-      if (res.status !== 409) {
-        const err = await res.json().catch(() => ({}));
-        alert(`Vertex edit failed: ${err.error ?? res.status}`);
-      }
-      setShapes((prev) => prev.map((x) => (x.key === drag.key ? { ...x, points: drag.originalPoints } : x)));
-      return;
-    }
-    const body = await res.json() as { manual_takeoff: { row_version: number }; quantity: number };
-    setShapes((prev) => prev.map((x) => (x.key === drag.key
-      ? { ...x, row_version: body.manual_takeoff.row_version, quantity: body.quantity, saved: true }
-      : x)));
-    commandStackRef.current.record({
-      id: `vtx-${s.id}-${Date.now()}`,
-      label: "Edit vertex",
-      undo: async () => {
-        setShapes((prev) => prev.map((x) => {
-          if (x.key !== drag.key) return x;
-          const q = recomputeShapeQuantity(x.tool, drag.originalPoints, x.coordinateSpace);
-          return { ...x, points: drag.originalPoints, quantity: q };
-        }));
-        setCommandTick((t) => t + 1);
-      },
-      redo: async () => {
-        setShapes((prev) => prev.map((x) => {
-          if (x.key !== drag.key) return x;
-          return { ...x, points: s.points, quantity: body.quantity };
-        }));
-        setCommandTick((t) => t + 1);
-      },
-    });
-    setCommandTick((t) => t + 1);
-  }, [shapes, recomputeShapeQuantity]);
+    await persistShapeGeometry(drag, "Vertex edit");
+  }, [persistShapeGeometry]);
 
   useEffect(() => {
     if (!dragState) return;
@@ -1541,8 +1520,13 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         const movedDisplay = originalDisplay.map((p, i) => (
           i === vertexDrag.vertexIndex ? { x: p.x + dx, y: p.y + dy } : p
         ));
-        const movedStorage = s.coordinateSpace === "page_space" ? pointsToPageSpace(movedDisplay, renderScale) : movedDisplay;
-        const quantity = recomputeShapeQuantity(s.tool, movedStorage, s.coordinateSpace);
+        const movedStorage = s.coordinateSpace === "page_space"
+          ? pointsToPageSpace(movedDisplay, renderScale)
+          : movedDisplay;
+        const qtyPoints = s.coordinateSpace === "page_space"
+          ? movedStorage
+          : pointsToPageSpace(movedStorage, renderScale);
+        const quantity = recomputeShapeQuantity(s.tool, qtyPoints, pageSpaceScaleFactor);
         return { ...s, points: movedStorage, quantity };
       }));
     };
@@ -1550,7 +1534,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp, { once: true });
     return () => window.removeEventListener("mousemove", onMove);
-  }, [vertexDrag, renderScale, commitVertexDrag, toDisplayPoints, recomputeShapeQuantity]);
+  }, [vertexDrag, renderScale, commitVertexDrag, toDisplayPoints, pageSpaceScaleFactor]);
 
   async function saveAllUnsaved() {
     const unsaved = shapes.filter((s) => !s.saved);
@@ -1725,13 +1709,40 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   function updateUtilityCostCode(key: string, code: string) {
     setUtilityRuns((prev) => prev.map((r) => (r.key === key ? { ...r, cost_code: code, saved: false } : r)));
   }
-  function removeUtilityRun(key: string) {
+  async function removeUtilityRun(key: string) {
+    const run = utilityRuns.find((r) => r.key === key);
+    if (run?.id) {
+      const res = await fetch(`/api/takeoff/canvas/utility?id=${encodeURIComponent(run.id)}`, { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Delete failed: ${err.error ?? res.status}`);
+        return;
+      }
+    }
     setUtilityRuns((prev) => prev.filter((r) => r.key !== key));
   }
-  function removeTopoNode(key: string) {
+  async function removeTopoNode(key: string) {
+    const node = topoNodes.find((n) => n.key === key);
+    if (node?.id) {
+      const res = await fetch(`/api/takeoff/canvas/topo?id=${encodeURIComponent(node.id)}`, { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Delete failed: ${err.error ?? res.status}`);
+        return;
+      }
+    }
     setTopoNodes((prev) => prev.filter((n) => n.key !== key));
   }
-  function removeAreaBound(key: string) {
+  async function removeAreaBound(key: string) {
+    const area = areaBounds.find((a) => a.key === key);
+    if (area?.id) {
+      const res = await fetch(`/api/takeoff/canvas/area-bounds?id=${encodeURIComponent(area.id)}`, { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Delete failed: ${err.error ?? res.status}`);
+        return;
+      }
+    }
     setAreaBounds((prev) => prev.filter((a) => a.key !== key));
   }
   function updateAreaCostCode(key: string, code: string) {
@@ -2107,11 +2118,29 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 const color = s.tool === "count" ? "#CCFF00" : s.tool === "length" ? "#00D2FF" : "#f97316";
                 const sPts = toDisplayPoints(s.points, s.coordinateSpace);
                 const cursorClass = tool === "pan" && s.saved && s.id ? "cursor-move" : "";
+                const handles = isSel && s.saved && s.id
+                  ? sPts.map((p, idx) => (
+                      canEditVertex(s.tool, s.points.length, idx) ? (
+                        <circle
+                          key={`vh-${idx}`}
+                          cx={p.x}
+                          cy={p.y}
+                          r={5}
+                          fill="#CCFF00"
+                          stroke="#000"
+                          strokeWidth={1.5}
+                          style={{ cursor: "grab" }}
+                          onMouseDown={(e) => beginVertexDrag(e, s, idx)}
+                        />
+                      ) : null
+                    ))
+                  : null;
                 if (s.tool === "count") {
                   const p = sPts[0];
                   return (
                     <g key={s.key} className={cursorClass} onClick={(e) => { e.stopPropagation(); toggleSelectKey(s.key, e.shiftKey || e.metaKey || e.ctrlKey); }} onMouseDown={(e) => beginShapeDrag(e, s)}>
                       <circle cx={p.x} cy={p.y} r={isSel ? 9 : 7} fill={color} stroke="#000" strokeWidth={2} />
+                      {handles}
                     </g>
                   );
                 }
@@ -2120,19 +2149,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   return (
                     <g key={s.key} className={cursorClass} onClick={(e) => { e.stopPropagation(); toggleSelectKey(s.key, e.shiftKey || e.metaKey || e.ctrlKey); }} onMouseDown={(e) => beginShapeDrag(e, s)}>
                       <path d={d} stroke={color} strokeWidth={isSel ? 4 : 3} fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                      {isSel && sPts.map((p, i) => (
-                        <circle
-                          key={`v-${i}`}
-                          cx={p.x}
-                          cy={p.y}
-                          r={5}
-                          fill="#fff"
-                          stroke={color}
-                          strokeWidth={1.5}
-                          className="cursor-nesw-resize"
-                          onMouseDown={(e) => beginVertexDrag(e, s, i)}
-                        />
-                      ))}
+                      {handles}
                     </g>
                   );
                 }
@@ -2141,19 +2158,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 return (
                   <g key={s.key} className={cursorClass} onClick={(e) => { e.stopPropagation(); toggleSelectKey(s.key, e.shiftKey || e.metaKey || e.ctrlKey); }} onMouseDown={(e) => beginShapeDrag(e, s)}>
                     <path d={d} fill={`${color}44`} stroke={color} strokeWidth={isSel ? 3 : 2} />
-                    {isSel && sPts.map((p, i) => (
-                      <circle
-                        key={`v-${i}`}
-                        cx={p.x}
-                        cy={p.y}
-                        r={5}
-                        fill="#fff"
-                        stroke={color}
-                        strokeWidth={1.5}
-                        className="cursor-nesw-resize"
-                        onMouseDown={(e) => beginVertexDrag(e, s, i)}
-                      />
-                    ))}
+                    {handles}
                   </g>
                 );
               })}
