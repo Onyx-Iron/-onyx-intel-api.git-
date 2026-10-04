@@ -75,6 +75,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         gmail_attachment_id: body.attachment_id,
       },
       origin: req.nextUrl.origin,
+      cookie: req.headers.get("cookie"),
     });
 
     let bidOpportunityId: string | null = null;

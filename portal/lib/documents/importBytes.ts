@@ -12,6 +12,7 @@ import {
 } from "@/lib/documents/queuePageSplit";
 import { logEvent, type EntityType } from "@/lib/activity";
 import { auditInsert } from "@/lib/audit";
+import { buildIngestKickRequest, shouldMarkIngestStartError } from "@/lib/documents/ingest-start";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 const PROJECT_DOCS_BUCKET = "project-documents";
@@ -28,6 +29,8 @@ export interface ImportBytesArgs {
   eventEntityType?: EntityType;
   /** Absolute origin for fire-and-forget ingest (e.g. req.nextUrl.origin). */
   origin?: string;
+  /** Clerk session from the importing request. Ingest rejects a cookieless kick. */
+  cookie?: string | null;
 }
 
 export interface ImportBytesResult {
@@ -104,12 +107,35 @@ export async function importPlanBytes(args: ImportBytesArgs): Promise<ImportByte
       originalPath: storagePath,
     });
   } else if (origin) {
-    const ingestUrl = `${origin.replace(/\/$/, "")}/api/documents/${doc.id}/ingest`;
-    void fetch(ingestUrl, {
+    const kick = buildIngestKickRequest({
+      origin,
+      documentId: doc.id,
+      cookie: args.cookie,
+    });
+    void fetch(kick.url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    }).catch((err) => console.error("[importPlanBytes] ingest fire failed", err));
+      headers: kick.headers,
+      body: kick.body,
+    }).then(async (res) => {
+      if (!shouldMarkIngestStartError(res.status)) return;
+      const detail = (await res.text().catch(() => "")).slice(0, 500);
+      await db.from("documents").update({
+        status: "error",
+        last_error: `Ingest failed to start (${res.status}): ${detail}`.slice(0, 2000),
+        last_error_step: "ingest_start",
+      }).eq("id", doc.id).eq("tenant_id", tenantId).in("status", ["pending", "processing", "queued"]);
+    }).catch(async (err) => {
+      console.error("[importPlanBytes] ingest fire failed", err);
+      try {
+        await db.from("documents").update({
+          status: "error",
+          last_error: `Ingest request failed to start: ${err instanceof Error ? err.message : String(err)}`.slice(0, 2000),
+          last_error_step: "ingest_start",
+        }).eq("id", doc.id).eq("tenant_id", tenantId).in("status", ["pending", "processing", "queued"]);
+      } catch (markErr) {
+        console.error("[importPlanBytes] failed to mark document error", markErr);
+      }
+    });
   }
 
   void logEvent({

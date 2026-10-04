@@ -153,6 +153,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         cloud_path: body.path ?? null,
       },
       origin: req.nextUrl.origin,
+      cookie: req.headers.get("cookie"),
     });
 
     return NextResponse.json({

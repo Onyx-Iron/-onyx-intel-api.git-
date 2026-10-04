@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { ingestStampIsLive, shouldMarkIngestStartError, shouldSkipLiveIngest } from "./ingest-start.ts";
+import {
+  buildIngestKickRequest,
+  ingestStampIsLive,
+  shouldMarkIngestStartError,
+  shouldSkipLiveIngest,
+} from "./ingest-start.ts";
 
 describe("shouldMarkIngestStartError", () => {
   it("treats queued and completed ingest responses as success", () => {
@@ -15,9 +20,33 @@ describe("shouldMarkIngestStartError", () => {
 
   it("marks real start failures", () => {
     assert.equal(shouldMarkIngestStartError(400), true);
+    assert.equal(shouldMarkIngestStartError(401), true);
     assert.equal(shouldMarkIngestStartError(412), true);
     assert.equal(shouldMarkIngestStartError(500), true);
     assert.equal(shouldMarkIngestStartError(503), true);
+  });
+});
+
+describe("buildIngestKickRequest", () => {
+  it("forwards the Clerk session so a small import can start ingest", () => {
+    const kick = buildIngestKickRequest({
+      origin: "https://app.onyx-iron.com/",
+      documentId: "doc-1",
+      cookie: " __session=abc ",
+    });
+    assert.equal(kick.url, "https://app.onyx-iron.com/api/documents/doc-1/ingest");
+    assert.equal(kick.headers.Cookie, "__session=abc");
+    assert.equal(kick.headers["Content-Type"], "application/json");
+    assert.equal(kick.body, "{}");
+  });
+
+  it("does not send an empty Cookie header", () => {
+    const kick = buildIngestKickRequest({
+      origin: "https://app.onyx-iron.com",
+      documentId: "doc-1",
+      cookie: "  ",
+    });
+    assert.equal("Cookie" in kick.headers, false);
   });
 });
 
