@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { nextSupervisorAction, takeoffKickUsesModel } from "./pipeline-supervisor.ts";
+import { nextSupervisorAction, supervisorStatusWrite, takeoffKickUsesModel } from "./pipeline-supervisor.ts";
 
 const base = {
   status: "queued",
@@ -34,6 +34,17 @@ describe("document supervisor", () => {
       measured: true,
       takeoff_done: true,
     }).action, "idle");
+  });
+
+  it("does not close a plan or its pages when kicking takeoff", () => {
+    const write = supervisorStatusWrite("kick_takeoff");
+    assert.equal(write.page, null);
+    assert.equal(write.document, null);
+    assert.equal(supervisorStatusWrite("measure").document, null);
+    assert.deepEqual(supervisorStatusWrite("terminal").document, {
+      status: "failed",
+      last_error_step: "supervisor",
+    });
   });
 
   it("stops on a password-protected file and at the attempt cap", () => {

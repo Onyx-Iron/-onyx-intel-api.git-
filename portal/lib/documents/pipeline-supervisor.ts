@@ -74,3 +74,36 @@ export function nextSupervisorAction(doc: SupervisorSnapshot): SupervisorDecisio
 export function takeoffKickUsesModel(): boolean {
   return false;
 }
+
+export interface SupervisorStatusWrite {
+  /** Columns written onto every document_pages row. Null leaves pages alone. */
+  page: Record<string, unknown> | null;
+  /** Status columns written onto the document. Null leaves status alone. */
+  document: Record<string, unknown> | null;
+}
+
+/**
+ * Status writes for one supervisor action.
+ *
+ * `kick_takeoff` only records that the measure pass finished. It must not
+ * stamp `document_pages.takeoff_status` or `documents.status`. Those columns
+ * belong to the per-page takeoff worker and OCR finalize. Closing them here
+ * skips extraction and hides a plan that is still split, processing, or failed.
+ */
+export function supervisorStatusWrite(action: SupervisorActionName): SupervisorStatusWrite {
+  switch (action) {
+    case "terminal":
+      return { page: null, document: { status: "failed", last_error_step: "supervisor" } };
+    case "portal_split":
+      return { page: null, document: { status: "split", split_status: "done" } };
+    case "kick_split":
+    case "measure":
+    case "kick_takeoff":
+    case "idle":
+      return { page: null, document: null };
+    default: {
+      const _never: never = action;
+      return _never;
+    }
+  }
+}
