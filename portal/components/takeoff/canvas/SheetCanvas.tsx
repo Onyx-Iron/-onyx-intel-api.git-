@@ -14,6 +14,12 @@ import { quantityForMeasurement } from "@/lib/takeoff/canvas/quantity";
 import { SCALE_PRESETS, matchScalePreset, pageSpaceFactorForPreset } from "@/lib/takeoff/scale-presets";
 import QuantityGrid from "@/components/takeoff/QuantityGrid";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
+import {
+  removeByKey,
+  upsertByKey,
+  type CanvasCollabEvent,
+} from "@/lib/takeoff/canvas/canvas-realtime";
+import { useCanvasRealtime } from "@/lib/takeoff/canvas/useCanvasRealtime";
 import { CANVAS_HOTKEY_HINT, resolveCanvasHotkey, type CanvasTool } from "@/lib/takeoff/canvas/hotkeys";
 import { displayTakeoffTool } from "@/lib/takeoff/measure-kind";
 import { buildQuantitySummary } from "@/lib/takeoff/canvas/quantity-summary";
@@ -281,6 +287,54 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [areaDraftPts, setAreaDraftPts] = useState<Pt[]>([]);
   const [areaBoundaryKind, setAreaBoundaryKind] = useState<BoundaryKind>("topsoil_stripping");
   const [areaDepthIn, setAreaDepthIn] = useState(6);
+
+  // ── Multi-estimator Realtime (broadcast + presence) ───────────────────────
+  const lastCursorTrackRef = useRef(0);
+  const onRemoteCanvasEvent = useCallback((event: CanvasCollabEvent) => {
+    const keyPayload = event.payload as { key?: string };
+    switch (event.kind) {
+      case "shape_upsert":
+        setShapes((prev) => upsertByKey(prev, event.payload as Shape));
+        break;
+      case "shape_remove":
+        if (keyPayload.key) setShapes((prev) => removeByKey(prev, keyPayload.key!));
+        break;
+      case "utility_upsert":
+        setUtilityRuns((prev) => upsertByKey(prev, event.payload as UtilityRun));
+        break;
+      case "utility_remove":
+        if (keyPayload.key) setUtilityRuns((prev) => removeByKey(prev, keyPayload.key!));
+        break;
+      case "topo_upsert":
+        setTopoNodes((prev) => upsertByKey(prev, event.payload as TopoNode));
+        break;
+      case "topo_remove":
+        if (keyPayload.key) setTopoNodes((prev) => removeByKey(prev, keyPayload.key!));
+        break;
+      case "area_upsert":
+        setAreaBounds((prev) => upsertByKey(prev, event.payload as AreaBound));
+        break;
+      case "area_remove":
+        if (keyPayload.key) setAreaBounds((prev) => removeByKey(prev, keyPayload.key!));
+        break;
+      case "wall_upsert":
+        setWallRuns((prev) => upsertByKey(prev, event.payload as WallRun));
+        break;
+      case "wall_remove":
+        if (keyPayload.key) setWallRuns((prev) => removeByKey(prev, keyPayload.key!));
+        break;
+      default:
+        break;
+    }
+  }, []);
+
+  const { peers, status: collabStatus, broadcast, trackCursor } = useCanvasRealtime({
+    projectId,
+    pageId,
+    // Display name is resolved server-side via /api/takeoff/canvas/realtime-auth.
+    displayName: "Estimator",
+    onRemoteEvent: onRemoteCanvasEvent,
+  });
 
   // ── Snap worker: nearest-vertex search off the main thread ───────────────
   useEffect(() => {
@@ -669,12 +723,19 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }, [tool, snapPoints]);
 
   const onCanvasMouseMove: React.MouseEventHandler<SVGSVGElement> = useCallback((e) => {
+    const cursor = toLocal(e.clientX, e.clientY, e.currentTarget);
+    const now = Date.now();
+    if (now - lastCursorTrackRef.current >= 80) {
+      lastCursorTrackRef.current = now;
+      // Same SVG viewBox space as shapes — not raw CSS pixels from the client rect.
+      trackCursor(cursor.x, cursor.y);
+    }
+
     if (!SNAP_TOOLS.has(tool) || snapPoints.length === 0) {
       setSnapTarget(null);
       latestSnapRef.current = null;
       return;
     }
-    const cursor = toLocal(e.clientX, e.clientY, e.currentTarget);
     const id = ++snapRequestIdRef.current;
     snapWorkerRef.current?.postMessage({
       type: "snap",
@@ -682,7 +743,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       cursor,
       thresholdPixels: DEFAULT_SNAP_THRESHOLD_PX,
     });
-  }, [tool, snapPoints, toLocal]);
+  }, [tool, snapPoints, toLocal, trackCursor]);
 
   // ── Geometry helpers ──────────────────────────────────────────────────────
   // `scale` is real-world-units per CURRENT-RENDER pixel — every existing
@@ -795,6 +856,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         layer_id: activeLayerId,
       };
       setShapes((prev) => [...prev, shape]);
+      broadcast("shape_upsert", shape);
       return;
     }
 
@@ -811,14 +873,17 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       if (raw != null) {
         const elevation = Number(raw);
         if (Number.isFinite(elevation)) {
-          setTopoNodes((prev) => [...prev, {
+          const node: TopoNode = {
+            // eslint-disable-next-line react-hooks/purity
             key: `spot-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             node_type: "spot_elevation",
             points: [p],
             coordinateSpace: "legacy_pixel",
             elevation,
             layer_assignment: "manual",
-          }]);
+          };
+          setTopoNodes((prev) => [...prev, node]);
+          broadcast("topo_upsert", node);
         }
       }
       return;
@@ -874,9 +939,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       },
     };
     setUtilityRuns((prev) => [...prev, run]);
+    broadcast("utility_upsert", run);
     setUtilityModalPts(null);
     setUtilityDraftPts([]);
-  }, [utilityModalPts, renderScale, calibration]);
+  }, [utilityModalPts, renderScale, calibration, broadcast]);
 
   const commitWall = useCallback((inputs: WallInputs) => {
     if (!wallModalPts || renderScale <= 0) return;
@@ -894,9 +960,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       rebar_spacing_inches: inputs.rebar_spacing_inches,
     };
     setWallRuns((prev) => [...prev, run]);
+    broadcast("wall_upsert", run);
     setWallModalPts(null);
     setDraftPoints([]);
-  }, [wallModalPts, renderScale, calibration]);
+  }, [wallModalPts, renderScale, calibration, broadcast]);
 
   const finishContourDraft = useCallback(() => {
     if (contourDraftPts.length < 2) { setContourDraftPts([]); return; }
@@ -904,18 +971,20 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (raw != null) {
       const elevation = Number(raw);
       if (Number.isFinite(elevation)) {
-        setTopoNodes((prev) => [...prev, {
+        const node: TopoNode = {
           key: `contour-${Date.now()}`,
           node_type: "contour_line",
           points: contourDraftPts,
           coordinateSpace: "legacy_pixel",
           elevation,
           layer_assignment: "manual",
-        }]);
+        };
+        setTopoNodes((prev) => [...prev, node]);
+        broadcast("topo_upsert", node);
       }
     }
     setContourDraftPts([]);
-  }, [contourDraftPts]);
+  }, [contourDraftPts, broadcast]);
 
   // Live SF (shoelace × scale²) and, for stripping/pad kinds, CY preview while drawing.
   const areaDraftPreview = useMemo(() => {
@@ -929,7 +998,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     if (areaDraftPts.length < 3) { setAreaDraftPts([]); return; }
     const sf = polygonArea(areaDraftPts) * scale * scale;
     const cy = DEPTH_APPLICABLE_KINDS.has(areaBoundaryKind) ? (sf * (areaDepthIn / 12)) / 27 : undefined;
-    setAreaBounds((prev) => [...prev, {
+    const bound: AreaBound = {
       key: `area-${Date.now()}`,
       points: areaDraftPts,
       coordinateSpace: "legacy_pixel",
@@ -937,9 +1006,11 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       area_sf: sf,
       depth_in: DEPTH_APPLICABLE_KINDS.has(areaBoundaryKind) ? areaDepthIn : undefined,
       volume_cy: cy,
-    }]);
+    };
+    setAreaBounds((prev) => [...prev, bound]);
+    broadcast("area_upsert", bound);
     setAreaDraftPts([]);
-  }, [areaDraftPts, scale, areaBoundaryKind, areaDepthIn]);
+  }, [areaDraftPts, scale, areaBoundaryKind, areaDepthIn, broadcast]);
 
   const finishDraft = useCallback(() => {
     if (tool === "utility_pipe") { finishUtilityDraft(); return; }
@@ -952,7 +1023,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
     if (tool === "length") {
       const quantity = totalLen(draftPoints) * scale;
-      setShapes((prev) => [...prev, {
+      const shape: Shape = {
         key: `l-${Date.now()}`,
         tool: "length",
         points: draftPoints,
@@ -960,7 +1031,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         quantity,
         unit: "LF",
         layer_id: activeLayerId,
-      }]);
+      };
+      setShapes((prev) => [...prev, shape]);
+      broadcast("shape_upsert", shape);
     } else if (tool === "perimeter" && draftPoints.length >= 3) {
       const closed = totalLen(draftPoints) + pixelDistance(draftPoints[draftPoints.length - 1], draftPoints[0]);
       setShapes((prev) => [...prev, {
@@ -974,7 +1047,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       }]);
     } else if (tool === "area" && draftPoints.length >= 3) {
       const quantity = polygonArea(draftPoints) * scale * scale;
-      setShapes((prev) => [...prev, {
+      const shape: Shape = {
         key: `a-${Date.now()}`,
         tool: "area",
         points: draftPoints,
@@ -982,10 +1055,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         quantity,
         unit: "SF",
         layer_id: activeLayerId,
-      }]);
+      };
+      setShapes((prev) => [...prev, shape]);
+      broadcast("shape_upsert", shape);
     }
     setDraftPoints([]);
-  }, [draftPoints, tool, scale, wallMode, activeLayerId, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft]);
+  }, [draftPoints, tool, scale, wallMode, activeLayerId, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft, broadcast]);
 
   const clearDrafts = useCallback(() => {
     setDraftPoints([]);
@@ -1029,11 +1104,16 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
     setShapes((prev) => {
       for (let i = prev.length - 1; i >= 0; i -= 1) {
-        if (!prev[i].saved) return [...prev.slice(0, i), ...prev.slice(i + 1)];
+        if (!prev[i].saved) {
+          const removed = prev[i];
+          // Broadcast after state update scheduling so peers drop the draft too.
+          queueMicrotask(() => broadcast("shape_remove", { key: removed.key }));
+          return [...prev.slice(0, i), ...prev.slice(i + 1)];
+        }
       }
       return prev;
     });
-  }, [draftPoints.length, utilityDraftPts.length, contourDraftPts.length, areaDraftPts.length, calibPts.length]);
+  }, [broadcast, draftPoints.length, utilityDraftPts.length, contourDraftPts.length, areaDraftPts.length, calibPts.length]);
 
   const redoLast = useCallback(() => {
     if (commandStackRef.current.canRedo) {
@@ -1060,6 +1140,9 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     setShapes((prev) => prev.filter((s) => !keys.has(s.key)));
     setSelectedKeys(new Set());
     setSelectedKey(null);
+    for (const s of snapshot) {
+      broadcast("shape_remove", { key: s.key });
+    }
 
     const deletedIds: string[] = [];
     for (const s of snapshot) {
@@ -1069,6 +1152,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       else {
         // Restore local state on failure so the user can retry.
         setShapes((prev) => [...prev, s]);
+        broadcast("shape_upsert", s);
       }
     }
 
@@ -1099,7 +1183,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       },
     });
     setCommandTick((t) => t + 1);
-  }, [shapes]);
+  }, [broadcast, shapes]);
 
   const deleteSelection = useCallback(() => {
     const keys = selectedKeys.size > 0 ? selectedKeys : (selectedKey ? new Set([selectedKey]) : new Set<string>());
@@ -1321,8 +1405,16 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     failLabel: string,
   ) => {
     const s = shapes.find((x) => x.key === drag.key);
-    if (!s || !s.id) return;
+    if (!s) return;
+    // No actual movement (e.g. a click that never crossed drag threshold) —
+    // nothing to persist.
     if (JSON.stringify(s.points) === JSON.stringify(drag.originalPoints)) return;
+
+    // Unsaved drafts have no server id — sync peers without PATCH.
+    if (!s.id) {
+      broadcast("shape_upsert", s);
+      return;
+    }
 
     const persistPoints = s.coordinateSpace === "page_space"
       ? s.points
@@ -1357,15 +1449,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       );
       if (reload && body.server_state) {
         const serverState = body.server_state as { points?: Pt[]; quantity: number; row_version: number };
-        setShapes((prev) => prev.map((x) => (x.key === drag.key
-          ? {
-              ...x,
-              points: serverState.points ?? drag.originalPoints,
-              quantity: serverState.quantity,
-              row_version: serverState.row_version,
-              coordinateSpace: "page_space",
-            }
-          : x)));
+        const restored = {
+          ...s,
+          points: serverState.points ?? drag.originalPoints,
+          quantity: serverState.quantity,
+          row_version: serverState.row_version,
+          coordinateSpace: "page_space" as const,
+        };
+        setShapes((prev) => prev.map((x) => (x.key === drag.key ? restored : x)));
+        broadcast("shape_upsert", restored);
       }
       return;
     }
@@ -1380,15 +1472,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
 
     const body = await res.json() as { manual_takeoff: { row_version: number }; quantity: number };
-    setShapes((prev) => prev.map((x) => (x.key === drag.key
-      ? {
-          ...x,
-          points: persistPoints,
-          coordinateSpace: "page_space",
-          row_version: body.manual_takeoff.row_version,
-          quantity: body.quantity,
-        }
-      : x)));
+    const updated = {
+      ...s,
+      points: persistPoints,
+      coordinateSpace: "page_space" as const,
+      row_version: body.manual_takeoff.row_version,
+      quantity: body.quantity,
+    };
+    setShapes((prev) => prev.map((x) => (x.key === drag.key ? updated : x)));
+    broadcast("shape_upsert", updated);
     commandStackRef.current.record({
       id: `geo-${s.id}-${Date.now()}`,
       label: failLabel === "Move" ? "Move measurement" : "Edit vertex",
@@ -1458,7 +1550,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       },
     });
     setCommandTick((t) => t + 1);
-  }, [shapes, renderScale]);
+  }, [broadcast, shapes, renderScale]);
 
   const commitShapeDrag = useCallback(async (drag: { key: string; originalPoints: Pt[]; originalRowVersion: number }) => {
     await persistShapeGeometry(drag, "Move");
@@ -1698,7 +1790,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }
 
   function updateCostCode(key: string, code: string) {
-    setShapes((prev) => prev.map((s) => (s.key === key ? { ...s, cost_code: code, saved: false } : s)));
+    setShapes((prev) => {
+      const next = prev.map((s) => (s.key === key ? { ...s, cost_code: code, saved: false } : s));
+      const updated = next.find((s) => s.key === key);
+      if (updated) broadcast("shape_upsert", updated);
+      return next;
+    });
   }
   function updateShapeProps(key: string, patch: Partial<Pick<Shape, "label" | "layer_id" | "cost_code" | "assembly_key">>) {
     setShapes((prev) => prev.map((s) => (s.key === key ? { ...s, ...patch, saved: false } : s)));
@@ -1707,7 +1804,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     void deleteShapesByKeys(new Set([key]));
   }
   function updateUtilityCostCode(key: string, code: string) {
-    setUtilityRuns((prev) => prev.map((r) => (r.key === key ? { ...r, cost_code: code, saved: false } : r)));
+    setUtilityRuns((prev) => {
+      const next = prev.map((r) => (r.key === key ? { ...r, cost_code: code, saved: false } : r));
+      const updated = next.find((r) => r.key === key);
+      if (updated) broadcast("utility_upsert", updated);
+      return next;
+    });
   }
   async function removeUtilityRun(key: string) {
     const run = utilityRuns.find((r) => r.key === key);
@@ -1720,6 +1822,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       }
     }
     setUtilityRuns((prev) => prev.filter((r) => r.key !== key));
+    broadcast("utility_remove", { key });
   }
   async function removeTopoNode(key: string) {
     const node = topoNodes.find((n) => n.key === key);
@@ -1732,6 +1835,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       }
     }
     setTopoNodes((prev) => prev.filter((n) => n.key !== key));
+    broadcast("topo_remove", { key });
   }
   async function removeAreaBound(key: string) {
     const area = areaBounds.find((a) => a.key === key);
@@ -1744,9 +1848,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       }
     }
     setAreaBounds((prev) => prev.filter((a) => a.key !== key));
+    broadcast("area_remove", { key });
   }
   function updateAreaCostCode(key: string, code: string) {
-    setAreaBounds((prev) => prev.map((a) => (a.key === key ? { ...a, target_cost_code: code, saved: false } : a)));
+    setAreaBounds((prev) => {
+      const next = prev.map((a) => (a.key === key ? { ...a, target_cost_code: code, saved: false } : a));
+      const updated = next.find((a) => a.key === key);
+      if (updated) broadcast("area_upsert", updated);
+      return next;
+    });
   }
 
   // ── "Compile to civil_surfaces" — push all topo nodes into the site
@@ -1895,7 +2005,48 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             </p>
           </div>
 
-          <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono text-white/40">
+          <div className="flex items-center gap-3 text-[10px] uppercase tracking-widest font-mono text-white/40">
+            <div
+              className="flex items-center gap-1.5"
+              title={
+                collabStatus === "live"
+                  ? "Live canvas collaboration connected"
+                  : collabStatus === "connecting"
+                    ? "Connecting to live collaboration…"
+                    : collabStatus === "error"
+                      ? "Live collaboration unavailable"
+                      : "Live collaboration off"
+              }
+            >
+              <span
+                className={`inline-block h-1.5 w-1.5 rounded-full ${
+                  collabStatus === "live"
+                    ? "bg-[#CCFF00]"
+                    : collabStatus === "connecting"
+                      ? "bg-amber-400 animate-pulse"
+                      : "bg-white/20"
+                }`}
+              />
+              <span className="normal-case tracking-normal text-white/50">
+                {collabStatus === "live"
+                  ? peers.length > 0
+                    ? `${peers.length + 1} live`
+                    : "Live"
+                  : collabStatus === "connecting"
+                    ? "Connecting"
+                    : "Solo"}
+              </span>
+              {peers.slice(0, 4).map((peer) => (
+                <span
+                  key={peer.key}
+                  className="inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[9px] font-semibold text-black"
+                  style={{ backgroundColor: peer.color }}
+                  title={peer.name}
+                >
+                  {peer.name.slice(0, 1).toUpperCase()}
+                </span>
+              ))}
+            </div>
             {priorUrl && (
               <button
                 type="button"
@@ -2359,6 +2510,24 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   />
                 </g>
               )}
+
+              {/* Remote estimator cursors (presence) */}
+              {peers.map((peer) => (
+                peer.x != null && peer.y != null ? (
+                  <g key={`cursor-${peer.key}`} pointerEvents="none">
+                    <circle cx={peer.x} cy={peer.y} r={4} fill={peer.color} stroke="#000" strokeWidth={1} />
+                    <text
+                      x={peer.x + 8}
+                      y={peer.y - 8}
+                      fontSize={10}
+                      fill={peer.color}
+                      fontFamily="monospace"
+                    >
+                      {peer.name}
+                    </text>
+                  </g>
+                ) : null
+              ))}
             </svg>
           )}
 
@@ -2752,7 +2921,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                       {w.length_lf.toFixed(1)} <span className="text-white/40">LF</span>
                       <span className="text-white/40 text-xs"> · {w.height_ft}&apos; H · {w.thickness_in}&quot;</span>
                     </div>
-                    <button type="button" onClick={() => setWallRuns((prev) => prev.filter((x) => x.key !== w.key))} className="text-[10px] text-white/30 hover:text-red-400">✕</button>
+                    <button type="button" onClick={() => { setWallRuns((prev) => prev.filter((x) => x.key !== w.key)); broadcast("wall_remove", { key: w.key }); }} className="text-[10px] text-white/30 hover:text-red-400">✕</button>
                   </div>
                   <div className="mt-1 space-y-0.5 text-[10px] font-mono text-white/50">
                     {recipe.map((line) => (

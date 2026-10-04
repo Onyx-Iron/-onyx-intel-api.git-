@@ -1650,6 +1650,7 @@ export type Database = {
           created_at: string | null
           document_id: string
           embedding: string | null
+          fts: unknown
           id: string
           page_id: string | null
           page_number: number | null
@@ -1661,6 +1662,7 @@ export type Database = {
           created_at?: string | null
           document_id: string
           embedding?: string | null
+          fts?: unknown
           id?: string
           page_id?: string | null
           page_number?: number | null
@@ -1672,6 +1674,7 @@ export type Database = {
           created_at?: string | null
           document_id?: string
           embedding?: string | null
+          fts?: unknown
           id?: string
           page_id?: string | null
           page_number?: number | null
@@ -5346,6 +5349,23 @@ export type Database = {
               similarity: number
             }[]
           }
+      match_document_chunks: {
+        Args: {
+          match_count?: number
+          match_project_id: string
+          match_tenant_id: string
+          query_embedding: string
+          query_text?: string
+          rrf_k?: number
+        }
+        Returns: {
+          content: string
+          document_id: string
+          page_number: number
+          rrf_score: number
+          similarity: number
+        }[]
+      }
       prune_ai_rate_limit_hits: {
         Args: { older_than?: string }
         Returns: undefined

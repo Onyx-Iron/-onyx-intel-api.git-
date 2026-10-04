@@ -142,10 +142,23 @@ export const PROJECT_SKILL_DECLARATIONS = [
     name: "search_project_docs",
     description:
       "Semantically search indexed project documents (drawings, specs, submittals, contracts). " +
-      "Use when the question involves document content, specifications, materials, quantities, or referenced sheets.",
+      "Use when the question involves document content, specifications, materials, quantities, or referenced sheets. " +
+      "Optionally narrow by document_ids or doc_types (e.g. drawing, spec, submittal).",
     parameters: {
       type: "OBJECT",
-      properties: { query: { type: "STRING", description: "Natural language search query" } },
+      properties: {
+        query: { type: "STRING", description: "Natural language search query" },
+        document_ids: {
+          type: "ARRAY",
+          items: { type: "STRING" },
+          description: "Optional document UUIDs to restrict the search",
+        },
+        doc_types: {
+          type: "ARRAY",
+          items: { type: "STRING" },
+          description: "Optional document types to restrict the search (drawing, spec, submittal, contract, etc.)",
+        },
+      },
       required: ["query"],
     },
   },
@@ -309,6 +322,7 @@ async function searchChunks(
   ctx: SkillContext,
   queryText: string,
   matchCount: number,
+  filters?: { document_ids?: string[]; doc_types?: string[] },
 ): Promise<ChunkRow[]> {
   if (!ctx.embedText) return [];
   const embedding = await ctx.embedText(queryText);
@@ -319,6 +333,8 @@ async function searchChunks(
     match_project_id: ctx.projectId,
     query_text: queryText,
     match_count: matchCount,
+    filter_document_ids: filters?.document_ids?.length ? filters.document_ids : null,
+    filter_doc_types: filters?.doc_types?.length ? filters.doc_types : null,
   }) as { data: ChunkRow[] | null };
   return data ?? [];
 }
@@ -348,8 +364,17 @@ export async function executeProjectSkill(
     case "search_project_docs": {
       const query = String(args.query ?? "").trim();
       if (!query) return "No query provided.";
+      const documentIds = Array.isArray(args.document_ids)
+        ? args.document_ids.filter((x): x is string => typeof x === "string")
+        : undefined;
+      const docTypes = Array.isArray(args.doc_types)
+        ? args.doc_types.filter((x): x is string => typeof x === "string")
+        : undefined;
       try {
-        const chunks = (await searchChunks(db, ctx, query, 6)).filter((chunk) => chunk.rrf_score > 0.01);
+        const chunks = (await searchChunks(db, ctx, query, 6, {
+          document_ids: documentIds,
+          doc_types: docTypes,
+        })).filter((chunk) => chunk.rrf_score > 0.01);
         if (chunks.length === 0) return `No relevant document excerpts found.\n\nOpen in app: ${href}`;
         for (const chunk of chunks) {
           ctx.citationsOut.push({

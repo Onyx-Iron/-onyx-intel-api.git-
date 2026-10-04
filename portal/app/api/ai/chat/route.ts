@@ -272,6 +272,7 @@ async function handleRag(
   project_id: string,
   message: string,
   conversation_id: string | undefined,
+  filters?: { document_ids?: string[]; doc_types?: string[] },
 ): Promise<Response> {
   const db = await createServiceClient();
 
@@ -353,6 +354,8 @@ async function handleRag(
       match_project_id: project_id,
       query_text: message.trim(),
       match_count: 6,
+      filter_document_ids: filters?.document_ids?.length ? filters.document_ids : null,
+      filter_doc_types: filters?.doc_types?.length ? filters.doc_types : null,
     }) as { data: ChunkRow[] | null };
 
     if (chunks && chunks.length > 0) {
@@ -745,7 +748,16 @@ export async function POST(req: NextRequest): Promise<Response> {
     if (mode === "agentic") {
       return await handleAgentic(userId, tenantId, body.project_id, body.message, body.conversation_id);
     }
-    return await handleRag(userId, tenantId, body.project_id, body.message, body.conversation_id);
+    const documentIds = Array.isArray((body as { document_ids?: unknown }).document_ids)
+      ? ((body as { document_ids: unknown[] }).document_ids).filter((x): x is string => typeof x === "string")
+      : undefined;
+    const docTypes = Array.isArray((body as { doc_types?: unknown }).doc_types)
+      ? ((body as { doc_types: unknown[] }).doc_types).filter((x): x is string => typeof x === "string")
+      : undefined;
+    return await handleRag(userId, tenantId, body.project_id, body.message, body.conversation_id, {
+      document_ids: documentIds,
+      doc_types: docTypes,
+    });
   } catch (err: unknown) {
     if (err instanceof NoProviderError) {
       return NextResponse.json(

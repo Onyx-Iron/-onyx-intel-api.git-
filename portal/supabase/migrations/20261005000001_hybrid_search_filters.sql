@@ -1,50 +1,4 @@
--- Unify vector search across sync ingest (`chunks`) and async page-split
--- pipeline (`document_chunks`). Adds document-scoped search for Q&A.
--- Hybrid RRF uses FULL OUTER JOIN + ordered keyword LIMIT (keyword-only hits
--- must survive) and search_path public,extensions for vector ops.
---
--- DROP first: prior overloads returned document_id uuid; this migration
--- widens to text. Postgres rejects CREATE OR REPLACE when OUT row types change
--- (SQLSTATE 42P13).
-
-DROP FUNCTION IF EXISTS public.match_chunks(vector, uuid, uuid, integer);
-DROP FUNCTION IF EXISTS public.match_chunks(vector, uuid, uuid, text, integer, integer);
-
-CREATE OR REPLACE FUNCTION public.match_chunks(
-  query_embedding vector,
-  match_tenant_id uuid,
-  match_project_id uuid,
-  match_count integer DEFAULT 5
-)
-RETURNS TABLE(content text, document_id text, page_number integer, similarity double precision)
-LANGUAGE plpgsql
-SET search_path TO 'public', 'extensions'
-AS $function$
-BEGIN
-  RETURN QUERY
-  SELECT
-    u.content,
-    u.document_id,
-    u.page_number,
-    (1 - (u.embedding <=> query_embedding))::double precision AS similarity
-  FROM (
-    SELECT c.content, c.document_id, c.page_number, c.embedding
-    FROM chunks c
-    WHERE c.tenant_id = match_tenant_id
-      AND c.project_id = match_project_id
-      AND c.embedding IS NOT NULL
-    UNION ALL
-    SELECT dc.content, dc.document_id, dc.page_number, dc.embedding
-    FROM document_chunks dc
-    JOIN documents d ON d.id = dc.document_id AND d.tenant_id = dc.tenant_id
-    WHERE dc.tenant_id = match_tenant_id
-      AND d.project_id = match_project_id
-      AND dc.embedding IS NOT NULL
-  ) u
-  ORDER BY u.embedding <=> query_embedding
-  LIMIT match_count;
-END;
-$function$;
+-- Optional document / doc_type filters for hybrid match_chunks (RRF).
 
 CREATE OR REPLACE FUNCTION public.match_chunks(
   query_embedding vector,
@@ -52,7 +6,9 @@ CREATE OR REPLACE FUNCTION public.match_chunks(
   match_project_id uuid,
   query_text text DEFAULT ''::text,
   match_count integer DEFAULT 6,
-  rrf_k integer DEFAULT 60
+  rrf_k integer DEFAULT 60,
+  filter_document_ids text[] DEFAULT NULL,
+  filter_doc_types text[] DEFAULT NULL
 )
 RETURNS TABLE(content text, document_id text, page_number integer, similarity double precision, rrf_score double precision)
 LANGUAGE plpgsql
@@ -66,9 +22,12 @@ BEGIN
     WITH vector_corpus AS (
       SELECT c.id, c.content, c.document_id, c.page_number, c.embedding, 'chunks'::text AS src
       FROM chunks c
+      LEFT JOIN documents d ON d.id = c.document_id AND d.tenant_id = c.tenant_id
       WHERE c.tenant_id = match_tenant_id
         AND c.project_id = match_project_id
         AND c.embedding IS NOT NULL
+        AND (filter_document_ids IS NULL OR c.document_id = ANY (filter_document_ids))
+        AND (filter_doc_types IS NULL OR d.doc_type = ANY (filter_doc_types))
       UNION ALL
       SELECT dc.id, dc.content, dc.document_id, dc.page_number, dc.embedding, 'document_chunks'::text AS src
       FROM document_chunks dc
@@ -76,12 +35,17 @@ BEGIN
       WHERE dc.tenant_id = match_tenant_id
         AND d.project_id = match_project_id
         AND dc.embedding IS NOT NULL
+        AND (filter_document_ids IS NULL OR dc.document_id = ANY (filter_document_ids))
+        AND (filter_doc_types IS NULL OR d.doc_type = ANY (filter_doc_types))
     ),
     keyword_corpus AS (
       SELECT c.id, c.content, c.document_id, c.page_number, c.fts, 'chunks'::text AS src
       FROM chunks c
+      LEFT JOIN documents d ON d.id = c.document_id AND d.tenant_id = c.tenant_id
       WHERE c.tenant_id = match_tenant_id
         AND c.project_id = match_project_id
+        AND (filter_document_ids IS NULL OR c.document_id = ANY (filter_document_ids))
+        AND (filter_doc_types IS NULL OR d.doc_type = ANY (filter_doc_types))
       UNION ALL
       SELECT
         dc.id,
@@ -94,6 +58,8 @@ BEGIN
       JOIN documents d ON d.id = dc.document_id AND d.tenant_id = dc.tenant_id
       WHERE dc.tenant_id = match_tenant_id
         AND d.project_id = match_project_id
+        AND (filter_document_ids IS NULL OR dc.document_id = ANY (filter_document_ids))
+        AND (filter_doc_types IS NULL OR d.doc_type = ANY (filter_doc_types))
     ),
     vector_ranked AS (
       SELECT
@@ -153,49 +119,18 @@ BEGIN
       mc.page_number,
       mc.similarity,
       (1.0 / (rrf_k + ROW_NUMBER() OVER (ORDER BY mc.similarity DESC)))::double precision AS rrf_score
-    FROM public.match_chunks(query_embedding, match_tenant_id, match_project_id, match_count) mc;
+    FROM public.match_chunks(query_embedding, match_tenant_id, match_project_id, match_count) mc
+    WHERE (filter_document_ids IS NULL OR mc.document_id = ANY (filter_document_ids));
   END IF;
 END;
 $function$;
 
--- Document-scoped search for Q&A (distinct overload from project hybrid RRF).
-CREATE OR REPLACE FUNCTION public.match_document_chunks(
-  query_embedding vector,
-  match_tenant_id uuid,
-  match_document_id text,
-  match_count integer DEFAULT 8
-)
-RETURNS TABLE(content text, page_number integer, similarity double precision)
-LANGUAGE plpgsql
-SET search_path TO 'public', 'extensions'
-AS $function$
-BEGIN
-  RETURN QUERY
-  SELECT
-    u.content,
-    u.page_number,
-    (1 - (u.embedding <=> query_embedding))::double precision AS similarity
-  FROM (
-    SELECT c.content, c.page_number, c.embedding
-    FROM chunks c
-    WHERE c.tenant_id = match_tenant_id
-      AND c.document_id = match_document_id
-      AND c.embedding IS NOT NULL
-    UNION ALL
-    SELECT dc.content, dc.page_number, dc.embedding
-    FROM document_chunks dc
-    WHERE dc.tenant_id = match_tenant_id
-      AND dc.document_id = match_document_id
-      AND dc.embedding IS NOT NULL
-  ) u
-  ORDER BY u.embedding <=> query_embedding
-  LIMIT match_count;
-END;
-$function$;
+-- Drop the pre-filter 6-arg overload so PostgREST/RPC resolve to this signature
+-- (new filter args default to NULL). Keep the 4-arg legacy used in the ELSE branch.
+DROP FUNCTION IF EXISTS public.match_chunks(vector, uuid, uuid, text, integer, integer);
 
-REVOKE ALL ON FUNCTION public.match_document_chunks(vector, uuid, text, integer) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.match_document_chunks(vector, uuid, text, integer) TO service_role;
+ALTER FUNCTION public.match_chunks(vector, uuid, uuid, text, integer, integer, text[], text[])
+  SET search_path = public, extensions;
 
-ALTER FUNCTION public.match_chunks(vector, uuid, uuid, integer) SET search_path = public, extensions;
-ALTER FUNCTION public.match_chunks(vector, uuid, uuid, text, integer, integer) SET search_path = public, extensions;
-ALTER FUNCTION public.match_document_chunks(vector, uuid, text, integer) SET search_path = public, extensions;
+REVOKE ALL ON FUNCTION public.match_chunks(vector, uuid, uuid, text, integer, integer, text[], text[]) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.match_chunks(vector, uuid, uuid, text, integer, integer, text[], text[]) TO service_role;
