@@ -14,11 +14,49 @@ const KNOWN_ROLES: readonly Role[] = [
   "Owner", "Admin", "Estimator", "ProjectManager", "FieldSuperintendent", "Subcontractor", "ClientView",
 ];
 
-// A user with no project_profiles row yet (first login) defaults to the most
-// capable role rather than silently locking the tenant's own owner out —
-// `getOrCreateTenant` already gates workspace creation, so anyone reaching
-// this point is a legitimate member of the org.
+// A member with no project_profiles row is an Estimator: they can estimate
+// and work the job, and they cannot delete the workspace's projects.
+// The workspace owner is resolved separately and is always Owner.
 const DEFAULT_ROLE: Role = "Estimator";
+
+export interface RoleLookup {
+  orgId?: string | null;
+  orgRole?: string | null;
+}
+
+/** Clerk organization administrators, plus the person who owns a personal workspace. */
+export function isWorkspaceOwner(input: {
+  clerkUserId: string;
+  clerkOrgId: string | null | undefined;
+  orgId?: string | null;
+  orgRole?: string | null;
+}): boolean {
+  if (input.clerkOrgId != null && input.clerkOrgId === `user_${input.clerkUserId}`) return true;
+  const orgRole = input.orgRole ?? "";
+  const orgAdmin = orgRole === "org:admin" || orgRole === "admin";
+  if (!orgAdmin || !input.orgId || !input.clerkOrgId) return false;
+  return input.orgId === input.clerkOrgId;
+}
+
+/**
+ * Effective operational role. A workspace owner is Owner even when no
+ * project_profiles row exists, or when that row is a lesser role — the
+ * account that administers the workspace can delete projects and use
+ * every other action. Everyone else keeps the stored role, or Estimator
+ * when they have none. ClientView and Subcontractor stay restricted.
+ */
+export function resolveOperationalRole(input: {
+  storedRole: string | null | undefined;
+  clerkUserId: string;
+  clerkOrgId: string | null | undefined;
+  orgId?: string | null;
+  orgRole?: string | null;
+}): Role {
+  if (isWorkspaceOwner(input)) return "Owner";
+  const stored = input.storedRole;
+  if (stored && (KNOWN_ROLES as readonly string[]).includes(stored)) return stored as Role;
+  return DEFAULT_ROLE;
+}
 
 // ── Resource categories the app currently gates ──
 export type ResourceCategory = "financial" | "field" | "admin";
@@ -47,19 +85,54 @@ export class PermissionError extends Error {
 }
 
 /** Looks up the caller's operational role for a tenant, defaulting if unset. */
-export async function getUserRole(tenantId: string, clerkUserId: string): Promise<Role> {
+export async function getUserRole(
+  tenantId: string,
+  clerkUserId: string,
+  lookup: RoleLookup = {},
+): Promise<Role> {
   const db = await createServiceClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
-  const { data } = await anyDb
-    .from("project_profiles")
-    .select("role")
-    .eq("tenant_id", tenantId)
-    .eq("clerk_user_id", clerkUserId)
-    .maybeSingle();
+  const [{ data: profile }, { data: tenant }] = await Promise.all([
+    anyDb
+      .from("project_profiles")
+      .select("role")
+      .eq("tenant_id", tenantId)
+      .eq("clerk_user_id", clerkUserId)
+      .maybeSingle(),
+    anyDb
+      .from("tenants")
+      .select("clerk_org_id")
+      .eq("id", tenantId)
+      .maybeSingle(),
+  ]);
 
-  const role = data?.role as string | undefined;
-  return (role && (KNOWN_ROLES as readonly string[]).includes(role)) ? (role as Role) : DEFAULT_ROLE;
+  const stored = profile?.role as string | undefined;
+  const clerkOrgId = (tenant?.clerk_org_id ?? null) as string | null;
+  const role = resolveOperationalRole({
+    storedRole: stored,
+    clerkUserId,
+    clerkOrgId,
+    orgId: lookup.orgId,
+    orgRole: lookup.orgRole,
+  });
+
+  // Remember the promotion so later requests, including ones that do not
+  // carry the Clerk org role, still see Owner.
+  if (role === "Owner" && stored !== "Owner") {
+    const { error } = await anyDb.from("project_profiles").upsert(
+      {
+        tenant_id: tenantId,
+        clerk_user_id: clerkUserId,
+        role: "Owner",
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "tenant_id,clerk_user_id" },
+    );
+    if (error) console.error("[getUserRole] could not store Owner profile", error.message);
+  }
+
+  return role;
 }
 
 // Financial-read gate (frontend-backend-reconciliation, item 4). Every role
@@ -115,8 +188,9 @@ export async function assertPermission(
   clerkUserId: string,
   resource: ResourceCategory,
   action: Action,
+  lookup: RoleLookup = {},
 ): Promise<Role> {
-  const role = await getUserRole(tenantId, clerkUserId);
+  const role = await getUserRole(tenantId, clerkUserId, lookup);
   if (!canPerform(role, resource, action)) {
     throw new PermissionError(`Role '${role}' is not permitted to ${action} ${resource} resources.`);
   }

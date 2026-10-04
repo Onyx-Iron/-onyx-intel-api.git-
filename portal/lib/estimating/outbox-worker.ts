@@ -15,7 +15,7 @@
 // still-mutable DRAFT version (an approved/superseded version is never
 // touched — immutability holds regardless of what happens to its source).
 import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
-import { collectDeletedMirrorIds, filterDraftEstimateItemIds } from "@/lib/estimating/delete-reconcile";
+import { collectDeletedMirrorIds, filterDraftEstimateItemIds, sourceRemovedEstimateFields } from "@/lib/estimating/delete-reconcile";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyDb = any;
@@ -205,24 +205,6 @@ async function reconcileDeletedTakeoffEstimateItems(
     .select("id, notes")
     .in("id", toFlagIds);
   for (const row of (existing ?? []) as Array<{ id: string; notes: string | null }>) {
-    const prior = (row.notes ?? "").trim();
-    const notes = prior.startsWith("Source removed") ? prior : `Source removed${prior ? ` — ${prior}` : ""}`;
-    await db.from("estimate_items").update({
-      notes,
-      pricing_status: "unpriced",
-      labor_cost: 0,
-      material_cost: 0,
-      equipment_cost: 0,
-      trucking_cost: 0,
-      subcontract_cost: 0,
-      disposal_cost: 0,
-      total_direct_cost: 0,
-      contingency: 0,
-      overhead: 0,
-      profit: 0,
-      total_price: 0,
-      unit_price: null,
-      unit_cost: null,
-    }).eq("id", row.id);
+    await db.from("estimate_items").update(sourceRemovedEstimateFields(row.notes)).eq("id", row.id);
   }
 }

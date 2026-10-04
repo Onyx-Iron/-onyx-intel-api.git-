@@ -37,9 +37,10 @@ if (!ENV.ready) {
     "Owner", "Admin", "Estimator", "ProjectManager", "FieldSuperintendent", "Subcontractor", "ClientView",
   ];
 
-  // Mirrors getUserRole (permissions.ts) exactly, but against the test's own
-  // client rather than createServiceClient(), which calls next/headers'
-  // cookies() and throws outside a real request scope.
+  // Mirrors the stored-role half of getUserRole (permissions.ts) against the
+  // test's own client rather than createServiceClient(), which calls
+  // next/headers' cookies() and throws outside a real request scope.
+  // Workspace-owner promotion is covered by permissions.test.ts.
   async function getRole(tenant: string, clerkUserId: string): Promise<Role> {
     const { data } = await db
       .from("project_profiles")

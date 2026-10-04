@@ -1,5 +1,6 @@
 import { createServiceClient } from "@/lib/supabase/server";
-import { buildEstimateImportRows, scaledDirectCosts, type CostCatalogForImport, type EstimateImportRow, type ExistingEstimateForImport } from "@/lib/estimating/takeoff-import";
+import { buildEstimateImportRows, scaledDirectCosts, type CostCatalogForImport, type EstimateImportRow, type ExistingEstimateForImport, type TakeoffItemForEstimate } from "@/lib/estimating/takeoff-import";
+import { excludeUnscaledManualTakeoff } from "@/lib/estimating/unscaled-takeoff";
 import { regionFromProject, resolveCostsBatch } from "@/lib/cost/resolver";
 import { applyVersionPercentages, calculateItem } from "@/lib/estimating/calculations";
 import { getOrCreateDraftVersion } from "@/lib/estimating/versioning";
@@ -45,10 +46,10 @@ export async function syncTakeoffToEstimate(
   // Filter non-approved rows in SQL — buildEstimateImportRows would drop
   // them anyway, but pulling every suggested/reviewed/rejected AI row on
   // large projects is wasted IO and cost-resolution work.
-  const [takeoff, versionIds, catalog, project, versionRow, pendingReviewCount] = await Promise.all([
+  const [takeoff, versionIds, catalog, project, versionRow, pendingReviewCount, calibrations] = await Promise.all([
     anyDb
       .from("takeoff_items")
-      .select("id,label,csi_code,division,quantity,unit,type,meta,review_status,source_method")
+      .select("id,label,csi_code,division,quantity,unit,type,meta,review_status,source_method,sheet_id")
       .eq("tenant_id", tenantId)
       .eq("project_id", projectId)
       .or("review_status.is.null,review_status.eq.approved")
@@ -78,12 +79,32 @@ export async function syncTakeoffToEstimate(
       .eq("tenant_id", tenantId)
       .eq("project_id", projectId)
       .in("review_status", ["suggested", "reviewed", "rejected"]),
+    anyDb
+      .from("sheet_calibrations")
+      .select("page_id")
+      .eq("tenant_id", tenantId)
+      .eq("project_id", projectId)
+      .eq("verified", true)
+      .eq("status", "verified")
+      .eq("active", true)
+      .not("page_space_scale_factor", "is", null),
   ]);
 
   if (takeoff.error || catalog.error) {
     console.error("[syncTakeoffToEstimate]", takeoff.error ?? catalog.error);
     return emptySync(estimateId, versionId);
   }
+
+  if (calibrations.error) {
+    console.error("[syncTakeoffToEstimate] calibrations", calibrations.error);
+  }
+  const verifiedPageIds = new Set<string>(
+    calibrations.error
+      ? []
+      : (calibrations.data ?? []).map((row: { page_id: string }) => row.page_id),
+  );
+  const takeoffRows = (takeoff.data ?? []) as Array<TakeoffItemForEstimate & { sheet_id?: string | null }>;
+  const scaledTakeoff = excludeUnscaledManualTakeoff(takeoffRows, verifiedPageIds);
 
   // Dedup is scoped across every version belonging to this ONE estimate
   // (not just the current draft) — a draft created by copying an approved
@@ -100,7 +121,7 @@ export async function syncTakeoffToEstimate(
   }
 
   const distinctCodes = [...new Set(
-    (takeoff.data ?? [])
+    scaledTakeoff.items
       .map((t: { csi_code?: string | null }) => t.csi_code)
       .filter((c: string | null | undefined): c is string => Boolean(c)),
   )] as string[];
@@ -144,7 +165,7 @@ export async function syncTakeoffToEstimate(
   ];
 
   const result = buildEstimateImportRows({
-    takeoffItems: takeoff.data ?? [],
+    takeoffItems: scaledTakeoff.items,
     existingEstimateItems: existing ?? [],
     costCatalog: mergedCatalog,
     projectId,
