@@ -34,3 +34,26 @@ export function ingestStampIsLive(
 export function shouldSkipLiveIngest(stampIsLive: boolean, claimedByIngest: boolean): boolean {
   return stampIsLive && claimedByIngest;
 }
+
+/**
+ * Server-side kick of `/api/documents/:id/ingest`. That route reads the
+ * Clerk session, so the caller's cookie has to travel with the request.
+ * A cookieless POST is 401 and the stored file never leaves `pending`.
+ */
+export function buildIngestKickRequest(args: {
+  origin: string;
+  documentId: string;
+  cookie?: string | null;
+}): { url: string; headers: Record<string, string>; body: string } {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  const cookie = args.cookie?.trim();
+  if (cookie) headers.Cookie = cookie;
+  const origin = args.origin.replace(/\/$/, "");
+  return {
+    url: `${origin}/api/documents/${args.documentId}/ingest`,
+    headers,
+    body: JSON.stringify({}),
+  };
+}
