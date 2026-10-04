@@ -1,6 +1,7 @@
 /**
- * Resolve which takeoff_items mirror ids should lose their draft/review
- * estimate_items after a manual takeoff soft-delete.
+ * Resolve which takeoff_items mirror ids should drive draft/review
+ * estimate_items reconciliation after a manual takeoff soft-delete
+ * (flag "Source removed" + zero pricing — not hard-delete).
  *
  * Prefer the outbox payload's `mirror_id` (written by soft_delete_manual_takeoff_tx)
  * so retained mirrors (locked estimate refs) still reconcile sibling draft lines.

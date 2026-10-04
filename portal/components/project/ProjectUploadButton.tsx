@@ -50,6 +50,7 @@ export default function ProjectUploadButton({
         }
       }
       onUploaded?.();
+      window.dispatchEvent(new CustomEvent("onyx:documents-refresh"));
       if (failures.length > 0) {
         toast({ title: String(`Some files could not be uploaded:\n\n${failures.join("\n")}`), kind: "error" });
       } else if (uploaded > 0) {

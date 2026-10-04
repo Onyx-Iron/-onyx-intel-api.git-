@@ -3,6 +3,7 @@ import { allocateDirectCosts } from "../../supabase/functions/_shared/estimate-s
 export interface SeedCostSource {
   unit_cost: number;
   source: string;
+  price_scope?: string | null;
   labor_cost?: number;
   material_cost?: number;
   equipment_cost?: number;
@@ -23,7 +24,7 @@ export function seedLineCosts(
   material_cost: number;
   equipment_cost: number;
   unit_cost: number | null;
-  pricing_status: "priced" | "unpriced";
+  pricing_status: "priced" | "unpriced" | "review";
 } {
   const qty = Number.isFinite(quantity) ? quantity : 0;
   const resolvedUnit = resolved && resolved.source !== "none" && resolved.unit_cost > 0
@@ -57,12 +58,13 @@ export function seedLineCosts(
         }
       : null,
   );
+  const nationalOnly = resolvedUnit != null && (resolved?.price_scope === "national" || resolved?.source === "national_price");
   return {
     labor_cost: allocated.laborCost,
     material_cost: allocated.materialCost,
     equipment_cost: allocated.equipmentCost,
     unit_cost: unitCost,
-    pricing_status: "priced",
+    pricing_status: nationalOnly ? "review" : "priced",
   };
 }
 
