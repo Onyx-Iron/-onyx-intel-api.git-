@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
+import { requirePermission } from "@/lib/project-controls/route-guards";
 import { logEvent } from "@/lib/activity";
 import { mirrorCivilItemsToTakeoff, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
 import { REBAR_UNIT_WEIGHT_LBS_PER_FT, type RebarSize } from "@/lib/math/assemblies";
@@ -88,6 +89,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+  const denied = await requirePermission(tenantId, userId, "field", "write");
+  if (denied) return denied;
   const distinctProjectIds = [...new Set(items.map((it) => it.project_id))];
   for (const pid of distinctProjectIds) {
     try {
