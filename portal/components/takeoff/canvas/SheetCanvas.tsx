@@ -16,7 +16,7 @@ import QuantityGrid from "@/components/takeoff/QuantityGrid";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
 import { chunkReloadDecision } from "@/lib/takeoff/canvas/chunk-reload";
 import { loadPdfjs } from "@/lib/takeoff/canvas/pdfjs-loader";
-import { CANVAS_HOTKEY_HINT, resolveCanvasHotkey, type CanvasTool } from "@/lib/takeoff/canvas/hotkeys";
+import { CANVAS_HOTKEY_HINT, MEASURE_SHEET_HINT, measureToolLabel, resolveCanvasHotkey, type CanvasTool } from "@/lib/takeoff/canvas/hotkeys";
 import { displayTakeoffTool } from "@/lib/takeoff/measure-kind";
 import { buildQuantitySummary } from "@/lib/takeoff/canvas/quantity-summary";
 import { CommandStack } from "@/lib/takeoff/canvas/command-stack";
@@ -1857,7 +1857,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               ← Back
             </Link>
             <div>
-              <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Sheet Canvas</div>
+              <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Measure</div>
               <div className="text-sm font-semibold">
                 {projectName} <span className="text-white/40 font-normal">· Page {pageNumber}</span>
               </div>
@@ -1866,7 +1866,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
           {/* Tool switcher */}
           <div className="flex flex-col items-end gap-1">
-            <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] p-1">
+            <div className="flex max-w-[42rem] flex-wrap items-center justify-end gap-1 rounded-full border border-white/10 bg-white/[0.03] p-1">
               {(["pan", "calibrate", "count", "length", "perimeter", "area", "utility_pipe", "spot_elevation", "contour_line", "civil_area_bounds"] as Tool[]).map((t) => (
                 <button
                   key={t}
@@ -1878,12 +1878,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                       : "text-white/60 hover:text-white hover:bg-white/[0.06]"
                   }`}
                 >
-                  {t}
+                  {measureToolLabel(t)}
                 </button>
               ))}
             </div>
-            <p className="hidden px-1 text-[9px] font-mono uppercase tracking-widest text-white/30 sm:block">
-              {CANVAS_HOTKEY_HINT}
+            <p className="hidden px-1 text-[10px] normal-case tracking-normal text-white/45 sm:block" title={CANVAS_HOTKEY_HINT}>
+              {MEASURE_SHEET_HINT}
             </p>
           </div>
 

@@ -141,9 +141,20 @@ export function listedMissingPages(doc: ProcessingDocument): number[] {
 }
 
 /**
- * Why takeoff must not run. Null means the user can measure this file.
+ * Manual measuring stays available while automatic quantities are still
+ * running. Null once the file is finished, failed, or not a drawing.
+ */
+export function sheetMeasureNote(doc: ProcessingDocument): string | null {
+  const stage = processingStage(doc);
+  if (stage === "Complete" || stage === "Failed" || stage === "Partial") return null;
+  if (!quantitiesAllowedForDocType(doc.doc_type)) return null;
+  return "Automatic quantities are still running. You can measure this sheet now.";
+}
+
+/**
+ * Why automatic quantities must not run. Null means the file can emit quantities.
  * A partial file stays blocked until failed pages succeed or the user
- * dismisses the listed missing pages.
+ * dismisses the listed missing pages. Manual measuring stays available.
  */
 export function takeoffBlockReason(doc: ProcessingDocument): string | null {
   if (!quantitiesAllowedForDocType(doc.doc_type)) {

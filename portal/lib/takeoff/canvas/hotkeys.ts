@@ -19,6 +19,36 @@ export type CanvasTool =
   | "contour_line"
   | "civil_area_bounds";
 
+/** Names an estimator sees on the sheet. The stored tool id stays unchanged. */
+export function measureToolLabel(tool: CanvasTool): string {
+  switch (tool) {
+    case "pan":
+      return "Pan";
+    case "calibrate":
+      return "Scale";
+    case "count":
+      return "Count";
+    case "length":
+      return "Length";
+    case "area":
+      return "Area";
+    case "perimeter":
+      return "Perimeter";
+    case "utility_pipe":
+      return "Pipe";
+    case "spot_elevation":
+      return "Elevation";
+    case "contour_line":
+      return "Contour";
+    case "civil_area_bounds":
+      return "Paving limits";
+    default: {
+      const unknown: never = tool;
+      return unknown;
+    }
+  }
+}
+
 export type HotkeyAction =
   | { type: "tool"; tool: CanvasTool }
   | { type: "cancel" }
@@ -104,3 +134,5 @@ export function resolveCanvasHotkey(
 /** Human-readable shortcut legend for the toolbar. */
 export const CANVAS_HOTKEY_HINT =
   "L line · R perimeter · A area · C count · K scale · Space pan · Ctrl+Z undo · Enter finish";
+
+export const MEASURE_SHEET_HINT = "Set the scale first. Then click the sheet to measure.";
