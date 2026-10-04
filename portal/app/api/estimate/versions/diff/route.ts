@@ -3,16 +3,21 @@ import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { getServiceDb, loadVersionForTenant, NotFoundError } from "@/lib/estimating/versioning";
 import { diffEstimateVersions, type VersionDiffItem } from "@/lib/estimating/version-diff";
+import { fetchAllPages } from "@/lib/supabase/fetch-all";
 
 export const runtime = "nodejs";
 
 async function loadItems(db: Awaited<ReturnType<typeof getServiceDb>>, versionId: string): Promise<VersionDiffItem[]> {
-  const { data, error } = await db
-    .from("estimate_items")
-    .select("id, source_takeoff_id, csi_code, description, quantity, unit_cost, total_price, drawing_ref, quantity_basis")
-    .eq("estimate_version_id", versionId);
-  if (error) throw new Error(error.message);
-  return (data ?? []) as VersionDiffItem[];
+  const loaded = await fetchAllPages<VersionDiffItem>((from, to) =>
+    db
+      .from("estimate_items")
+      .select("id, source_takeoff_id, csi_code, description, quantity, unit_cost, total_price, drawing_ref, quantity_basis")
+      .eq("estimate_version_id", versionId)
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+  if (loaded.error) throw new Error(loaded.error);
+  return loaded.rows;
 }
 
 /** GET /api/estimate/versions/diff?left=&right= — tenant-scoped item diff. */

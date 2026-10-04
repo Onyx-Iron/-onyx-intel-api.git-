@@ -10,6 +10,7 @@ import {
   type EstimateGroupBy,
   type ExportLine,
 } from "@/lib/estimating/estimate-export";
+import { fetchAllPages } from "@/lib/supabase/fetch-all";
 
 export const runtime = "nodejs";
 
@@ -46,13 +47,17 @@ export async function GET(
     throw e;
   }
 
-  const { data, error } = await db
-    .from("estimate_items")
-    .select("description, csi_code, cost_code, item_type, quantity, uom, unit_cost, total_price, pricing_status, notes, drawing_ref, location_tag, source_takeoff_id, quantity_basis")
-    .eq("estimate_version_id", id)
-    .eq("tenant_id", tenantId);
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  const lines = (data ?? []) as ExportLine[];
+  const loaded = await fetchAllPages<ExportLine>((from, to) =>
+    db
+      .from("estimate_items")
+      .select("description, csi_code, cost_code, item_type, quantity, uom, unit_cost, total_price, pricing_status, notes, drawing_ref, location_tag, source_takeoff_id, quantity_basis")
+      .eq("estimate_version_id", id)
+      .eq("tenant_id", tenantId)
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+  if (loaded.error) return NextResponse.json({ error: loaded.error }, { status: 500 });
+  const lines = loaded.rows;
 
   const { data: project } = await db
     .from("projects")

@@ -4,8 +4,9 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 import { approveVersion, getServiceDb, loadVersionForTenant, NotFoundError } from "@/lib/estimating/versioning";
 import { recordEstimateAudit } from "@/lib/estimating/audit";
-import { buildEstimateQualityReport } from "@/lib/estimating/estimate-qc";
+import { buildEstimateQualityReport, type EstimateQcItem } from "@/lib/estimating/estimate-qc";
 import { logEvent } from "@/lib/activity";
+import { fetchAllPages } from "@/lib/supabase/fetch-all";
 
 export const runtime = "nodejs";
 
@@ -46,13 +47,17 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     return NextResponse.json({ error: `Version is '${version.status}' and cannot be approved.` }, { status: 409 });
   }
 
-  const { data: items, error: itemsErr } = await db
-    .from("estimate_items")
-    .select("id,description,csi_code,trade,item_type,quantity,uom,unit_cost,source_takeoff_id,source_fingerprint,quantity_basis,drawing_ref,location_tag,pricing_status")
-    .eq("estimate_version_id", id);
-  if (itemsErr) return NextResponse.json({ error: itemsErr.message }, { status: 500 });
+  const loaded = await fetchAllPages<EstimateQcItem>((from, to) =>
+    db
+      .from("estimate_items")
+      .select("id,description,csi_code,trade,item_type,quantity,uom,unit_cost,source_takeoff_id,source_fingerprint,quantity_basis,drawing_ref,location_tag,pricing_status")
+      .eq("estimate_version_id", id)
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+  if (loaded.error) return NextResponse.json({ error: loaded.error }, { status: 500 });
 
-  const qc = buildEstimateQualityReport(items ?? []);
+  const qc = buildEstimateQualityReport(loaded.rows);
   if (!qc.ready_for_proposal) {
     return NextResponse.json({
       error: "Estimate is not ready for approval",

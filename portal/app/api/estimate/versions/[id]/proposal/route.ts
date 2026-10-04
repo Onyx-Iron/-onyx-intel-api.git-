@@ -5,6 +5,7 @@ import { assertPermission, PermissionError } from "@/lib/project-controls/permis
 import { getServiceDb, loadVersionForTenant, NotFoundError } from "@/lib/estimating/versioning";
 import { calculateEstimateTotals } from "@/lib/estimating/calculations";
 import { recordEstimateAudit } from "@/lib/estimating/audit";
+import { fetchAllPages } from "@/lib/supabase/fetch-all";
 
 export const runtime = "nodejs";
 
@@ -64,27 +65,47 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     }, { status: 409 });
   }
 
-  const { data: items, error } = await db
-    .from("estimate_items")
-    .select("total_direct_cost, indirect_cost, contingency, overhead, profit, total_price, is_alternate, alternate_accepted, is_allowance, description, cost_code, quantity, uom")
-    .eq("estimate_version_id", id);
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  interface ProposalItem {
+    total_direct_cost: number;
+    indirect_cost: number;
+    contingency: number;
+    overhead: number;
+    profit: number;
+    total_price: number;
+    is_alternate: boolean;
+    alternate_accepted: boolean;
+    is_allowance: boolean;
+    description: string | null;
+    cost_code: string | null;
+    quantity: number | null;
+    uom: string | null;
+  }
+  const loaded = await fetchAllPages<ProposalItem>((from, to) =>
+    db
+      .from("estimate_items")
+      .select("total_direct_cost, indirect_cost, contingency, overhead, profit, total_price, is_alternate, alternate_accepted, is_allowance, description, cost_code, quantity, uom")
+      .eq("estimate_version_id", id)
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+  if (loaded.error) return NextResponse.json({ error: loaded.error }, { status: 500 });
+  const items = loaded.rows;
 
   const totals = calculateEstimateTotals(
-    (items ?? []).map((it: Record<string, unknown>) => ({
-      totalDirectCost: it.total_direct_cost as number,
-      indirectCost: it.indirect_cost as number,
-      contingency: it.contingency as number,
-      overhead: it.overhead as number,
-      profit: it.profit as number,
-      totalPrice: it.total_price as number,
-      isAlternate: it.is_alternate as boolean,
-      alternateAccepted: it.alternate_accepted as boolean,
+    items.map((it) => ({
+      totalDirectCost: it.total_direct_cost,
+      indirectCost: it.indirect_cost,
+      contingency: it.contingency,
+      overhead: it.overhead,
+      profit: it.profit,
+      totalPrice: it.total_price,
+      isAlternate: it.is_alternate,
+      alternateAccepted: it.alternate_accepted,
     })),
   );
 
-  const alternates = (items ?? []).filter((it: { is_alternate: boolean }) => it.is_alternate);
-  const allowances = (items ?? []).filter((it: { is_allowance: boolean }) => it.is_allowance);
+  const alternates = items.filter((it) => it.is_alternate);
+  const allowances = items.filter((it) => it.is_allowance);
 
   const { data: proposal, error: insError } = await db
     .from("estimate_proposals")

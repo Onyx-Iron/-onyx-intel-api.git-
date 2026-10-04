@@ -5,6 +5,7 @@ import { assertPermission, PermissionError } from "@/lib/project-controls/permis
 import { assertVersionEditable, getServiceDb, loadVersionForTenant, NotFoundError, VersionLockedError } from "@/lib/estimating/versioning";
 import { applyVersionPercentages, calculateEstimateTotals, calculateItem } from "@/lib/estimating/calculations";
 import { recordEstimateAudit, recordEstimateAuditBatch } from "@/lib/estimating/audit";
+import { fetchAllPages } from "@/lib/supabase/fetch-all";
 
 export const runtime = "nodejs";
 
@@ -65,16 +66,21 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     throw e;
   }
 
-  const { data: items, error } = await db
-    .from("estimate_items")
-    .select("*")
-    .eq("estimate_version_id", id)
-    .order("sort_order", { ascending: true })
-    .order("created_at", { ascending: true });
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  const loaded = await fetchAllPages<Record<string, unknown>>((from, to) =>
+    db
+      .from("estimate_items")
+      .select("*")
+      .eq("estimate_version_id", id)
+      .order("sort_order", { ascending: true })
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+  if (loaded.error) return NextResponse.json({ error: loaded.error }, { status: 500 });
+  const items = loaded.rows;
 
   const totals = calculateEstimateTotals(
-    (items ?? []).map((it: Record<string, unknown>) => ({
+    items.map((it: Record<string, unknown>) => ({
       totalDirectCost: it.total_direct_cost as number,
       indirectCost: it.indirect_cost as number,
       contingency: it.contingency as number,
@@ -86,7 +92,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     })),
   );
 
-  return NextResponse.json({ version, items: items ?? [], totals });
+  return NextResponse.json({ version, items, totals });
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }): Promise<NextResponse> {
@@ -150,11 +156,16 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     return NextResponse.json({ items: [], totals, version: effectiveVersion });
   }
 
-  const { data: existingRows } = await db
-    .from("estimate_items")
-    .select("*")
-    .eq("estimate_version_id", id);
-  const existingById = new Map((existingRows ?? []).map((row: { id: string }) => [row.id, row]));
+  const existingLoaded = await fetchAllPages<{ id: string }>((from, to) =>
+    db
+      .from("estimate_items")
+      .select("*")
+      .eq("estimate_version_id", id)
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+  if (existingLoaded.error) return NextResponse.json({ error: existingLoaded.error }, { status: 500 });
+  const existingById = new Map(existingLoaded.rows.map((row) => [row.id, row]));
 
   const pct = {
     contingencyPct: effectiveVersion.contingency_pct ?? 0,
@@ -261,12 +272,17 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function getVersionTotals(db: any, versionId: string) {
-  const { data: items } = await db
-    .from("estimate_items")
-    .select("total_direct_cost, indirect_cost, contingency, overhead, profit, total_price, is_alternate, alternate_accepted")
-    .eq("estimate_version_id", versionId);
+  const loaded = await fetchAllPages<Record<string, unknown>>((from, to) =>
+    db
+      .from("estimate_items")
+      .select("total_direct_cost, indirect_cost, contingency, overhead, profit, total_price, is_alternate, alternate_accepted")
+      .eq("estimate_version_id", versionId)
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+  if (loaded.error) throw new Error(loaded.error);
   return calculateEstimateTotals(
-    (items ?? []).map((it: Record<string, unknown>) => ({
+    loaded.rows.map((it: Record<string, unknown>) => ({
       totalDirectCost: it.total_direct_cost as number,
       indirectCost: it.indirect_cost as number,
       contingency: it.contingency as number,

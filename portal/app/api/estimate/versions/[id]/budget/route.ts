@@ -4,6 +4,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 import { getServiceDb, loadVersionForTenant, NotFoundError } from "@/lib/estimating/versioning";
 import { snapshotBudget, type BudgetSourceItem } from "@/lib/estimating/budget";
+import { fetchAllPages } from "@/lib/supabase/fetch-all";
 
 export const runtime = "nodejs";
 
@@ -73,14 +74,18 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   const existing = await loadSnapshot(db, tenantId, id);
   if (existing) return NextResponse.json({ tenant_id: tenantId, created: false, ...existing });
 
-  const { data: items, error: itemError } = await db
-    .from("estimate_items")
-    .select("id, source_takeoff_id, csi_code, description, quantity, uom, labor_cost, material_cost, equipment_cost, total_price, sort_order")
-    .eq("estimate_version_id", id)
-    .order("sort_order", { ascending: true });
-  if (itemError) return NextResponse.json({ error: itemError.message }, { status: 500 });
+  const loaded = await fetchAllPages<BudgetSourceItem>((from, to) =>
+    db
+      .from("estimate_items")
+      .select("id, source_takeoff_id, csi_code, description, quantity, uom, labor_cost, material_cost, equipment_cost, total_price, sort_order")
+      .eq("estimate_version_id", id)
+      .order("sort_order", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+  if (loaded.error) return NextResponse.json({ error: loaded.error }, { status: 500 });
 
-  const snapshot = snapshotBudget((items ?? []) as BudgetSourceItem[]);
+  const snapshot = snapshotBudget(loaded.rows);
   const { data: budget, error: budgetError } = await db
     .from("project_budgets")
     .insert({

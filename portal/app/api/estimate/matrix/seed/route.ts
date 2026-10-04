@@ -7,6 +7,7 @@ import { calculateItem } from "@/lib/estimating/calculations";
 import { regionFromProject, resolveCostsBatch, type CostResolveResult } from "@/lib/cost/resolver";
 import { legacyHeuristicUnitCost, seedLineCosts } from "@/lib/estimating/seed-pricing";
 import { unitsCompatible } from "@/lib/estimating/takeoff-import";
+import { fetchAllPages } from "@/lib/supabase/fetch-all";
 
 export const runtime = "nodejs";
 
@@ -63,11 +64,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // correctly sees them as already-present rather than re-adding them.
   const { data: allVersionsOfEstimate } = await db
     .from("estimate_versions").select("id").eq("estimate_id", estimateId);
-  const { data: versionItems } = await db
-    .from("estimate_items")
-    .select("source_takeoff_id")
-    .in("estimate_version_id", (allVersionsOfEstimate ?? []).map((v: { id: string }) => v.id));
-  const seen = new Set<string>((versionItems ?? []).map((r: { source_takeoff_id: string | null }) => r.source_takeoff_id).filter(Boolean));
+  const versionIdList = (allVersionsOfEstimate ?? []).map((v: { id: string }) => v.id);
+  const versionItems = versionIdList.length === 0
+    ? { rows: [] as Array<{ source_takeoff_id: string | null }>, error: null }
+    : await fetchAllPages<{ source_takeoff_id: string | null }>((from, to) =>
+      db
+        .from("estimate_items")
+        .select("source_takeoff_id")
+        .in("estimate_version_id", versionIdList)
+        .order("id", { ascending: true })
+        .range(from, to),
+    );
+  if (versionItems.error) return NextResponse.json({ error: versionItems.error }, { status: 500 });
+  const seen = new Set<string>(versionItems.rows.map((r) => r.source_takeoff_id).filter((id): id is string => Boolean(id)));
 
   const toInsert: Record<string, unknown>[] = [];
 
@@ -91,26 +100,36 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     estimated_unit_cost: number | null;
     review_status: string | null;
   }
-  const [{ data: takeoffRows }, { data: project }, { data: draftRows }] = await Promise.all([
-    db
-      .from("takeoff_items")
-      .select("id, cost_code:csi_code, description:label, total_qty:quantity, uom:unit, estimated_unit_cost:rate, review_status")
-      .eq("tenant_id", tenantId).eq("project_id", body.project_id)
-      .or("review_status.is.null,review_status.eq.approved"),
+  const [takeoffPage, { data: project }, draftPage] = await Promise.all([
+    fetchAllPages<SeedTakeoff>((from, to) =>
+      db
+        .from("takeoff_items")
+        .select("id, cost_code:csi_code, description:label, total_qty:quantity, uom:unit, estimated_unit_cost:rate, review_status")
+        .eq("tenant_id", tenantId).eq("project_id", body.project_id)
+        .or("review_status.is.null,review_status.eq.approved")
+        .order("id", { ascending: true })
+        .range(from, to),
+    ),
     db
       .from("projects")
       .select("state, city, zip_code")
       .eq("id", body.project_id)
       .eq("tenant_id", tenantId)
       .maybeSingle(),
-    db
-      .from("estimate_items")
-      .select("id, source_takeoff_id, cost_code, csi_code, quantity, uom, labor_cost, material_cost, equipment_cost")
-      .eq("tenant_id", tenantId)
-      .eq("estimate_version_id", versionId),
+    fetchAllPages<DraftLine>((from, to) =>
+      db
+        .from("estimate_items")
+        .select("id, source_takeoff_id, cost_code, csi_code, quantity, uom, labor_cost, material_cost, equipment_cost")
+        .eq("tenant_id", tenantId)
+        .eq("estimate_version_id", versionId)
+        .order("id", { ascending: true })
+        .range(from, to),
+    ),
   ]);
-  const takeoffs = (takeoffRows ?? []) as SeedTakeoff[];
-  const draftLines = (draftRows ?? []) as DraftLine[];
+  if (takeoffPage.error) return NextResponse.json({ error: takeoffPage.error }, { status: 500 });
+  if (draftPage.error) return NextResponse.json({ error: draftPage.error }, { status: 500 });
+  const takeoffs = takeoffPage.rows;
+  const draftLines = draftPage.rows;
   const legacyLines = draftLines.filter((row) => legacyHeuristicUnitCost(
     Number(row.labor_cost ?? 0),
     Number(row.material_cost ?? 0),
@@ -220,11 +239,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
   }
 
-  const { data: manual } = await db
-    .from("manual_takeoffs")
-    .select("id, cost_code, takeoff_type, quantity, unit")
-    .eq("tenant_id", tenantId).eq("project_id", body.project_id);
-  for (const m of manual ?? []) {
+  const manual = await fetchAllPages<{
+    id: string;
+    cost_code: string | null;
+    takeoff_type: string;
+    quantity: number | null;
+    unit: string | null;
+  }>((from, to) =>
+    db
+      .from("manual_takeoffs")
+      .select("id, cost_code, takeoff_type, quantity, unit")
+      .eq("tenant_id", tenantId)
+      .eq("project_id", body.project_id)
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+  if (manual.error) return NextResponse.json({ error: manual.error }, { status: 500 });
+  for (const m of manual.rows) {
     if (seen.has(m.id)) continue;
     const calc = calculateItem({ quantity: Number(m.quantity ?? 0) });
     toInsert.push({
@@ -239,9 +270,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   let added = 0;
   if (toInsert.length > 0) {
-    const { data, error } = await db.from("estimate_items").insert(toInsert).select("id");
+    const { error } = await db.from("estimate_items").insert(toInsert);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    added = data?.length ?? toInsert.length;
+    added = toInsert.length;
   }
 
   return NextResponse.json({ added, skipped: seen.size, blocked_by_review: blockedByReview, repriced });
