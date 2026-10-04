@@ -65,6 +65,27 @@ const SNAP_TOOLS: ReadonlySet<Tool> = new Set([
 
 interface Pt { x: number; y: number }
 
+function pixelDistance(a: Pt, b: Pt): number {
+  return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+function totalLen(pts: Pt[]): number {
+  let s = 0;
+  for (let i = 1; i < pts.length; i++) s += pixelDistance(pts[i - 1], pts[i]);
+  return s;
+}
+
+function polygonArea(pts: Pt[]): number {
+  if (pts.length < 3) return 0;
+  let s = 0;
+  for (let i = 0, n = pts.length; i < n; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % n];
+    s += a.x * b.y - b.x * a.y;
+  }
+  return Math.abs(s) / 2;
+}
+
 interface Shape {
   key: string;                // client-side id
   id?: string;                // server id once saved — required to PATCH an existing object
@@ -714,22 +735,6 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
     return calibration?.scale_ratio ?? 1;
   }, [calibration, renderScale]);
-  const pixelDistance = (a: Pt, b: Pt) => Math.hypot(b.x - a.x, b.y - a.y);
-  const totalLen = (pts: Pt[]) => {
-    let s = 0;
-    for (let i = 1; i < pts.length; i++) s += pixelDistance(pts[i - 1], pts[i]);
-    return s;
-  };
-  const polygonArea = (pts: Pt[]) => {
-    if (pts.length < 3) return 0;
-    let s = 0;
-    for (let i = 0, n = pts.length; i < n; i++) {
-      const a = pts[i];
-      const b = pts[(i + 1) % n];
-      s += a.x * b.y - b.x * a.y;
-    }
-    return Math.abs(s) / 2;
-  };
 
   // Preview quantity for the in-progress draft (before commit).
   const draftQuantity = useMemo(() => {
@@ -848,7 +853,6 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
     if (tool === "count") {
       const shape: Shape = {
-        // eslint-disable-next-line react-hooks/purity
         key: `c-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         tool: "count",
         points: [p],
