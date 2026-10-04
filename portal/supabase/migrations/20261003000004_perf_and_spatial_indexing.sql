@@ -1,3 +1,6 @@
+-- Version 20261003000004: 20261003000000 is already used by
+-- purchase_orders_vendor_bid_unique.sql. Supabase records only the
+-- numeric prefix, so the shared version aborted every fresh apply.
 -- Perf + spatial indexing for estimate loading and canvas takeoff.
 --
 -- Adapted from the proposed 20261003_perf_and_spatial_indexing.sql to match
