@@ -4,6 +4,7 @@ import { CpmCycleError, computeCpm, shiftTaskDates } from "./cpm.ts";
 import {
   approvedChangeDelta,
   budgetAlreadyPosted,
+  changeOrderBudgetDelta,
   computeBudgetLine,
   computePayLine,
   eventPostsBudget,
@@ -64,8 +65,60 @@ describe("project cost math", () => {
     assert.equal(approvedChangeDelta("pending", "draft", 5000), 0);
     assert.equal(approvedChangeDelta("pending", "approved", 5000), 5000);
     assert.equal(approvedChangeDelta("approved", "approved", 5000), 0);
+    assert.equal(approvedChangeDelta("approved", "rejected", 5000), -5000);
+    assert.equal(approvedChangeDelta("approved", "void", 5000), -5000);
+    assert.equal(approvedChangeDelta("void", "approved", 5000), 5000);
+    assert.equal(approvedChangeDelta("approved", "approved", 12000, 10000), 2000);
     assert.equal(eventPostsBudget("draft"), false);
     assert.equal(eventPostsBudget("approved"), true);
+  });
+
+  it("takes an approved change back off the budget when the order leaves approved", () => {
+    const links = ["concrete"];
+    const approved = changeOrderBudgetDelta(
+      { status: "pending", amount: 10000 },
+      { status: "approved", amount: 10000 },
+      links,
+      [],
+    );
+    const rejected = changeOrderBudgetDelta(
+      { status: "approved", amount: 10000 },
+      { status: "rejected", amount: 10000 },
+      links,
+      [],
+    );
+    const approvedAgain = changeOrderBudgetDelta(
+      { status: "pending", amount: 10000 },
+      { status: "approved", amount: 10000 },
+      links,
+      [],
+    );
+    assert.deepEqual(approved, [{ budgetLineId: "concrete", amount: 10000 }]);
+    assert.deepEqual(rejected, [{ budgetLineId: "concrete", amount: -10000 }]);
+    assert.equal(approved[0].amount + rejected[0].amount + approvedAgain[0].amount, 10000);
+
+    const weights = [
+      { budgetLineId: "concrete", amount: 9000 },
+      { budgetLineId: "rebar", amount: 1000 },
+    ];
+    const posted = changeOrderBudgetDelta(
+      { status: "draft", amount: 10000 },
+      { status: "approved", amount: 10000 },
+      [],
+      weights,
+    );
+    const removed = changeOrderBudgetDelta(
+      { status: "approved", amount: 10000 },
+      { status: "void", amount: 10000 },
+      [],
+      weights,
+    );
+    assert.deepEqual(posted, [
+      { budgetLineId: "concrete", amount: 9000 },
+      { budgetLineId: "rebar", amount: 1000 },
+    ]);
+    assert.equal(posted[0].amount + removed[0].amount, 0);
+    assert.equal(posted[1].amount + removed[1].amount, 0);
   });
 
   it("forecasts the remainder unless a line override is set", () => {
