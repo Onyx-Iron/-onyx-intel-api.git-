@@ -49,8 +49,11 @@ export function normalizeDocumentClass(value: string | null | undefined): Docume
 }
 
 export function quantitiesAllowedForDocType(docType: string | null | undefined): boolean {
-  if (!docType) return false;
-  return QUANTITY_DOC_TYPES.has(docType);
+  // Unset means the plan has not been classified yet. Plan uploads are
+  // drawings until a spec, RFI, or other explicit class is stored.
+  const raw = docType?.trim().toLowerCase();
+  if (!raw) return true;
+  return QUANTITY_DOC_TYPES.has(raw);
 }
 
 export function processingStage(doc: ProcessingDocument): ProcessingStage {

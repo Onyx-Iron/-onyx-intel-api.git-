@@ -53,11 +53,14 @@ describe("processing display", () => {
     assert.equal(takeoffBlockReason({ ...doc, meta: { ...doc.meta, partial_acknowledged: true } }), null);
   });
 
-  it("does not emit quantities from a spec, an unclassified file, or other", () => {
+  it("measures an unclassified plan and a drawing, and blocks a spec or other", () => {
+    assert.equal(quantitiesAllowedForDocType("drawing"), true);
+    assert.equal(quantitiesAllowedForDocType(null), true);
+    assert.equal(quantitiesAllowedForDocType(""), true);
     assert.equal(quantitiesAllowedForDocType("spec"), false);
-    assert.equal(quantitiesAllowedForDocType(null), false);
     assert.equal(quantitiesAllowedForDocType("other"), false);
     assert.match(takeoffBlockReason({ status: "complete", doc_type: "spec" }) ?? "", /Only drawings/);
+    assert.equal(takeoffBlockReason({ status: "complete", doc_type: null }), null);
     assert.equal(processingStage({ status: "processing", ocr_status: "done" }), "Indexing");
   });
 });

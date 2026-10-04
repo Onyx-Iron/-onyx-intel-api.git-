@@ -34,6 +34,7 @@ describe("extraction fallback", () => {
     assert.equal(scaleStringFromText('1/4" = 1\'-0"'), '1/4" = 1\'-0"');
     assert.match(scaleStringFromText('1" = 20\'') ?? "", /20/);
     const extraction = extractionFromPageText([{ pageNumber: 1, text: '1" = 20\'' }], 1);
+    assert.equal(extraction.doc_type, "drawing");
     assert.equal(extraction.pages.length, 1);
     assert.match(extraction.pages[0]?.key_terms.join(" ") ?? "", /20/);
   });

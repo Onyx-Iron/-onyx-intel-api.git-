@@ -104,6 +104,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         project_id,
         file_name: file.name,
         status: asyncSplit ? "queued" : "pending",
+        doc_type: file.name.toLowerCase().endsWith(".pdf") ? "drawing" : null,
         uploaded_at: new Date().toISOString(),
         meta: buildDocumentRevisionMeta(file.name, {
           source: "local_upload",

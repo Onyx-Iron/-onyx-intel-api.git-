@@ -118,7 +118,9 @@ function classifyLocalText(text: string): string {
   if (/\bSUBMITTAL\b/.test(sample)) return "submittal";
   if (/\b(SHEET|FLOOR PLAN|SITE PLAN|ELEVATION|DETAIL)\b/.test(sample)) return "drawing";
   if (/\b(AGREEMENT|GENERAL CONDITIONS)\b/.test(sample)) return "contract";
-  return "other";
+  // A plan sheet with no title-block words is still a drawing. "other"
+  // would block quantities on the engineering PDF that was uploaded.
+  return "drawing";
 }
 
 function titleFromText(text: string): string {

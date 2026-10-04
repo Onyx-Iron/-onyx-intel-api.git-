@@ -166,6 +166,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       project_id,
       file_name,
       status: "pending",
+      doc_type: file_name.toLowerCase().endsWith(".pdf") ? "drawing" : null,
       uploaded_at: new Date().toISOString(),
       checksum,
       meta: buildDocumentRevisionMeta(file_name, {
