@@ -93,6 +93,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       versionName: body.version_name, notes: body.notes ?? `Duplicated from version ${source.version_number}`,
     });
 
+    // The estimate screen loads current_version_id. Without this, "New Draft
+    // to Edit" copies the locked version and then reloads that same locked
+    // version, so the new draft is never shown.
+    const { error: currentError } = await anyDb
+      .from("estimates")
+      .update({
+        current_version_id: newVersion.id,
+        updated_by: userId,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", source.estimate_id)
+      .eq("tenant_id", tenantId);
+    if (currentError) return NextResponse.json({ error: currentError.message }, { status: 500 });
+
     void recordEstimateAudit(anyDb, {
       tenantId, estimateId: source.estimate_id, estimateVersionId: newVersion.id,
       entityType: "version", entityId: newVersion.id, action: "created", actorUserId: userId,
