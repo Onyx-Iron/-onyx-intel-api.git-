@@ -412,6 +412,15 @@ describe("takeoff to estimate import quality", () => {
     });
   });
 
+  it("does not scale a unit price across a zero, missing, or non-finite quantity", () => {
+    const priced = { quantity: 10, unit_cost: 40, labor_cost: 100, material_cost: 300, equipment_cost: null };
+    assert.equal(scaledDirectCosts({ ...priced, quantity: 0 }, 20), null);
+    assert.equal(scaledDirectCosts({ ...priced, unit_cost: null }, 20), null);
+    assert.equal(scaledDirectCosts(priced, null), null);
+    assert.equal(scaledDirectCosts({ ...priced, quantity: Number.NaN }, 20), null);
+    assert.equal(scaledDirectCosts(priced, Number.POSITIVE_INFINITY), null);
+  });
+
   it("inserts a draft line when quantity changed and the draft has no copy of an approved line", () => {
     const result = buildEstimateImportRows({
       takeoffItems: [
@@ -544,5 +553,19 @@ describe("takeoff to estimate import quality", () => {
     });
     assert.equal(result.rows[0]?.pricing_status, "review");
     assert.equal(result.rows[0]?.unit_cost, 10);
+  });
+
+  it("keeps a section rate ahead of a national average for the same code and unit", () => {
+    const result = buildEstimateImportRows({
+      takeoffItems: [{ id: "slab", label: "Slab", csi_code: "03 30 00", quantity: 12, unit: "CY", review_status: "approved" }],
+      existingEstimateItems: [],
+      costCatalog: [
+        { csi_code: "033000", uom: "CY", unit_cost: 90, basis: "national" },
+        { csi_code: "03-30-00", uom: "CY", unit_cost: 185, basis: "section" },
+      ],
+      projectId: "project-1",
+    });
+    assert.equal(result.rows[0]?.unit_cost, 185);
+    assert.equal(result.rows[0]?.pricing_status, "priced");
   });
 });

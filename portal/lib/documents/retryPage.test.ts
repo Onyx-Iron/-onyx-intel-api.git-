@@ -60,6 +60,7 @@ describe("documentStatusAfterPageRetry", () => {
   it("moves terminal failure back to split for polling", () => {
     assert.equal(documentStatusAfterPageRetry("complete_with_errors"), "split");
     assert.equal(documentStatusAfterPageRetry("error"), "split");
+    assert.equal(documentStatusAfterPageRetry("failed"), "split");
     assert.equal(documentStatusAfterPageRetry("processing"), null);
   });
 });

@@ -33,6 +33,9 @@ describe("ingest claim", () => {
   it("treats a fresh processing stamp as live and an old one as free", () => {
     assert.equal(ingestStampIsLive("processing", "2026-10-04T01:52:00.000Z", now), true);
     assert.equal(ingestStampIsLive("processing", "2026-10-04T01:40:00.000Z", now), false);
+    assert.equal(ingestStampIsLive("processing", new Date(now - 269_999).toISOString(), now), true);
+    assert.equal(ingestStampIsLive("processing", new Date(now - 270_000).toISOString(), now), false);
+    assert.equal(ingestStampIsLive("processing", "not-a-date", now), false);
   });
 
   it("starts ingest when upload complete pre-stamped the row and no claim exists", () => {
