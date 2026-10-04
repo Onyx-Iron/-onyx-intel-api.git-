@@ -72,6 +72,45 @@ export function planPageRetry(
   return { stages, pagePatch };
 }
 
+export type InvokeFailureRollback = {
+  stage: PageWorkerKind;
+  /**
+   * Only apply the patch while this column is still `pending`. A worker that
+   * already moved the stage to processing/done/error must not be overwritten.
+   */
+  pendingColumn: "status" | "takeoff_status";
+  patch: { updated_at: string; status?: string; error?: string; takeoff_status?: string; takeoff_error?: string };
+};
+
+/**
+ * Restore a stage to `error` after the worker invoke itself fails.
+ * The retry route sets the stage to `pending` before the call; without this
+ * rollback a failed invoke leaves takeoff pending forever (reclaim only
+ * covers OCR pending and in-flight `processing`).
+ */
+export function invokeFailureRollback(stage: PageWorkerKind, message: string): InvokeFailureRollback {
+  const clipped = message.slice(0, 500);
+  const updated_at = new Date().toISOString();
+  switch (stage) {
+    case "ocr":
+      return {
+        stage,
+        pendingColumn: "status",
+        patch: { status: "error", error: clipped, updated_at },
+      };
+    case "takeoff":
+      return {
+        stage,
+        pendingColumn: "takeoff_status",
+        patch: { takeoff_status: "error", takeoff_error: clipped, updated_at },
+      };
+    default: {
+      const exhaustive: never = stage;
+      throw new Error(`Unhandled page worker stage: ${String(exhaustive)}`);
+    }
+  }
+}
+
 /** Parent docs that should leave terminal failure so list polling resumes. */
 export function documentStatusAfterPageRetry(currentStatus: string): string | null {
   if (
