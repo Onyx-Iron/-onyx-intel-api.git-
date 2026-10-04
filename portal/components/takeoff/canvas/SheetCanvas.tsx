@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import CADVectorLayer from "./CADVectorLayer";
@@ -28,6 +28,7 @@ import {
   type VectorPoint,
 } from "@/lib/takeoff/canvas/vector-snap";
 import { canEditVertex, recomputeShapeQuantity } from "@/lib/takeoff/canvas/shape-edit";
+import { attachPointerDrag } from "@/lib/takeoff/canvas/pointer-drag";
 import { takeoffQueryKeys, useSheetCalibration } from "@/lib/takeoff/queries";
 import type { SnapResult } from "@/lib/takeoff/canvas/snap-algorithm";
 
@@ -221,6 +222,14 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [tool, setTool]             = useState<Tool>("pan");
   const toolBeforeSpacePan = useRef<Tool | null>(null);
   const [shapes, setShapes]         = useState<Shape[]>([]);
+  // Drag handlers write the latest points here before React re-renders so
+  // mouseup can persist the drop, not an earlier move. Layout sync covers
+  // shape updates that did not come from the drag handler. Assigning the
+  // ref during render trips react-hooks/refs.
+  const shapesRef = useRef(shapes);
+  useLayoutEffect(() => {
+    shapesRef.current = shapes;
+  }, [shapes]);
   const [draftPoints, setDraftPoints] = useState<Pt[]>([]);   // in-progress polygon/line points
   const [calibPts, setCalibPts]     = useState<Pt[]>([]);     // during calibrate mode
   const [scaleDraft, setScaleDraft] = useState<{ a: Pt; b: Pt } | null>(null);
@@ -1377,7 +1386,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     drag: { key: string; originalPoints: Pt[]; originalRowVersion: number; originalQuantity?: number },
     failLabel: string,
   ) => {
-    const s = shapes.find((x) => x.key === drag.key);
+    const s = shapesRef.current.find((x) => x.key === drag.key);
     if (!s || !s.id) return;
     if (JSON.stringify(s.points) === JSON.stringify(drag.originalPoints)) return;
 
@@ -1548,7 +1557,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     const onMove = (e: MouseEvent) => {
       const dx = e.clientX - dragState.startClient.x;
       const dy = e.clientY - dragState.startClient.y;
-      setShapes((prev) => prev.map((s) => {
+      const next = shapesRef.current.map((s) => {
         if (s.key !== dragState.key) return s;
         // Drag delta is measured in CURRENT-render screen pixels (raw
         // clientX/Y deltas) — apply it in display space, then convert back
@@ -1558,12 +1567,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         const movedDisplay = originalDisplay.map((p) => ({ x: p.x + dx, y: p.y + dy }));
         const movedStorage = s.coordinateSpace === "page_space" ? pointsToPageSpace(movedDisplay, renderScale) : movedDisplay;
         return { ...s, points: movedStorage };
-      }));
+      });
+      shapesRef.current = next;
+      setShapes(next);
     };
     const onUp = () => { void commitShapeDrag(dragState); setDragState(null); };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp, { once: true });
-    return () => window.removeEventListener("mousemove", onMove);
+    return attachPointerDrag(window, onMove, onUp);
   }, [dragState, renderScale, commitShapeDrag, toDisplayPoints]);
 
   useEffect(() => {
@@ -1571,7 +1580,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     const onMove = (e: MouseEvent) => {
       const dx = e.clientX - vertexDrag.startClient.x;
       const dy = e.clientY - vertexDrag.startClient.y;
-      setShapes((prev) => prev.map((s) => {
+      const next = shapesRef.current.map((s) => {
         if (s.key !== vertexDrag.key) return s;
         const originalDisplay = toDisplayPoints(vertexDrag.originalPoints, s.coordinateSpace);
         const movedDisplay = originalDisplay.map((p, i) => (
@@ -1585,12 +1594,12 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           : pointsToPageSpace(movedStorage, renderScale);
         const quantity = recomputeShapeQuantity(s.tool, qtyPoints, pageSpaceScaleFactor);
         return { ...s, points: movedStorage, quantity };
-      }));
+      });
+      shapesRef.current = next;
+      setShapes(next);
     };
     const onUp = () => { void commitVertexDrag(vertexDrag); setVertexDrag(null); };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp, { once: true });
-    return () => window.removeEventListener("mousemove", onMove);
+    return attachPointerDrag(window, onMove, onUp);
   }, [vertexDrag, renderScale, commitVertexDrag, toDisplayPoints, pageSpaceScaleFactor]);
 
   async function saveAllUnsaved() {
