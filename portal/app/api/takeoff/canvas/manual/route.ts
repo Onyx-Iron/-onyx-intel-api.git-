@@ -5,9 +5,11 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { logEvent } from "@/lib/activity";
 import { processOutboxBatch } from "@/lib/estimating/outbox-worker";
-import { calculateLinearLength, calculatePolygonArea, calculateCount, FORMULA_VERSION } from "@/lib/takeoff/canvas/quantity";
+import { quantityForMeasurement, calculatedQuantityForSave, FORMULA_VERSION, type QuantityGeometry } from "@/lib/takeoff/canvas/quantity";
+import { measurementUnit, storedTakeoffType } from "@/lib/takeoff/measure-kind";
 import type { Point } from "@/lib/takeoff/canvas/coordinates";
-import type { ManualTakeoffItem, ManualTakeoffUpdateBody } from "@/lib/types/takeoff";
+import type { ManualTakeoffItem, ManualTakeoffUpdateBody, TakeoffGeometry } from "@/lib/types/takeoff";
+import type { Json } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
 
@@ -19,8 +21,9 @@ export const runtime = "nodejs";
  * POST { items: [{ project_id, page_id?, cost_code?, takeoff_type, quantity, unit?, geometry, client_key? }] }
  *      → each item is saved via the `save_manual_takeoff_tx` Postgres RPC —
  *        upsert + audit history + mirrored takeoff_items upsert + mirror
- *        history + a durable outbox event all happen in ONE database
- *        transaction (STEP 8). Idempotent on (tenant_id, project_id,
+ *        history + layer assignment happen in ONE database transaction.
+ *        An estimate outbox row is written only when the mirror is approved
+ *        and the sheet has a verified page-space scale. Idempotent on (tenant_id, project_id,
  *        client_key) — items without a client_key get a server-generated
  *        one so every save (including older single-item callers like
  *        CADVectorLayer) is atomic, even though only client-originated
@@ -34,7 +37,10 @@ export const runtime = "nodejs";
  * page-space calibration, the server recalculates quantity from geometry +
  * calibration itself (lib/takeoff/canvas/quantity.ts) and uses that
  * authoritative value — a manipulated browser-submitted quantity cannot
- * silently persist. When calibration is legacy/unverified, no authoritative
+ * silently persist. When calibration is legacy/unverified, the row is still
+ * saved and calculated_quantity stays null so an unscaled length is not a
+ * real quantity. Estimate sync stays withheld until the sheet is verified.
+ * When calibration is legacy/unverified, no authoritative
  * recalculation is possible (no page-space scale factor exists yet), so the
  * submitted quantity is trusted as-is and the response carries a warning;
  * this is also when estimate-sync is skipped, per the "unverified
@@ -54,8 +60,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
   const db = await createServiceClient();
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let query = (db as any)
+  let query = db
     .from("manual_takeoffs")
     .select("*")
     .eq("tenant_id", tenantId)
@@ -71,6 +76,17 @@ type Item = ManualTakeoffItem;
 
 const QUANTITY_TOLERANCE_PCT = 1; // >1% discrepancy between submitted and server-calculated quantity is flagged
 
+function quantityGeometry(geo: TakeoffGeometry): QuantityGeometry {
+  const num = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+  return {
+    measure: typeof geo.measure === "string" ? geo.measure : null,
+    thickness: num(geo.thickness),
+    width: num(geo.width),
+    depth: num(geo.depth),
+    slope_pct: num(geo.slope_pct ?? geo.slopePct),
+  };
+}
+
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -79,7 +95,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const items = Array.isArray(body.items) ? body.items : [];
   if (items.length === 0) return NextResponse.json({ error: "items required" }, { status: 400 });
 
-  const validTypes = new Set(["count", "length", "area"]);
+  const validTypes = new Set(["count", "length", "area", "perimeter"]);
   for (const it of items) {
     if (!it.project_id) return NextResponse.json({ error: "each item needs project_id" }, { status: 400 });
     if (!validTypes.has(it.takeoff_type)) return NextResponse.json({ error: `invalid takeoff_type: ${it.takeoff_type}` }, { status: 400 });
@@ -116,8 +132,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const db = await createServiceClient();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const anyDb = db as any;
 
   // Resolve each distinct page_id's parent document_id up front (needed for
   // the takeoff_items mirror's own document_id column — see
@@ -128,8 +142,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const calibrationByPageId = new Map<string, { page_space_scale_factor: number | null; status: string }>();
   if (distinctPageIds.length > 0) {
     const [{ data: pages }, { data: calibrations }] = await Promise.all([
-      anyDb.from("document_pages").select("id, document_id").in("id", distinctPageIds),
-      anyDb.from("sheet_calibrations").select("page_id, page_space_scale_factor, status").eq("tenant_id", tenantId).in("page_id", distinctPageIds),
+      db.from("document_pages").select("id, document_id").in("id", distinctPageIds),
+      db.from("sheet_calibrations").select("page_id, page_space_scale_factor, status").eq("tenant_id", tenantId).in("page_id", distinctPageIds),
     ]);
     for (const p of pages ?? []) pageInfoById.set(p.id, { documentId: p.document_id });
     for (const c of calibrations ?? []) calibrationByPageId.set(c.page_id, c);
@@ -137,7 +151,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const results: Array<{ id: string; client_key: string; was_update: boolean; quantity: number; unit: string; row_version: number; calculation_formula_version: string | null; discrepancy_warning: string | null; calibration_warning: string | null }> = [];
   let anyVerifiedCalibrationUsed = false;
-  const projectIdsNeedingSync = new Set<string>();
 
   for (const it of items) {
     const clientKey = it.client_key ?? crypto.randomUUID();
@@ -152,81 +165,67 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     let calibrationWarning: string | null = null;
 
     const isPageSpace = geo.coordinate_space === "page_space" && Array.isArray(geo.points);
-    if (calibration?.status === "verified" && calibration.page_space_scale_factor != null && isPageSpace) {
+    const verified = calibration?.status === "verified" && calibration.page_space_scale_factor != null;
+    const countOnly = it.takeoff_type === "count";
+    if (isPageSpace && (countOnly || verified)) {
       const points = geo.points as Point[];
-      let serverQuantity: number;
-      if (it.takeoff_type === "count") serverQuantity = calculateCount(points);
-      else if (it.takeoff_type === "length") serverQuantity = calculateLinearLength(points, calibration.page_space_scale_factor);
-      else serverQuantity = calculatePolygonArea(points, calibration.page_space_scale_factor);
+      const factor = countOnly ? (calibration?.page_space_scale_factor ?? 1) : calibration!.page_space_scale_factor!;
+      const serverQuantity = quantityForMeasurement(it.takeoff_type, points, factor, quantityGeometry(geo));
+      if (serverQuantity == null) {
+        return NextResponse.json({
+          error: "This polygon crosses itself, so its area is not stored.",
+          code: "polygon_rejected",
+        }, { status: 422 });
+      }
 
       const pctDiff = it.quantity !== 0 ? Math.abs(serverQuantity - it.quantity) / Math.abs(it.quantity) * 100 : (serverQuantity === 0 ? 0 : 100);
       if (pctDiff > QUANTITY_TOLERANCE_PCT) {
         discrepancyWarning = `submitted quantity ${it.quantity} differed from server-calculated ${serverQuantity.toFixed(4)} by ${pctDiff.toFixed(1)}% — server value used`;
       }
       quantity = serverQuantity;
-      calculationFormulaVersion = FORMULA_VERSION;
-      anyVerifiedCalibrationUsed = true;
+      calculationFormulaVersion = calculatedQuantityForSave(countOnly || verified, serverQuantity) == null ? null : FORMULA_VERSION;
+      if (verified) anyVerifiedCalibrationUsed = true;
     } else if (it.page_id) {
       // No verified page-space calibration for this sheet — cannot
       // authoritatively recompute, so the submitted quantity is trusted
       // as-is (STEP 4/18: never fabricate a scale that doesn't exist).
-      // Estimate-sync is withheld for this item below until recalibration.
+      // The save function withholds estimate sync until the sheet has a verified scale.
       calibrationWarning = calibration
         ? "this sheet's calibration is legacy/unverified — recalibrate before this measurement can sync to the estimate"
         : "this sheet has no calibration yet — recalibrate before this measurement can sync to the estimate";
     }
 
-    const { data, error } = await anyDb.rpc("save_manual_takeoff_tx", {
+    const { data, error } = await db.rpc("save_manual_takeoff_tx", {
       p_tenant_id: tenantId,
       p_project_id: it.project_id,
       p_page_id: it.page_id ?? null,
       p_document_id: documentId,
       p_cost_code: it.cost_code ?? null,
-      p_takeoff_type: it.takeoff_type,
+      p_takeoff_type: storedTakeoffType(it.takeoff_type),
       p_quantity: quantity,
-      p_unit: it.unit ?? (it.takeoff_type === "count" ? "EA" : it.takeoff_type === "length" ? "LF" : "SF"),
-      p_geometry: it.geometry,
+      p_unit: it.unit ?? measurementUnit(it.takeoff_type),
+      p_geometry: {
+        ...(it.geometry ?? {}),
+        ...(it.takeoff_type === "perimeter" ? { measure: "perimeter" } : {}),
+      } as unknown as Json,
       p_client_key: clientKey,
       p_actor_user_id: userId,
       p_calculation_formula_version: calculationFormulaVersion,
       p_is_vision_sourced: isVisionSourced,
       p_label: typeof geo.description === "string" ? geo.description : null,
+      p_layer_id: it.layer_id ?? null,
     }).single();
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
     const row = data as { manual_takeoff: { id: string; row_version: number }; mirror_takeoff_item_id: string; was_update: boolean };
 
-    // Additive layer assignment (Company Hub M3) — do not alter save_manual_takeoff_tx.
-    if (it.layer_id) {
-      await anyDb
-        .from("manual_takeoffs")
-        .update({ layer_id: it.layer_id })
-        .eq("id", row.manual_takeoff.id)
-        .eq("tenant_id", tenantId);
-    }
-
     results.push({
       id: row.manual_takeoff.id, client_key: clientKey, was_update: row.was_update,
-      quantity, unit: it.unit ?? (it.takeoff_type === "count" ? "EA" : it.takeoff_type === "length" ? "LF" : "SF"),
+      quantity, unit: it.unit ?? measurementUnit(it.takeoff_type),
       row_version: row.manual_takeoff.row_version,
       calculation_formula_version: calculationFormulaVersion, discrepancy_warning: discrepancyWarning, calibration_warning: calibrationWarning,
     });
-
-    // save_manual_takeoff_tx always writes a pending 'upsert' outbox event —
-    // it has no knowledge of calibration state. An item on an unverified
-    // sheet must NOT sync to the estimate yet (policy stated above), so its
-    // outbox row is marked processed-as-skipped immediately, rather than
-    // left pending (which the worker would otherwise pick up and sync
-    // anyway) or left pending forever (which would violate "failed events
-    // cannot remain pending indefinitely" once a real retry worker exists).
-    if (calibrationWarning) {
-      await anyDb.from("estimate_sync_outbox")
-        .update({ status: "processed", processed_at: new Date().toISOString(), last_error: `skipped: ${calibrationWarning}` })
-        .eq("tenant_id", tenantId).eq("manual_takeoff_id", row.manual_takeoff.id).eq("event_type", "upsert").eq("status", "pending");
-    } else {
-      projectIdsNeedingSync.add(it.project_id);
-    }
   }
 
   void logEvent({
@@ -249,10 +248,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // leaves the event `pending` with a backoff delay (or `dead_letter` after
   // repeated failures) rather than being silently dropped or retried
   // instantly in a hot loop.
-  void projectIdsNeedingSync;
   let workerResult: Awaited<ReturnType<typeof processOutboxBatch>> | null = null;
   try {
-    workerResult = await processOutboxBatch(anyDb, `inline-post-${Date.now()}`, 20);
+    workerResult = await processOutboxBatch(db, `inline-post-${Date.now()}`, 20);
   } catch (err) {
     console.error("[canvas/manual] inline outbox processing failed", err);
   }
@@ -271,10 +269,8 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   const denied = await requirePermission(tenantId, userId, "field", "write");
   if (denied) return denied;
   const db = await createServiceClient();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const anyDb = db as any;
 
-  const { data, error } = await anyDb.rpc("soft_delete_manual_takeoff_tx", {
+  const { data, error } = await db.rpc("soft_delete_manual_takeoff_tx", {
     p_id: id, p_tenant_id: tenantId, p_actor_user_id: userId,
   }).single();
   if (error) {
@@ -287,7 +283,7 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   // Opportunistic outbox processing (STEP 14) — same worker path POST uses.
   let workerResult: Awaited<ReturnType<typeof processOutboxBatch>> | null = null;
   try {
-    workerResult = await processOutboxBatch(anyDb, `inline-delete-${Date.now()}`, 20);
+    workerResult = await processOutboxBatch(db, `inline-delete-${Date.now()}`, 20);
   } catch (err) {
     console.error("[canvas/manual] delete outbox processing failed", err);
   }
@@ -310,10 +306,8 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   const denied = await requirePermission(tenantId, userId, "field", "write");
   if (denied) return denied;
   const db = await createServiceClient();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const anyDb = db as any;
 
-  const { data, error } = await anyDb.rpc("restore_manual_takeoff_tx", {
+  const { data, error } = await db.rpc("restore_manual_takeoff_tx", {
     p_id: id, p_tenant_id: tenantId, p_actor_user_id: userId,
   }).single();
   if (error) {
@@ -329,7 +323,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
 
   let workerResult: Awaited<ReturnType<typeof processOutboxBatch>> | null = null;
   try {
-    workerResult = await processOutboxBatch(anyDb, `inline-restore-${Date.now()}`, 20);
+    workerResult = await processOutboxBatch(db, `inline-restore-${Date.now()}`, 20);
   } catch (err) {
     console.error("[canvas/manual] restore outbox processing failed", err);
   }
@@ -373,48 +367,57 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   const denied = await requirePermission(tenantId, userId, "field", "write");
   if (denied) return denied;
   const db = await createServiceClient();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const anyDb = db as any;
 
-  const { data: existing, error: fetchErr } = await anyDb
-    .from("manual_takeoffs").select("project_id, page_id, takeoff_type").eq("id", body.id).eq("tenant_id", tenantId).maybeSingle();
+  const { data: existing, error: fetchErr } = await db
+    .from("manual_takeoffs").select("project_id, page_id, takeoff_type, geometry").eq("id", body.id).eq("tenant_id", tenantId).maybeSingle();
   if (fetchErr) return NextResponse.json({ error: fetchErr.message }, { status: 500 });
   if (!existing) return NextResponse.json({ error: "not found" }, { status: 404 });
 
   let quantity = body.quantity;
   let calculationFormulaVersion: string | null = null;
   let discrepancyWarning: string | null = null;
-  const geo = body.geometry ?? {};
+  const storedMeasure = existing.geometry && typeof existing.geometry === "object" ? (existing.geometry as { measure?: unknown }).measure : null;
+  const geo = {
+    ...(body.geometry ?? {}),
+    ...(typeof (body.geometry ?? {}).measure !== "string" && storedMeasure === "perimeter" ? { measure: "perimeter" } : {}),
+  };
   const isPageSpace = geo.coordinate_space === "page_space" && Array.isArray(geo.points);
-  if (existing.page_id && isPageSpace) {
-    const { data: calibration } = await anyDb
+    if (existing.page_id && isPageSpace) {
+    const { data: calibration } = await db
       .from("sheet_calibrations").select("page_space_scale_factor, status").eq("tenant_id", tenantId).eq("page_id", existing.page_id).maybeSingle();
-    if (calibration?.status === "verified" && calibration.page_space_scale_factor != null) {
+    const verified = calibration?.status === "verified" && calibration.page_space_scale_factor != null;
+    const countOnly = existing.takeoff_type === "count";
+    if (countOnly || verified) {
       const points = geo.points as Point[];
-      let serverQuantity: number;
-      if (existing.takeoff_type === "count") serverQuantity = calculateCount(points);
-      else if (existing.takeoff_type === "length") serverQuantity = calculateLinearLength(points, calibration.page_space_scale_factor);
-      else serverQuantity = calculatePolygonArea(points, calibration.page_space_scale_factor);
+      const factor = countOnly ? (calibration?.page_space_scale_factor ?? 1) : calibration!.page_space_scale_factor!;
+      const serverQuantity = quantityForMeasurement(existing.takeoff_type, points, factor, quantityGeometry(geo));
+      if (serverQuantity == null) {
+        return NextResponse.json({
+          error: "This polygon crosses itself, so its area is not stored.",
+          code: "polygon_rejected",
+        }, { status: 422 });
+      }
 
       const pctDiff = body.quantity !== 0 ? Math.abs(serverQuantity - body.quantity) / Math.abs(body.quantity) * 100 : (serverQuantity === 0 ? 0 : 100);
       if (pctDiff > QUANTITY_TOLERANCE_PCT) {
         discrepancyWarning = `submitted quantity ${body.quantity} differed from server-calculated ${serverQuantity.toFixed(4)} by ${pctDiff.toFixed(1)}% — server value used`;
       }
       quantity = serverQuantity;
-      calculationFormulaVersion = FORMULA_VERSION;
+      calculationFormulaVersion = calculatedQuantityForSave(countOnly || verified, serverQuantity) == null ? null : FORMULA_VERSION;
     }
   }
 
-  const { data, error } = await anyDb.rpc("update_manual_takeoff_tx", {
+  const { data, error } = await db.rpc("update_manual_takeoff_tx", {
     p_id: body.id,
     p_tenant_id: tenantId,
     p_expected_row_version: body.row_version,
-    p_geometry: body.geometry ?? {},
+    p_geometry: geo as unknown as Json,
     p_quantity: quantity,
     p_unit: body.unit ?? null,
     p_cost_code: body.cost_code ?? null,
     p_actor_user_id: userId,
     p_calculation_formula_version: calculationFormulaVersion,
+    p_layer_id: body.layer_id ?? null,
   }).single();
   if (error) {
     if (error.message?.includes("soft-deleted")) return NextResponse.json({ error: error.message }, { status: 409 });
@@ -429,7 +432,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
 
   let workerResult: Awaited<ReturnType<typeof processOutboxBatch>> | null = null;
   try {
-    workerResult = await processOutboxBatch(anyDb, `inline-patch-${Date.now()}`, 20);
+    workerResult = await processOutboxBatch(db, `inline-patch-${Date.now()}`, 20);
   } catch (err) {
     console.error("[canvas/manual] patch outbox processing failed", err);
   }

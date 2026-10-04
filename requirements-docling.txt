@@ -1,6 +1,5 @@
 # Optional heavy deps for the Docling text-PDF spike (XD-01).
-# NOT installed by default CI / Railway web service — enable on a dedicated
-# worker or local spike with:
-#   pip install -r requirements.txt -r requirements-docling.txt
-#   ENABLE_DOCLING=1
+# Install AFTER a CPU torch wheel (see Dockerfile) so pip does not pull CUDA.
+# Pin transformers<5: Docling layout AutoImageProcessor breaks on transformers 5.x.
 docling>=2.15.0,<3
+transformers>=4.42.0,<5

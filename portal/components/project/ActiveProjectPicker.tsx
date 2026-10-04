@@ -9,7 +9,12 @@ const QUICK_JUMPS = [
   { label: "Docs", phase: "documents", tab: "documents" },
   { label: "Takeoff", phase: "takeoff", tab: "takeoff" },
   { label: "Estimate", phase: "estimate", tab: "estimates" },
+  { label: "Schedule", phase: "schedule", tab: "scheduling" },
+  { label: "Controls", phase: "controls", tab: "controls" },
+  { label: "Procurement", phase: "procurement", tab: "procurement" },
+  { label: "Financials", phase: "financials", tab: "ar" },
   { label: "Field", phase: "field", tab: "daily-log" },
+  { label: "Closeout", phase: "closeout", tab: "punchlist" },
 ] as const;
 
 export default function ActiveProjectPicker({ onNavigate }: { onNavigate?: () => void }) {
