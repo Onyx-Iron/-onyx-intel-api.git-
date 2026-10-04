@@ -47,6 +47,8 @@ export interface RfiPayload {
   assigned_to: string | null;
   response: string | null;
   response_date: string | null;
+  ball_contact_id: string | null;
+  ball_since: string | null;
   meta: Record<string, never>;
 }
 
@@ -65,6 +67,9 @@ export interface SubmittalPayload {
   returned_date: string | null;
   responsible: string | null;
   notes: string | null;
+  ball_contact_id: string | null;
+  ball_since: string | null;
+  warranty_end_date: string | null;
   meta: Record<string, never>;
 }
 
@@ -86,6 +91,8 @@ export interface ChangeOrderPayload {
   subcontract_cost: number | null;
   markup: number | null;
   notes: string | null;
+  ball_contact_id: string | null;
+  ball_since: string | null;
   meta: Record<string, never>;
 }
 
@@ -153,6 +160,8 @@ export function buildRfiPayload(raw: RawPayload, scope: ProjectControlScope): Rf
     assigned_to: cleanText(raw.assigned_to),
     response: cleanText(raw.response),
     response_date: normalizeDate(raw.response_date),
+    ball_contact_id: cleanText(raw.ball_contact_id),
+    ball_since: normalizeDate(raw.ball_since),
     meta: {},
   };
 }
@@ -173,6 +182,9 @@ export function buildSubmittalPayload(raw: RawPayload, scope: ProjectControlScop
     returned_date: normalizeDate(raw.returned_date),
     responsible: cleanText(raw.responsible),
     notes: cleanText(raw.notes),
+    ball_contact_id: cleanText(raw.ball_contact_id),
+    ball_since: normalizeDate(raw.ball_since),
+    warranty_end_date: normalizeDate(raw.warranty_end_date),
     meta: {},
   };
 }
@@ -196,14 +208,16 @@ export function buildChangeOrderPayload(raw: RawPayload, scope: ProjectControlSc
     subcontract_cost: normalizeNumber(raw.subcontract_cost),
     markup: normalizeNumber(raw.markup),
     notes: cleanText(raw.notes),
+    ball_contact_id: cleanText(raw.ball_contact_id),
+    ball_since: normalizeDate(raw.ball_since),
     meta: {},
   };
 }
 
 export function buildRfiUpdate(raw: RawPayload): UpdatePayload {
   return buildUpdate(raw, {
-    text: ["number", "subject", "description", "discipline", "assigned_to", "response"],
-    dates: ["submitted_date", "due_date", "response_date"],
+    text: ["number", "subject", "description", "discipline", "assigned_to", "response", "ball_contact_id"],
+    dates: ["submitted_date", "due_date", "response_date", "ball_since"],
     enums: {
       status: [RFI_STATUSES, "open"],
       priority: [CONTROL_PRIORITIES, "medium"],
@@ -213,8 +227,8 @@ export function buildRfiUpdate(raw: RawPayload): UpdatePayload {
 
 export function buildSubmittalUpdate(raw: RawPayload): UpdatePayload {
   return buildUpdate(raw, {
-    text: ["number", "spec_section", "title", "description", "revision", "responsible", "notes"],
-    dates: ["submitted_date", "due_date", "returned_date"],
+    text: ["number", "spec_section", "title", "description", "revision", "responsible", "notes", "ball_contact_id"],
+    dates: ["submitted_date", "due_date", "returned_date", "ball_since", "warranty_end_date"],
     enums: {
       submittal_type: [SUBMITTAL_TYPES, "other"],
       status: [SUBMITTAL_STATUSES, "draft"],
@@ -224,8 +238,8 @@ export function buildSubmittalUpdate(raw: RawPayload): UpdatePayload {
 
 export function buildChangeOrderUpdate(raw: RawPayload): UpdatePayload {
   return buildUpdate(raw, {
-    text: ["number", "description", "reason", "trade", "notes"],
-    dates: ["request_date", "submitted_date", "approved_date"],
+    text: ["number", "description", "reason", "trade", "notes", "ball_contact_id"],
+    dates: ["request_date", "submitted_date", "approved_date", "ball_since"],
     numbers: ["amount", "labor_cost", "material_cost", "equipment_cost", "subcontract_cost", "markup"],
     enums: {
       status: [CHANGE_ORDER_STATUSES, "draft"],

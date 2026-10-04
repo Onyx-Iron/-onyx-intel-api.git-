@@ -7,6 +7,8 @@ import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { auditInsert } from "@/lib/audit";
 import { scheduleTaskCreateSchema, parseBody } from "@/lib/validation";
+import { recomputeProjectSchedule } from "@/lib/project-file/schedule-store";
+import { CpmCycleError } from "@/lib/project-file/cpm";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
@@ -59,7 +61,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ error: parsed.error }, { status: 400 });
     }
 
-    const { project_id, name, status, start_date, end_date, duration, critical } = parsed.data;
+    const { project_id, name, status, start_date, end_date, duration, critical, dependencies, percent_complete } = parsed.data;
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const denied = await requirePermission(tenantId, userId, "field", "write");
@@ -78,6 +80,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         end_date: end_date ?? undefined,
         duration: duration ?? undefined,
         critical: critical ?? undefined,
+        deps: dependencies ?? [],
+        percent_complete: percent_complete ?? null,
       })
       .select()
       .single();
@@ -105,6 +109,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       action: "created",
       title: `Schedule task created: ${name.trim()}`,
     });
+
+    try {
+      await recomputeProjectSchedule(db, tenantId, project_id);
+    } catch (err) {
+      if (err instanceof CpmCycleError) {
+        return NextResponse.json({ task: data, error: err.message }, { status: 409 });
+      }
+      throw err;
+    }
 
     return NextResponse.json({ task: data }, { status: 201 });
   } catch (err: unknown) {

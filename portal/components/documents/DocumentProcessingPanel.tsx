@@ -8,6 +8,7 @@ import {
   plainLanguageError,
   processingStage,
   processingStall,
+  sheetMeasureNote,
   takeoffBlockReason,
   type ProcessingStage,
 } from "@/lib/documents/processing-display";
@@ -128,7 +129,8 @@ export default function DocumentProcessingPanel({ projectId }: { projectId: stri
             const error = plainLanguageError(doc.last_error, doc.last_error_step);
             const stall = processingStall(doc);
             const missing = listedMissingPages(doc);
-            const block = takeoffBlockReason(doc);
+            const measureNote = sheetMeasureNote(doc);
+            const block = measureNote ?? takeoffBlockReason(doc);
             const needsPassword = stage === "Failed" && isPasswordRequired(doc.last_error);
             const loadedPages = pageNumbers[doc.id];
             const ledger = loadedPages

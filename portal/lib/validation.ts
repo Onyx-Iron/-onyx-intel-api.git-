@@ -34,6 +34,7 @@ export const scheduleTaskCreateSchema = z.object({
   critical: z.boolean().optional(),
   parent_id: z.string().uuid().nullable().optional(),
   dependencies: z.array(z.string().uuid()).max(50).optional(),
+  percent_complete: z.number().min(0).max(100).nullable().optional(),
   meta: z.record(z.string(), z.unknown()).optional(),
 });
 

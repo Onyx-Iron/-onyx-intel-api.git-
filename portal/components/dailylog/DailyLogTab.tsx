@@ -28,18 +28,70 @@ interface FormState {
   crew_count: string;
   work_performed: string;
   notes: string;
+  client_visible: boolean;
 }
 
 const today = () => new Date().toISOString().split("T")[0];
 
 const EMPTY_FORM: FormState = {
-  log_date: today(), weather: "", temperature: "", crew_count: "", work_performed: "", notes: "",
+  log_date: today(), weather: "", temperature: "", crew_count: "", work_performed: "", notes: "", client_visible: false,
 };
 
 const WEATHER_OPTS = ["Clear", "Partly Cloudy", "Overcast", "Rain", "Snow", "Windy", "Hot", "Cold"];
 
 function fmtDate(d: string): string {
   return new Date(d + "T00:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+}
+
+function ProductionEditor({ projectId, logId }: { projectId: string; logId: string }) {
+  const { toast } = useToast();
+  const [headcount, setHeadcount] = useState("");
+  const [hours, setHours] = useState("");
+  const [delayReason, setDelayReason] = useState("");
+  const [delayHours, setDelayHours] = useState("");
+  const [equipment, setEquipment] = useState("");
+  const [equipmentHours, setEquipmentHours] = useState("");
+  const [delivery, setDelivery] = useState("");
+  const [quantity, setQuantity] = useState("");
+  const [unit, setUnit] = useState("");
+
+  const save = async () => {
+    const res = await fetch("/api/daily-production", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project_id: projectId,
+        daily_log_id: logId,
+        manpower: headcount ? [{ company_name: "Crew", headcount: Number(headcount), hours: Number(hours) || 0 }] : [],
+        delays: delayReason ? [{ reason_code: delayReason, hours: Number(delayHours) || 0 }] : [],
+        equipment: equipment ? [{ name: equipment, hours: Number(equipmentHours) || 0 }] : [],
+        deliveries: delivery ? [{ note: delivery }] : [],
+        quantities: quantity ? [{ quantity: Number(quantity), unit: unit || null }] : [],
+      }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      toast({ title: String((data as { error?: string }).error ?? "Could not save production"), kind: "error" });
+      return;
+    }
+    toast({ title: String("Production saved on this log"), kind: "success" });
+  };
+
+  const field = "bg-[#0A0A0B] border border-white/10 rounded px-2 py-1 text-[11px] text-white";
+  return (
+    <div className="mt-3 grid gap-2 border-t border-white/5 pt-3 md:grid-cols-5">
+      <input className={field} placeholder="Headcount" value={headcount} onChange={(e) => setHeadcount(e.target.value)} />
+      <input className={field} placeholder="Hours" value={hours} onChange={(e) => setHours(e.target.value)} />
+      <input className={field} placeholder="Delay reason" value={delayReason} onChange={(e) => setDelayReason(e.target.value)} />
+      <input className={field} placeholder="Delay hours" value={delayHours} onChange={(e) => setDelayHours(e.target.value)} />
+      <input className={field} placeholder="Equipment" value={equipment} onChange={(e) => setEquipment(e.target.value)} />
+      <input className={field} placeholder="Equip. hours" value={equipmentHours} onChange={(e) => setEquipmentHours(e.target.value)} />
+      <input className={field} placeholder="Delivery" value={delivery} onChange={(e) => setDelivery(e.target.value)} />
+      <input className={field} placeholder="Qty installed" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+      <input className={field} placeholder="Unit" value={unit} onChange={(e) => setUnit(e.target.value)} />
+      <button type="button" onClick={() => { void save(); }} className="text-[10px] uppercase tracking-widest text-[#CCFF00]">Save production</button>
+    </div>
+  );
 }
 
 export default function DailyLogTab({ projectId }: { projectId: string }) {
@@ -105,6 +157,7 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
           crew_count: Number.isFinite(crewNum) ? crewNum : null,
           work_performed: form.work_performed || null,
           notes: form.notes || null,
+          client_visible: form.client_visible,
           photo_urls: pendingPhotos.map((p) => p.path),
         }),
       });
@@ -169,6 +222,25 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
                 <label className="block text-[10px] uppercase tracking-widest text-gray-600 mb-1.5">Weather</label>
                 <input list="weather-opts" value={form.weather} onChange={(e) => setForm((f) => ({ ...f, weather: e.target.value }))} className={inputCls} placeholder="Clear" />
                 <datalist id="weather-opts">{WEATHER_OPTS.map((w) => <option key={w} value={w} />)}</datalist>
+                <button
+                  type="button"
+                  className="mt-1 text-[10px] uppercase tracking-widest text-[#00D2FF]"
+                  onClick={async () => {
+                    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/weather`);
+                    const data = await res.json().catch(() => ({})) as { weather?: string | null; temperature?: string | null };
+                    if (!data.weather && !data.temperature) {
+                      toast({ title: String("No site weather. Set the project coordinates, or type it in."), kind: "error" });
+                      return;
+                    }
+                    setForm((current) => ({
+                      ...current,
+                      weather: data.weather ?? current.weather,
+                      temperature: data.temperature ?? current.temperature,
+                    }));
+                  }}
+                >
+                  Fill from site
+                </button>
               </div>
               <div>
                 <label className="block text-[10px] uppercase tracking-widest text-gray-600 mb-1.5">Temp (Â°F)</label>
@@ -183,6 +255,10 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
               <label className="block text-[10px] uppercase tracking-widest text-gray-600 mb-1.5">Work Performed</label>
               <textarea value={form.work_performed} onChange={(e) => setForm((f) => ({ ...f, work_performed: e.target.value }))} rows={3} className={inputCls} placeholder="Describe work completed todayâ€¦" />
             </div>
+            <label className="flex items-center gap-2 text-xs text-white/70">
+              <input type="checkbox" checked={form.client_visible} onChange={(e) => setForm((f) => ({ ...f, client_visible: e.target.checked }))} />
+              Visible to the client on this project
+            </label>
             <div>
               <label className="block text-[10px] uppercase tracking-widest text-gray-600 mb-1.5">Notes / Issues</label>
               <textarea value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} rows={2} className={inputCls} placeholder="Delays, deliveries, safety, visitorsâ€¦" />
@@ -250,6 +326,7 @@ export default function DailyLogTab({ projectId }: { projectId: string }) {
               </div>
               {log.work_performed && <p className="text-gray-300 text-xs mt-2 whitespace-pre-wrap">{log.work_performed}</p>}
               {log.notes && <p className="text-gray-500 text-[11px] mt-1.5 whitespace-pre-wrap">{log.notes}</p>}
+              <ProductionEditor projectId={projectId} logId={log.id} />
               {log.photos.length > 0 && (
                 <div className="flex flex-wrap gap-2 mt-3">
                   {log.photos.map((p, i) => p.url && (

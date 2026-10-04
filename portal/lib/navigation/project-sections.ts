@@ -29,7 +29,11 @@ export const PROJECT_SECTIONS = [
     id: "Estimate & Budget",
     slug: "estimate",
     keywords: "pricing proposal budget bid",
-    tabs: [{ id: "estimates", label: "Estimate & Budget", keywords: "price proposal sov version" }],
+    tabs: [
+      { id: "estimates", label: "Estimate & Budget", keywords: "price proposal sov version" },
+      { id: "budget", label: "Budget", keywords: "original revised committed forecast margin" },
+      { id: "selections", label: "Selections", keywords: "allowance client selection" },
+    ],
   },
   {
     id: "Schedule",
@@ -70,6 +74,7 @@ export const PROJECT_SECTIONS = [
       { id: "open", label: "Open Invoices", keywords: "unpaid invoices" },
       { id: "closed", label: "Closed Invoices", keywords: "paid invoices" },
       { id: "lien-waivers", label: "Lien Waivers", keywords: "waiver lien release" },
+      { id: "pay-apps", label: "Pay Applications", keywords: "pay app sov draw retainage" },
     ],
   },
   {
@@ -81,6 +86,8 @@ export const PROJECT_SECTIONS = [
       { id: "weekly-log", label: "Weekly Log", keywords: "weekly status report" },
       { id: "todo", label: "To Do List", keywords: "tasks action items" },
       { id: "staff", label: "Staff", keywords: "crew people assignments" },
+      { id: "time", label: "Time Cards", keywords: "time card hours labor" },
+      { id: "meetings", label: "Meetings", keywords: "meeting action item" },
     ],
   },
   {
@@ -90,6 +97,7 @@ export const PROJECT_SECTIONS = [
     tabs: [
       { id: "punchlist", label: "Punchlist", keywords: "punch deficiency closeout" },
       { id: "co", label: "Certificate of Occupancy", keywords: "co occupancy certificate" },
+      { id: "inspections", label: "Closeout Assembly", keywords: "inspection warranty manual punch walk" },
       { id: "final-docs", label: "Final Docs", keywords: "closeout documents as-built" },
     ],
   },

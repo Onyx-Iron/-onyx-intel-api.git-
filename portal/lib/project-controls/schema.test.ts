@@ -47,6 +47,8 @@ describe("project control payloads", () => {
       assigned_to: "Civil Engineer",
       response: null,
       response_date: null,
+      ball_contact_id: null,
+      ball_since: null,
       meta: {},
     });
   });

@@ -4275,6 +4275,321 @@ export type Database = {
         }
         Relationships: []
       }
+      project_budgets: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          id: string
+          is_current: boolean
+          line_count: number
+          project_id: string
+          source_estimate_version_id: string
+          tenant_id: string
+          total_price: number
+          version_number: number
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          is_current?: boolean
+          line_count?: number
+          project_id: string
+          source_estimate_version_id: string
+          tenant_id: string
+          total_price?: number
+          version_number: number
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          is_current?: boolean
+          line_count?: number
+          project_id?: string
+          source_estimate_version_id?: string
+          tenant_id?: string
+          total_price?: number
+          version_number?: number
+        }
+        Relationships: []
+      }
+      project_budget_lines: {
+        Row: {
+          approved_change_amount: number
+          budget_id: string
+          csi_code: string | null
+          description: string
+          equipment_cost: number
+          forecast_override: number | null
+          id: string
+          labor_cost: number
+          material_cost: number
+          original_amount: number
+          project_id: string
+          quantity: number | null
+          sort_order: number
+          source_estimate_item_id: string | null
+          source_takeoff_id: string | null
+          tenant_id: string
+          total_price: number
+          uom: string | null
+        }
+        Insert: {
+          approved_change_amount?: number
+          budget_id: string
+          csi_code?: string | null
+          description: string
+          equipment_cost?: number
+          forecast_override?: number | null
+          id?: string
+          labor_cost?: number
+          material_cost?: number
+          original_amount?: number
+          project_id: string
+          quantity?: number | null
+          sort_order?: number
+          source_estimate_item_id?: string | null
+          source_takeoff_id?: string | null
+          tenant_id: string
+          total_price?: number
+          uom?: string | null
+        }
+        Update: {
+          approved_change_amount?: number
+          budget_id?: string
+          csi_code?: string | null
+          description?: string
+          equipment_cost?: number
+          forecast_override?: number | null
+          id?: string
+          labor_cost?: number
+          material_cost?: number
+          original_amount?: number
+          project_id?: string
+          quantity?: number | null
+          sort_order?: number
+          source_estimate_item_id?: string | null
+          source_takeoff_id?: string | null
+          tenant_id?: string
+          total_price?: number
+          uom?: string | null
+        }
+        Relationships: []
+      }
+      project_contacts: {
+        Row: {
+          clerk_user_id: string | null
+          contact_id: string
+          created_at: string
+          id: string
+          is_primary: boolean
+          meta: Json
+          project_id: string
+          role_on_project: string | null
+          tenant_id: string
+        }
+        Insert: {
+          clerk_user_id?: string | null
+          contact_id: string
+          created_at?: string
+          id?: string
+          is_primary?: boolean
+          meta?: Json
+          project_id: string
+          role_on_project?: string | null
+          tenant_id: string
+        }
+        Update: {
+          clerk_user_id?: string | null
+          contact_id?: string
+          created_at?: string
+          id?: string
+          is_primary?: boolean
+          meta?: Json
+          project_id?: string
+          role_on_project?: string | null
+          tenant_id?: string
+        }
+        Relationships: []
+      }
+      project_record_links: {
+        Row: {
+          created_at: string
+          from_id: string
+          from_type: string
+          id: string
+          link_role: string
+          project_id: string
+          tenant_id: string
+          to_id: string
+          to_type: string
+        }
+        Insert: {
+          created_at?: string
+          from_id: string
+          from_type: string
+          id?: string
+          link_role: string
+          project_id: string
+          tenant_id: string
+          to_id: string
+          to_type: string
+        }
+        Update: {
+          created_at?: string
+          from_id?: string
+          from_type?: string
+          id?: string
+          link_role?: string
+          project_id?: string
+          tenant_id?: string
+          to_id?: string
+          to_type?: string
+        }
+        Relationships: []
+      }
+      sheet_markups: {
+        Row: {
+          color: string
+          created_at: string
+          created_by: string | null
+          geometry: Json
+          id: string
+          label: string | null
+          markup_type: string
+          page_id: string | null
+          project_id: string
+          tenant_id: string
+          updated_at: string
+        }
+        Insert: {
+          color?: string
+          created_at?: string
+          created_by?: string | null
+          geometry?: Json
+          id?: string
+          label?: string | null
+          markup_type: string
+          page_id?: string | null
+          project_id: string
+          tenant_id: string
+          updated_at?: string
+        }
+        Update: {
+          color?: string
+          created_at?: string
+          created_by?: string | null
+          geometry?: Json
+          id?: string
+          label?: string | null
+          markup_type?: string
+          page_id?: string | null
+          project_id?: string
+          tenant_id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      sheet_pins: {
+        Row: {
+          created_at: string
+          entity_id: string
+          entity_type: string
+          id: string
+          label: string | null
+          page_id: string
+          project_id: string
+          tenant_id: string
+          x: number
+          y: number
+        }
+        Insert: {
+          created_at?: string
+          entity_id: string
+          entity_type: string
+          id?: string
+          label?: string | null
+          page_id: string
+          project_id: string
+          tenant_id: string
+          x: number
+          y: number
+        }
+        Update: {
+          created_at?: string
+          entity_id?: string
+          entity_type?: string
+          id?: string
+          label?: string | null
+          page_id?: string
+          project_id?: string
+          tenant_id?: string
+          x?: number
+          y?: number
+        }
+        Relationships: []
+      }
+      takeoff_layers: {
+        Row: {
+          color: string
+          created_at: string
+          created_by: string | null
+          default_cost_code: string | null
+          description: string | null
+          discipline: string | null
+          id: string
+          locked: boolean
+          name: string
+          opacity: number
+          project_id: string
+          sort_order: number
+          tenant_id: string
+          trade: string | null
+          updated_at: string
+          updated_by: string | null
+          visible: boolean
+        }
+        Insert: {
+          color?: string
+          created_at?: string
+          created_by?: string | null
+          default_cost_code?: string | null
+          description?: string | null
+          discipline?: string | null
+          id?: string
+          locked?: boolean
+          name: string
+          opacity?: number
+          project_id: string
+          sort_order?: number
+          tenant_id: string
+          trade?: string | null
+          updated_at?: string
+          updated_by?: string | null
+          visible?: boolean
+        }
+        Update: {
+          color?: string
+          created_at?: string
+          created_by?: string | null
+          default_cost_code?: string | null
+          description?: string | null
+          discipline?: string | null
+          id?: string
+          locked?: boolean
+          name?: string
+          opacity?: number
+          project_id?: string
+          sort_order?: number
+          tenant_id?: string
+          trade?: string | null
+          updated_at?: string
+          updated_by?: string | null
+          visible?: boolean
+        }
+        Relationships: []
+      }
       schedule_tasks: {
         Row: {
           created_at: string
@@ -4292,6 +4607,7 @@ export type Database = {
           ls_date: string | null
           meta: Json
           name: string
+          percent_complete: number | null
           project_id: string
           start_date: string | null
           status: string
@@ -4315,6 +4631,7 @@ export type Database = {
           ls_date?: string | null
           meta?: Json
           name: string
+          percent_complete?: number | null
           project_id: string
           start_date?: string | null
           status?: string
@@ -4338,6 +4655,7 @@ export type Database = {
           ls_date?: string | null
           meta?: Json
           name?: string
+          percent_complete?: number | null
           project_id?: string
           start_date?: string | null
           status?: string

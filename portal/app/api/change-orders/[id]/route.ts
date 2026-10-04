@@ -9,6 +9,8 @@ import {
 } from "@/lib/project-controls/server";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditUpdate, auditDelete } from "@/lib/audit";
+import { approvedChangeDelta } from "@/lib/project-file/money";
+import { addApprovedChange } from "@/lib/project-file/budget-store";
 
 export const runtime = "nodejs";
 
@@ -50,6 +52,30 @@ export async function PUT(req: NextRequest, ctx: RouteContext): Promise<NextResp
       .single();
 
     if (error) return NextResponse.json({ error: "Change Orders are not yet available in this workspace.", code: "FEATURE_UNAVAILABLE" }, { status: 503 });
+
+    const next = data as { status?: string; amount?: number | null; project_id?: string };
+    const previous = before as { status?: string; project_id?: string } | null;
+    const delta = approvedChangeDelta(previous?.status ?? "", next.status ?? "", Number(next.amount ?? 0));
+    if (delta !== 0 && previous?.project_id) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const anyDb = db as any;
+      const { data: links } = await anyDb
+        .from("project_record_links")
+        .select("to_id")
+        .eq("tenant_id", tenantId)
+        .eq("project_id", previous.project_id)
+        .eq("from_type", "change_order")
+        .eq("from_id", id)
+        .eq("link_role", "prices")
+        .eq("to_type", "budget_line");
+      const allocations = (links ?? []).map((link: { to_id: string }) => ({
+        budgetLineId: link.to_id,
+        amount: delta / Math.max(1, links.length),
+      }));
+      if (allocations.length) {
+        await addApprovedChange(anyDb, tenantId, previous.project_id, allocations);
+      }
+    }
 
     auditUpdate({
       tenant_id: tenantId,

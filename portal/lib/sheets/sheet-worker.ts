@@ -1,8 +1,8 @@
 /**
  * Sheet-index worker: claims uncalibrated sheets via `claim_unparsed_sheets`
- * (FOR UPDATE SKIP LOCKED) and marks structural indexing complete once the
- * page link exists. User calibration (`is_calibrated`) is separate and
- * remains false until a verified sheet_calibration is saved.
+ * (FOR UPDATE SKIP LOCKED) and marks the page link indexed. Flipping that
+ * index bit is not a measured sheet. Lengths and areas come from the
+ * document supervisor, using the scale printed on the page.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyDb = any;

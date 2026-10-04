@@ -89,11 +89,10 @@ export default async function CanvasPage({ params, searchParams }: PageProps) {
     return (
       <div className="min-h-screen bg-[#06070A] text-white">
         <div className="mx-auto max-w-3xl px-6 py-16 text-center">
-          <p className="text-[11px] font-bold uppercase tracking-[0.32em] text-[#CCFF00]">Sheet Canvas</p>
-          <h1 className="mt-4 text-3xl font-light tracking-tight">Nothing to draw on yet.</h1>
+          <p className="text-[11px] font-bold uppercase tracking-[0.32em] text-[#CCFF00]">Measure</p>
+          <h1 className="mt-4 text-3xl font-light tracking-tight">The first sheet is not ready yet.</h1>
           <p className="mt-3 text-sm text-white/50">
-            Import a PDF plan through the Drive picker first — the page-split pipeline creates
-            the individual sheets this workspace renders.
+            You can measure this drawing as soon as its first sheet appears. Upload a PDF if this project does not have one yet.
           </p>
           <div className="mt-8 flex justify-center gap-3">
             <Link
