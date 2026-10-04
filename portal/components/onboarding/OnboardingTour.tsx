@@ -162,7 +162,7 @@ export default function OnboardingTour() {
     );
   }
 
-  if (done || step === "done") return null;
+  if (done || step === "done" || step === "welcome") return null;
 
   const copy = STEP_COPY[step];
 
