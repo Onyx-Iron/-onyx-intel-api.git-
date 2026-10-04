@@ -2,6 +2,7 @@ import {
   CHANGE_ORDER_FINANCIAL_FIELDS,
   INVOICE_FINANCIAL_FIELDS,
 } from "@/lib/project-controls/financial-redaction";
+import { rankStoredPageText } from "@/lib/documents/page-text";
 import { PROJECT_SECTIONS, projectSectionHref } from "@/lib/navigation/project-sections";
 
 export interface SkillCitation {
@@ -304,23 +305,68 @@ export const PROJECT_SKILL_DECLARATIONS = [
   },
 ];
 
+async function storedPageMatches(
+  db: Db,
+  ctx: SkillContext,
+  queryText: string,
+  matchCount: number,
+): Promise<ChunkRow[]> {
+  const { data: docs, error: docsErr } = await db
+    .from("documents")
+    .select("id")
+    .eq("tenant_id", ctx.tenantId)
+    .eq("project_id", ctx.projectId)
+    .order("uploaded_at", { ascending: false })
+    .limit(100);
+  if (docsErr || !docs?.length) return [];
+  const ids = (docs as Array<{ id: string }>).map((doc) => doc.id);
+  const terms = [...new Set(queryText.toLowerCase().match(/[a-z0-9]{3,}/g) ?? [])].slice(0, 6);
+  if (terms.length === 0) return [];
+  const { data: pages, error } = await db
+    .from("document_pages")
+    .select("document_id, page_number, ocr_text")
+    .eq("tenant_id", ctx.tenantId)
+    .in("document_id", ids)
+    .or(terms.map((term) => `ocr_text.ilike.%${term}%`).join(","))
+    .limit(40);
+  if (error || !pages?.length) return [];
+  return rankStoredPageText(
+    (pages as Array<{ document_id: string; page_number: number; ocr_text: string | null }>).flatMap((page) => {
+      if (!page.ocr_text) return [];
+      return [{ document_id: page.document_id, page_number: page.page_number, text: page.ocr_text }];
+    }),
+    queryText,
+    matchCount,
+  );
+}
+
 async function searchChunks(
   db: Db,
   ctx: SkillContext,
   queryText: string,
   matchCount: number,
 ): Promise<ChunkRow[]> {
-  if (!ctx.embedText) return [];
-  const embedding = await ctx.embedText(queryText);
-  const vectorStr = `[${embedding.join(",")}]`;
-  const { data } = await db.rpc("match_chunks", {
-    query_embedding: vectorStr,
-    match_tenant_id: ctx.tenantId,
-    match_project_id: ctx.projectId,
-    query_text: queryText,
-    match_count: matchCount,
-  }) as { data: ChunkRow[] | null };
-  return data ?? [];
+  if (ctx.embedText) {
+    try {
+      const embedding = await ctx.embedText(queryText);
+      const vectorStr = `[${embedding.join(",")}]`;
+      const { data } = await db.rpc("match_chunks", {
+        query_embedding: vectorStr,
+        match_tenant_id: ctx.tenantId,
+        match_project_id: ctx.projectId,
+        query_text: queryText,
+        match_count: matchCount,
+      }) as { data: ChunkRow[] | null };
+      if (data && data.length > 0) return data;
+    } catch {
+      /* Large split plans have page text and no embedding. */
+    }
+  }
+  try {
+    return await storedPageMatches(db, ctx, queryText, matchCount);
+  } catch {
+    return [];
+  }
 }
 
 export async function executeProjectSkill(

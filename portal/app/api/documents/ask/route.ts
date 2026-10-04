@@ -9,6 +9,7 @@ import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditUpdate } from "@/lib/audit";
 import { checkAiRateLimit } from "@/lib/ai/rate-limit";
 import { embedQueryText } from "@/lib/ai/embeddings";
+import { selectOcrContext } from "@/lib/documents/page-text";
 import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
 
 export const runtime = "nodejs";
@@ -167,10 +168,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .not("ocr_text", "is", null)
       .order("page_number", { ascending: true });
     const ocrPages = (asyncPages ?? []) as Array<{ page_number: number; ocr_text: string }>;
-    if (ocrPages.length > 0) {
-      const context = ocrPages
-        .map((p) => `=== Page ${p.page_number} ===\n${p.ocr_text}`)
-        .join("\n\n");
+    const context = selectOcrContext(
+      ocrPages.map((page) => ({ page_number: page.page_number, text: page.ocr_text })),
+      question.trim(),
+    );
+    if (context) {
       return await answerFromTextContext(context, "document OCR excerpts", "document_pages_ocr");
     }
 
