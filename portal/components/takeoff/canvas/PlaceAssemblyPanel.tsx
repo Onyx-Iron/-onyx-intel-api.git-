@@ -10,7 +10,7 @@ interface AsmComp {
   label: string | null;
 }
 
-interface Assembly {
+export interface Assembly {
   id: string;
   name: string;
   csi_code: string;
@@ -19,8 +19,12 @@ interface Assembly {
 
 export default function PlaceAssemblyPanel({
   onPlace,
+  onArm,
+  armedId,
 }: {
   onPlace: (rows: ReturnType<typeof expandAssemblyPlacement>) => void;
+  onArm?: (assembly: Assembly | null) => void;
+  armedId?: string | null;
 }) {
   const [assemblies, setAssemblies] = useState<Assembly[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -59,6 +63,23 @@ export default function PlaceAssemblyPanel({
           <option key={a.id} value={a.id}>{a.name} ({a.components.length})</option>
         ))}
       </select>
+      {onArm && (
+        <button
+          type="button"
+          disabled={!selected || selected.components.length === 0}
+          onClick={() => {
+            if (!selected) return;
+            onArm(armedId === selected.id ? null : selected);
+          }}
+          className={`w-full rounded px-2 py-1 text-[10px] font-semibold ${
+            armedId && armedId === selected?.id
+              ? "bg-[#CCFF00] text-black"
+              : "border border-white/15 text-white/70"
+          } disabled:opacity-40`}
+        >
+          {armedId && armedId === selected?.id ? "Armed — draw the next measurement" : "Arm for the next measurement"}
+        </button>
+      )}
       <div className="flex gap-1">
         <input
           value={qty}

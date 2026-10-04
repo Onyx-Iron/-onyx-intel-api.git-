@@ -86,6 +86,7 @@ export interface ChangeOrderPayload {
   subcontract_cost: number | null;
   markup: number | null;
   notes: string | null;
+  cost_code: string | null;
   meta: Record<string, never>;
 }
 
@@ -136,6 +137,21 @@ export function normalizeEnum<T extends string>(
   fallback: T,
 ): T {
   return typeof value === "string" && allowed.includes(value as T) ? (value as T) : fallback;
+}
+
+/** The form sends `title`. The stored RFI column is `subject`. */
+export function rfiRawWithSubject(raw: RawPayload): RawPayload {
+  if (cleanText(raw.subject)) return raw;
+  const title = cleanText(raw.title);
+  if (!title) return raw;
+  return { ...raw, subject: title };
+}
+
+export function controlWriteStatus(error: { message?: string | null; code?: string | null }): 422 | 503 {
+  const code = error.code ?? "";
+  const message = error.message ?? "";
+  if (code === "42P01" || code === "PGRST205" || /does not exist|schema cache/i.test(message)) return 503;
+  return 422;
 }
 
 export function buildRfiPayload(raw: RawPayload, scope: ProjectControlScope): RfiPayload {
@@ -196,6 +212,9 @@ export function buildChangeOrderPayload(raw: RawPayload, scope: ProjectControlSc
     subcontract_cost: normalizeNumber(raw.subcontract_cost),
     markup: normalizeNumber(raw.markup),
     notes: cleanText(raw.notes),
+    cost_code: typeof raw.cost_code === "string" && /^\d{2}-\d{2}-\d{2}$/.test(raw.cost_code.trim())
+      ? raw.cost_code.trim()
+      : null,
     meta: {},
   };
 }

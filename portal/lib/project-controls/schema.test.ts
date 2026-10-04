@@ -8,7 +8,9 @@ import {
   buildRfiUpdate,
   buildSubmittalPayload,
   buildSubmittalUpdate,
+  controlWriteStatus,
   getControlSummary,
+  rfiRawWithSubject,
 } from "./schema.ts";
 
 const scope = {
@@ -78,6 +80,29 @@ describe("project control payloads", () => {
     assert.equal(submittal.status, "submitted");
     assert.equal(changeOrder.amount, 12500.5);
     assert.equal(changeOrder.markup, null);
+    assert.equal(changeOrder.cost_code, null);
+  });
+
+  it("accepts an RFI title as the stored subject", () => {
+    const payload = buildRfiPayload(rfiRawWithSubject({ title: "  Confirm sleeve elevation  " }), scope);
+    assert.equal(payload.subject, "Confirm sleeve elevation");
+  });
+
+  it("stores a change-order cost code the budget can group", () => {
+    const payload = buildChangeOrderPayload({
+      description: "Added hydrant",
+      cost_code: "33-11-00",
+      amount: 4200,
+      status: "approved",
+    }, scope);
+    assert.equal(payload.cost_code, "33-11-00");
+    assert.equal(payload.status, "approved");
+    assert.equal(payload.amount, 4200);
+  });
+
+  it("reserves 503 for a missing table and 422 for any other insert error", () => {
+    assert.equal(controlWriteStatus({ code: "PGRST205", message: "Could not find the table" }), 503);
+    assert.equal(controlWriteStatus({ code: "23514", message: "check constraint failed" }), 422);
   });
 
   it("summarizes open controls and pending cost exposure", () => {

@@ -247,6 +247,38 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
     return Number.isFinite(n) ? n : null;
   }
 
+  async function importCsv(file: File) {
+    const csv = await file.text();
+    setSaving(true);
+    try {
+      const res = await fetch("/api/cost-catalog/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ csv }),
+      });
+      const data = await res.json().catch(() => ({})) as {
+        error?: string;
+        inserted?: number;
+        updated?: number;
+        rejected?: Array<{ line: number; reason: string }>;
+      };
+      if (!res.ok) {
+        toast({ title: data.error ?? "Import failed", kind: "error" });
+        return;
+      }
+      const rejected = data.rejected?.length ?? 0;
+      toast({
+        title: `Imported ${data.inserted ?? 0} new and ${data.updated ?? 0} updated. ${rejected} row${rejected === 1 ? "" : "s"} rejected.`,
+        kind: rejected > 0 ? "info" : "success",
+      });
+      await load();
+    } catch (err) {
+      toast({ title: err instanceof Error ? err.message : "Import failed", kind: "error" });
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!form.csi_code.trim()) {
@@ -359,6 +391,19 @@ export default function CostOverrideManager({ tenantId, planLabel }: Props) {
               className="h-9 w-64 rounded-full border border-white/10 bg-[#0E0F12] pl-9 pr-3 text-xs text-white placeholder:text-white/30 focus:border-[#CCFF00]/40 focus:outline-none"
             />
           </div>
+          <label className="inline-flex h-9 cursor-pointer items-center rounded-full border border-white/15 px-4 text-xs font-bold uppercase tracking-widest text-white/80 hover:text-white">
+            Import CSV
+            <input
+              type="file"
+              accept=".csv,text/csv"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (file) void importCsv(file);
+              }}
+            />
+          </label>
           <button
             type="button"
             onClick={openAdd}

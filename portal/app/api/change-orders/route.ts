@@ -1,6 +1,6 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
-import { buildChangeOrderPayload } from "@/lib/project-controls/schema";
+import { buildChangeOrderPayload, controlWriteStatus } from "@/lib/project-controls/schema";
 import {
   assertProjectBelongsToTenant,
   authTenantKey,
@@ -83,7 +83,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .select()
       .single();
 
-    if (error) return NextResponse.json({ ...UNAVAILABLE }, { status: 503 });
+    if (error) {
+      const status = controlWriteStatus(error);
+      if (status === 503) return NextResponse.json({ ...UNAVAILABLE }, { status: 503 });
+      return NextResponse.json({ error: error.message }, { status: 422 });
+    }
 
     auditInsert({
       tenant_id: tenantId,

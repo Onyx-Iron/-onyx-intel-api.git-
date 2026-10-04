@@ -6,6 +6,7 @@ import { requirePermission, ownershipDenied } from "@/lib/project-controls/route
 import { logEvent } from "@/lib/activity";
 import { processOutboxBatch } from "@/lib/estimating/outbox-worker";
 import { quantityForMeasurement, calculatedQuantityForSave, FORMULA_VERSION, scaleFactorForPoints, type QuantityGeometry, type ScaleRegionInput } from "@/lib/takeoff/canvas/quantity";
+import { assemblyFactorOf, assemblyQuantityOf } from "@/lib/takeoff/canvas/assemblies";
 import { measurementUnit, storedTakeoffType } from "@/lib/takeoff/measure-kind";
 import type { Point } from "@/lib/takeoff/canvas/coordinates";
 import type { ManualTakeoffItem, ManualTakeoffUpdateBody, TakeoffGeometry } from "@/lib/types/takeoff";
@@ -209,12 +210,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (isPageSpace && verified) {
       const points = geo.points as Point[];
       const factor = countOnly ? 1 : choice!.factor!;
-      const serverQuantity = quantityForMeasurement(it.takeoff_type, points, factor, quantityGeometry(geo));
+      let serverQuantity = quantityForMeasurement(it.takeoff_type, points, factor, quantityGeometry(geo));
       if (serverQuantity == null) {
         return NextResponse.json({
           error: "This polygon crosses itself, so its area is not stored.",
           code: "polygon_rejected",
         }, { status: 422 });
+      }
+      const explicitCount = countOnly ? assemblyQuantityOf(geo) : null;
+      if (explicitCount != null) serverQuantity = explicitCount;
+      else {
+        const assemblyFactor = assemblyFactorOf(geo);
+        if (assemblyFactor != null) serverQuantity = serverQuantity * assemblyFactor;
       }
 
       const pctDiff = it.quantity !== 0 ? Math.abs(serverQuantity - it.quantity) / Math.abs(it.quantity) * 100 : (serverQuantity === 0 ? 0 : 100);
@@ -439,12 +446,18 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     if (verified) {
       const points = geo.points as Point[];
       const factor = countOnly ? 1 : choice.factor!;
-      const serverQuantity = quantityForMeasurement(existing.takeoff_type, points, factor, quantityGeometry(geo));
+      let serverQuantity = quantityForMeasurement(existing.takeoff_type, points, factor, quantityGeometry(geo));
       if (serverQuantity == null) {
         return NextResponse.json({
           error: "This polygon crosses itself, so its area is not stored.",
           code: "polygon_rejected",
         }, { status: 422 });
+      }
+      const explicitCount = countOnly ? assemblyQuantityOf(geo) : null;
+      if (explicitCount != null) serverQuantity = explicitCount;
+      else {
+        const assemblyFactor = assemblyFactorOf(geo);
+        if (assemblyFactor != null) serverQuantity = serverQuantity * assemblyFactor;
       }
 
       const pctDiff = body.quantity !== 0 ? Math.abs(serverQuantity - body.quantity) / Math.abs(body.quantity) * 100 : (serverQuantity === 0 ? 0 : 100);

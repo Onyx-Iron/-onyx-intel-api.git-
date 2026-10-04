@@ -24,6 +24,23 @@ function normalizeUnit(u: string): "EA" | "LF" | "SF" {
   return "EA";
 }
 
+function geometryNumber(geometry: unknown, key: "assembly_factor" | "assembly_quantity"): number | null {
+  if (!geometry || typeof geometry !== "object") return null;
+  const value = Number((geometry as Record<string, unknown>)[key]);
+  return Number.isFinite(value) ? value : null;
+}
+
+export function assemblyFactorOf(geometry: unknown): number | null {
+  const factor = geometryNumber(geometry, "assembly_factor");
+  return factor != null && factor > 0 ? factor : null;
+}
+
+/** A count component keeps the expanded quantity instead of the vertex count. */
+export function assemblyQuantityOf(geometry: unknown): number | null {
+  const quantity = geometryNumber(geometry, "assembly_quantity");
+  return quantity != null && quantity >= 0 ? quantity : null;
+}
+
 export function expandAssemblyPlacement(opts: {
   assemblyId: string;
   assemblyName: string;

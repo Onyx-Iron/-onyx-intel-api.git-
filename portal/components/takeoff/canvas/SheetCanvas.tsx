@@ -19,7 +19,10 @@ import { displayTakeoffTool } from "@/lib/takeoff/measure-kind";
 import { buildQuantitySummary } from "@/lib/takeoff/canvas/quantity-summary";
 import { CommandStack } from "@/lib/takeoff/canvas/command-stack";
 import TakeoffLayersPanel from "./TakeoffLayersPanel";
-import PlaceAssemblyPanel from "./PlaceAssemblyPanel";
+import PlaceAssemblyPanel, { type Assembly } from "./PlaceAssemblyPanel";
+import { expandAssemblyPlacement } from "@/lib/takeoff/canvas/assemblies";
+import { saveStatusLine } from "@/lib/takeoff/canvas/save-status";
+import { compareRevisionQuantities, type RevisionDeltaRow } from "@/lib/takeoff/canvas/revision-delta";
 import ToolChestPanel, { type ChestTool } from "./ToolChestPanel";
 import {
   DEFAULT_SNAP_THRESHOLD_PX,
@@ -76,6 +79,8 @@ interface Shape {
   label?: string;
   layer_id?: string | null;
   assembly_key?: string | null;
+  assembly_factor?: number;
+  assembly_quantity?: number;
   saved?: boolean;            // has been persisted to manual_takeoffs
 }
 
@@ -243,6 +248,16 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [pinKind, setPinKind] = useState<"punch" | "rfi">("punch");
   const [pinPoint, setPinPoint] = useState<Pt | null>(null);
   const [armedTool, setArmedTool] = useState<ChestTool | null>(null);
+  const [armedAssembly, setArmedAssembly] = useState<Assembly | null>(null);
+  const [saveConflict, setSaveConflict] = useState(false);
+  const [scaleUnconfirmed, setScaleUnconfirmed] = useState(false);
+  const [outboxFailed, setOutboxFailed] = useState(0);
+  const [outboxCompleted, setOutboxCompleted] = useState(0);
+  const [priorPageId, setPriorPageId] = useState<string | null>(null);
+  const [revisionDelta, setRevisionDelta] = useState<RevisionDeltaRow[]>([]);
+  const shapesRef = useRef<Shape[]>([]);
+  const propSaveTimers = useRef<Map<string, number>>(new Map());
+  shapesRef.current = shapes;
   const [scaleRegions, setScaleRegions] = useState<Array<{
     id: string;
     polygon: Pt[];
@@ -611,8 +626,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           { cache: "no-store" },
         );
         if (!res.ok) return;
-        const data = await res.json() as { url?: string | null; revision_token?: string | null; file_name?: string | null };
-        if (cancelled || !data.url) return;
+        const data = await res.json() as { url?: string | null; page_id?: string | null; revision_token?: string | null; file_name?: string | null };
+        if (cancelled) return;
+        setPriorPageId(data.page_id ?? null);
+        if (!data.url) return;
         setPriorUrl(data.url);
         setPriorLabel(data.revision_token ? `Rev ${data.revision_token}` : (data.file_name ?? "Prior"));
       } catch {
@@ -621,6 +638,36 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     })();
     return () => { cancelled = true; };
   }, [documentId, pageNumber]);
+
+  useEffect(() => {
+    const dirty = [...shapes, ...utilityRuns, ...topoNodes, ...areaBounds, ...wallRuns].some((item) => item.saved !== true);
+    if (!dirty) return;
+    const onLeave = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onLeave);
+    return () => window.removeEventListener("beforeunload", onLeave);
+  }, [shapes, utilityRuns, topoNodes, areaBounds, wallRuns]);
+
+  useEffect(() => {
+    if (!showPrior || !priorPageId) {
+      setRevisionDelta([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const load = async (id: string) => {
+        const res = await fetch(`/api/takeoff/canvas/manual?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(id)}`, { cache: "no-store" });
+        if (!res.ok) return [];
+        const data = await res.json() as { items?: Array<{ cost_code: string | null; unit: string | null; quantity: number | null }> };
+        return data.items ?? [];
+      };
+      const [current, prior] = await Promise.all([load(pageId), load(priorPageId)]);
+      if (!cancelled) setRevisionDelta(compareRevisionQuantities(prior, current));
+    })();
+    return () => { cancelled = true; };
+  }, [showPrior, priorPageId, pageId, projectId, shapes]);
 
   useEffect(() => {
     if (!showPrior || !priorUrl || renderScale <= 0) return;
@@ -792,6 +839,47 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
       : shape.unit;
     return { ...shape, cost_code: armedTool.cost_code, unit, label: shape.label ?? armedTool.name };
   }
+
+  function shapesForAssembly(assembly: Assembly, base: Shape): Shape[] {
+    const rows = expandAssemblyPlacement({
+      assemblyId: assembly.id,
+      assemblyName: assembly.name,
+      baseQuantity: base.quantity,
+      components: assembly.components.map((component) => ({
+        cost_code: component.cost_code,
+        quantity_factor: component.quantity_factor,
+        unit: component.unit,
+        label: component.label,
+      })),
+    });
+    return rows.map((row, index) => {
+      const tool = row.unit === "LF" ? "length" : row.unit === "SF" ? "area" : "count";
+      const factor = base.quantity > 0 ? row.quantity / base.quantity : 1;
+      return {
+        key: `${base.key}-${index}`,
+        tool: tool === "length" && base.tool === "perimeter" ? "perimeter" : tool,
+        points: base.points,
+        coordinateSpace: base.coordinateSpace,
+        quantity: row.quantity,
+        unit: row.unit,
+        cost_code: row.cost_code,
+        label: row.label,
+        layer_id: base.layer_id,
+        assembly_key: row.meta.assembly_group,
+        assembly_factor: factor,
+        assembly_quantity: row.unit === "EA" ? row.quantity : undefined,
+      };
+    });
+  }
+
+  function commitDrawn(shape: Shape) {
+    if (armedAssembly) {
+      setShapes((prev) => [...prev, ...shapesForAssembly(armedAssembly, shape)]);
+      setArmedAssembly(null);
+      return;
+    }
+    setShapes((prev) => [...prev, withArmed(shape)]);
+  }
   const pixelDistance = (a: Pt, b: Pt) => Math.hypot(b.x - a.x, b.y - a.y);
   const totalLen = (pts: Pt[]) => {
     let s = 0;
@@ -887,7 +975,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
 
     if (tool === "count") {
-      const shape: Shape = withArmed({
+      const base: Shape = {
         // eslint-disable-next-line react-hooks/purity
         key: `c-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         tool: "count",
@@ -899,8 +987,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         quantity: 1,
         unit: "EA",
         layer_id: activeLayerId,
-      });
-      setShapes((prev) => [...prev, shape]);
+      };
+      commitDrawn(base);
       return;
     }
 
@@ -1104,7 +1192,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
     if (tool === "length") {
       const quantity = totalLen(draftPoints) * live;
-      setShapes((prev) => [...prev, withArmed({
+      commitDrawn({
         key: `l-${Date.now()}`,
         tool: "length",
         points: draftPoints,
@@ -1112,10 +1200,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         quantity,
         unit: "LF",
         layer_id: activeLayerId,
-      })]);
+      });
     } else if (tool === "perimeter" && draftPoints.length >= 3) {
       const closed = totalLen(draftPoints) + pixelDistance(draftPoints[draftPoints.length - 1], draftPoints[0]);
-      setShapes((prev) => [...prev, withArmed({
+      commitDrawn({
         key: `p-${Date.now()}`,
         tool: "perimeter",
         points: draftPoints,
@@ -1123,10 +1211,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         quantity: closed * live,
         unit: "LF",
         layer_id: activeLayerId,
-      })]);
+      });
     } else if (tool === "area" && draftPoints.length >= 3) {
       const quantity = polygonArea(draftPoints) * live * live;
-      setShapes((prev) => [...prev, withArmed({
+      commitDrawn({
         key: `a-${Date.now()}`,
         tool: "area",
         points: draftPoints,
@@ -1134,10 +1222,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         quantity,
         unit: "SF",
         layer_id: activeLayerId,
-      })]);
+      });
     }
     setDraftPoints([]);
-  }, [draftPoints, tool, scaleForPoints, wallMode, activeLayerId, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft, renderScale, projectId, pageId, regionLabel, armedTool]);
+  }, [draftPoints, tool, scaleForPoints, wallMode, activeLayerId, finishUtilityDraft, finishContourDraft, finishAreaBoundsDraft, renderScale, projectId, pageId, regionLabel, armedTool, armedAssembly]);
 
   const clearDrafts = useCallback(() => {
     setDraftPoints([]);
@@ -1151,6 +1239,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const selectTool = useCallback((next: Tool) => {
     toolBeforeSpacePan.current = null;
     setArmedTool(null);
+    setArmedAssembly(null);
     setPendingRegionId(null);
     setTool(next);
     clearDrafts();
@@ -1159,6 +1248,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const armChestTool = useCallback((chest: ChestTool) => {
     toolBeforeSpacePan.current = null;
     setArmedTool(chest);
+    setArmedAssembly(null);
     setTool(chest.tool);
     clearDrafts();
   }, [clearDrafts]);
@@ -1749,6 +1839,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               page_number: pageNumber,
               label: s.label,
               assembly_key: s.assembly_key,
+              ...(s.assembly_factor != null ? { assembly_factor: s.assembly_factor } : {}),
+              ...(s.assembly_quantity != null ? { assembly_quantity: s.assembly_quantity } : {}),
               ...(s.tool === "perimeter" ? { measure: "perimeter" } : {}),
               ...(choice?.regionId ? { scale_region_id: choice.regionId } : {}),
             },
@@ -1848,8 +1940,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         // a still-'legacy_pixel' tag and divide by renderScale a second time.
         let byClientKey = new Map<string, { id: string; row_version: number }>();
         if (manualSaveRequest) {
-          const manualData = await (await manualSaveRequest).json().catch(() => ({})) as { items?: Array<{ id: string; client_key: string; row_version: number }> };
+          const manualData = await (await manualSaveRequest).json().catch(() => ({})) as {
+            items?: Array<{ id: string; client_key: string; row_version: number; calibration_warning: string | null }>;
+            outbox_processed?: { failed?: number; completed?: number } | null;
+          };
           byClientKey = new Map((manualData.items ?? []).map((it) => [it.client_key, { id: it.id, row_version: it.row_version }]));
+          setScaleUnconfirmed((manualData.items ?? []).some((item) => Boolean(item.calibration_warning)));
+          setOutboxFailed(manualData.outbox_processed?.failed ?? 0);
+          setOutboxCompleted(manualData.outbox_processed?.completed ?? 0);
+          setSaveConflict(false);
         }
         setShapes((prev) => prev.map((s) => (s.saved
           ? s
@@ -1862,6 +1961,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         const failed = results.find((r) => !r.ok);
         const err = failed ? await failed.json().catch(() => ({})) as { error?: string; code?: string } : {};
         if (err.code === "calibration_required") selectTool("calibrate");
+        if (failed?.status === 409) setSaveConflict(true);
         alert(`Save failed: ${err.error ?? failed?.status}`);
       }
     } finally {
@@ -1873,7 +1973,63 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     setShapes((prev) => prev.map((s) => (s.key === key ? { ...s, cost_code: code, saved: false } : s)));
   }
   function updateShapeProps(key: string, patch: Partial<Pick<Shape, "label" | "layer_id" | "cost_code" | "assembly_key">>) {
+    const current = shapesRef.current.find((shape) => shape.key === key);
+    const next = current ? { ...current, ...patch } : null;
+    if (next?.id && typeof next.row_version === "number") {
+      setShapes((prev) => prev.map((s) => (s.key === key ? { ...s, ...patch, saved: false } : s)));
+      const existing = propSaveTimers.current.get(key);
+      if (existing) window.clearTimeout(existing);
+      const timer = window.setTimeout(() => { void patchSavedShape({ ...next, ...patch }); }, 400);
+      propSaveTimers.current.set(key, timer);
+      return;
+    }
     setShapes((prev) => prev.map((s) => (s.key === key ? { ...s, ...patch, saved: false } : s)));
+  }
+
+  async function patchSavedShape(shape: Shape) {
+    if (!shape.id || typeof shape.row_version !== "number") return;
+    const points = shape.coordinateSpace === "page_space" ? shape.points : pointsToPageSpace(shape.points, renderScale);
+    const res = await fetch("/api/takeoff/canvas/manual", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: shape.id,
+        row_version: shape.row_version,
+        quantity: shape.quantity,
+        unit: shape.unit,
+        cost_code: shape.cost_code || null,
+        layer_id: shape.layer_id ?? null,
+        geometry: {
+          points,
+          coordinate_space: "page_space",
+          page_number: pageNumber,
+          label: shape.label,
+          assembly_key: shape.assembly_key,
+          ...(shape.assembly_factor != null ? { assembly_factor: shape.assembly_factor } : {}),
+          ...(shape.assembly_quantity != null ? { assembly_quantity: shape.assembly_quantity } : {}),
+          ...(shape.tool === "perimeter" ? { measure: "perimeter" } : {}),
+        },
+      }),
+    });
+    const data = await res.json().catch(() => ({})) as {
+      conflict?: boolean;
+      manual_takeoff?: { row_version?: number };
+      calibration_warning?: string | null;
+      outbox_processed?: { failed?: number; completed?: number } | null;
+      error?: string;
+    };
+    if (!res.ok) {
+      if (res.status === 409 || data.conflict) setSaveConflict(true);
+      return;
+    }
+    setSaveConflict(false);
+    setScaleUnconfirmed(Boolean(data.calibration_warning));
+    setOutboxFailed(data.outbox_processed?.failed ?? 0);
+    setOutboxCompleted(data.outbox_processed?.completed ?? 0);
+    const version = data.manual_takeoff?.row_version;
+    setShapes((prev) => prev.map((s) => (s.key === shape.key
+      ? { ...s, saved: true, coordinateSpace: "page_space", points, ...(typeof version === "number" ? { row_version: version } : {}) }
+      : s)));
   }
   function removeShape(key: string) {
     void deleteShapesByKeys(new Set([key]));
@@ -2682,6 +2838,11 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             onArm={armChestTool}
           />
           <PlaceAssemblyPanel
+            armedId={armedAssembly?.id ?? null}
+            onArm={(assembly) => {
+              setArmedAssembly(assembly);
+              if (assembly) setArmedTool(null);
+            }}
             onPlace={(rows) => {
               setShapes((prev) => [
                 ...prev,
@@ -3141,7 +3302,29 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           </div>
         )}
 
+        {showPrior && revisionDelta.length > 0 && (
+          <div className="border-t border-white/10 px-3 py-2 space-y-1 max-h-40 overflow-y-auto">
+            <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Revision quantities</div>
+            {revisionDelta.map((row) => (
+              <div key={`${row.cost_code}-${row.unit}`} className="flex justify-between gap-2 text-[10px] font-mono text-white/70">
+                <span>{row.cost_code} {row.unit}</span>
+                <span>{row.delta > 0 ? "+" : ""}{row.delta.toFixed(2)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div className="border-t border-white/10 p-3">
+          <p className="mb-2 text-center text-[10px] uppercase tracking-widest font-mono text-white/50">
+            {saveStatusLine({
+              unsaved: [...shapes, ...utilityRuns, ...topoNodes, ...areaBounds, ...wallRuns].filter((item) => item.saved !== true).length,
+              saving,
+              conflict: saveConflict,
+              scaleUnconfirmed,
+              outboxFailed,
+              outboxCompleted,
+            })}
+          </p>
           <button
             type="button"
             onClick={saveAllUnsaved}

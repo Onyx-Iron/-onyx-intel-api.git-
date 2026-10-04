@@ -62,7 +62,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     .eq("document_id", prior.id)
     .eq("page_number", pageNumber)
     .maybeSingle();
-  if (!page?.storage_path) return NextResponse.json({ url: null, document_id: prior.id });
+  if (!page?.storage_path) {
+    return NextResponse.json({ url: null, document_id: prior.id, page_id: page?.id ?? null });
+  }
 
   const { data: signed, error: signErr } = await db.storage
     .from(PLANS_BUCKET)

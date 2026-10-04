@@ -1,6 +1,6 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
-import { buildRfiPayload } from "@/lib/project-controls/schema";
+import { buildRfiPayload, controlWriteStatus, rfiRawWithSubject } from "@/lib/project-controls/schema";
 import {
   assertProjectBelongsToTenant,
   authTenantKey,
@@ -63,7 +63,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const denied = await requirePermission(tenantId, userId, "field", "write");
     if (denied) return denied;
     await assertProjectBelongsToTenant(projectId, tenantId);
-    const payload = buildRfiPayload(body, { tenantId, projectId });
+    const payload = buildRfiPayload(rfiRawWithSubject(body), { tenantId, projectId });
     const db = await getControlDb();
 
     const { data, error } = await db
@@ -72,7 +72,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .select()
       .single();
 
-    if (error) return NextResponse.json({ ...UNAVAILABLE }, { status: 503 });
+    if (error) {
+      const status = controlWriteStatus(error);
+      if (status === 503) return NextResponse.json({ ...UNAVAILABLE }, { status: 503 });
+      return NextResponse.json({ error: error.message }, { status: 422 });
+    }
 
     auditInsert({
       tenant_id: tenantId,
@@ -90,7 +94,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       entityId: (data as any).id,
       action: "created",
-      title: `RFI created: ${parsed.data.title}`,
+      title: `RFI created: ${payload.subject}`,
     });
 
     return NextResponse.json({ item: data }, { status: 201 });
