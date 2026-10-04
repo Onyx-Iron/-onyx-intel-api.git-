@@ -186,7 +186,7 @@ export function payAppInvoiceTotals(lines: PayAppDrawLine[], retainagePct: numbe
   return { amount: roundMoney(amount), retainage: roundMoney(retainage) };
 }
 
-/** True once this change order has already moved the revised budget. */
+/** True while this change order's approved amount is on the revised budget. */
 export function budgetAlreadyPosted(meta: unknown): boolean {
   if (!meta || typeof meta !== "object" || Array.isArray(meta)) return false;
   return (meta as { budget_posted?: unknown }).budget_posted === true;
@@ -198,6 +198,27 @@ export function withBudgetPosted(meta: unknown): Record<string, unknown> {
     : {};
   base.budget_posted = true;
   return base;
+}
+
+export function withoutBudgetPosted(meta: unknown): Record<string, unknown> {
+  const base = meta && typeof meta === "object" && !Array.isArray(meta)
+    ? { ...(meta as Record<string, unknown>) }
+    : {};
+  delete base.budget_posted;
+  return base;
+}
+
+/**
+ * A non-zero delta is this transition's movement: the first approval, a
+ * re-approval after the amount was taken back off, or an edit while the
+ * order stays approved. `budget_posted` only records that the current
+ * approved amount is on the budget. It must not drop a later positive
+ * movement — the flag stays set across a reversal until it is cleared.
+ */
+export function skipBudgetDelta(net: number, alreadyPosted: boolean): boolean {
+  if (net > 0 && alreadyPosted) return false;
+  if (net < 0) return false;
+  return net === 0;
 }
 
 export interface WaiverCoverInput {

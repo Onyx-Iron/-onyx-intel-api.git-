@@ -9,8 +9,10 @@ import {
   computePayLine,
   eventPostsBudget,
   payAppInvoiceTotals,
+  skipBudgetDelta,
   waiverCoversDraw,
   withBudgetPosted,
+  withoutBudgetPosted,
 } from "./money.ts";
 import {
   approvedRfiWritesTo,
@@ -177,6 +179,15 @@ describe("project cost math", () => {
     assert.equal(budgetAlreadyPosted({}), false);
     assert.equal(budgetAlreadyPosted({ budget_posted: true }), true);
     assert.deepEqual(withBudgetPosted({ source: "event" }), { source: "event", budget_posted: true });
+  });
+
+  it("keeps a re-approval and an approved amount increase on the revised budget", () => {
+    assert.equal(skipBudgetDelta(10000, true), false);
+    assert.equal(skipBudgetDelta(-10000, true), false);
+    assert.equal(skipBudgetDelta(2000, true), false);
+    assert.equal(skipBudgetDelta(0, true), true);
+    assert.deepEqual(withoutBudgetPosted({ source: "event", budget_posted: true }), { source: "event" });
+    assert.equal(budgetAlreadyPosted(withoutBudgetPosted({ budget_posted: true })), false);
   });
 
   it("holds a pay app until received lien waivers cover the draw", () => {

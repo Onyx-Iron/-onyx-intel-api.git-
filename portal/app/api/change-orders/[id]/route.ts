@@ -12,7 +12,9 @@ import { auditUpdate, auditDelete } from "@/lib/audit";
 import {
   budgetAlreadyPosted,
   changeOrderBudgetDelta,
+  skipBudgetDelta,
   withBudgetPosted,
+  withoutBudgetPosted,
   type ChangeOrderBudgetWeight,
 } from "@/lib/project-file/money";
 import { addApprovedChange } from "@/lib/project-file/budget-store";
@@ -136,7 +138,7 @@ export async function DELETE(_req: NextRequest, ctx: RouteContext): Promise<Next
         status: "void",
         amount: previous.amount ?? null,
         meta: previous.meta,
-      });
+      }, { persistFlag: false });
     }
 
     auditDelete({
@@ -167,6 +169,7 @@ async function syncChangeOrderBudget(
   changeOrderId: string,
   previous: { status?: string; amount?: number | null; meta?: unknown },
   next: { status?: string; amount?: number | null; meta?: unknown },
+  options: { persistFlag?: boolean } = {},
 ): Promise<void> {
   if (!projectId) return;
   const { data: links, error: linkError } = await db
@@ -211,17 +214,18 @@ async function syncChangeOrderBudget(
   if (allocations.length === 0) return;
 
   const net = allocations.reduce((sum, row) => sum + row.amount, 0);
-  // First-post guard from #115: do not add again when already posted.
-  if (net > 0 && budgetAlreadyPosted(previous.meta)) return;
+  if (skipBudgetDelta(net, budgetAlreadyPosted(previous.meta))) return;
 
   await addApprovedChange(db, tenantId, projectId, allocations);
 
-  if (net > 0) {
-    const { error: flagError } = await db
-      .from("change_order_items")
-      .update({ meta: withBudgetPosted(previous.meta) })
-      .eq("id", changeOrderId)
-      .eq("tenant_id", tenantId);
-    if (flagError) throw new Error(flagError.message);
-  }
+  if (options.persistFlag === false) return;
+  const stillApproved = (next.status ?? "") === "approved";
+  const { error: flagError } = await db
+    .from("change_order_items")
+    .update({
+      meta: stillApproved ? withBudgetPosted(previous.meta) : withoutBudgetPosted(previous.meta),
+    })
+    .eq("id", changeOrderId)
+    .eq("tenant_id", tenantId);
+  if (flagError) throw new Error(flagError.message);
 }
