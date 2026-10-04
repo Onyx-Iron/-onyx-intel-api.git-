@@ -5,6 +5,7 @@ import { assertPermission, PermissionError } from "@/lib/project-controls/permis
 import { getServiceDb, loadVersionForTenant, NotFoundError } from "@/lib/estimating/versioning";
 import { calculateEstimateTotals } from "@/lib/estimating/calculations";
 import { recordEstimateAudit } from "@/lib/estimating/audit";
+import { fetchAllPages } from "@/lib/supabase/fetch-all";
 
 export const runtime = "nodejs";
 
@@ -72,14 +73,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     }, { status: 409 });
   }
 
-  const { data: items, error } = await db
-    .from("estimate_items")
-    .select("cost_code, scope_category, description, quantity, total_direct_cost, indirect_cost, contingency, overhead, profit, total_price, is_alternate, alternate_accepted, is_allowance")
-    .eq("estimate_version_id", id);
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  const loaded = await fetchAllPages<SovItem>((from, to) =>
+    db
+      .from("estimate_items")
+      .select("cost_code, scope_category, description, quantity, total_direct_cost, indirect_cost, contingency, overhead, profit, total_price, is_alternate, alternate_accepted, is_allowance")
+      .eq("estimate_version_id", id)
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+  if (loaded.error) return NextResponse.json({ error: loaded.error }, { status: 500 });
+  const items = loaded.rows;
 
   const totals = calculateEstimateTotals(
-    (items ?? []).map((it: SovItem) => ({
+    items.map((it: SovItem) => ({
       totalDirectCost: it.total_direct_cost, indirectCost: it.indirect_cost, contingency: it.contingency,
       overhead: it.overhead, profit: it.profit, totalPrice: it.total_price,
       isAlternate: it.is_alternate, alternateAccepted: it.alternate_accepted,
@@ -89,7 +95,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   // Alternates stay excluded from SOV grouping unless accepted — same rule
   // calculateEstimateTotals already applies to the total, applied here to
   // the row grouping too so the visible line items match the total.
-  const included = (items ?? []).filter((it: SovItem) => !it.is_alternate || it.alternate_accepted);
+  const included = items.filter((it: SovItem) => !it.is_alternate || it.alternate_accepted);
   const groupKeyOf = (it: SovItem): string => {
     if (groupBy === "cost_code") return it.cost_code ?? "Uncategorized";
     if (groupBy === "scope_category") return it.scope_category ?? "Uncategorized";

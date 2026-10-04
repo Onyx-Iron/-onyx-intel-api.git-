@@ -1,5 +1,6 @@
 import { createServiceClient } from "@/lib/supabase/server";
-import { buildEstimateImportRows, scaledDirectCosts, type CostCatalogForImport, type EstimateImportRow, type ExistingEstimateForImport } from "@/lib/estimating/takeoff-import";
+import { fetchAllPages } from "@/lib/supabase/fetch-all";
+import { buildEstimateImportRows, scaledDirectCosts, type CostCatalogForImport, type EstimateImportRow, type ExistingEstimateForImport, type TakeoffItemForEstimate } from "@/lib/estimating/takeoff-import";
 import { regionFromProject, resolveCostsBatch } from "@/lib/cost/resolver";
 import { applyVersionPercentages, calculateItem } from "@/lib/estimating/calculations";
 import { getOrCreateDraftVersion } from "@/lib/estimating/versioning";
@@ -46,21 +47,29 @@ export async function syncTakeoffToEstimate(
   // them anyway, but pulling every suggested/reviewed/rejected AI row on
   // large projects is wasted IO and cost-resolution work.
   const [takeoff, versionIds, catalog, project, versionRow, pendingReviewCount] = await Promise.all([
-    anyDb
-      .from("takeoff_items")
-      .select("id,label,csi_code,division,quantity,unit,type,meta,review_status,source_method")
-      .eq("tenant_id", tenantId)
-      .eq("project_id", projectId)
-      .or("review_status.is.null,review_status.eq.approved")
-      .order("created_at", { ascending: true }),
+    fetchAllPages<TakeoffItemForEstimate>((from, to) =>
+      anyDb
+        .from("takeoff_items")
+        .select("id,label,csi_code,division,quantity,unit,type,meta,review_status,source_method")
+        .eq("tenant_id", tenantId)
+        .eq("project_id", projectId)
+        .or("review_status.is.null,review_status.eq.approved")
+        .order("created_at", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to),
+    ),
     anyDb
       .from("estimate_versions")
       .select("id")
       .eq("estimate_id", estimateId),
-    anyDb
-      .from("cost_catalog")
-      .select("csi_code,uom,unit_cost")
-      .eq("tenant_id", tenantId),
+    fetchAllPages<CostCatalogForImport>((from, to) =>
+      anyDb
+        .from("cost_catalog")
+        .select("csi_code,uom,unit_cost")
+        .eq("tenant_id", tenantId)
+        .order("id", { ascending: true })
+        .range(from, to),
+    ),
     anyDb
       .from("projects")
       .select("state, city, zip_code")
@@ -89,19 +98,28 @@ export async function syncTakeoffToEstimate(
   // (not just the current draft) — a draft created by copying an approved
   // version already contains that version's items, so this naturally skips
   // re-importing anything already present via the copy. STEP 4: "running
-  // import twice must not duplicate estimate items."
-  const { data: existing, error: existingErr } = await anyDb
-    .from("estimate_items")
-    .select("id, estimate_version_id, source_takeoff_id, source_fingerprint, notes, quantity, unit_cost, labor_cost, material_cost, equipment_cost")
-    .in("estimate_version_id", (versionIds.data ?? []).map((v: { id: string }) => v.id));
-  if (existingErr) {
-    console.error("[syncTakeoffToEstimate]", existingErr);
+  // import twice must not duplicate estimate items." The read is paged:
+  // a single response is capped at 1000 rows, and the rows past that cap
+  // would be inserted again.
+  const versionIdList = (versionIds.data ?? []).map((v: { id: string }) => v.id);
+  const existing = versionIdList.length === 0
+    ? { rows: [] as ExistingEstimateForImport[], error: null }
+    : await fetchAllPages<ExistingEstimateForImport>((from, to) =>
+      anyDb
+        .from("estimate_items")
+        .select("id, estimate_version_id, source_takeoff_id, source_fingerprint, notes, quantity, unit_cost, labor_cost, material_cost, equipment_cost")
+        .in("estimate_version_id", versionIdList)
+        .order("id", { ascending: true })
+        .range(from, to),
+    );
+  if (existing.error) {
+    console.error("[syncTakeoffToEstimate]", existing.error);
     return emptySync(estimateId, versionId);
   }
 
   const distinctCodes = [...new Set(
-    (takeoff.data ?? [])
-      .map((t: { csi_code?: string | null }) => t.csi_code)
+    takeoff.rows
+      .map((t) => t.csi_code)
       .filter((c: string | null | undefined): c is string => Boolean(c)),
   )] as string[];
   const region = regionFromProject(project.data);
@@ -136,12 +154,12 @@ export async function syncTakeoffToEstimate(
           ? "location_index" as const
           : "section" as const,
     })),
-    ...(catalog.data ?? []),
+    ...catalog.rows,
   ];
 
   const result = buildEstimateImportRows({
-    takeoffItems: takeoff.data ?? [],
-    existingEstimateItems: existing ?? [],
+    takeoffItems: takeoff.rows,
+    existingEstimateItems: existing.rows,
     costCatalog: mergedCatalog,
     projectId,
     targetVersionId: versionId,
@@ -191,12 +209,12 @@ export async function syncTakeoffToEstimate(
 
   let imported = 0;
   if (payload.length > 0) {
-    const { data, error } = await anyDb.from("estimate_items").insert(payload).select("id");
+    const { error } = await anyDb.from("estimate_items").insert(payload);
     if (error) {
       console.error("[syncTakeoffToEstimate] insert failed", error);
       return { imported: 0, updated, skipped: result.skipped, priced: 0, unpriced: 0, review: 0, pendingReview, estimateId, versionId };
     }
-    imported = data?.length ?? 0;
+    imported = payload.length;
   }
 
   return { imported, updated, skipped: result.skipped, priced, unpriced, review, pendingReview, estimateId, versionId };
