@@ -1,4 +1,5 @@
 import React from "react";
+import logoSrc from "./oi-logo.png";
 
 interface BrandMarkProps {
   size?: "sm" | "md" | "lg";
@@ -7,16 +8,27 @@ interface BrandMarkProps {
   className?: string;
 }
 
-export function OILogo({ className = "h-12 w-auto" }: { className?: string }) {
+const src = typeof logoSrc === "string" ? logoSrc : logoSrc.src;
+
+export function OILogo({
+  className = "h-12 w-auto",
+  alt = "",
+}: {
+  className?: string;
+  alt?: string;
+}) {
   return (
-    <svg viewBox="0 0 140 90" fill="none" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden>
-      <text x="62" y="14" fontFamily="Georgia, serif" fontSize="14" fontWeight="900" fill="white">&amp;</text>
-      <circle cx="22" cy="56" r="20" stroke="white" strokeWidth="9" fill="none" />
-      <rect x="104" y="36" width="11" height="40" fill="white" />
-      <rect x="95"  y="36" width="29" height="6"  fill="white" />
-      <rect x="95"  y="70" width="29" height="6"  fill="white" />
-      <path d="M 76 16 L 56 54 L 70 54 L 60 88 L 92 48 L 76 48 L 92 16 Z" fill="#CCFF00" />
-    </svg>
+    // Brand raster — height is set by className (h-7 / h-12), width follows.
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={src}
+      alt={alt}
+      width={546}
+      height={415}
+      className={className}
+      draggable={false}
+      aria-hidden={alt === "" ? true : undefined}
+    />
   );
 }
 

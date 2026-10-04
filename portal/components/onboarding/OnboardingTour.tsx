@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { useOptionalProjectContext } from "@/components/project/ProjectContext";
+import { OILogo } from "@/components/brand/BrandMark";
 import {
   FIRST_RUN_EVENT,
   firstRunHref,
@@ -121,13 +122,8 @@ export default function OnboardingTour() {
       >
         <div className="absolute inset-0 bg-black/75 backdrop-blur-sm" onClick={dismissWelcome} />
         <div className="relative z-10 mx-4 w-full max-w-md overflow-hidden rounded-2xl border border-white/10 bg-[#0E0F12] p-6 shadow-2xl">
-          <div className="mb-4 flex items-center gap-2">
-            <span
-              aria-hidden
-              className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-[#CCFF00] text-lg font-black text-black"
-            >
-              ⚡
-            </span>
+          <div className="mb-4 flex items-center gap-3">
+            <OILogo className="h-10 w-auto" alt="" />
             <span className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#CCFF00]">
               OnyxIntel
             </span>

@@ -23,6 +23,7 @@ import {
   Users,
   X,
 } from "lucide-react";
+import { OILogo } from "@/components/brand/BrandMark";
 import ActiveProjectPicker from "@/components/project/ActiveProjectPicker";
 import { requestCommandPalette } from "@/components/search/CommandPalette";
 import { useProjectContext } from "@/components/project/ProjectContext";
@@ -160,9 +161,12 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
   return (
     <>
-      <div className="px-4 pt-5 pb-1">
-        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/35">Onyx &amp; Iron</p>
-        <p className="mt-0.5 text-sm font-semibold text-white/80">Onyx Intel</p>
+      <div className="flex items-center gap-2.5 px-4 pt-5 pb-1">
+        <OILogo className="h-9 w-auto shrink-0" alt="Onyx Intel" />
+        <div className="min-w-0">
+          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/35">Onyx &amp; Iron</p>
+          <p className="mt-0.5 text-sm font-semibold text-white/80">Onyx Intel</p>
+        </div>
       </div>
 
       <ActiveProjectPicker onNavigate={onNavigate} />
