@@ -122,9 +122,19 @@ describe("quantityForMeasurement", () => {
 
   it("folds thickness, width, depth, and slope into the stored quantity", () => {
     assert.equal(quantityForMeasurement("area", square, 1, { thickness: 0.5 }), 50);
+    assert.equal(quantityForMeasurement("area", square, 1, { depth: 0.5 }), 50);
+    assert.equal(quantityForMeasurement("area", square, 1, { thickness: 0 }), 100);
     assert.equal(quantityForMeasurement("length", [{ x: 0, y: 0 }, { x: 10, y: 0 }], 1, { width: 2, depth: 3 }), 60);
     const sloped = quantityForMeasurement("length", [{ x: 0, y: 0 }, { x: 100, y: 0 }], 1, { slope_pct: 75 });
     assert.ok(sloped != null && Math.abs(sloped - 125) < 1e-9);
+    const aliased = quantityForMeasurement("length", [{ x: 0, y: 0 }, { x: 100, y: 0 }], 1, { slopePct: 75 });
+    assert.ok(aliased != null && Math.abs(aliased - 125) < 1e-9);
+    assert.equal(quantityForMeasurement("length", [{ x: 0, y: 0 }, { x: 100, y: 0 }], 1, { slope_pct: 0 }), 100);
+  });
+
+  it("rejects a self-crossing perimeter and prices a closed perimeter by its edge length", () => {
+    assert.equal(quantityForMeasurement("perimeter", bowtie, 1), null);
+    assert.equal(quantityForMeasurement("length", square, 1, { measure: "perimeter" }), 40);
   });
 
   it("leaves calculated quantity null until the sheet scale is verified", () => {
