@@ -8,6 +8,7 @@ import { requirePermission, ownershipDenied } from "@/lib/project-controls/route
 import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { takeoffItemsSchema, parseBody } from "@/lib/validation";
+import { detachedTakeoffEstimateFields, filterDraftEstimateItemIds } from "@/lib/estimating/delete-reconcile";
 import { recordTakeoffHistory, recordTakeoffHistoryBatch } from "@/lib/takeoff/history";
 import { isVisionMeta, provenanceForNewItem } from "@/lib/takeoff/provenance";
 import type { Json } from "@/lib/supabase/types";
@@ -233,15 +234,59 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
       .eq("id", id).eq("tenant_id", tenantId).eq("project_id", project_id)
       .maybeSingle();
 
-    const query = db.from("takeoff_items").delete().eq("id", id).eq("tenant_id", tenantId).eq("project_id", project_id);
+    // Capture draft lines first. Deleting the takeoff row SET NULLs
+    // source_takeoff_id, which would hide the link, and the price would stay.
+    const { data: linkedItems, error: linkedErr } = await db
+      .from("estimate_items")
+      .select("id, estimate_version_id, notes")
+      .eq("tenant_id", tenantId)
+      .eq("project_id", project_id)
+      .eq("source_takeoff_id", id);
+    if (linkedErr) return NextResponse.json({ error: linkedErr.message }, { status: 422 });
 
-    const { error } = await query;
+    const linked = (linkedItems ?? []).flatMap((row) => (
+      row.estimate_version_id
+        ? [{ id: row.id, estimate_version_id: row.estimate_version_id, notes: row.notes }]
+        : []
+    ));
+    let draftLines = linked;
+    if (linked.length > 0) {
+      const versionIds = [...new Set(linked.map((row) => row.estimate_version_id))];
+      const { data: versions, error: versionErr } = await db
+        .from("estimate_versions")
+        .select("id, status")
+        .in("id", versionIds);
+      if (versionErr) return NextResponse.json({ error: versionErr.message }, { status: 422 });
+      const draftIds = new Set(filterDraftEstimateItemIds(linked, versions ?? []));
+      draftLines = linked.filter((row) => draftIds.has(row.id));
+    }
+
+    const { error } = await db
+      .from("takeoff_items")
+      .delete()
+      .eq("id", id)
+      .eq("tenant_id", tenantId)
+      .eq("project_id", project_id);
     if (error) return NextResponse.json({ error: error.message }, { status: 422 });
 
     await recordTakeoffHistory(anyDb, {
       tenantId, projectId: project_id, takeoffItemId: id, action: "deleted",
       actorUserId: userId, before: before ?? null,
     });
+
+    for (const line of draftLines) {
+      // Approved versions are not in draftLines. A locked reference still
+      // rejects the delete above, so those rows are never updated.
+      const { error: reconcileErr } = await db
+        .from("estimate_items")
+        .update(detachedTakeoffEstimateFields(line.notes))
+        .eq("id", line.id)
+        .eq("tenant_id", tenantId)
+        .eq("project_id", project_id);
+      if (reconcileErr) {
+        return NextResponse.json({ error: reconcileErr.message }, { status: 500 });
+      }
+    }
 
     return NextResponse.json({ ok: true });
   } catch (err: unknown) {
