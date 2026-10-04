@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   documentStatusAfterPageRetry,
+  invokeFailureRollback,
   planPageRetry,
   type RetryablePageRow,
 } from "./retryPage.ts";
@@ -53,6 +54,24 @@ describe("planPageRetry", () => {
   it("rejects missing storage_path", () => {
     const plan = planPageRetry(page({ storage_path: null }));
     assert.ok("error" in plan);
+  });
+});
+
+describe("invokeFailureRollback", () => {
+  it("restores OCR to error without touching takeoff", () => {
+    const rollback = invokeFailureRollback("ocr", "page-processor 502: boom");
+    assert.equal(rollback.pendingColumn, "status");
+    assert.equal(rollback.patch.status, "error");
+    assert.equal(rollback.patch.error, "page-processor 502: boom");
+    assert.equal(rollback.patch.takeoff_status, undefined);
+  });
+
+  it("restores takeoff to error so a failed invoke stays retryable", () => {
+    const rollback = invokeFailureRollback("takeoff", "x".repeat(600));
+    assert.equal(rollback.pendingColumn, "takeoff_status");
+    assert.equal(rollback.patch.takeoff_status, "error");
+    assert.equal(rollback.patch.takeoff_error?.length, 500);
+    assert.equal(rollback.patch.status, undefined);
   });
 });
 
