@@ -46,6 +46,7 @@ describe("estimate sync contract", () => {
     );
     const source = readFileSync(workerPath, "utf8");
     assert.match(source, /enqueue_project_estimate_sync/);
+    assert.match(source, /planPageTakeoffWrite/);
     assert.doesNotMatch(source, /from\("estimate_items"\)/);
     assert.doesNotMatch(source, /allocateDirectCosts/);
     assert.doesNotMatch(source, /function fingerprint\(/);

@@ -3,13 +3,26 @@
  * Keeps mutation handlers from re-copying the same try/catch boilerplate.
  */
 
+import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import {
   assertPermission,
   PermissionError,
   type Action,
   type ResourceCategory,
+  type RoleLookup,
 } from "@/lib/project-controls/permissions";
+
+/** Clerk org role for this request, used to recognize the workspace owner. */
+export async function roleLookupFor(userId: string): Promise<RoleLookup> {
+  try {
+    const session = await auth();
+    if (session.userId !== userId) return {};
+    return { orgId: session.orgId, orgRole: session.orgRole };
+  } catch {
+    return {};
+  }
+}
 
 /** Returns a 403 NextResponse when the role cannot perform the action; null when allowed. */
 export async function requirePermission(
@@ -19,7 +32,7 @@ export async function requirePermission(
   action: Action = "write",
 ): Promise<NextResponse | null> {
   try {
-    await assertPermission(tenantId, userId, resource, action);
+    await assertPermission(tenantId, userId, resource, action, await roleLookupFor(userId));
     return null;
   } catch (e) {
     if (e instanceof PermissionError) {
