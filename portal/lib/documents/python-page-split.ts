@@ -108,7 +108,9 @@ export async function splitOversizedPdfOnPython(args: PythonSplitArgs): Promise<
     last_error_step: null,
   }).eq("id", args.documentId).eq("tenant_id", args.tenantId);
 
-  await db.rpc("refresh_document_processing_summary", { p_document_id: args.documentId });
+  // The generated client does not list this maintenance function.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (db as any).rpc("refresh_document_processing_summary", { p_document_id: args.documentId });
   await fanOutPageWorkers(pageRows, args);
 }
 
