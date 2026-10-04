@@ -112,8 +112,9 @@ if (!ENV.ready) {
     });
 
     it("does not move the revised budget for a draft change", async () => {
-      assert.equal(approvedChangeDelta("draft", "approved", 500), 0);
+      assert.equal(approvedChangeDelta("draft", "pending", 500), 0);
       assert.equal(approvedChangeDelta("pending", "draft", 500), 0);
+      assert.equal(approvedChangeDelta("approved", "void", 500), -500);
       const { data: estimate, error: estimateError } = await db.from("estimates").insert({
         tenant_id: tenantA,
         project_id: projectA,
