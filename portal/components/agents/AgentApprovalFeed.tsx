@@ -2,6 +2,8 @@
 
 import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
+import { Bot } from "lucide-react";
+import EmptyState from "@/components/common/EmptyState";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -120,11 +122,14 @@ export default function AgentApprovalFeed({ initialItems, projectNames }: Props)
       {/* Feed */}
       <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 lg:px-10 space-y-3">
         {filtered.length === 0 && (
-          <div className="rounded-xl border border-white/10 bg-white/[0.02] p-8 text-center">
-            <p className="text-sm text-white/60">No agent findings waiting for review.</p>
-            <p className="mt-2 text-xs text-white/40">
-              As pages get parsed, background agents post findings here.
-            </p>
+          <div className="rounded-xl border border-white/8 bg-[#0E0F12]">
+            <EmptyState
+              icon={<Bot className="h-6 w-6" />}
+              title="No approvals waiting"
+              description="AI Workforce reviews takeoff and estimate findings inside a project. Start from Documents or Takeoff."
+              actionLabel="Choose or create a project"
+              actionHref="/dashboard/projects?new=1"
+            />
           </div>
         )}
 

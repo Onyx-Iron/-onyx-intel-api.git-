@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import ActiveProjectPicker from "@/components/project/ActiveProjectPicker";
 import { requestCommandPalette } from "@/components/search/CommandPalette";
+import { useProjectContext } from "@/components/project/ProjectContext";
 
 interface NavItem {
   href: string;
@@ -140,9 +141,17 @@ function CollapsibleNav({
 
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
+  const { projects, loading } = useProjectContext();
+  const firstRun = !loading && projects.length === 0;
+  const primaryNav = firstRun
+    ? PRIMARY_NAV.filter((item) => item.href === "/dashboard" || item.href === "/dashboard/projects")
+    : PRIMARY_NAV;
+  const moreTools = firstRun
+    ? [...PRIMARY_NAV.filter((item) => item.href !== "/dashboard" && item.href !== "/dashboard/projects"), ...MORE_TOOLS]
+    : MORE_TOOLS;
   const moreActive = useMemo(
-    () => MORE_TOOLS.some((item) => pathMatches(pathname, item)),
-    [pathname],
+    () => moreTools.some((item) => pathMatches(pathname, item)),
+    [pathname, moreTools],
   );
   const settingsActive = useMemo(
     () => SETTINGS_NAV.some((item) => pathMatches(pathname, item)),
@@ -174,14 +183,14 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       <nav className="flex-1 overflow-y-auto px-3 pb-4">
         <div className="space-y-0.5">
           <p className="mb-2 px-3 text-[9px] font-bold uppercase tracking-[0.22em] text-white/25">Main</p>
-          {PRIMARY_NAV.map((item) => (
+          {primaryNav.map((item) => (
             <NavLink key={item.label} item={item} onNavigate={onNavigate} />
           ))}
         </div>
 
         <CollapsibleNav
           title="More tools"
-          items={MORE_TOOLS}
+          items={moreTools}
           forceOpen={moreActive}
           onNavigate={onNavigate}
           small

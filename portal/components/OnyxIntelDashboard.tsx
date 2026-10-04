@@ -246,8 +246,14 @@ function ProjectPipeline({ projects, loading }: { projects: DashProject[]; loadi
               ))
             ) : projects.length === 0 ? (
               <tr>
-                <td className="px-4 py-10 text-center text-sm text-white/30" colSpan={6}>
-                  No matching projects yet.
+                <td className="px-4 py-10 text-center" colSpan={6}>
+                  <p className="text-sm text-white/50">No projects yet.</p>
+                  <Link
+                    href="/dashboard/projects?new=1"
+                    className="mt-3 inline-flex items-center gap-1 text-xs font-bold uppercase tracking-widest text-[#CCFF00]"
+                  >
+                    Create your first project <ChevronRight size={14} />
+                  </Link>
                 </td>
               </tr>
             ) : (
@@ -846,7 +852,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
               <GlobalSearch />
               <GoogleConnect compact />
               <Link
-                href="/dashboard/projects"
+                href="/dashboard/projects?new=1"
                 className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-[#CCFF00] px-4 text-xs font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85"
               >
                 <Plus size={13} /> New
@@ -880,10 +886,10 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
                 </Link>
               ) : (
                 <Link
-                  href="/dashboard/projects"
-                  className="inline-flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.22em] text-white transition-colors hover:text-[#CCFF00]"
+                  href="/dashboard/projects?new=1"
+                  className="inline-flex items-center gap-2 rounded-full bg-[#CCFF00] px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-black transition-opacity hover:opacity-85"
                 >
-                  Choose a project <ChevronRight size={14} />
+                  Create your first project <ChevronRight size={14} />
                 </Link>
               )}
             </div>
@@ -902,7 +908,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
           </div>
         )}
 
-        {/* Editorial KPI band — hairline separators, no cards */}
+        {dataLoading || (data?.kpis.projects ?? 0) > 0 ? (
         <div className="mb-10 border-y border-white/8 py-6">
           {dataLoading ? (
             <div className="h-16 animate-pulse rounded bg-white/5" />
@@ -920,6 +926,20 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
             </div>
           )}
         </div>
+        ) : (
+        <div className="mb-10 rounded-xl border border-[#CCFF00]/20 bg-[#CCFF00]/5 px-5 py-6">
+          <p className="text-sm font-semibold text-white">Start with a project</p>
+          <p className="mt-1 text-xs text-white/55">
+            Upload plans, then takeoff and estimate live in the project workspace.
+          </p>
+          <Link
+            href="/dashboard/projects?new=1"
+            className="mt-4 inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black"
+          >
+            Create your first project
+          </Link>
+        </div>
+        )}
 
         {/* Focused home: AI + projects first; extras stay available but tucked away */}
         <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.85fr)]">
@@ -942,9 +962,15 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
             <Panel title="What needs attention">
               <div className="divide-y divide-white/5">
                 {([
-                  { label: activeProjectId ? "Needs takeoff" : "Projects needing takeoff", value: pendingTakeoffs, tone: "text-[#CCFF00] bg-[#CCFF00]/10", icon: <Layers size={13} />, href: null as string | null },
-                  { label: "Budget alerts",            value: overBudget,      tone: "text-amber-400 bg-amber-400/10", icon: <AlertTriangle size={13} />, href: null },
-                  { label: "Schedule tasks",           value: scopedScheduleTasks, tone: "text-[#00D2FF] bg-[#00D2FF]/10", icon: <Clock size={13} />, href: null },
+                  { label: activeProjectId ? "Needs takeoff" : "Projects needing takeoff", value: pendingTakeoffs, tone: "text-[#CCFF00] bg-[#CCFF00]/10", icon: <Layers size={13} />, href: activeProject
+                    ? `/dashboard/projects/${activeProject.id}?phase=takeoff&tab=takeoff`
+                    : "/dashboard/takeoff" },
+                  { label: "Budget alerts",            value: overBudget,      tone: "text-amber-400 bg-amber-400/10", icon: <AlertTriangle size={13} />, href: activeProject
+                    ? `/dashboard/projects/${activeProject.id}?phase=estimate&tab=estimates`
+                    : "/dashboard/estimating" },
+                  { label: "Schedule tasks",           value: scopedScheduleTasks, tone: "text-[#00D2FF] bg-[#00D2FF]/10", icon: <Clock size={13} />, href: activeProject
+                    ? `/dashboard/projects/${activeProject.id}?phase=schedule&tab=scheduling`
+                    : "/dashboard/project-management" },
                   ...((data?.alerts ?? []).map((a) => ({
                     label: a.label,
                     value: a.value,

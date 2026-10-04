@@ -6,6 +6,7 @@ import { getGoogleToken } from "@/lib/google/clientAuth";
 
 import { useToast } from "@/components/common/Toast";
 import GoogleDrivePicker from "@/components/documents/GoogleDrivePicker";
+import { patchFirstRun } from "@/lib/onboarding/firstRun";
 
 // ── Types matching SecureTakeoffRow output from takeoff_validator.py ──────────
 
@@ -347,6 +348,9 @@ interface SavedItem {
 
 export default function TakeoffTab({ projectId }: { projectId: string }) {
   const { toast } = useToast();
+  useEffect(() => {
+    patchFirstRun({ takeoff_opened: true });
+  }, []);
   const [phase, setPhase]         = useState<Phase>("idle");
   const [rows, setRows]           = useState<TakeoffRow[]>([]);
   const [progress, setProgress]   = useState(0);
@@ -990,8 +994,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
             </Link>
           </div>
           <p className="text-[11px] text-gray-600 mt-1">
-            Upload a PDF schedule, DXF/DWG or IFC model, or XLSX. Quantities are extracted
-            deterministically — exact geometry and table data, CSI-coded, at zero per-document cost.
+            Upload plans or pick a sheet. Quantities are extracted from PDFs, DXF/DWG, IFC, or XLSX.
             Graphical drawing pages can optionally be read by AI vision.
           </p>
         </div>

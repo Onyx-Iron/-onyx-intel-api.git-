@@ -6,6 +6,7 @@ import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
 import { useProjectContext } from "@/components/project/ProjectContext";
+import { chooseOrCreateProjectHref } from "@/lib/navigation/project-sections";
 
 import { useConfirm } from "@/components/common/ConfirmDialog";
 
@@ -211,11 +212,12 @@ export default function ContactsPage() {
                         title="No contacts yet"
                         description={
                           activeProject
-                            ? `No contacts are linked to ${activeProject.name} yet.`
-                            : "Add subs, vendors, and stakeholders across all your projects."
+                            ? `Contacts for ${activeProject.name} start here — add a sub, vendor, or stakeholder.`
+                            : "Contacts live with a project. Choose or create one, then add people."
                         }
-                        actionLabel="Add Contact"
-                        onAction={openAdd}
+                        actionLabel={activeProject ? "Add Contact" : "Choose or create a project"}
+                        onAction={activeProject ? openAdd : undefined}
+                        actionHref={activeProject ? undefined : chooseOrCreateProjectHref(null, "overview", "summary")}
                       />
                     </div>
                   </td>

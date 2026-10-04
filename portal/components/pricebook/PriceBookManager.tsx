@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Plus, Search } from "lucide-react";
+import { Plus, Search, BookOpen } from "lucide-react";
 import PageHero from "@/components/layout/PageHero";
+import EmptyState from "@/components/common/EmptyState";
 
 import { useConfirm } from "@/components/common/ConfirmDialog";
 import { useToast } from "@/components/common/Toast";
@@ -164,7 +165,19 @@ export default function PriceBookManager() {
               {loading ? (
                 [...Array(4)].map((_, i) => <tr key={i}>{[...Array(5)].map((__, j) => <td key={j} className="px-4 py-3"><div className="h-3 bg-white/5 rounded animate-pulse" style={{ width: j === 1 ? "70%" : "40%" }} /></td>)}</tr>)
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={5} className="text-center py-16 text-xs uppercase tracking-widest text-gray-600">{items.length === 0 ? "Your price book is empty — add entries or use 'Save Prices' from an estimate" : "No matches"}</td></tr>
+                <tr>
+                  <td colSpan={5}>
+                    <EmptyState
+                      icon={<BookOpen className="h-6 w-6" />}
+                      title={items.length === 0 ? "Price book is empty" : "No matches"}
+                      description={items.length === 0
+                        ? "Add rates here, or save prices from a project Estimate. Pricing starts inside a project."
+                        : "Try a different search."}
+                      actionLabel={items.length === 0 ? "Add a rate" : undefined}
+                      onAction={items.length === 0 ? openAdd : undefined}
+                    />
+                  </td>
+                </tr>
               ) : (
                 filtered.map((it) => (
                   <tr key={it.id} className="hover:bg-white/[0.02] transition-colors group">

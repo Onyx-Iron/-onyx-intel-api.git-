@@ -6,6 +6,7 @@ import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
 import { useProjectContext } from "@/components/project/ProjectContext";
+import { chooseOrCreateProjectHref } from "@/lib/navigation/project-sections";
 
 interface TakeoffItem {
   id: string;
@@ -132,9 +133,7 @@ export default function GlobalTakeoffPage() {
     return byStatus;
   }, [filtered]);
 
-  const openWorkspaceHref = activeProject
-    ? `/dashboard/projects/${activeProject.id}?phase=takeoff&tab=takeoff`
-    : "/dashboard/projects";
+  const openWorkspaceHref = chooseOrCreateProjectHref(activeProject?.id, "takeoff", "takeoff");
 
   return (
     <div>
@@ -254,8 +253,8 @@ export default function GlobalTakeoffPage() {
                         <EmptyState
                           icon={<Ruler className="w-6 h-6" />}
                           title="No takeoff items yet"
-                          description="Draw takeoffs from a project's Takeoff tab to see them roll up here."
-                          actionLabel={activeProject ? "Open takeoff workspace" : "Go to projects"}
+                          description="Upload plans or pick a sheet in a project's Takeoff tab."
+                          actionLabel={activeProject ? "Open takeoff" : "Choose or create a project"}
                           actionHref={openWorkspaceHref}
                         />
                       </div>

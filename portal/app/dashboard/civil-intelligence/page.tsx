@@ -7,6 +7,7 @@ import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
 import { useProjectContext } from "@/components/project/ProjectContext";
+import { chooseOrCreateProjectHref } from "@/lib/navigation/project-sections";
 
 interface VolumeRow {
   id: string;
@@ -78,9 +79,7 @@ export default function GlobalCivilIntelligencePage() {
     );
   }, [filteredRows]);
 
-  const openWorkspaceHref = activeProject
-    ? `/dashboard/projects/${activeProject.id}?phase=takeoff&tab=cutfill`
-    : "/dashboard/projects";
+  const openWorkspaceHref = chooseOrCreateProjectHref(activeProject?.id, "takeoff", "cutfill");
   const massHaulHref = activeProject
     ? `/dashboard/projects/${activeProject.id}/civil-earthwork`
     : null;
@@ -165,7 +164,13 @@ export default function GlobalCivilIntelligencePage() {
                   <tr>
                     <td colSpan={5}>
                       <div className="py-4">
-                        <EmptyState icon={<Mountain className="w-6 h-6" />} title="No earthwork volumes yet" description="Compute cut/fill volumes from a project's Cut/Fill tab to see them roll up here." />
+                        <EmptyState
+                          icon={<Mountain className="w-6 h-6" />}
+                          title="No earthwork volumes yet"
+                          description="Civil intelligence starts in a project Cut/Fill tab."
+                          actionLabel={activeProject ? "Open Cut / Fill" : "Choose or create a project"}
+                          actionHref={openWorkspaceHref}
+                        />
                       </div>
                     </td>
                   </tr>

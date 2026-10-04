@@ -7,6 +7,7 @@ import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
 import { useProjectContext } from "@/components/project/ProjectContext";
+import { chooseOrCreateProjectHref } from "@/lib/navigation/project-sections";
 
 interface Invoice {
   id: string;
@@ -105,9 +106,7 @@ export default function GlobalFinancialsPage() {
     return { receivable, payable, anyRedacted };
   }, [filteredInvoices]);
 
-  const openWorkspaceHref = activeProject
-    ? `/dashboard/projects/${activeProject.id}?phase=financials&tab=ar`
-    : "/dashboard/projects";
+  const openWorkspaceHref = chooseOrCreateProjectHref(activeProject?.id, "financials", "ar");
 
   return (
     <div>
@@ -179,7 +178,13 @@ export default function GlobalFinancialsPage() {
                     <tr>
                       <td colSpan={5}>
                         <div className="py-4">
-                          <EmptyState icon={<DollarSign className="w-6 h-6" />} title="No invoices yet" description="Add invoices from a project's Financials tab to see them roll up here." />
+                          <EmptyState
+                            icon={<DollarSign className="w-6 h-6" />}
+                            title="No invoices yet"
+                            description="Financials start inside a project. Add invoices there, then they roll up here."
+                            actionLabel={activeProject ? "Open financials" : "Choose or create a project"}
+                            actionHref={openWorkspaceHref}
+                          />
                         </div>
                       </td>
                     </tr>

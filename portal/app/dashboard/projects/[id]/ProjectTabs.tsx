@@ -60,7 +60,7 @@ import {
   SelectionsTab,
   TimeCardsTab,
 } from "@/components/project-file/ProjectFilePanels";
-import { phaseFromSlug, PROJECT_SECTIONS, type ProjectPhase } from "@/lib/navigation/project-sections";
+import { PHASE_HELPER, phaseFromSlug, PROJECT_SECTIONS, type ProjectPhase } from "@/lib/navigation/project-sections";
 
 // Target 10-section IA (docs/frontend-backend-reconciliation/INFORMATION_ARCHITECTURE.md)
 // replacing the prior 5-phase/~21-subtab structure. This recomposes the same
@@ -342,6 +342,11 @@ export default function ProjectTabs({ projectId, projectName }: ProjectTabsProps
         )}
 
         <div className="px-4 py-6 sm:px-6 sm:py-8">
+          {PHASE_HELPER[phaseSlug(activePhase)] && (
+            <p className="mb-4 text-xs leading-relaxed text-white/45">
+              {PHASE_HELPER[phaseSlug(activePhase)]}
+            </p>
+          )}
           {activeSub ? activeSub.render(projectId, projectName ?? "") : null}
         </div>
       </div>
