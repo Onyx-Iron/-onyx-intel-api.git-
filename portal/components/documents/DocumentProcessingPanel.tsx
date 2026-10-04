@@ -13,6 +13,9 @@ import {
   type ProcessingStage,
 } from "@/lib/documents/processing-display";
 import { buildPageLedger, ledgerCounts } from "@/lib/documents/page-ledger";
+import { formatStageProgress, type StageCounts } from "@/lib/documents/pipelineProgress";
+
+type PipelineLabels = { ocr: string; takeoff: string };
 
 interface ProcessingDoc {
   id: string;
@@ -47,6 +50,39 @@ export default function DocumentProcessingPanel({ projectId }: { projectId: stri
   const [notice, setNotice] = useState<string | null>(null);
   const [openDocId, setOpenDocId] = useState<string | null>(null);
   const [pageNumbers, setPageNumbers] = useState<Record<string, Array<{ pageNumber: number; failed?: boolean; error?: string | null }>>>({});
+  const [pipelineByDoc, setPipelineByDoc] = useState<Record<string, PipelineLabels>>({});
+
+  const pollPipeline = useCallback(async (list: ProcessingDoc[]) => {
+    const targets = list.filter((doc) => {
+      const stage = processingStage(doc);
+      return stage !== "Complete" || Boolean(takeoffBlockReason(doc));
+    });
+    if (targets.length === 0) return;
+    await Promise.all(
+      targets.map(async (doc) => {
+        try {
+          const res = await fetch(`/api/documents/${encodeURIComponent(doc.id)}/pipeline`, { cache: "no-store" });
+          if (!res.ok) return;
+          const data = await res.json() as {
+            ocr?: StageCounts;
+            takeoff?: StageCounts;
+            labels?: { ocr?: string; takeoff?: string };
+          };
+          const ocr = data.ocr ?? { total: 0, done: 0, error: 0, pending: 0, processing: 0 };
+          const takeoff = data.takeoff ?? { total: 0, done: 0, error: 0, pending: 0, processing: 0 };
+          setPipelineByDoc((prev) => ({
+            ...prev,
+            [doc.id]: {
+              ocr: data.labels?.ocr ?? formatStageProgress("OCR", ocr),
+              takeoff: data.labels?.takeoff ?? formatStageProgress("Takeoff", takeoff),
+            },
+          }));
+        } catch {
+          /* best effort */
+        }
+      }),
+    );
+  }, []);
 
   const load = useCallback(async () => {
     const res = await fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}&limit=200`, { cache: "no-store" });
@@ -59,7 +95,8 @@ export default function DocumentProcessingPanel({ projectId }: { projectId: stri
       return stage !== "Complete";
     });
     if (attention) setOpen(true);
-  }, [projectId]);
+    void pollPipeline(next);
+  }, [projectId, pollPipeline]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- mount fetch
@@ -70,11 +107,19 @@ export default function DocumentProcessingPanel({ projectId }: { projectId: stri
     };
     window.addEventListener("onyx:documents-refresh", onRefresh);
     const timer = window.setInterval(() => { void load(); }, 4000);
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource(`/api/documents/events?project_id=${encodeURIComponent(projectId)}`);
+      es.addEventListener("documents", () => { void load(); });
+    } catch {
+      /* EventSource unavailable — interval poll remains */
+    }
     return () => {
       window.removeEventListener("onyx:documents-refresh", onRefresh);
       window.clearInterval(timer);
+      es?.close();
     };
-  }, [load]);
+  }, [load, projectId]);
 
   async function retry(doc: ProcessingDoc, password?: string) {
     setBusyId(doc.id);
@@ -147,6 +192,13 @@ export default function DocumentProcessingPanel({ projectId }: { projectId: stri
                 <div className="min-w-0">
                   <div className="truncate text-xs text-white">{doc.file_name}</div>
                   <div className={`mt-1 text-[10px] font-bold uppercase tracking-widest ${STAGE_TONE[stage]}`}>{stage}</div>
+                  {pipelineByDoc[doc.id] && (
+                    <p className="mt-1 text-[11px] text-white/55">
+                      {pipelineByDoc[doc.id].ocr}
+                      <span className="mx-1.5 text-white/25">·</span>
+                      {pipelineByDoc[doc.id].takeoff}
+                    </p>
+                  )}
                   {stall && <p className="mt-1 max-w-xl text-[11px] text-[#F5A623]">{stall}</p>}
                   {error && stage !== "Complete" && <p className="mt-1 max-w-xl text-[11px] text-white/60">{error}</p>}
                   {ledger.length > 0 && (

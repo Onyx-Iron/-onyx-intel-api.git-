@@ -31,6 +31,11 @@ import { canEditVertex, recomputeShapeQuantity } from "@/lib/takeoff/canvas/shap
 import { attachPointerDrag } from "@/lib/takeoff/canvas/pointer-drag";
 import { takeoffQueryKeys, useSheetCalibration } from "@/lib/takeoff/queries";
 import type { SnapResult } from "@/lib/takeoff/canvas/snap-algorithm";
+import {
+  SCALE_COACH_COPY,
+  sheetHasVerifiedScale,
+  toolRequiresVerifiedScale,
+} from "@/lib/takeoff/scaleGate";
 
 // Coordinate-space tag carried alongside each committed item (professional-
 // manual-takeoff milestone, PERMANENT RULE 1/2). 'page_space' points are
@@ -263,6 +268,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   } | null>(null);
   const [loadError, setLoadError]   = useState<string | null>(null);
   const [saving, setSaving]         = useState(false);
+  const [scaleCoach, setScaleCoach] = useState<string | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [activeLayerId, setActiveLayerId] = useState<string | null>(null);
@@ -1066,10 +1072,20 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }, []);
 
   const selectTool = useCallback((next: Tool) => {
+    // Hard-gate measure/draw until the sheet has a verified page-space scale.
+    // Pan and calibrate stay available so the estimator can fix the coach CTA.
+    if (toolRequiresVerifiedScale(next) && !sheetHasVerifiedScale(calibration)) {
+      toolBeforeSpacePan.current = null;
+      setTool("calibrate");
+      clearDrafts();
+      setScaleCoach(SCALE_COACH_COPY);
+      return;
+    }
     toolBeforeSpacePan.current = null;
     setTool(next);
     clearDrafts();
-  }, [clearDrafts]);
+    setScaleCoach(null);
+  }, [clearDrafts, calibration]);
 
   const undoLast = useCallback(() => {
     // Prefer undoing an in-progress vertex; otherwise command stack; else drop newest unsaved.
@@ -1995,6 +2011,10 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   <span className="text-[#CCFF00]" title="Page-space calibration — stable across zoom, resize, and reload">
                     ✓ Verified · {calibration.page_space_scale_factor?.toFixed(4)} {calibration.unit_type}/page-unit
                   </span>
+                ) : calibration.status === "needs_verification" ? (
+                  <span className="text-amber-400" title={SCALE_COACH_COPY}>
+                    Suggested scale — confirm against a known dimension
+                  </span>
                 ) : (
                   <span className="text-amber-400" title="This calibration predates the page-space model and is render-scale-dependent — recalibrate before approving new measurements or syncing to the estimate">
                     ⚠ Legacy scale — needs recalibration
@@ -2006,13 +2026,16 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   onClick={() => {
                     selectTool("calibrate");
                   }}
-                  className="rounded-full border border-white/10 px-2 py-0.5 text-white/60 hover:text-white hover:bg-white/[0.06] normal-case tracking-normal"
+                  className="rounded-full border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-amber-200 hover:bg-amber-400/20 normal-case tracking-normal"
                 >
-                  Recalibrate
+                  {calibration.status === "verified" ? "Recalibrate" : "Confirm scale"}
                 </button>
               </>
             ) : (
-              <span className="text-amber-400">Set the sheet scale before saving a measurement.</span>
+              <span className="text-amber-400">Set the sheet scale before measuring.</span>
+            )}
+            {scaleCoach && (
+              <span className="text-amber-300 normal-case tracking-normal">{scaleCoach}</span>
             )}
           </div>
         </div>

@@ -6,6 +6,7 @@ import {
   firstRunHref,
   firstRunTargetId,
   isFirstRunComplete,
+  mergeFirstRun,
   nextFirstRunStep,
   parseFirstRun,
 } from "./firstRun.ts";
@@ -54,6 +55,17 @@ describe("first-run checklist", () => {
       }, true),
       true,
     );
+  });
+
+  it("OR-merges local and server checklist progress", () => {
+    const local = { ...emptyFirstRun(), project_created: true };
+    const remote = { ...emptyFirstRun(), plans_uploaded: true, takeoff_opened: true };
+    assert.deepEqual(mergeFirstRun(local, remote), {
+      project_created: true,
+      plans_uploaded: true,
+      takeoff_opened: true,
+      dismissed: false,
+    });
   });
 });
 
