@@ -3,10 +3,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant, assertPageBelongsToProject } from "@/lib/project-controls/server";
 import type { CalibrationPoint, CalibrationUpsertBody } from "@/lib/types/takeoff";
-import { previewRecalibration, recalibrationNeedsConfirm } from "@/lib/takeoff/recalibration";
+import { previewRecalibration, recalibrationNeedsConfirm, recomputePageSpaceQuantities } from "@/lib/takeoff/recalibration";
 import { applyManualScale, type ScaleRegion } from "@/lib/takeoff/stated-scale";
+import { FORMULA_VERSION } from "@/lib/takeoff/canvas/quantity";
 import { matchScalePreset, pageSpaceFactorForPreset } from "@/lib/takeoff/scale-presets";
 import { requirePermission } from "@/lib/project-controls/route-guards";
+import { processOutboxBatch } from "@/lib/estimating/outbox-worker";
 
 export const runtime = "nodejs";
 
@@ -149,16 +151,34 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
 
   const oldFactor = typeof before?.page_space_scale_factor === "number" ? before.page_space_scale_factor : null;
   const oldVerified = before?.status === "verified" && oldFactor != null && oldFactor > 0;
-  const { data: drafts } = oldVerified
-    ? await anyDb
-      .from("manual_takeoffs")
-      .select("id, label, takeoff_type, quantity, unit, geometry, cost_code, row_version")
-      .eq("tenant_id", tenantId)
-      .eq("page_id", page_id)
-      .is("deleted_at", null)
-    : { data: [] as Array<Record<string, unknown>> };
+  const { data: drafts } = await anyDb
+    .from("manual_takeoffs")
+    .select("id, label, takeoff_type, quantity, unit, geometry, cost_code, row_version")
+    .eq("tenant_id", tenantId)
+    .eq("page_id", page_id)
+    .is("deleted_at", null);
+  type DraftRow = {
+    id: string;
+    label?: string | null;
+    takeoff_type: string;
+    quantity: number;
+    unit?: string | null;
+    geometry?: {
+      points?: Array<{ x: number; y: number }>;
+      coordinate_space?: string | null;
+      measure?: string | null;
+      thickness?: number | null;
+      width?: number | null;
+      depth?: number | null;
+      slope_pct?: number | null;
+      slopePct?: number | null;
+    } | null;
+    cost_code?: string | null;
+    row_version?: number;
+  };
+  const draftRows = (drafts ?? []) as DraftRow[];
   const preview = previewRecalibration(
-    ((drafts ?? []) as Array<{ id: string; label?: string | null; takeoff_type: string; quantity: number; unit?: string | null }>).map((row) => ({
+    (oldVerified ? draftRows : []).map((row) => ({
       id: row.id,
       label: row.label,
       takeoff_type: row.takeoff_type,
@@ -174,6 +194,48 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
       requires_confirmation: true,
       preview,
     }, { status: 409 });
+  }
+
+  // Rewrite pixel quantities before the sheet is verified. Estimate sync
+  // holds manual rows until then, so a concurrent sync cannot price the
+  // unscaled number, and the verified sheet already has real quantities.
+  let recomputed = 0;
+  if (!oldVerified && draftRows.length > 0) {
+    const fixes = recomputePageSpaceQuantities(
+      draftRows.map((row) => ({
+        id: row.id,
+        takeoff_type: row.takeoff_type,
+        quantity: Number(row.quantity),
+        geometry: row.geometry ?? null,
+      })),
+      pageSpaceScaleFactor,
+    );
+    for (const line of fixes) {
+      const row = draftRows.find((candidate) => candidate.id === line.id);
+      if (!row || typeof row.row_version !== "number") continue;
+      if (line.after == null) {
+        await anyDb.from("takeoff_items").update({ quantity: null }).eq("tenant_id", tenantId).eq("source_manual_takeoff_id", row.id);
+        continue;
+      }
+      if (!line.recomputed) continue;
+      const { error: updateErr } = await anyDb.rpc("update_manual_takeoff_tx", {
+        p_id: row.id,
+        p_tenant_id: tenantId,
+        p_expected_row_version: row.row_version,
+        p_geometry: row.geometry ?? {},
+        p_quantity: line.after,
+        p_unit: row.unit ?? null,
+        p_cost_code: row.cost_code ?? null,
+        p_actor_user_id: userId,
+        p_calculation_formula_version: FORMULA_VERSION,
+      });
+      if (updateErr) {
+        console.error("[calibration] recompute quantity failed", updateErr);
+        await anyDb.from("takeoff_items").update({ quantity: null }).eq("tenant_id", tenantId).eq("source_manual_takeoff_id", row.id);
+        continue;
+      }
+      recomputed += 1;
+    }
   }
 
   const { data, error } = await anyDb
@@ -274,8 +336,21 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     if (regionError) return NextResponse.json({ error: regionError.message }, { status: 500 });
   }
 
+  if (!oldVerified && draftRows.length > 0) {
+    const { error: enqueueErr } = await anyDb.rpc("enqueue_project_estimate_sync", {
+      p_tenant_id: tenantId,
+      p_project_id: project_id,
+      p_payload: { source: "first_calibration", page_id },
+    });
+    if (enqueueErr) console.error("[calibration] enqueue estimate sync failed", enqueueErr);
+    try {
+      await processOutboxBatch(anyDb, `calibration-${Date.now()}`, 20);
+    } catch (err) {
+      console.error("[calibration] outbox processing failed", err);
+    }
+  }
+
   if (body.apply_to_drafts === true) {
-    const draftRows = (drafts ?? []) as Array<{ id: string; geometry: unknown; unit?: string | null; cost_code?: string | null; row_version?: number }>;
     for (const line of preview) {
       if (!line.recomputed) continue;
       const row = draftRows.find((candidate) => candidate.id === line.id);
@@ -294,5 +369,5 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     }
   }
 
-  return NextResponse.json({ calibration: data, preview });
+  return NextResponse.json({ calibration: data, preview, recomputed });
 }
