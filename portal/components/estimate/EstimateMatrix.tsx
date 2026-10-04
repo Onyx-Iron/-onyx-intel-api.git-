@@ -7,6 +7,8 @@ import { calculateAssemblyQuantities, type RebarSize, REBAR_UNIT_WEIGHT_LBS_PER_
 import { applyVersionPercentages, calculateEstimateTotals, calculateItem } from "@/lib/estimating/calculations";
 import { ESTIMATE_LINE_TYPES, listCsiSections, lookupCsi, normalizeLineType } from "@/lib/estimating/csi-catalog";
 import { quantitySourceLabel } from "@/lib/estimating/estimate-export";
+import { buildEstimateQualityReport, type EstimateQualityReport } from "@/lib/estimating/estimate-qc";
+import type { ReadinessCheck } from "@/lib/estimating/readiness";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -133,6 +135,8 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [seedResult, setSeedResult] = useState<string | null>(null);
+  const [readinessChecks, setReadinessChecks] = useState<ReadinessCheck[]>([]);
+  const [qcFocus, setQcFocus] = useState<"review" | "unpriced" | "sources" | null>(null);
   const [assemblyModalOpen, setAssemblyModalOpen] = useState(false);
   const [role, setRole] = useState<string | null>(null);
   const [moneyHidden, setMoneyHidden] = useState(false);
@@ -166,6 +170,59 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     const sort = window.localStorage.getItem(`estimate-sort:${projectId}:${view === "quantities" ? "quantities" : "priced"}`);
     if (sort === "sheet" || sort === "description" || sort === "quantity" || sort === "code") setSortBy(sort);
   }, [projectId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadReadiness = async () => {
+      try {
+        const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/estimate-readiness`, { cache: "no-store" });
+        if (!res.ok || cancelled) return;
+        const data = await res.json() as { checks?: ReadinessCheck[] };
+        if (!cancelled) setReadinessChecks(data.checks ?? []);
+      } catch {
+        /* best effort */
+      }
+    };
+    void loadReadiness();
+    const timer = window.setInterval(() => { void loadReadiness(); }, 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [projectId]);
+
+  const qualityReport: EstimateQualityReport = useMemo(() => {
+    return buildEstimateQualityReport(
+      rows.map((row) => ({
+        id: row.id ?? row._local,
+        description: row.description,
+        csi_code: row.cost_code,
+        item_type: row.item_type,
+        quantity: row.quantity,
+        uom: row.unit,
+        unit_cost:
+          row.labor_unit + row.material_unit + row.equipment_unit
+          + row.subcontractor_unit + row.trucking_unit + row.disposal_unit,
+        source_takeoff_id: row.source_takeoff_id,
+        quantity_basis: row.quantity_basis,
+        drawing_ref: row.drawing_ref,
+        location_tag: row.location_tag,
+        pricing_status: row.pricing_status,
+      })),
+    );
+  }, [rows]);
+
+  const sourceRemovedCount = useMemo(
+    () => rows.filter((row) => (row.notes ?? "").startsWith("Source removed")).length,
+    [rows],
+  );
+
+  const scaleCheck = readinessChecks.find((check) => check.id === "scale");
+  const reviewCheck = readinessChecks.find((check) => check.id === "review");
+  const showQcBanner = !qualityReport.ready_for_proposal
+    || sourceRemovedCount > 0
+    || (scaleCheck != null && !scaleCheck.ok)
+    || (reviewCheck != null && !reviewCheck.ok);
 
   const displayOrder = useMemo(() => {
     const indexed = rows.map((row, index) => ({ row, index }));
@@ -318,7 +375,12 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         bid_stage_suggestion?: { opportunity_id: string; suggested_stage: string; name?: string };
       };
       if (!res.ok) {
-        setSeedResult(`Approve failed: ${data.error ?? res.status}`);
+        const blockers = (data as { blockers?: string[] }).blockers;
+        setSeedResult(
+          blockers?.length
+            ? `Approve blocked: ${blockers.join("; ")}`
+            : `Approve failed: ${data.error ?? res.status}`,
+        );
         return;
       }
       await load();
@@ -777,6 +839,66 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
             <span key={group.label} className="text-white/50">{group.label}: ${fmt(group.total)}</span>
           ))}
         </div>
+        {showQcBanner && (
+          <div className="border-t border-amber-400/30 bg-amber-900/15 px-4 py-2 text-[11px] text-amber-100">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-bold uppercase tracking-widest text-amber-300">Estimate QC</span>
+              <span className="text-amber-200/80">Risk {qualityReport.risk_score}/100</span>
+            </div>
+            <ul className="mt-1.5 space-y-1 text-amber-100/90">
+              {qualityReport.counts.review > 0 && (
+                <li>
+                  <button type="button" className="hover:underline" onClick={() => setQcFocus("review")}>
+                    {qualityReport.counts.review} line{qualityReport.counts.review === 1 ? "" : "s"} need estimator review
+                  </button>
+                </li>
+              )}
+              {qualityReport.counts.unpriced > 0 && (
+                <li>
+                  <button type="button" className="hover:underline" onClick={() => setQcFocus("unpriced")}>
+                    {qualityReport.counts.unpriced} line{qualityReport.counts.unpriced === 1 ? "" : "s"} still unpriced
+                  </button>
+                </li>
+              )}
+              {sourceRemovedCount > 0 && (
+                <li>
+                  <button type="button" className="hover:underline" onClick={() => setQcFocus("sources")}>
+                    {sourceRemovedCount} line{sourceRemovedCount === 1 ? "" : "s"} marked source removed
+                  </button>
+                </li>
+              )}
+              {scaleCheck && !scaleCheck.ok && (
+                <li>
+                  <Link href={`/dashboard/projects/${projectId}?phase=takeoff&tab=takeoff`} className="hover:underline">
+                    {scaleCheck.detail}
+                  </Link>
+                </li>
+              )}
+              {reviewCheck && !reviewCheck.ok && (
+                <li>
+                  <Link href="/dashboard/takeoff" className="hover:underline">
+                    {reviewCheck.detail}
+                  </Link>
+                </li>
+              )}
+              {qualityReport.blockers
+                .filter((b) => !b.includes("unit pricing") && !b.includes("estimator review"))
+                .slice(0, 3)
+                .map((blocker) => (
+                  <li key={blocker}>{blocker}</li>
+                ))}
+            </ul>
+            {qcFocus && (
+              <button
+                type="button"
+                className="mt-2 text-[10px] uppercase tracking-widest text-amber-200/70 hover:text-amber-100"
+                onClick={() => setQcFocus(null)}
+              >
+                Clear row highlight
+              </button>
+            )}
+          </div>
+        )}
         {seedResult && <div className="border-t border-white/5 bg-white/[0.03] px-4 py-1.5 text-[11px] text-white/70">{seedResult}</div>}
         {versions.length > 1 && (
           <div className="border-t border-white/5 px-4 py-2 flex flex-wrap items-center gap-2 text-[11px]">
@@ -859,11 +981,15 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
                       const direct = rowDirect(r);
                       const source = quantitySourceLabel(r);
                       const division = lookupCsi(r.cost_code).division;
+                      const qcHit = qcFocus === "review" ? r.pricing_status === "review"
+                        : qcFocus === "unpriced" ? r.pricing_status === "unpriced" || !rowHasRate(r)
+                        : qcFocus === "sources" ? (r.notes ?? "").startsWith("Source removed")
+                        : false;
                       return (
                         <tr
                           key={r.id ?? r._local}
                           data-index={virtualRow.index}
-                          className={`hover:bg-white/[0.02] ${r._dirty ? "bg-[#CCFF00]/[0.03]" : ""}`}
+                          className={`hover:bg-white/[0.02] ${r._dirty ? "bg-[#CCFF00]/[0.03]" : ""} ${qcHit ? "bg-amber-400/10 ring-1 ring-inset ring-amber-400/40" : ""}`}
                           style={{ height: ESTIMATE_ROW_HEIGHT_PX }}
                         >
                           <td className="border-b border-white/5 px-2 py-1 text-[10px] font-mono text-white/40">{i + 1}</td>

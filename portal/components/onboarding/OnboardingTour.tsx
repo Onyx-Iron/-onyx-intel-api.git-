@@ -8,6 +8,7 @@ import {
   FIRST_RUN_EVENT,
   firstRunHref,
   firstRunTargetId,
+  hydrateFirstRunFromServer,
   isFirstRunComplete,
   nextFirstRunStep,
   patchFirstRun,
@@ -65,6 +66,7 @@ export default function OnboardingTour() {
     const sync = () => setFlags(readFirstRun());
     window.addEventListener(FIRST_RUN_EVENT, sync);
     window.addEventListener("storage", sync);
+    void hydrateFirstRunFromServer().then(setFlags);
     return () => {
       window.removeEventListener(FIRST_RUN_EVENT, sync);
       window.removeEventListener("storage", sync);

@@ -64,10 +64,57 @@ export function writeFirstRun(flags: FirstRunFlags): void {
   }
 }
 
+/** OR-merge server and local so either device advancing a step wins. */
+export function mergeFirstRun(a: FirstRunFlags, b: FirstRunFlags): FirstRunFlags {
+  return {
+    project_created: a.project_created || b.project_created,
+    plans_uploaded: a.plans_uploaded || b.plans_uploaded,
+    takeoff_opened: a.takeoff_opened || b.takeoff_opened,
+    dismissed: a.dismissed || b.dismissed,
+  };
+}
+
 export function patchFirstRun(patch: Partial<FirstRunFlags>): FirstRunFlags {
   const next = { ...readFirstRun(), ...patch };
   writeFirstRun(next);
+  void syncFirstRunToServer(next);
   return next;
+}
+
+/** Pull server checklist into localStorage (cross-device). */
+export async function hydrateFirstRunFromServer(): Promise<FirstRunFlags> {
+  const local = readFirstRun();
+  try {
+    const res = await fetch("/api/me/preferences", { cache: "no-store" });
+    if (!res.ok) return local;
+    const data = await res.json() as { first_run?: Partial<FirstRunFlags> };
+    const remote = parseFirstRun(JSON.stringify(data.first_run ?? {}));
+    const merged = mergeFirstRun(local, remote);
+    writeFirstRun(merged);
+    if (
+      merged.project_created !== remote.project_created
+      || merged.plans_uploaded !== remote.plans_uploaded
+      || merged.takeoff_opened !== remote.takeoff_opened
+      || merged.dismissed !== remote.dismissed
+    ) {
+      void syncFirstRunToServer(merged);
+    }
+    return merged;
+  } catch {
+    return local;
+  }
+}
+
+async function syncFirstRunToServer(flags: FirstRunFlags): Promise<void> {
+  try {
+    await fetch("/api/me/preferences", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ first_run: flags }),
+    });
+  } catch {
+    // offline / private mode — local cache still works
+  }
 }
 
 /**

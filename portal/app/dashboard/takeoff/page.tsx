@@ -7,6 +7,7 @@ import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
 import { useProjectContext } from "@/components/project/ProjectContext";
 import { chooseOrCreateProjectHref } from "@/lib/navigation/project-sections";
+import { needsReviewDecision, reviewTakeoffItem } from "@/lib/takeoff/reviewQueue";
 
 interface TakeoffItem {
   id: string;
@@ -75,6 +76,9 @@ export default function GlobalTakeoffPage() {
   const [unprocessedSheets, setUnprocessedSheets] = useState<UnprocessedSheet[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actingId, setActingId] = useState<string | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [queueOnly, setQueueOnly] = useState(true);
 
   const load = () => {
     setLoading(true);
@@ -119,19 +123,48 @@ export default function GlobalTakeoffPage() {
     return m;
   }, [projects]);
 
-  const filtered = useMemo(
+  const scoped = useMemo(
     () => filterByActiveProject(items, activeProjectId),
     [items, activeProjectId],
   );
 
+  const suggestedQueue = useMemo(
+    () => scoped.filter((item) => needsReviewDecision(item.review_status)),
+    [scoped],
+  );
+
+  const filtered = useMemo(
+    () => (queueOnly ? suggestedQueue : scoped),
+    [queueOnly, suggestedQueue, scoped],
+  );
+
   const totals = useMemo(() => {
     const byStatus: Record<string, number> = {};
-    for (const i of filtered) {
+    for (const i of scoped) {
       const key = i.review_status ?? "unknown";
       byStatus[key] = (byStatus[key] ?? 0) + 1;
     }
     return byStatus;
-  }, [filtered]);
+  }, [scoped]);
+
+  async function decide(itemId: string, action: "approve" | "reject") {
+    setActingId(itemId);
+    setReviewError(null);
+    const result = await reviewTakeoffItem(itemId, action);
+    if (!result.ok) {
+      setReviewError(result.error);
+      setActingId(null);
+      return;
+    }
+    setItems((prev) =>
+      prev.map((item) =>
+        item.id === itemId
+          ? { ...item, review_status: action === "approve" ? "approved" : "rejected" }
+          : item,
+      ),
+    );
+    setActingId(null);
+  }
 
   const openWorkspaceHref = chooseOrCreateProjectHref(activeProject?.id, "takeoff", "takeoff");
 
@@ -155,7 +188,7 @@ export default function GlobalTakeoffPage() {
           <div className="flex flex-1 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-white/50">
             <Info size={12} className="shrink-0" />
             <span>
-              Read-only roll-up. Draw and edit takeoffs from a project&apos;s Takeoff tab.
+              Approve suggested findings here, or draw new takeoffs from a project&apos;s Takeoff tab.
               {activeProject && (
                 <>
                   {" "}
@@ -168,6 +201,11 @@ export default function GlobalTakeoffPage() {
           </div>
           <ProjectScopeSelect className="w-56" label="" />
         </div>
+        {reviewError && (
+          <div className="mb-4 rounded-lg border border-[#E50914]/30 bg-[#E50914]/10 px-4 py-2 text-xs text-[#E50914]">
+            {reviewError}
+          </div>
+        )}
 
         {!loading && (openPlans.length > 0 || unprocessedSheets.length > 0) && (
           <div className="mb-5 grid gap-4 md:grid-cols-2">
@@ -215,7 +253,7 @@ export default function GlobalTakeoffPage() {
           </div>
         )}
 
-        {!loading && !error && filtered.length > 0 && (
+        {!loading && !error && scoped.length > 0 && (
           <div className="mb-5 flex flex-wrap items-center gap-3">
             <div className="flex flex-wrap gap-2">
               {Object.entries(totals).map(([status, count]) => (
@@ -226,6 +264,26 @@ export default function GlobalTakeoffPage() {
                   {status}: {count}
                 </span>
               ))}
+            </div>
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setQueueOnly(true)}
+                className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-widest ${
+                  queueOnly ? "bg-[#00D2FF] text-black" : "border border-white/15 text-white/60"
+                }`}
+              >
+                Needs decision ({suggestedQueue.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setQueueOnly(false)}
+                className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-widest ${
+                  !queueOnly ? "bg-white text-black" : "border border-white/15 text-white/60"
+                }`}
+              >
+                All items
+              </button>
             </div>
           </div>
         )}
@@ -241,6 +299,7 @@ export default function GlobalTakeoffPage() {
                   <th className="text-right text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3">Quantity</th>
                   <th className="text-left text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3">Review</th>
                   <th className="text-left text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3">Created</th>
+                  <th className="text-right text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
@@ -248,12 +307,16 @@ export default function GlobalTakeoffPage() {
                   <SkeletonRows />
                 ) : filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={6}>
+                    <td colSpan={7}>
                       <div className="py-4">
                         <EmptyState
                           icon={<Ruler className="w-6 h-6" />}
-                          title="No takeoff items yet"
-                          description="Upload plans or pick a sheet in a project's Takeoff tab."
+                          title={queueOnly ? "No suggested items waiting" : "No takeoff items yet"}
+                          description={
+                            queueOnly
+                              ? "Approved and rejected findings stay on All items. Upload plans or open a project Takeoff tab to extract more."
+                              : "Upload plans or pick a sheet in a project's Takeoff tab."
+                          }
                           actionLabel={activeProject ? "Open takeoff" : "Choose or create a project"}
                           actionHref={openWorkspaceHref}
                         />
@@ -263,6 +326,7 @@ export default function GlobalTakeoffPage() {
                 ) : (
                   filtered.map((item) => {
                     const reviewKey = item.review_status && item.review_status in REVIEW_STYLES ? item.review_status : "unknown";
+                    const pending = needsReviewDecision(item.review_status);
                     return (
                       <tr key={item.id} className="hover:bg-white/[0.02] transition-colors">
                         <td className="px-4 py-3 text-white text-xs truncate max-w-xs">{item.label ?? "Untitled item"}</td>
@@ -277,6 +341,30 @@ export default function GlobalTakeoffPage() {
                           </span>
                         </td>
                         <td className="px-4 py-3 text-gray-400 text-xs">{fmt(item.created_at)}</td>
+                        <td className="px-4 py-3 text-right">
+                          {pending ? (
+                            <div className="inline-flex items-center gap-2">
+                              <button
+                                type="button"
+                                disabled={actingId === item.id}
+                                onClick={() => void decide(item.id, "approve")}
+                                className="text-[10px] font-bold uppercase tracking-widest text-[#CCFF00] hover:underline disabled:opacity-40"
+                              >
+                                Approve
+                              </button>
+                              <button
+                                type="button"
+                                disabled={actingId === item.id}
+                                onClick={() => void decide(item.id, "reject")}
+                                className="text-[10px] font-bold uppercase tracking-widest text-[#E50914] hover:underline disabled:opacity-40"
+                              >
+                                Reject
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-white/30">—</span>
+                          )}
+                        </td>
                       </tr>
                     );
                   })
