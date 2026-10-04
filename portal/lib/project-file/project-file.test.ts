@@ -3,10 +3,13 @@ import { describe, it } from "node:test";
 import { CpmCycleError, computeCpm, shiftTaskDates } from "./cpm.ts";
 import {
   approvedChangeDelta,
+  budgetAlreadyPosted,
   computeBudgetLine,
   computePayLine,
   eventPostsBudget,
+  payAppInvoiceTotals,
   waiverCoversDraw,
+  withBudgetPosted,
 } from "./money.ts";
 import {
   approvedRfiWritesTo,
@@ -100,6 +103,27 @@ describe("project cost math", () => {
     assert.equal(line.completed, 600);
     assert.equal(line.retainage, 60);
     assert.equal(line.balance, 400);
+  });
+
+  it("bills stored materials on the pay app and keeps this draw's retainage", () => {
+    const totals = payAppInvoiceTotals([{
+      previous: 200,
+      thisPeriod: 300,
+      storedMaterials: 100,
+    }], 10);
+    assert.equal(totals.amount, 400);
+    assert.equal(totals.retainage, 40);
+
+    const workOnly = payAppInvoiceTotals([{ previous: 0, thisPeriod: 1000, storedMaterials: 0 }], 10);
+    assert.equal(workOnly.amount, 1000);
+    assert.equal(workOnly.retainage, 100);
+  });
+
+  it("posts a change order to the budget only once", () => {
+    assert.equal(budgetAlreadyPosted(null), false);
+    assert.equal(budgetAlreadyPosted({}), false);
+    assert.equal(budgetAlreadyPosted({ budget_posted: true }), true);
+    assert.deepEqual(withBudgetPosted({ source: "event" }), { source: "event", budget_posted: true });
   });
 
   it("holds a pay app until received lien waivers cover the draw", () => {

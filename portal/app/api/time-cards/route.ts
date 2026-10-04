@@ -81,7 +81,20 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     .maybeSingle();
   if (!card) return NextResponse.json({ error: "Time card not found" }, { status: 404 });
 
-  if (body.status === "approved" && card.status !== "approved") {
+  if (body.status === "approved") {
+    const { data: claimed, error: claimError } = await gate.ctx.db
+      .from("time_cards")
+      .update({ status: "approved" })
+      .eq("id", card.id)
+      .eq("tenant_id", gate.ctx.tenantId)
+      .eq("project_id", gate.projectId)
+      .eq("status", "draft")
+      .select("id")
+      .maybeSingle();
+    if (claimError) return NextResponse.json({ error: claimError.message }, { status: 422 });
+    if (!claimed) {
+      return NextResponse.json({ error: "Time card is no longer a draft" }, { status: 409 });
+    }
     const { data: staff } = await gate.ctx.db
       .from("staff_members")
       .select("hourly_rate")
@@ -91,7 +104,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     const rate = Number(staff?.hourly_rate ?? 0);
     const amount = rate * Number(card.hours ?? 0);
     if (amount > 0) {
-      await gate.ctx.db.from("project_cost_entries").insert({
+      const { error: costError } = await gate.ctx.db.from("project_cost_entries").insert({
         tenant_id: gate.ctx.tenantId,
         project_id: gate.projectId,
         budget_line_id: body.budget_line_id ?? null,
@@ -100,14 +113,40 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
         amount,
         entry_date: card.work_date,
       });
+      if (costError) {
+        await gate.ctx.db
+          .from("time_cards")
+          .update({ status: "draft" })
+          .eq("id", card.id)
+          .eq("tenant_id", gate.ctx.tenantId)
+          .eq("status", "approved");
+        return NextResponse.json({ error: costError.message }, { status: 422 });
+      }
     }
+    return NextResponse.json({ status: "approved" });
   }
-  const nextStatus = body.status ?? card.status;
-  const { error } = await gate.ctx.db
-    .from("time_cards")
-    .update({ status: nextStatus })
-    .eq("id", card.id)
-    .eq("tenant_id", gate.ctx.tenantId);
-  if (error) return NextResponse.json({ error: error.message }, { status: 422 });
-  return NextResponse.json({ status: nextStatus });
+
+  if (body.status === "void") {
+    const { data: claimed, error: claimError } = await gate.ctx.db
+      .from("time_cards")
+      .update({ status: "void" })
+      .eq("id", card.id)
+      .eq("tenant_id", gate.ctx.tenantId)
+      .eq("project_id", gate.projectId)
+      .neq("status", "void")
+      .select("id")
+      .maybeSingle();
+    if (claimError) return NextResponse.json({ error: claimError.message }, { status: 422 });
+    if (!claimed) return NextResponse.json({ status: "void" });
+    const { error: dropError } = await gate.ctx.db
+      .from("project_cost_entries")
+      .delete()
+      .eq("time_card_id", card.id)
+      .eq("tenant_id", gate.ctx.tenantId)
+      .eq("project_id", gate.projectId);
+    if (dropError) return NextResponse.json({ error: dropError.message }, { status: 422 });
+    return NextResponse.json({ status: "void" });
+  }
+
+  return NextResponse.json({ status: card.status });
 }
