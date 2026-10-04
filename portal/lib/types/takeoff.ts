@@ -44,6 +44,7 @@ export interface ManualTakeoffItem {
   unit?: "EA" | "LF" | "SF" | string | null;
   geometry: TakeoffGeometry;
   client_key?: string | null;
+  layer_id?: string | null;
 }
 
 export interface ManualTakeoffUpdateBody {
@@ -53,6 +54,7 @@ export interface ManualTakeoffUpdateBody {
   unit?: string | null;
   cost_code?: string | null;
   geometry: TakeoffGeometry;
+  layer_id?: string | null;
 }
 
 // ── Calibration ───────────────────────────────────────────────────────────
@@ -69,6 +71,10 @@ export interface CalibrationUpsertBody {
   point_b?: CalibrationPoint;
   known_distance?: number;
   known_unit?: string;
+  /** Apply a confirmed recalibration to draft measurements on this sheet. */
+  apply_to_drafts?: boolean;
+  scale_preset?: string;
+  suggestion_only?: boolean;
 }
 
 // ── Civil utility pipe runs ─────────────────────────────────────────────────

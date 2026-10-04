@@ -1,7 +1,7 @@
 -- XD-14: pgTAP cross-tenant isolation suite.
 --
--- Proves the app.clerk_org_id RLS policies on projects / takeoff_items /
--- estimate_items deny tenant B rows when the GUC is set to tenant A's org.
+-- Proves tenant RLS on projects / takeoff_items / estimate_items denies
+-- tenant B rows when impersonating tenant A's Clerk org (JWT + GUC).
 -- Runs inside a transaction that rolls back (including temporary GRANTs
 -- needed because production revokes authenticated table privileges —
 -- RLS is a backstop for future PostgREST paths).
@@ -15,8 +15,14 @@ create extension if not exists pgtap with schema extensions;
 select plan(8);
 
 -- Temporary grants so SET ROLE authenticated can exercise RLS (rolled back).
+-- Table SELECT was revoked for authenticated in production (service-role app
+-- path). Migration 20261006000000 restores EXECUTE on current_tenant_id()
+-- (tenants.self_select + many tenant_isolation_* policies invoke it); keep a
+-- session grant here so this suite stays green even if that migration is not
+-- yet applied on an older local stack.
 grant select on public.tenants, public.projects, public.takeoff_items, public.estimate_items
   to authenticated;
+grant execute on function public.current_tenant_id() to authenticated;
 
 -- Fixed UUIDs for stable assertions.
 select set_config('test.tenant_a', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', true);
@@ -99,9 +105,14 @@ select is(
   'superuser sees both takeoff_items'
 );
 
--- Impersonate tenant A via GUC used by tenant_isolation_* ALL policies.
+-- Impersonate tenant A.
+-- - app.clerk_org_id feeds the recovered ALL policies
+-- - request.jwt.claims.org_id feeds current_tenant_id() (per-command policies
+--   and tenants.self_select). Without the JWT claim, tenants RLS hides every
+--   row from the clerk_org subquery and authenticated sees 0 rows.
 set local role authenticated;
 select set_config('app.clerk_org_id', 'org_pgtap_a', true);
+select set_config('request.jwt.claims', '{"org_id":"org_pgtap_a"}', true);
 
 select is(
   (select count(*)::int from public.projects
@@ -133,6 +144,7 @@ select is(
 
 -- Switch to tenant B — must not see A.
 select set_config('app.clerk_org_id', 'org_pgtap_b', true);
+select set_config('request.jwt.claims', '{"org_id":"org_pgtap_b"}', true);
 
 select is(
   (select count(*)::int from public.projects

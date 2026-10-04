@@ -5,7 +5,7 @@ import { resolveCanvasHotkey, isEditableKeyboardTarget } from "./hotkeys.ts";
 
 function keyEvent(
   partial: Partial<KeyboardEvent> & Pick<KeyboardEvent, "key" | "type">,
-): Pick<KeyboardEvent, "key" | "code" | "type" | "repeat" | "metaKey" | "ctrlKey" | "altKey" | "target"> {
+): Pick<KeyboardEvent, "key" | "code" | "type" | "repeat" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey" | "target"> {
   return {
     key: partial.key,
     code: partial.code ?? "",
@@ -14,13 +14,15 @@ function keyEvent(
     metaKey: partial.metaKey ?? false,
     ctrlKey: partial.ctrlKey ?? false,
     altKey: partial.altKey ?? false,
+    shiftKey: partial.shiftKey ?? false,
     target: partial.target ?? null,
   };
 }
 
 describe("resolveCanvasHotkey", () => {
-  it("maps L/A/C to length/area/count tools", () => {
+  it("maps L/R/A/C to length/perimeter/area/count tools", () => {
     assert.deepEqual(resolveCanvasHotkey(keyEvent({ key: "l", type: "keydown" })), { type: "tool", tool: "length" });
+    assert.deepEqual(resolveCanvasHotkey(keyEvent({ key: "r", type: "keydown" })), { type: "tool", tool: "perimeter" });
     assert.deepEqual(resolveCanvasHotkey(keyEvent({ key: "A", type: "keydown" })), { type: "tool", tool: "area" });
     assert.deepEqual(resolveCanvasHotkey(keyEvent({ key: "c", type: "keydown" })), { type: "tool", tool: "count" });
   });
@@ -33,9 +35,18 @@ describe("resolveCanvasHotkey", () => {
     assert.deepEqual(resolveCanvasHotkey(keyEvent({ key: " ", code: "Space", type: "keyup" })), { type: "pan_hold_end" });
   });
 
-  it("ignores repeats, modifiers, and unknown keys", () => {
+  it("maps Ctrl/Cmd undo redo select-all duplicate and delete", () => {
+    assert.deepEqual(resolveCanvasHotkey(keyEvent({ key: "z", type: "keydown", ctrlKey: true })), { type: "undo" });
+    assert.deepEqual(resolveCanvasHotkey(keyEvent({ key: "y", type: "keydown", metaKey: true })), { type: "redo" });
+    assert.deepEqual(resolveCanvasHotkey(keyEvent({ key: "z", type: "keydown", ctrlKey: true, shiftKey: true })), { type: "redo" });
+    assert.deepEqual(resolveCanvasHotkey(keyEvent({ key: "a", type: "keydown", ctrlKey: true })), { type: "select_all" });
+    assert.deepEqual(resolveCanvasHotkey(keyEvent({ key: "d", type: "keydown", ctrlKey: true })), { type: "duplicate" });
+    assert.deepEqual(resolveCanvasHotkey(keyEvent({ key: "Delete", type: "keydown" })), { type: "delete_selection" });
+  });
+
+  it("ignores repeats, alt, and unknown keys", () => {
     assert.equal(resolveCanvasHotkey(keyEvent({ key: "l", type: "keydown", repeat: true })), null);
-    assert.equal(resolveCanvasHotkey(keyEvent({ key: "l", type: "keydown", metaKey: true })), null);
+    assert.equal(resolveCanvasHotkey(keyEvent({ key: "l", type: "keydown", altKey: true })), null);
     assert.equal(resolveCanvasHotkey(keyEvent({ key: "q", type: "keydown" })), null);
   });
 

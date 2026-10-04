@@ -9,8 +9,17 @@ import type { UtilityRunItem } from "@/lib/types/takeoff";
 import { logEvent } from "@/lib/activity";
 import { auditInsert, auditDelete } from "@/lib/audit";
 import { mirrorCivilItemsToTakeoff, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
+import { quantityForMeasurement } from "@/lib/takeoff/canvas/quantity";
+import type { Point } from "@/lib/takeoff/canvas/coordinates";
 
 export const runtime = "nodejs";
+
+function pagePoints(geometry: unknown): Point[] | null {
+  if (!geometry || typeof geometry !== "object") return null;
+  const geo = geometry as { coordinate_space?: string; points?: Point[] };
+  if (geo.coordinate_space !== "page_space" || !Array.isArray(geo.points) || geo.points.length < 2) return null;
+  return geo.points;
+}
 
 /**
  * Linear utility (pipe run) takeoff persistence — the Sheet Canvas
@@ -84,6 +93,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
   }
   const db = await createServiceClient();
+  const pageIds = [...new Set(items.map((it) => it.page_id).filter((id): id is string => Boolean(id)))];
+  const calibrationByPage = new Map<string, { status: string; page_space_scale_factor: number | null }>();
+  if (pageIds.length > 0) {
+    const { data: calibrations } = await db.from("sheet_calibrations").select("page_id, status, page_space_scale_factor").eq("tenant_id", tenantId).in("page_id", pageIds);
+    for (const row of calibrations ?? []) calibrationByPage.set(row.page_id, row);
+  }
+  for (const it of items) {
+    if (!it.page_id) continue;
+    const calibration = calibrationByPage.get(it.page_id);
+    const factor = calibration?.status === "verified" ? calibration.page_space_scale_factor : null;
+    const points = pagePoints(it.geometry);
+    if (factor == null || !points) {
+      return NextResponse.json({ error: "Set the sheet scale before saving a utility run.", code: "calibration_required" }, { status: 422 });
+    }
+    const plan = quantityForMeasurement("length", points, factor);
+    if (plan == null || plan <= 0) {
+      return NextResponse.json({ error: "The run length could not be calculated from the sheet.", code: "quantity_rejected" }, { status: 422 });
+    }
+    const rise = it.invert_elevation_end - it.invert_elevation_start;
+    const slope = Number.isFinite(rise) && plan > 0 ? (rise / plan) * 100 : 0;
+    it.run_length_lf = slope !== 0 ? (quantityForMeasurement("length", points, factor, { slope_pct: slope }) ?? plan) : plan;
+  }
 
   const rows = items.map((it) => {
     const embedment = calcPipeEmbedment({

@@ -19,10 +19,12 @@ import {
   Mountain,
   Ruler,
   Truck,
+  Search,
   Users,
   X,
 } from "lucide-react";
 import ActiveProjectPicker from "@/components/project/ActiveProjectPicker";
+import { requestCommandPalette } from "@/components/search/CommandPalette";
 
 interface NavItem {
   href: string;
@@ -35,6 +37,7 @@ interface NavItem {
 const PRIMARY_NAV: NavItem[] = [
   { href: "/dashboard", label: "Home", icon: <LayoutDashboard size={15} />, exact: true },
   { href: "/dashboard/projects", label: "Projects", icon: <FolderKanban size={15} /> },
+  { href: "/dashboard/preconstruction", label: "Bid Board", icon: <ClipboardList size={15} /> },
   { href: "/dashboard/reports", label: "Reports", icon: <ClipboardList size={15} /> },
   { href: "/dashboard/agents/pending", label: "AI Workforce", icon: <Bot size={15} /> },
 ];
@@ -57,6 +60,7 @@ const MORE_TOOLS: NavItem[] = [
 ];
 
 const SETTINGS_NAV: NavItem[] = [
+  { href: "/dashboard/settings/connections", label: "Connections", icon: <Megaphone size={13} /> },
   { href: "/dashboard/settings/team", label: "Team", icon: <Users size={13} /> },
   { href: "/dashboard/settings/billing", label: "Billing", icon: <Calculator size={13} /> },
   { href: "/dashboard/settings/cost-overrides", label: "Cost Overrides", icon: <BookOpen size={13} /> },
@@ -153,6 +157,19 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       </div>
 
       <ActiveProjectPicker onNavigate={onNavigate} />
+
+      <button
+        type="button"
+        onClick={() => {
+          onNavigate?.();
+          requestCommandPalette();
+        }}
+        className="mx-3 mb-3 flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-left text-xs text-white/45 transition-colors hover:border-white/20 hover:text-white"
+      >
+        <Search size={13} className="text-[#CCFF00]" />
+        <span className="flex-1">Jump to a function</span>
+        <kbd className="rounded border border-white/10 px-1.5 py-0.5 text-[9px] text-white/35">Ctrl K</kbd>
+      </button>
 
       <nav className="flex-1 overflow-y-auto px-3 pb-4">
         <div className="space-y-0.5">

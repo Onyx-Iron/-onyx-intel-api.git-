@@ -30,9 +30,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     await reclaimStuckProcessingPages(db, tenantId).catch((err) =>
       console.error("[GET /api/documents] stuck page reclaim failed", err),
     );
-    await reclaimStuckProcessingSheets(db, tenantId).catch((err) =>
-      console.error("[GET /api/documents] stuck sheet reclaim failed", err),
-    );
+    try {
+      await reclaimStuckProcessingSheets(db, tenantId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return NextResponse.json({ error: `[GET /api/documents] ${msg}` }, { status: 500 });
+    }
     await finalizeDocumentsFromOcr(db, tenantId).catch((err) =>
       console.error("[GET /api/documents] OCR finalize failed", err),
     );

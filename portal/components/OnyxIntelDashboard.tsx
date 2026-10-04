@@ -49,6 +49,29 @@ interface DashKpis {
   documents: number;
   scheduleTasks: number;
   estimatedValue: number;
+  bidsDue7d?: number;
+  planEmails7d?: number;
+  agentApprovals?: number;
+  docsStuck?: number;
+  openInvoices?: number;
+  seoHealth?: number;
+  connectionsOk?: number;
+  connectionErrors?: number;
+}
+
+interface DashAlert {
+  id: string;
+  label: string;
+  value: number;
+  href: string;
+}
+
+interface DashBidDue {
+  id: string;
+  name: string;
+  due_at: string;
+  stage: string;
+  href: string;
 }
 
 interface DashActivity {
@@ -64,6 +87,14 @@ interface DashData {
   kpis: DashKpis;
   projects: DashProject[];
   activity: DashActivity[];
+  bids_due?: DashBidDue[];
+  alerts?: DashAlert[];
+}
+
+interface SkillLinkChip {
+  skill: string;
+  label: string;
+  href: string;
 }
 
 interface AIMessage {
@@ -71,6 +102,7 @@ interface AIMessage {
   role: "user" | "system";
   content: string;
   timestamp: string;
+  links?: SkillLinkChip[];
 }
 
 interface Metric {
@@ -91,11 +123,27 @@ const INITIAL_AI_MESSAGES: AIMessage[] = [
   },
 ];
 
-const QUICK_PROMPTS = [
+const PORTFOLIO_PROMPTS = [
   "Summarize project risks across the active jobs.",
+  "Which jobs still need a takeoff?",
   "Draft an RFI from a missing spec detail.",
-  "What takeoff items need estimate review?",
 ];
+
+const PROJECT_PROMPTS = [
+  "Which RFIs are still open?",
+  "What takeoff items are waiting for review?",
+  "Summarize recent daily logs and open punch items.",
+  "What's the estimate status, and which invoices are unpaid?",
+];
+
+function uniqueLinks(links: SkillLinkChip[]): SkillLinkChip[] {
+  const seen = new Set<string>();
+  return links.filter((link) => {
+    if (!link.href || seen.has(link.href)) return false;
+    seen.add(link.href);
+    return true;
+  });
+}
 
 function formatCurrency(value: number): string {
   if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
@@ -292,6 +340,37 @@ function ScheduleRiskPanel({ projects, loading }: { projects: DashProject[]; loa
   );
 }
 
+function BidsDuePanel({ data, loading }: { data: DashData | null; loading: boolean }) {
+  const bids = data?.bids_due ?? [];
+  return (
+    <Panel title="Bids due (7 days)">
+      <div className="border-b border-white/5 px-4 py-3">
+        <p className="text-2xl font-black text-white">{loading ? "--" : data?.kpis.bidsDue7d ?? bids.length}</p>
+        <p className="text-[10px] uppercase tracking-widest text-white/40">Open opportunities</p>
+      </div>
+      <div className="divide-y divide-white/5">
+        {loading ? (
+          <div className="px-4 py-6 text-sm text-white/30">Loading…</div>
+        ) : bids.length === 0 ? (
+          <div className="px-4 py-6 text-sm text-white/30">
+            No bids due this week.{" "}
+            <Link href="/dashboard/preconstruction" className="text-[#CCFF00]/80 hover:underline">Open Bid Board</Link>
+          </div>
+        ) : (
+          bids.slice(0, 5).map((b) => (
+            <Link key={b.id} href={b.href} className="block px-4 py-3 hover:bg-white/[0.03]">
+              <p className="truncate text-sm font-medium text-white">{b.name}</p>
+              <p className="mt-0.5 text-xs text-white/40">
+                {b.stage} · due {new Date(b.due_at).toLocaleDateString()}
+              </p>
+            </Link>
+          ))
+        )}
+      </div>
+    </Panel>
+  );
+}
+
 function DocumentIntelligence({ data, loading }: { data: DashData | null; loading: boolean }) {
   const latest = data?.activity.filter((item) => item.kind === "document").slice(0, 4) ?? [];
 
@@ -376,6 +455,7 @@ function AICommandPanel({
   chatEndRef,
   projectLabel,
   memoryMode,
+  prompts,
 }: {
   aiInput: string;
   aiMessages: AIMessage[];
@@ -385,6 +465,7 @@ function AICommandPanel({
   chatEndRef: React.RefObject<HTMLDivElement | null>;
   projectLabel: string | null;
   memoryMode: boolean;
+  prompts: string[];
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   return (
@@ -397,8 +478,8 @@ function AICommandPanel({
         <div className="flex items-center justify-between gap-2 border-b border-white/6 px-4 py-2.5">
           <p className="text-[10px] uppercase tracking-widest text-white/35">
             {memoryMode
-              ? `Remembering ${projectLabel ?? "project"} — chat + project memory`
-              : "Portfolio assist — select a project for lasting memory"}
+              ? `Reading ${projectLabel ?? "this project"} — RFIs, takeoff, estimate, field, and the rest`
+              : "Portfolio assist — select a project to use its live records"}
           </p>
           <ProjectScopeSelect className="w-44" label="" />
         </div>
@@ -409,7 +490,20 @@ function AICommandPanel({
                 {message.role === "system" ? <Zap size={13} /> : <MessageSquare size={13} />}
               </div>
               <div className={`max-w-[84%] rounded-lg border px-3 py-2 text-sm leading-6 ${message.role === "system" ? "border-white/8 bg-white/3 text-white/80" : "border-[#00D2FF]/20 bg-[#00D2FF]/8 text-white"}`}>
-                {message.content}
+                <p className="whitespace-pre-wrap">{message.content}</p>
+                {message.links && message.links.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {message.links.map((link) => (
+                      <Link
+                        key={`${message.id}-${link.href}`}
+                        href={link.href}
+                        className="rounded-full border border-[#CCFF00]/30 bg-[#CCFF00]/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-[#CCFF00] hover:bg-[#CCFF00]/20"
+                      >
+                        Open {link.label}
+                      </Link>
+                    ))}
+                  </div>
+                )}
                 <p className="mt-1 text-[10px] text-white/30">{message.timestamp}</p>
               </div>
             </div>
@@ -420,6 +514,9 @@ function AICommandPanel({
                 <Zap size={13} />
               </div>
               <div className="rounded-lg border border-white/8 bg-white/3 px-3 py-2.5">
+                {memoryMode && (
+                  <p className="mb-2 text-[10px] uppercase tracking-widest text-white/40">Reading project records</p>
+                )}
                 <div className="flex gap-1">
                   {[0, 1, 2].map((item) => (
                     <span key={item} className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#CCFF00]" style={{ animationDelay: `${item * 140}ms` }} />
@@ -433,7 +530,7 @@ function AICommandPanel({
 
         <div className="border-t border-white/8 p-3">
           <div className="mb-3 flex flex-wrap gap-2">
-            {QUICK_PROMPTS.map((prompt) => (
+            {prompts.map((prompt) => (
               <button
                 key={prompt}
                 type="button"
@@ -652,7 +749,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            mode: "rag",
+            mode: "agentic",
             project_id: activeProjectId,
             message: trimmed,
             conversation_id: conversationId ?? undefined,
@@ -668,12 +765,22 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
         }
         const convHeader = response.headers.get("X-Conversation-Id");
         if (convHeader) setConversationId(convHeader);
+        let links: SkillLinkChip[] = [];
+        const linkHeader = response.headers.get("X-Skill-Links");
+        if (linkHeader) {
+          try {
+            const parsed = JSON.parse(decodeURIComponent(linkHeader)) as SkillLinkChip[];
+            links = uniqueLinks(Array.isArray(parsed) ? parsed : []);
+          } catch {
+            links = [];
+          }
+        }
 
         const reader = response.body?.getReader();
         const decoder = new TextDecoder();
         let full = "";
         const msgId = `msg-${Date.now() + 1}`;
-        setAiMessages((previous) => [...previous, { id: msgId, role: "system", content: "", timestamp: timestamp() }]);
+        setAiMessages((previous) => [...previous, { id: msgId, role: "system", content: "", timestamp: timestamp(), links }]);
         if (reader) {
           while (true) {
             const { done, value } = await reader.read();
@@ -826,6 +933,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
               chatEndRef={chatEndRef}
               projectLabel={activeProject?.name ?? null}
               memoryMode={Boolean(activeProjectId)}
+              prompts={activeProjectId ? PROJECT_PROMPTS : PORTFOLIO_PROMPTS}
             />
             <ProjectPipeline projects={filteredProjects} loading={dataLoading} />
           </div>
@@ -834,14 +942,25 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
             <Panel title="What needs attention">
               <div className="divide-y divide-white/5">
                 {([
-                  { label: activeProjectId ? "Needs takeoff" : "Projects needing takeoff", value: pendingTakeoffs, tone: "text-[#CCFF00] bg-[#CCFF00]/10", icon: <Layers size={13} /> },
-                  { label: "Budget alerts",            value: overBudget,      tone: "text-amber-400 bg-amber-400/10", icon: <AlertTriangle size={13} /> },
-                  { label: "Schedule tasks",           value: scopedScheduleTasks, tone: "text-[#00D2FF] bg-[#00D2FF]/10", icon: <Clock size={13} /> },
-                ] as { label: string; value: number; tone: string; icon: React.ReactNode }[]).map((item) => (
+                  { label: activeProjectId ? "Needs takeoff" : "Projects needing takeoff", value: pendingTakeoffs, tone: "text-[#CCFF00] bg-[#CCFF00]/10", icon: <Layers size={13} />, href: null as string | null },
+                  { label: "Budget alerts",            value: overBudget,      tone: "text-amber-400 bg-amber-400/10", icon: <AlertTriangle size={13} />, href: null },
+                  { label: "Schedule tasks",           value: scopedScheduleTasks, tone: "text-[#00D2FF] bg-[#00D2FF]/10", icon: <Clock size={13} />, href: null },
+                  ...((data?.alerts ?? []).map((a) => ({
+                    label: a.label,
+                    value: a.value,
+                    tone: a.value > 0 ? "text-amber-300 bg-amber-400/10" : "text-white/50 bg-white/5",
+                    icon: <Zap size={13} />,
+                    href: a.href as string | null,
+                  }))),
+                ] as { label: string; value: number; tone: string; icon: React.ReactNode; href: string | null }[]).map((item) => (
                   <div key={item.label} className="flex items-center justify-between px-4 py-3.5">
                     <div className="flex items-center gap-2.5">
                       <span className={`flex items-center justify-center rounded-md p-1.5 ${item.tone}`}>{item.icon}</span>
-                      <span className="text-sm text-white/50">{item.label}</span>
+                      {item.href ? (
+                        <Link href={item.href} className="text-sm text-white/70 hover:text-[#CCFF00]">{item.label}</Link>
+                      ) : (
+                        <span className="text-sm text-white/50">{item.label}</span>
+                      )}
                     </div>
                     <span className={`rounded-lg px-3 py-1 text-lg font-black ${item.tone}`}>{dataLoading ? "--" : item.value}</span>
                   </div>
@@ -858,6 +977,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
                 <ScheduleRiskPanel projects={filteredProjects} loading={dataLoading} />
                 <GoogleCalendarCard />
                 <GmailInboxCard />
+                <BidsDuePanel data={data} loading={dataLoading} />
                 <DocumentIntelligence data={data} loading={dataLoading} />
                 <RecentContactsCard />
                 <AuditActivityCard />

@@ -6,6 +6,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { pythonApiBaseUrl, pythonApiHeaders } from "@/lib/python-api";
 import { CANONICAL_FAILURE, CANONICAL_SUCCESS } from "@/lib/documents/status";
+import { takeoffBlockReason } from "@/lib/documents/processing-display";
 import {
   ASYNC_SPLIT_BYTES,
   queueDriveDocumentForPageSplit,
@@ -54,9 +55,22 @@ export async function POST(req: NextRequest): Promise<Response> {
 
     const { data: doc, error } = await db
       .from("documents")
-      .select("id, file_name, meta")
+      .select("id, file_name, meta, status, doc_type, page_count, last_error, last_error_step, split_status, ocr_status, vector_status")
       .eq("id", document_id).eq("tenant_id", tenantId).eq("project_id", project_id).single();
     if (error || !doc) return NextResponse.json({ error: "Document not found" }, { status: 404 });
+
+    const block = takeoffBlockReason({
+      status: doc.status,
+      split_status: doc.split_status,
+      ocr_status: doc.ocr_status,
+      vector_status: doc.vector_status,
+      doc_type: doc.doc_type,
+      page_count: doc.page_count,
+      last_error: doc.last_error,
+      last_error_step: doc.last_error_step,
+      meta: (doc.meta as Record<string, unknown> | null) ?? null,
+    });
+    if (block) return NextResponse.json({ error: block, code: "takeoff_blocked" }, { status: 422 });
 
     const meta = (doc.meta as Record<string, unknown> | null) ?? {};
     const storagePath = meta.storage_path as string | undefined;

@@ -4,6 +4,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useVirtualizer } from "@tanstack/react-virtual";
 import Link from "next/link";
 import { calculateAssemblyQuantities, type RebarSize, REBAR_UNIT_WEIGHT_LBS_PER_FT } from "@/lib/math/assemblies";
+import { applyVersionPercentages, calculateEstimateTotals, calculateItem } from "@/lib/estimating/calculations";
+import { ESTIMATE_LINE_TYPES, listCsiSections, lookupCsi, normalizeLineType } from "@/lib/estimating/csi-catalog";
+import { quantitySourceLabel } from "@/lib/estimating/estimate-export";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -22,6 +25,12 @@ interface EstimateRow {
   disposal_unit: number;
   notes: string;
   sort_order: number;
+  item_type: string;
+  drawing_ref?: string | null;
+  location_tag?: string | null;
+  source_takeoff_id?: string | null;
+  pricing_status?: string | null;
+  quantity_basis?: string | null;
   _dirty?: boolean;   // client-only: pending save
   _local?: string;    // client-only: local uuid for un-saved rows
 }
@@ -72,20 +81,20 @@ const UNIT_COL_LABELS: Record<UnitKey, string> = {
 
 /** Fixed row height keeps the virtualizer stable at 60 FPS for 1,000+ line items. */
 const ESTIMATE_ROW_HEIGHT_PX = 36;
-const ESTIMATE_MATRIX_COL_COUNT = 13;
-
 // Converts an authoritative estimate_items row (cost-category dollar totals)
 // into the grid's editable per-unit-rate shape. Division is exact (not
 // rounded) so a round-trip load -> save reproduces the same dollar totals.
 function itemToRow(it: {
-  id: string; cost_code: string | null; description: string | null; quantity: number | null; uom: string | null;
+  id: string; cost_code: string | null; csi_code?: string | null; description: string | null; quantity: number | null; uom: string | null;
   labor_cost: number; material_cost: number; equipment_cost: number; trucking_cost: number;
   subcontract_cost: number; disposal_cost: number; notes: string | null; sort_order?: number;
+  item_type?: string | null; drawing_ref?: string | null; location_tag?: string | null;
+  source_takeoff_id?: string | null; pricing_status?: string | null; quantity_basis?: string | null;
 }, index: number): EstimateRow {
   const q = it.quantity && it.quantity !== 0 ? it.quantity : 1;
   return {
     id: it.id,
-    cost_code: it.cost_code ?? "",
+    cost_code: it.csi_code || it.cost_code || "",
     description: it.description ?? "",
     quantity: it.quantity ?? 0,
     unit: it.uom ?? "EA",
@@ -97,8 +106,24 @@ function itemToRow(it: {
     disposal_unit: it.disposal_cost / q,
     notes: it.notes ?? "",
     sort_order: it.sort_order ?? index,
+    item_type: normalizeLineType(it.item_type),
+    drawing_ref: it.drawing_ref,
+    location_tag: it.location_tag,
+    source_takeoff_id: it.source_takeoff_id,
+    pricing_status: it.pricing_status,
+    quantity_basis: it.quantity_basis,
     _dirty: false,
   };
+}
+
+function rowHasRate(row: EstimateRow): boolean {
+  return row.labor_unit + row.material_unit + row.equipment_unit + row.subcontractor_unit + row.trucking_unit + row.disposal_unit > 0;
+}
+
+function rowCountsTowardSell(row: EstimateRow): boolean {
+  if ((row.notes ?? "").startsWith("Source removed")) return false;
+  if (row.pricing_status === "unpriced" || row.pricing_status === "review") return false;
+  return rowHasRate(row);
 }
 
 export default function EstimateMatrix({ projectId, projectName }: Props) {
@@ -115,10 +140,13 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   const [versions, setVersions] = useState<{ id: string; version_number: number; status: string }[]>([]);
   const [compareLeft, setCompareLeft] = useState("");
   const [compareRight, setCompareRight] = useState("");
+  const [moneyView, setMoneyView] = useState<"quantities" | "priced">("priced");
+  const [groupBy, setGroupBy] = useState<"division" | "type" | "none">("none");
+  const [sortBy, setSortBy] = useState<"sheet" | "description" | "quantity" | "code">("sheet");
   const [versionDiff, setVersionDiff] = useState<{
     added: { description?: string | null; csi_code?: string | null }[];
     removed: { description?: string | null; csi_code?: string | null }[];
-    changed: { key: string; quantityDelta: number | null; totalDelta: number | null; right: { description?: string | null } }[];
+    changed: { key: string; changes?: string[]; quantityDelta: number | null; totalDelta: number | null; right: { description?: string | null } }[];
   } | null>(null);
   const saveTimer = useRef<number | null>(null);
   const rowsRef = useRef(rows);
@@ -128,14 +156,43 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   settingsRef.current = settings;
   const gridScrollRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => {
+    const view = window.localStorage.getItem(`estimate-view:${projectId}`);
+    if (view === "quantities" || view === "priced") setMoneyView(view);
+    const group = window.localStorage.getItem(`estimate-group:${projectId}:${view === "quantities" ? "quantities" : "priced"}`);
+    if (group === "division" || group === "type" || group === "none") setGroupBy(group);
+    const sort = window.localStorage.getItem(`estimate-sort:${projectId}:${view === "quantities" ? "quantities" : "priced"}`);
+    if (sort === "sheet" || sort === "description" || sort === "quantity" || sort === "code") setSortBy(sort);
+  }, [projectId]);
+
+  const displayOrder = useMemo(() => {
+    const indexed = rows.map((row, index) => ({ row, index }));
+    const groupLabel = (row: EstimateRow) => {
+      if (groupBy === "type") return normalizeLineType(row.item_type);
+      if (groupBy === "division") return lookupCsi(row.cost_code).division?.code ?? "zz";
+      return "";
+    };
+    indexed.sort((a, b) => {
+      const grouped = groupLabel(a.row).localeCompare(groupLabel(b.row));
+      if (grouped !== 0) return grouped;
+      if (sortBy === "description") return a.row.description.localeCompare(b.row.description);
+      if (sortBy === "quantity") return a.row.quantity - b.row.quantity;
+      if (sortBy === "code") return a.row.cost_code.localeCompare(b.row.cost_code);
+      return a.row.sort_order - b.row.sort_order;
+    });
+    return indexed.map((entry) => entry.index);
+  }, [rows, groupBy, sortBy]);
+
   const rowVirtualizer = useVirtualizer({
-    count: rows.length,
+    count: displayOrder.length,
     getScrollElement: () => gridScrollRef.current,
     estimateSize: () => ESTIMATE_ROW_HEIGHT_PX,
     overscan: 12,
   });
 
   const pricingRestricted = role != null && RESTRICTED_ROLES.has(role);
+  const showMoney = moneyView === "priced" && !pricingRestricted;
+  const matrixColCount = 8 + (showMoney ? UNIT_COL_KEYS.length + 1 : 0);
   const locked = versionStatus === "approved" || versionStatus === "superseded" || versionStatus === "void";
 
   useEffect(() => {
@@ -251,8 +308,32 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     setSaving(true);
     try {
       const res = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}/approve`, { method: "POST" });
-      if (res.ok) await load();
-      else setSeedResult(`Approve failed: ${(await res.json().catch(() => ({}))).error ?? res.status}`);
+      const data = await res.json().catch(() => ({})) as {
+        error?: string;
+        bid_stage_suggestion?: { opportunity_id: string; suggested_stage: string; name?: string };
+      };
+      if (!res.ok) {
+        setSeedResult(`Approve failed: ${data.error ?? res.status}`);
+        return;
+      }
+      await load();
+      const sug = data.bid_stage_suggestion;
+      if (sug?.opportunity_id && sug.suggested_stage) {
+        const ok = window.confirm(
+          `Linked bid "${sug.name ?? sug.opportunity_id}" can move to "${sug.suggested_stage}". Update the bid board now?`,
+        );
+        if (ok) {
+          const patch = await fetch(`/api/preconstruction/opportunities/${encodeURIComponent(sug.opportunity_id)}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ stage: sug.suggested_stage }),
+          });
+          if (patch.ok) setSeedResult(`Approved — bid stage set to ${sug.suggested_stage}.`);
+          else setSeedResult("Approved — bid stage update failed (update from Bid Board).");
+        } else {
+          setSeedResult("Approved — bid stage left unchanged.");
+        }
+      }
     } finally {
       setSaving(false);
     }
@@ -289,13 +370,58 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
   }, []);
 
   const totals = useMemo(() => {
-    const direct = rows.reduce((s, r) => s + rowDirect(r), 0);
-    const contingency = direct * (settings.contingency_pct / 100);
-    const subtotal = direct + contingency;
-    const withOverhead = subtotal * (1 + settings.overhead_pct / 100);
-    const finalBid = withOverhead * (1 + settings.profit_pct / 100);
-    return { direct, contingency, subtotal, withOverhead, finalBid };
+    const items = rows.filter(rowCountsTowardSell).map((row) => {
+      const direct = rowDirect(row);
+      const pct = applyVersionPercentages(direct, 0, {
+        contingencyPct: settings.contingency_pct,
+        overheadPct: settings.overhead_pct,
+        profitPct: settings.profit_pct,
+      });
+      const calc = calculateItem({
+        laborCost: row.quantity * row.labor_unit,
+        materialCost: row.quantity * row.material_unit,
+        equipmentCost: row.quantity * row.equipment_unit,
+        truckingCost: row.quantity * row.trucking_unit,
+        subcontractCost: row.quantity * row.subcontractor_unit,
+        disposalCost: row.quantity * row.disposal_unit,
+        quantity: row.quantity,
+        contingency: pct.contingency,
+        overhead: pct.overhead,
+        profit: pct.profit,
+      });
+      return {
+        totalDirectCost: calc.totalDirectCost,
+        indirectCost: 0,
+        contingency: pct.contingency,
+        overhead: pct.overhead,
+        profit: pct.profit,
+        totalPrice: calc.totalPrice,
+        isAlternate: false,
+        alternateAccepted: false,
+      };
+    });
+    const rolled = calculateEstimateTotals(items);
+    return {
+      direct: rolled.totalDirectCost,
+      contingency: rolled.totalContingency,
+      subtotal: rolled.totalDirectCost + rolled.totalContingency,
+      withOverhead: rolled.costBeforeProfit,
+      finalBid: rolled.totalPrice,
+    };
   }, [rows, settings, rowDirect]);
+
+  const groupSubtotals = useMemo(() => {
+    if (groupBy === "none") return [] as { label: string; total: number }[];
+    const buckets = new Map<string, number>();
+    for (const row of rows) {
+      if (!rowCountsTowardSell(row)) continue;
+      const label = groupBy === "type"
+        ? normalizeLineType(row.item_type)
+        : (lookupCsi(row.cost_code).division ? `${lookupCsi(row.cost_code).division?.code} ${lookupCsi(row.cost_code).division?.name}` : "Unassigned");
+      buckets.set(label, (buckets.get(label) ?? 0) + rowDirect(row));
+    }
+    return [...buckets.entries()].map(([label, total]) => ({ label, total }));
+  }, [rows, groupBy, rowDirect]);
 
   // ── Row edit helpers ──────────────────────────────────────────────────────
   function updateRow(idx: number, patch: Partial<EstimateRow>) {
@@ -320,6 +446,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         description: "",
         quantity: 0,
         unit: "EA",
+        item_type: "material",
         labor_unit: 0,
         material_unit: 0,
         equipment_unit: 0,
@@ -361,6 +488,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         labor_unit: 0, material_unit: 0, equipment_unit: 0,
         subcontractor_unit: 0, trucking_unit: 0, disposal_unit: 0,
         notes: `Assembly mix · ${areaSf.toLocaleString()} SF @ ${input.thicknessInches}"`,
+        item_type: "material",
         sort_order: nextSort + newRows.length, _dirty: true,
       });
     }
@@ -374,6 +502,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         labor_unit: 0, material_unit: 0, equipment_unit: 0,
         subcontractor_unit: 0, trucking_unit: 0, disposal_unit: 0,
         notes: `Assembly mix · ${areaSf.toLocaleString()} SF`,
+        item_type: "material",
         sort_order: nextSort + newRows.length, _dirty: true,
       });
     }
@@ -387,6 +516,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
         labor_unit: 0, material_unit: 0, equipment_unit: 0,
         subcontractor_unit: 0, trucking_unit: 0, disposal_unit: 0,
         notes: `Assembly mix · ${REBAR_UNIT_WEIGHT_LBS_PER_FT[input.rebarSize]} lb/ft unit weight`,
+        item_type: "material",
         sort_order: nextSort + newRows.length, _dirty: true,
       });
     }
@@ -437,7 +567,10 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
             cost_code: r.cost_code || null,
             description: r.description,
             quantity: r.quantity,
+            source_takeoff_id: r.source_takeoff_id,
             uom: r.unit,
+            item_type: normalizeLineType(r.item_type),
+            csi_code: r.cost_code || null,
             labor_cost: r.quantity * r.labor_unit,
             material_cost: r.quantity * r.material_unit,
             equipment_cost: r.quantity * r.equipment_unit,
@@ -491,66 +624,61 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
     saveTimer.current = window.setTimeout(() => { void saveAll(); }, 400);
   }
 
-  // ── Exports ───────────────────────────────────────────────────────────────
-  const exportProposal = useCallback(async () => {
-    const XLSX = await import("xlsx");
-    const wb = XLSX.utils.book_new();
-
-    // Sheet 1: Client Proposal (grouped by cost code prefix)
-    const grouped: Record<string, { desc: string; quantity: number; unit: string; direct: number }[]> = {};
-    for (const r of rows) {
-      const key = r.cost_code || "UNCODED";
-      const bucket = grouped[key] ?? (grouped[key] = []);
-      bucket.push({ desc: r.description || key, quantity: r.quantity, unit: r.unit, direct: rowDirect(r) });
+  const downloadServerExport = useCallback(async (format: "xlsx" | "pdf" | "csv") => {
+    if (!versionId) return;
+    const res = await fetch(`/api/estimate/versions/${encodeURIComponent(versionId)}/export?format=${format}&group=${groupBy}`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({})) as { error?: string };
+      setSeedResult(data.error ?? `Export failed (${res.status})`);
+      return;
     }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${projectName.replace(/[^\w-]+/g, "_")}_estimate.${format}`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }, [versionId, groupBy, projectName]);
 
-    const proposalRows: (string | number)[][] = [
-      [`Proposal · ${projectName}`],
-      [new Date().toLocaleDateString()],
-      [],
-      ["Cost Code", "Description", "Qty", "Unit", "Direct Cost"],
-    ];
-    for (const [code, items] of Object.entries(grouped)) {
-      const sub = items.reduce((s, i) => s + i.direct, 0);
-      for (const it of items) proposalRows.push([code, it.desc, it.quantity, it.unit, round(it.direct)]);
-      proposalRows.push(["", `— subtotal ${code} —`, "", "", round(sub)]);
+  async function draftRates() {
+    setSaving(true);
+    try {
+      const res = await fetch("/api/estimate/import-takeoff", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_id: projectId }),
+      });
+      const data = await res.json().catch(() => ({})) as { error?: string; priced?: number; unpriced?: number };
+      if (!res.ok) {
+        setSeedResult(data.error ?? `Draft rates failed (${res.status})`);
+      } else {
+        setSeedResult("Draft rates applied from approved quantities. Unpriced lines stay in the grid.");
+        await load();
+      }
+    } finally {
+      setSaving(false);
     }
-    proposalRows.push([], ["Direct Cost Total", "", "", "", round(totals.direct)]);
-    proposalRows.push([`Contingency (${settings.contingency_pct}%)`, "", "", "", round(totals.contingency)]);
-    proposalRows.push(["Subtotal", "", "", "", round(totals.subtotal)]);
-    proposalRows.push([`Overhead (${settings.overhead_pct}%)`, "", "", "", round(totals.withOverhead - totals.subtotal)]);
-    proposalRows.push([`Profit (${settings.profit_pct}%)`, "", "", "", round(totals.finalBid - totals.withOverhead)]);
-    proposalRows.push(["FINAL BID", "", "", "", round(totals.finalBid)]);
+  }
 
-    const wsProposal = XLSX.utils.aoa_to_sheet(proposalRows);
-    wsProposal["!cols"] = [{ wch: 14 }, { wch: 40 }, { wch: 10 }, { wch: 8 }, { wch: 14 }];
-    XLSX.utils.book_append_sheet(wb, wsProposal, "Proposal");
+  function rememberView(next: "quantities" | "priced") {
+    setMoneyView(next);
+    window.localStorage.setItem(`estimate-view:${projectId}`, next);
+    const group = window.localStorage.getItem(`estimate-group:${projectId}:${next}`);
+    const sort = window.localStorage.getItem(`estimate-sort:${projectId}:${next}`);
+    if (group === "division" || group === "type" || group === "none") setGroupBy(group);
+    if (sort === "sheet" || sort === "description" || sort === "quantity" || sort === "code") setSortBy(sort);
+  }
 
-    // Sheet 2: Schedule of Values
-    const sovRows: (string | number)[][] = [
-      [`Schedule of Values · ${projectName}`], [new Date().toLocaleDateString()], [],
-      ["Item #", "Cost Code", "Description", "Qty", "Unit", "Labor", "Material", "Equipment", "Sub", "Trucking", "Disposal", "Direct", "Overhead", "Profit", "SOV Value"],
-    ];
-    rows.forEach((r, i) => {
-      const direct = rowDirect(r);
-      const ovh = direct * (settings.overhead_pct / 100);
-      const pft = (direct + ovh) * (settings.profit_pct / 100);
-      sovRows.push([
-        i + 1, r.cost_code || "", r.description || "", r.quantity, r.unit,
-        round(r.quantity * r.labor_unit), round(r.quantity * r.material_unit),
-        round(r.quantity * r.equipment_unit), round(r.quantity * r.subcontractor_unit),
-        round(r.quantity * r.trucking_unit), round(r.quantity * r.disposal_unit),
-        round(direct), round(ovh), round(pft), round(direct + ovh + pft),
-      ]);
-    });
-    sovRows.push([]);
-    sovRows.push(["", "", "TOTAL", "", "", "", "", "", "", "", "", round(totals.direct), round(totals.withOverhead - totals.subtotal), round(totals.finalBid - totals.withOverhead), round(totals.finalBid)]);
-    const wsSov = XLSX.utils.aoa_to_sheet(sovRows);
-    wsSov["!cols"] = [{ wch: 6 }, { wch: 12 }, { wch: 36 }, ...Array(12).fill({ wch: 12 })];
-    XLSX.utils.book_append_sheet(wb, wsSov, "Schedule of Values");
+  function rememberGroup(next: "division" | "type" | "none") {
+    setGroupBy(next);
+    window.localStorage.setItem(`estimate-group:${projectId}:${moneyView}`, next);
+  }
 
-    XLSX.writeFile(wb, `${projectName.replace(/[^\w-]+/g, "_")}_estimate_${Date.now()}.xlsx`);
-  }, [projectName, rows, settings, totals, rowDirect]);
+  function rememberSort(next: "sheet" | "description" | "quantity" | "code") {
+    setSortBy(next);
+    window.localStorage.setItem(`estimate-sort:${projectId}:${moneyView}`, next);
+  }
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -588,6 +716,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
             ) : (
               <>
                 <button type="button" onClick={seed} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white disabled:opacity-40">Load from Takeoffs</button>
+                <button type="button" onClick={() => void draftRates()} disabled={saving} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white disabled:opacity-40">Draft rates from approved quantities</button>
                 <button type="button" onClick={addRow} className="inline-flex h-9 items-center rounded-full border border-white/15 bg-white/5 px-4 text-[11px] font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white">+ Row</button>
                 {!pricingRestricted && (
                   <button type="button" onClick={() => setAssemblyModalOpen(true)} className="inline-flex h-9 items-center rounded-full border border-[#00D2FF]/30 bg-[#00D2FF]/10 px-4 text-[11px] font-semibold uppercase tracking-widest text-[#00D2FF] hover:bg-[#00D2FF]/20">Insert Assembly Mix</button>
@@ -597,7 +726,9 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
                 )}
               </>
             )}
-            <button type="button" onClick={exportProposal} className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85">Export XLSX</button>
+            <button type="button" onClick={() => void downloadServerExport("xlsx")} className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-4 text-[11px] font-bold uppercase tracking-widest text-black hover:opacity-85">Excel</button>
+            <button type="button" onClick={() => void downloadServerExport("pdf")} className="inline-flex h-9 items-center rounded-full border border-white/15 px-4 text-[11px] font-bold uppercase tracking-widest text-white/80">PDF</button>
+            <button type="button" onClick={() => void downloadServerExport("csv")} className="inline-flex h-9 items-center rounded-full border border-white/15 px-4 text-[11px] font-bold uppercase tracking-widest text-white/80">CSV</button>
           </div>
         </div>
 
@@ -619,6 +750,28 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
           </div>
         )}
 
+        <div className="border-t border-white/5 px-4 py-2 flex flex-wrap items-center gap-2 text-[11px]">
+          <button type="button" onClick={() => rememberView("quantities")} className={`rounded-full px-3 py-1 uppercase tracking-widest ${moneyView === "quantities" ? "bg-white text-black" : "border border-white/15 text-white/60"}`}>Quantities</button>
+          <button type="button" onClick={() => rememberView("priced")} className={`rounded-full px-3 py-1 uppercase tracking-widest ${moneyView === "priced" ? "bg-[#CCFF00] text-black" : "border border-white/15 text-white/60"}`}>Priced</button>
+          <label className="text-white/40">Group
+            <select value={groupBy} onChange={(e) => rememberGroup(e.target.value as "division" | "type" | "none")} className="ml-2 rounded border border-white/10 bg-black/40 px-2 py-1 text-white">
+              <option value="none">None</option>
+              <option value="division">CSI division</option>
+              <option value="type">Line type</option>
+            </select>
+          </label>
+          <label className="text-white/40">Sort
+            <select value={sortBy} onChange={(e) => rememberSort(e.target.value as "sheet" | "description" | "quantity" | "code")} className="ml-2 rounded border border-white/10 bg-black/40 px-2 py-1 text-white">
+              <option value="sheet">Sheet order</option>
+              <option value="code">CSI code</option>
+              <option value="description">Description</option>
+              <option value="quantity">Quantity</option>
+            </select>
+          </label>
+          {groupSubtotals.map((group) => (
+            <span key={group.label} className="text-white/50">{group.label}: ${fmt(group.total)}</span>
+          ))}
+        </div>
         {seedResult && <div className="border-t border-white/5 bg-white/[0.03] px-4 py-1.5 text-[11px] text-white/70">{seedResult}</div>}
         {versions.length > 1 && (
           <div className="border-t border-white/5 px-4 py-2 flex flex-wrap items-center gap-2 text-[11px]">
@@ -645,6 +798,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
                 {change.right.description ?? change.key}
                 {change.quantityDelta != null ? ` · qty ${change.quantityDelta > 0 ? "+" : ""}${change.quantityDelta}` : ""}
                 {change.totalDelta != null ? ` · total ${change.totalDelta > 0 ? "+" : ""}${change.totalDelta}` : ""}
+                {change.changes?.includes("source") ? " · quantity source changed" : ""}
               </li>
             ))}
           </ul>
@@ -667,14 +821,16 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
             <thead className="sticky top-0 z-10 bg-[#0E0F12]">
               <tr className="text-left text-[9px] uppercase tracking-widest font-mono text-white/40">
                 <th className="border-b border-white/10 px-2 py-2 w-10">#</th>
-                <th className="border-b border-white/10 px-2 py-2 w-28">Cost Code</th>
+                <th className="border-b border-white/10 px-2 py-2 w-28">Type</th>
+                <th className="border-b border-white/10 px-2 py-2 w-28">CSI</th>
                 <th className="border-b border-white/10 px-2 py-2 min-w-[260px]">Description</th>
                 <th className="border-b border-white/10 px-2 py-2 w-24 text-right">Qty</th>
                 <th className="border-b border-white/10 px-2 py-2 w-16">Unit</th>
-                {UNIT_COL_KEYS.map((k) => (
+                <th className="border-b border-white/10 px-2 py-2 w-36">Source</th>
+                {showMoney && UNIT_COL_KEYS.map((k) => (
                   <th key={k} className="border-b border-white/10 px-2 py-2 w-24 text-right">{UNIT_COL_LABELS[k]}</th>
                 ))}
-                <th className="border-b border-white/10 px-2 py-2 w-32 text-right text-white/70">Direct</th>
+                {showMoney && <th className="border-b border-white/10 px-2 py-2 w-32 text-right text-white/70">Total</th>}
                 <th className="border-b border-white/10 px-2 py-2 w-10"></th>
               </tr>
             </thead>
@@ -689,13 +845,15 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
                   <>
                     {paddingTop > 0 && (
                       <tr aria-hidden="true">
-                        <td colSpan={ESTIMATE_MATRIX_COL_COUNT} style={{ height: paddingTop, padding: 0, border: 0 }} />
+                        <td colSpan={matrixColCount} style={{ height: paddingTop, padding: 0, border: 0 }} />
                       </tr>
                     )}
                     {virtualRows.map((virtualRow) => {
-                      const i = virtualRow.index;
+                      const i = displayOrder[virtualRow.index];
                       const r = rows[i];
                       const direct = rowDirect(r);
+                      const source = quantitySourceLabel(r);
+                      const division = lookupCsi(r.cost_code).division;
                       return (
                         <tr
                           key={r.id ?? r._local}
@@ -705,27 +863,36 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
                         >
                           <td className="border-b border-white/5 px-2 py-1 text-[10px] font-mono text-white/40">{i + 1}</td>
                           <td className="border-b border-white/5 px-1 py-1">
-                            <input value={r.cost_code} onChange={(e) => updateRow(i, { cost_code: e.target.value })} placeholder="NN-NN-NN" className="w-full bg-transparent px-1 py-1 text-[11px] font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
+                            <select value={normalizeLineType(r.item_type)} onChange={(e) => updateRow(i, { item_type: e.target.value })} className="w-full bg-transparent px-1 py-1 text-[11px] focus:outline-none">
+                              {ESTIMATE_LINE_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
+                            </select>
+                          </td>
+                          <td className="border-b border-white/5 px-1 py-1">
+                            <input list="csi-sections" value={r.cost_code} onChange={(e) => updateRow(i, { cost_code: e.target.value })} placeholder="03-30-00" title={division ? `${division.code} ${division.name}` : "CSI code"} className="w-full bg-transparent px-1 py-1 text-[11px] font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
                           </td>
                           <td className="border-b border-white/5 px-1 py-1">
                             <input value={r.description} onChange={(e) => updateRow(i, { description: e.target.value })} className="w-full bg-transparent px-1 py-1 text-xs focus:outline-none focus:bg-white/[0.05] rounded" />
                           </td>
                           <td className="border-b border-white/5 px-1 py-1">
-                            <input type="number" step="0.01" value={r.quantity} onChange={(e) => updateRow(i, { quantity: Number(e.target.value) })} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
+                            {r.source_takeoff_id ? (
+                              <div className="flex items-center justify-end gap-1">
+                                <span className="font-mono text-xs" title="Quantity comes from the linked measurement">{r.quantity}</span>
+                                <button type="button" className="text-[9px] uppercase tracking-widest text-white/40 hover:text-white" onClick={() => updateRow(i, { source_takeoff_id: null })}>Unlink</button>
+                              </div>
+                            ) : (
+                              <input type="number" step="0.01" value={r.quantity} onChange={(e) => updateRow(i, { quantity: Number(e.target.value) })} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
+                            )}
                           </td>
                           <td className="border-b border-white/5 px-1 py-1">
                             <input value={r.unit} onChange={(e) => updateRow(i, { unit: e.target.value })} className="w-full bg-transparent px-1 py-1 text-[11px] font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
                           </td>
-                          {UNIT_COL_KEYS.map((k) => (
+                          <td className="border-b border-white/5 px-2 py-1 text-[10px] text-white/50" title={r.quantity_basis ?? source}>{source}</td>
+                          {showMoney && UNIT_COL_KEYS.map((k) => (
                             <td key={k} className="border-b border-white/5 px-1 py-1">
-                              {pricingRestricted ? (
-                                <span className="block w-full px-1 py-1 text-xs text-right font-mono text-white/20 select-none" aria-hidden="true">••••</span>
-                              ) : (
-                                <input type="number" step="0.01" value={r[k]} onChange={(e) => updateRow(i, { [k]: Number(e.target.value) } as Partial<EstimateRow>)} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
-                              )}
+                              <input type="number" step="0.01" value={r[k]} onChange={(e) => updateRow(i, { [k]: Number(e.target.value) } as Partial<EstimateRow>)} className="w-full bg-transparent px-1 py-1 text-xs text-right font-mono focus:outline-none focus:bg-white/[0.05] rounded" />
                             </td>
                           ))}
-                          <td className="border-b border-white/5 px-2 py-1 text-right text-xs font-mono text-white">{pricingRestricted ? "••••" : `$${fmt(direct)}`}</td>
+                          {showMoney && <td className="border-b border-white/5 px-2 py-1 text-right text-xs font-mono text-white">{rowCountsTowardSell(r) ? `$${fmt(direct)}` : "Unpriced"}</td>}
                           <td className="border-b border-white/5 px-1 py-1 text-center">
                             <button type="button" onClick={() => removeRow(i)} className="text-white/30 hover:text-red-400 text-xs">✕</button>
                           </td>
@@ -734,7 +901,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
                     })}
                     {paddingBottom > 0 && (
                       <tr aria-hidden="true">
-                        <td colSpan={ESTIMATE_MATRIX_COL_COUNT} style={{ height: paddingBottom, padding: 0, border: 0 }} />
+                        <td colSpan={matrixColCount} style={{ height: paddingBottom, padding: 0, border: 0 }} />
                       </tr>
                     )}
                   </>
@@ -743,6 +910,9 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
             </tbody>
           </table>
         )}
+        <datalist id="csi-sections">
+          {listCsiSections().map((section) => <option key={section.code} value={section.code}>{section.name}</option>)}
+        </datalist>
       </div>
 
       {/* Totals footer — hidden for masked roles since it exposes markup/profit */}
@@ -756,6 +926,7 @@ export default function EstimateMatrix({ projectId, projectName }: Props) {
             <Total label="Subtotal" value={totals.subtotal} />
             <Total label={`+ Overhead & Profit`} value={totals.finalBid - totals.subtotal} />
             <Total label="FINAL BID" value={totals.finalBid} tone="text-[#CCFF00]" big />
+            <p className="col-span-full text-[10px] text-white/40">Unpriced rows and removed sources stay in the grid and are left out of this sell price.</p>
           </div>
         )}
         {saving && <div className="mt-1 text-center text-[10px] uppercase tracking-widest font-mono text-white/40">Saving…</div>}
@@ -881,7 +1052,6 @@ function Total({ label, value, tone, big }: { label: string; value: number; tone
 function fmt(v: number): string {
   return new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v);
 }
-function round(v: number): number { return Math.round(v * 100) / 100; }
 function numericOr(v: unknown, d: number): number {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : d;

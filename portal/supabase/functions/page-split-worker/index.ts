@@ -35,6 +35,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { PDFDocument } from "https://esm.sh/pdf-lib@1.17.1";
+import { captureException } from "../_shared/errors.ts";
 
 const SUPABASE_URL       = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY   = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -59,6 +60,21 @@ async function fetchWithRetry(url: string, options: RequestInit, maxAttempts = 3
     if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 500 * 2 ** (attempt - 1)));
   }
   throw lastErr;
+}
+
+async function vectorsForSinglePage(pageBytes: Uint8Array): Promise<unknown[] | null> {
+  try {
+    const pdfjs = await import("https://esm.sh/pdfjs-dist@5.4.624/legacy/build/pdf.mjs");
+    const { extractVectorsFromPdfPage } = await import("../../../lib/cad/pdf-vector-extract.ts");
+    const doc = await pdfjs.getDocument({ data: pageBytes, disableWorker: true, isEvalSupported: false }).promise;
+    const page = await doc.getPage(1);
+    const vectors = await extractVectorsFromPdfPage(page);
+    if (typeof doc.destroy === "function") await doc.destroy();
+    return Array.isArray(vectors) ? vectors : [];
+  } catch (err) {
+    console.warn("[page-split] vector extract failed", err);
+    return null;
+  }
 }
 
 interface Payload {
@@ -162,6 +178,7 @@ Deno.serve(async (req) => {
     const pageRows: Array<{
       id: string; tenant_id: string; document_id: string; page_number: number;
       storage_path: string; status: string;
+      vectors: unknown[] | null; vector_status: string; vectors_extracted_at: string | null;
     }> = [];
 
     // pdf-lib doesn't stream; iterate sequentially. For huge decks (500+ pages)
@@ -188,6 +205,7 @@ Deno.serve(async (req) => {
         continue;
       }
 
+      const vectors = await vectorsForSinglePage(pageBytes);
       pageRows.push({
         id: crypto.randomUUID(),
         tenant_id: body.tenant_id,
@@ -195,6 +213,9 @@ Deno.serve(async (req) => {
         page_number: pageNumber,
         storage_path: storagePath,
         status: "pending",
+        vectors: vectors ?? null,
+        vector_status: vectors && vectors.length > 0 ? "done" : "pending",
+        vectors_extracted_at: vectors && vectors.length > 0 ? new Date().toISOString() : null,
       });
     }
 
@@ -340,6 +361,7 @@ Deno.serve(async (req) => {
     }), { status: 200, headers: { "Content-Type": "application/json" } });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
+    captureException(err, { fn: "page-split-worker", document_id: body?.document_id });
     console.error("[page-split-worker]", err);
     await recordEvent("failed", String(err?.message ?? err));
     await db.from("documents")

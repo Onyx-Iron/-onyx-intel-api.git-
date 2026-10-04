@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant, assertPageBelongsToProject } from "@/lib/project-controls/server";
 import type { CalibrationPoint, CalibrationUpsertBody } from "@/lib/types/takeoff";
+import { previewRecalibration, recalibrationNeedsConfirm } from "@/lib/takeoff/recalibration";
+import { matchScalePreset, pageSpaceFactorForPreset } from "@/lib/takeoff/scale-presets";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 
 export const runtime = "nodejs";
@@ -57,6 +59,44 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   if (!project_id || !page_id) {
     return NextResponse.json({ error: "project_id and page_id required" }, { status: 400 });
   }
+
+  if (body.suggestion_only) {
+    const preset = matchScalePreset(body.scale_preset ?? "");
+    if (!preset) return NextResponse.json({ error: "Unknown scale suggestion." }, { status: 400 });
+    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    try {
+      await assertProjectBelongsToTenant(project_id, tenantId);
+      await assertPageBelongsToProject(page_id, project_id, tenantId);
+    } catch (err) {
+      return NextResponse.json({ error: err instanceof Error ? err.message : "ownership check failed" }, { status: 403 });
+    }
+    const db = await createServiceClient();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyDb = db as any;
+    const { data: existing } = await anyDb.from("sheet_calibrations").select("status, verified").eq("tenant_id", tenantId).eq("page_id", page_id).maybeSingle();
+    if (existing?.status === "verified" && existing?.verified === true) {
+      return NextResponse.json({ calibration: existing, kept: "verified" });
+    }
+    const { data, error } = await anyDb.from("sheet_calibrations").upsert({
+      tenant_id: tenantId,
+      project_id,
+      page_id,
+      unit_type: "LF",
+      page_space_scale_factor: pageSpaceFactorForPreset(preset),
+      coordinate_system_version: "v1",
+      status: "needs_verification",
+      verified: false,
+      active: true,
+      known_unit: preset.label,
+      created_by: userId,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "page_id" }).select("id, page_id, status, verified, page_space_scale_factor, known_unit").single();
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ calibration: data, suggested: true });
+  }
+
   const validPoint = (p: unknown): p is CalibrationPoint => typeof p === "object" && p !== null
     && typeof (p as CalibrationPoint).x === "number" && Number.isFinite((p as CalibrationPoint).x)
     && typeof (p as CalibrationPoint).y === "number" && Number.isFinite((p as CalibrationPoint).y);
@@ -98,6 +138,35 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     .eq("page_id", page_id)
     .maybeSingle();
 
+  const oldFactor = typeof before?.page_space_scale_factor === "number" ? before.page_space_scale_factor : null;
+  const oldVerified = before?.status === "verified" && oldFactor != null && oldFactor > 0;
+  const { data: drafts } = oldVerified
+    ? await anyDb
+      .from("manual_takeoffs")
+      .select("id, label, takeoff_type, quantity, unit, geometry, cost_code, row_version")
+      .eq("tenant_id", tenantId)
+      .eq("page_id", page_id)
+      .is("deleted_at", null)
+    : { data: [] as Array<Record<string, unknown>> };
+  const preview = previewRecalibration(
+    ((drafts ?? []) as Array<{ id: string; label?: string | null; takeoff_type: string; quantity: number; unit?: string | null }>).map((row) => ({
+      id: row.id,
+      label: row.label,
+      takeoff_type: row.takeoff_type,
+      quantity: Number(row.quantity),
+      unit: row.unit,
+    })),
+    oldVerified ? oldFactor : null,
+    pageSpaceScaleFactor,
+  );
+  if (oldVerified && recalibrationNeedsConfirm(preview) && body.apply_to_drafts !== true) {
+    return NextResponse.json({
+      error: "Confirm the before and after quantities before this scale change is saved.",
+      requires_confirmation: true,
+      preview,
+    }, { status: 409 });
+  }
+
   const { data, error } = await anyDb
     .from("sheet_calibrations")
     .upsert(
@@ -130,5 +199,25 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     actor_user_id: userId, before: before ?? null, after: data,
   });
 
-  return NextResponse.json({ calibration: data });
+  if (body.apply_to_drafts === true) {
+    const draftRows = (drafts ?? []) as Array<{ id: string; geometry: unknown; unit?: string | null; cost_code?: string | null; row_version?: number }>;
+    for (const line of preview) {
+      if (!line.recomputed) continue;
+      const row = draftRows.find((candidate) => candidate.id === line.id);
+      if (!row || typeof row.row_version !== "number") continue;
+      await anyDb.rpc("update_manual_takeoff_tx", {
+        p_id: row.id,
+        p_tenant_id: tenantId,
+        p_expected_row_version: row.row_version,
+        p_geometry: row.geometry ?? {},
+        p_quantity: line.after,
+        p_unit: row.unit ?? null,
+        p_cost_code: row.cost_code ?? null,
+        p_actor_user_id: userId,
+        p_calculation_formula_version: "recalibration-v1",
+      });
+    }
+  }
+
+  return NextResponse.json({ calibration: data, preview });
 }

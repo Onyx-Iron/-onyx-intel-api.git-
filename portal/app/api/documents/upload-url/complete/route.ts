@@ -1,5 +1,5 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { requirePermission } from "@/lib/project-controls/route-guards";
@@ -9,6 +9,7 @@ import {
   enqueueRailwayExtractFromStorage,
   shouldEnqueueRailwayExtract,
 } from "@/lib/documents/railwayExtract";
+import { ingestStampIsLive, shouldMarkIngestStartError } from "@/lib/documents/ingest-start";
 
 export const runtime = "nodejs";
 
@@ -39,7 +40,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const db = await createServiceClient();
     const { data: doc, error } = await db
       .from("documents")
-      .select("id, file_name, project_id, status, meta")
+      .select("id, file_name, project_id, status, processing_started_at, meta")
       .eq("id", body.document_id)
       .eq("tenant_id", tenantId)
       .maybeSingle();
@@ -124,43 +125,53 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
     }
 
-    // ── PDF / other → ingest (page-split-worker for large plan sets) ───────
+    // Ingest owns processing_started_at. Writing it here makes the first
+    // start look in-flight, and the skip used to be stored as ingest_start.
+    if (ingestStampIsLive(doc.status, doc.processing_started_at)) {
+      return NextResponse.json({
+        ok: true,
+        document: { id: doc.id, file_name: doc.file_name, status: "processing" },
+        processing: "async_ingest",
+      });
+    }
+
     await db.from("documents").update({
       status: "processing",
-      processing_started_at: new Date().toISOString(),
+      processing_started_at: null,
       last_error: null,
       last_error_step: null,
     }).eq("id", doc.id).eq("tenant_id", tenantId);
 
-    void fetch(new URL(`/api/documents/${doc.id}/ingest`, req.url).toString(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Cookie: req.headers.get("cookie") ?? "",
-      },
-      body: JSON.stringify({}),
-    }).then(async (res) => {
-      if (res.ok || res.status === 202) return;
-      const detail = (await res.text().catch(() => "")).slice(0, 500);
+    const ingestUrl = new URL(`/api/documents/${doc.id}/ingest`, req.url).toString();
+    const cookie = req.headers.get("cookie") ?? "";
+    after(async () => {
       try {
+        const res = await fetch(ingestUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: cookie,
+          },
+          body: JSON.stringify({}),
+        });
+        if (!shouldMarkIngestStartError(res.status)) return;
+        const detail = (await res.text().catch(() => "")).slice(0, 500);
         await db.from("documents").update({
           status: "error",
           last_error: `Ingest failed to start (${res.status}): ${detail}`.slice(0, 2000),
           last_error_step: "ingest_start",
         }).eq("id", doc.id).in("status", ["processing", "pending"]);
-      } catch (markErr) {
-        console.error("[upload-url/complete] failed to mark document error", markErr);
-      }
-    }).catch(async (err) => {
-      console.error("[upload-url/complete] ingest fetch failed", err);
-      try {
-        await db.from("documents").update({
-          status: "error",
-          last_error: `Ingest request failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 2000),
-          last_error_step: "ingest_start",
-        }).eq("id", doc.id).in("status", ["processing", "pending"]);
-      } catch (markErr) {
-        console.error("[upload-url/complete] failed to mark document error", markErr);
+      } catch (err) {
+        console.error("[upload-url/complete] ingest fetch failed", err);
+        try {
+          await db.from("documents").update({
+            status: "error",
+            last_error: `Ingest request failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 2000),
+            last_error_step: "ingest_start",
+          }).eq("id", doc.id).in("status", ["processing", "pending"]);
+        } catch (markErr) {
+          console.error("[upload-url/complete] failed to mark document error", markErr);
+        }
       }
     });
 

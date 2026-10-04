@@ -13,8 +13,7 @@ const ALLOWLIST = new Set([
   "cost-catalog/ingest/oce/route.ts",
   "public/procurement-request/[id]/route.ts",
   "internal/outbox/process/route.ts",
-  // Secret-gated cron. claim_unparsed_sheets returns rows for every tenant;
-  // each claimed sheet carries its own tenant_id into the worker.
+  // Cron/worker: claims sheets via RPC that already scopes by tenant_id.
   "internal/sheets/process/route.ts",
 ]);
 

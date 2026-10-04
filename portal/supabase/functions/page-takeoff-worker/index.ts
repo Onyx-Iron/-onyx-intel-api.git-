@@ -30,6 +30,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { captureException } from "../_shared/errors.ts";
 
 const SUPABASE_URL     = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -137,6 +138,30 @@ Deno.serve(async (req) => {
   await recordEvent("started");
 
   try {
+    const { data: sourceDoc } = await db
+      .from("documents")
+      .select("doc_type, status, meta")
+      .eq("id", body.document_id)
+      .eq("tenant_id", body.tenant_id)
+      .maybeSingle();
+    const docType = String(sourceDoc?.doc_type ?? "").toLowerCase();
+    const partialOpen = sourceDoc?.status === "complete_with_errors"
+      && sourceDoc?.meta?.partial_acknowledged !== true;
+    if ((docType && docType !== "drawing") || partialOpen) {
+      await db.from("document_pages")
+        .update({ takeoff_status: "skipped", updated_at: new Date().toISOString() })
+        .eq("id", body.page_id)
+        .eq("tenant_id", body.tenant_id);
+      const reason = partialOpen
+        ? "Takeoff skipped until missing pages are retried or acknowledged."
+        : "Specs and other non-drawing files do not emit quantities.";
+      await recordEvent("skipped", reason);
+      await refreshDocumentSummary();
+      return new Response(JSON.stringify({ ok: true, skipped: true, reason }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
     if (!PYTHON_API_URL) throw new Error("PYTHON_API_URL is not configured for this function");
 
     // ── 1. Download the single-page PDF ─────────────────────────────────────
@@ -238,6 +263,7 @@ Deno.serve(async (req) => {
     });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
+    captureException(err, { fn: "page-takeoff-worker", page_id: body?.page_id });
     console.error("[page-takeoff-worker]", err);
     const message = String(err?.message ?? err);
     await recordEvent("failed", message);
