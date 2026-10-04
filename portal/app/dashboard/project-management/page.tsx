@@ -225,7 +225,7 @@ export default function ProjectManagementPage() {
                   [...Array(6)].map((_, index) => (
                     <tr key={index}><td colSpan={6} className="px-4 py-3"><div className="h-3 w-2/3 animate-pulse rounded bg-white/5" /></td></tr>
                   ))
-                ) : !hasOpenItems && !error ? (
+                ) : !hasOpenItems ? (
                   <tr>
                     <td colSpan={6}>
                       <EmptyState

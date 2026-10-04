@@ -152,7 +152,7 @@ export default function DocumentsPage() {
             <tbody className="divide-y divide-white/5">
               {loading ? (
                 <SkeletonRows />
-              ) : filtered.length === 0 && !error ? (
+              ) : filtered.length === 0 ? (
                 <tr>
                   <td colSpan={6}>
                     <div className="py-4">

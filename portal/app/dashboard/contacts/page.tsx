@@ -203,7 +203,7 @@ export default function ContactsPage() {
             <tbody className="divide-y divide-white/5">
               {loading ? (
                 <SkeletonRows />
-              ) : filteredContacts.length === 0 && !error ? (
+              ) : filteredContacts.length === 0 ? (
                 <tr>
                   <td colSpan={6}>
                     <div className="py-4">

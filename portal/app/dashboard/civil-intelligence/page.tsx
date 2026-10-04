@@ -160,7 +160,7 @@ export default function GlobalCivilIntelligencePage() {
                   [...Array(4)].map((_, i) => (
                     <tr key={i}><td colSpan={5} className="px-4 py-3"><div className="h-3 w-2/3 bg-white/5 animate-pulse rounded" /></td></tr>
                   ))
-                ) : filteredRows.length === 0 && !error ? (
+                ) : filteredRows.length === 0 ? (
                   <tr>
                     <td colSpan={5}>
                       <div className="py-4">
