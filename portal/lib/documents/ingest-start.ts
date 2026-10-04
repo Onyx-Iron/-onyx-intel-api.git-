@@ -1,3 +1,6 @@
+/** Same window ingest uses before it will start a second run. */
+export const INGEST_CLAIM_WINDOW_MS = 270_000;
+
 /**
  * fire-and-forget ingest must not flip a document to error when another
  * run already owns it. 202 (queued split) is success. 409 is the in-flight
@@ -8,4 +11,26 @@ export function shouldMarkIngestStartError(status: number): boolean {
   if (status >= 200 && status < 300) return false;
   if (status === 409) return false;
   return true;
+}
+
+/**
+ * A fresh `processing_started_at` only means a run is in flight when this
+ * ingest already claimed the row. Upload complete used to write that
+ * timestamp and then call ingest, so the first start looked like a duplicate
+ * and came back `already_processing`.
+ */
+export function ingestStampIsLive(
+  status: string | null | undefined,
+  processingStartedAt: string | null | undefined,
+  nowMs = Date.now(),
+  windowMs = INGEST_CLAIM_WINDOW_MS,
+): boolean {
+  if (status !== "processing" || !processingStartedAt) return false;
+  const started = new Date(processingStartedAt).getTime();
+  if (!Number.isFinite(started)) return false;
+  return nowMs - started < windowMs;
+}
+
+export function shouldSkipLiveIngest(stampIsLive: boolean, claimedByIngest: boolean): boolean {
+  return stampIsLive && claimedByIngest;
 }

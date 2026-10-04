@@ -8,19 +8,18 @@
 //   1. Download the single-page PDF from storage.
 //   2. Read the embedded text layer with pdf.js.
 //   3. Store that text on document_pages.ocr_text.
-//   4. Chunk it into document_chunks with a null embedding.
+//   4. Replace document_chunks for this page. The embedding stays null.
 //
-// Env vars:
-//   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
-//   PLANS_BUCKET (default "plans-bucket").
+// This function does not call a model, so a missing API key cannot fail
+// the page. A missing file or a pdf.js failure marks the page error so
+// the portal retry can run this worker again.
 
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import { captureException } from "../_shared/errors.ts";
 
-const SUPABASE_URL     = Deno.env.get("SUPABASE_URL")!;
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const PLANS_BUCKET     = Deno.env.get("PLANS_BUCKET") ?? "plans-bucket";
+const PLANS_BUCKET = Deno.env.get("PLANS_BUCKET") ?? "plans-bucket";
 
 interface Payload {
   page_id: string;
@@ -83,51 +82,60 @@ Deno.serve(async (req) => {
     if (dl.error || !dl.data) throw new Error(`storage download: ${dl.error?.message ?? "empty"}`);
     const bytes = new Uint8Array(await dl.data.arrayBuffer());
     const text = await readSinglePageText(bytes);
-
     const chunks = chunkText(text, 1200, 200);
-    if (chunks.length === 0) {
-      await db.from("document_pages")
-        .update({ status: "done", ocr_text: text || null, updated_at: new Date().toISOString() })
-        .eq("id", body.page_id);
-      await recordEvent("ocr", "succeeded");
-      await recordEvent("embedding", "skipped", "no text on this page");
-      await refreshDocumentSummary();
-      return new Response(JSON.stringify({ ok: true, page_id: body.page_id, chunks: 0 }), { status: 200 });
+
+    const { error: clearErr } = await db.from("document_chunks")
+      .delete()
+      .eq("page_id", body.page_id)
+      .eq("tenant_id", body.tenant_id);
+    if (clearErr) throw new Error(`clear chunks: ${clearErr.message}`);
+
+    if (chunks.length > 0) {
+      const rows = chunks.map((content, i) => ({
+        id: crypto.randomUUID(),
+        tenant_id: body.tenant_id,
+        document_id: body.document_id,
+        page_id: body.page_id,
+        page_number: body.page_number,
+        chunk_index: i,
+        content,
+        embedding: null,
+      }));
+      const { error: insErr } = await db.from("document_chunks").insert(rows);
+      if (insErr) throw new Error(`insert chunks: ${insErr.message}`);
     }
 
-    const rows = chunks.map((content, i) => ({
-      id: crypto.randomUUID(),
-      tenant_id: body.tenant_id,
-      document_id: body.document_id,
-      page_id: body.page_id,
-      page_number: body.page_number,
-      chunk_index: i,
-      content,
-      embedding: null,
-    }));
-    const { error: insErr } = await db.from("document_chunks").insert(rows);
-    if (insErr) throw new Error(`insert chunks: ${insErr.message}`);
-
     await db.from("document_pages")
-      .update({ status: "done", ocr_text: text, updated_at: new Date().toISOString() })
-      .eq("id", body.page_id);
+      .update({
+        status: "done",
+        error: null,
+        ocr_text: text || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", body.page_id)
+      .eq("tenant_id", body.tenant_id);
     await recordEvent("ocr", "succeeded");
-    await recordEvent("embedding", "skipped", "text stored without an embedding");
+    await recordEvent(
+      "embedding",
+      "skipped",
+      chunks.length === 0 ? "no text on this page" : "text stored without an embedding",
+    );
     await refreshDocumentSummary();
 
     return new Response(JSON.stringify({
       ok: true,
       page_id: body.page_id,
-      chunks: rows.length,
+      reader: "pdfjs",
+      chunks: chunks.length,
     }), { status: 200 });
   } catch (err: any) {
-    captureException(err, { fn: "page-processor" });
     console.error("[page-processor]", err);
     const message = String(err?.message ?? err);
     await recordEvent("ocr", "failed", message);
     await db.from("document_pages")
       .update({ status: "error", error: message.slice(0, 500), updated_at: new Date().toISOString() })
-      .eq("id", body.page_id);
+      .eq("id", body.page_id)
+      .eq("tenant_id", body.tenant_id);
     await refreshDocumentSummary();
     return new Response(JSON.stringify({ error: message }), { status: 500 });
   }
