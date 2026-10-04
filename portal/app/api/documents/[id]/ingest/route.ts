@@ -21,6 +21,7 @@ import {
   queueDriveDocumentForPageSplit,
   queueLocalDocumentForPageSplit,
 } from "@/lib/documents/queuePageSplit";
+import { ingestStampIsLive, shouldSkipLiveIngest } from "@/lib/documents/ingest-start";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
@@ -208,12 +209,6 @@ export async function POST(
   try {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    try {
-      geminiApiKey();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return NextResponse.json({ error: msg }, { status: 503 });
-    }
 
     const body = await req.json().catch(() => ({})) as { access_token?: string; password?: string };
     const accessToken = body.access_token; // optional — server falls back to stored token
@@ -257,11 +252,21 @@ export async function POST(
     }
 
     const priorStartedAt = doc.processing_started_at as string | null;
-    const activeIngest = doc.status === "processing"
-      && priorStartedAt
-      && Date.now() - new Date(priorStartedAt).getTime() < CONCURRENT_INGEST_MS;
-    if (activeIngest) {
-      return NextResponse.json({ ok: true, skipped: true, reason: "already_processing" }, { status: 409 });
+    const stampIsLive = ingestStampIsLive(doc.status, priorStartedAt, Date.now(), CONCURRENT_INGEST_MS);
+    let claimedByIngest = false;
+    if (stampIsLive && priorStartedAt) {
+      const { count, error: claimEventErr } = await db
+        .from("document_processing_events")
+        .select("id", { count: "exact", head: true })
+        .eq("document_id", docId)
+        .eq("tenant_id", resolvedTenantId)
+        .eq("step", "indexing")
+        .eq("status", "started")
+        .gte("started_at", priorStartedAt);
+      claimedByIngest = !claimEventErr && (count ?? 0) > 0;
+    }
+    if (shouldSkipLiveIngest(stampIsLive, claimedByIngest)) {
+      return NextResponse.json({ ok: true, skipped: true, reason: "already_processing" });
     }
 
     // Optimistic claim — only one concurrent ingest should pass this update.
@@ -276,7 +281,7 @@ export async function POST(
       : claimQuery.is("processing_started_at", null);
     const { data: claimed } = await claimQuery.select("id").maybeSingle();
     if (!claimed) {
-      return NextResponse.json({ ok: true, skipped: true, reason: "concurrent_claim" }, { status: 409 });
+      return NextResponse.json({ ok: true, skipped: true, reason: "concurrent_claim" });
     }
 
     await logDocumentProcessingEvent({
