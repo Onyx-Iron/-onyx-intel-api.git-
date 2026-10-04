@@ -5,12 +5,12 @@
 //   POST { page_id, document_id, tenant_id, page_number, storage_path }
 //
 // Confirms the page file is in storage and marks the page ready for the
-// portal's local text and geometry pass. It does not call a model and it
-// does not embed. A missing API key cannot fail the page.
+// portal's local text and geometry pass. This function does not call a
+// model and does not embed, so an invalid or missing API key cannot fail
+// the page.
 
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import { captureException } from "../_shared/errors.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -85,7 +85,7 @@ Deno.serve(async (req) => {
       .eq("id", body.page_id)
       .eq("tenant_id", body.tenant_id);
     await recordEvent("ocr", "succeeded", "local text is read in the portal");
-    await recordEvent("embedding", "skipped", "embeddings are not required to measure a sheet");
+    await recordEvent("embedding", "skipped", "embeddings are not required to store or measure the sheet");
     await refreshDocumentSummary();
 
     return new Response(JSON.stringify({
@@ -95,7 +95,6 @@ Deno.serve(async (req) => {
       chunks: 0,
     }), { status: 200 });
   } catch (err: any) {
-    captureException(err, { fn: "page-processor" });
     console.error("[page-processor]", err);
     const message = String(err?.message ?? err);
     await recordEvent("ocr", "failed", message);

@@ -49,7 +49,7 @@ export function normalizeDocumentClass(value: string | null | undefined): Docume
 }
 
 export function quantitiesAllowedForDocType(docType: string | null | undefined): boolean {
-  if (!docType) return true;
+  if (!docType) return false;
   return QUANTITY_DOC_TYPES.has(docType);
 }
 

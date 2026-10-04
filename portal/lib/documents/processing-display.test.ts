@@ -62,8 +62,10 @@ describe("processing display", () => {
     assert.doesNotMatch(blocked ?? "", /splitting/i);
   });
 
-  it("does not emit quantities from a spec", () => {
+  it("does not emit quantities from a spec, an unclassified file, or other", () => {
     assert.equal(quantitiesAllowedForDocType("spec"), false);
+    assert.equal(quantitiesAllowedForDocType(null), false);
+    assert.equal(quantitiesAllowedForDocType("other"), false);
     assert.match(takeoffBlockReason({ status: "complete", doc_type: "spec" }) ?? "", /Only drawings/);
     assert.equal(processingStage({ status: "processing", ocr_status: "done" }), "Indexing");
   });

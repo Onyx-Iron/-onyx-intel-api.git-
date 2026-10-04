@@ -1,6 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
+import { visionStoredQuantity } from "@/lib/takeoff/vision-quantity";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertPageBelongsToProject } from "@/lib/project-controls/server";
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { auditUpdate } from "@/lib/audit";
@@ -173,18 +174,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             "  4. Bill of materials or key legends",
             "  5. Raster images / photo insets showing tagged items",
             "  6. Dimension strings that imply lengths, widths, areas",
-            "  7. Civil grading plans — spot elevations, contour lines, EX/EXIST (existing",
-            "     grade), PROP/FG (proposed/finish grade), TC/FL (top/flow line), TW/BW",
-            "     (top/bottom of wall) callouts. When present, emit SEPARATE earthwork items",
-            "     by scope rather than one generic line: 31-11-00 clearing & grubbing (AC),",
-            "     31-14-13 topsoil strip (CY, assume 6in depth if not noted), 31-23-16 mass",
-            "     excavation/cut-fill (CY — read every existing/proposed elevation visible,",
-            "     area-weight them across the graded region rather than a flat few-point",
-            "     average, and put the elevations and areas used in raw_text), 31-25-00",
-            "     erosion control (LF/SF), 32-32-00 retaining walls (LF, from TW/BW pairs).",
-            "     Only emit 31-23-23 building-pad/subgrade-prep if this specific sheet states",
-            "     a recompaction depth and offset — otherwise skip it; that spec usually lives",
-            "     in the geotechnical report, not the grading plan.",
+            "  7. Civil callouts that name a count or a length printed on the sheet.",
+            "     Do not invent cut, fill, or cubic-yard earthwork. Those quantities come",
+            "     from a measured grid, not from this reading.",
             "",
             "Return STRICT JSON matching this schema (no prose, no markdown fences):",
             "{",
@@ -312,7 +304,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       p_page_number: (page as { page_number?: number }).page_number ?? 0,
       p_items: items.map((it) => ({
         description: it.description,
-        quantity: it.quantity,
+        quantity: visionStoredQuantity(it.source, it.quantity),
         unit: it.unit,
         cost_code: it.cost_code ?? null,
         layer_hint: it.layer_hint ?? null,

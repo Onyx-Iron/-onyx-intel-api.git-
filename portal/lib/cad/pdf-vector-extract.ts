@@ -33,8 +33,41 @@ export interface ExtractedVector {
 }
 
 interface Segment {
-  cmd: "M" | "L" | "C" | "Q";
+  cmd: "M" | "L" | "C" | "V" | "Y";
   args: number[];
+}
+
+/** pdf.js RGB channels are 0–1. Multiplying by 255 here keeps civil colors distinct. */
+export function pdfChannelHex(r: number, g: number, b: number): string {
+  return rgb(r, g, b);
+}
+
+/** Short chords along a cubic so the measured length is longer than the endpoint chord when the curve bows. */
+export function flattenCubic(
+  p0: [number, number],
+  p1: [number, number],
+  p2: [number, number],
+  p3: [number, number],
+  steps = 8,
+): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  const count = Math.max(2, steps);
+  for (let i = 1; i <= count; i++) {
+    const t = i / count;
+    const mt = 1 - t;
+    const x = mt * mt * mt * p0[0] + 3 * mt * mt * t * p1[0] + 3 * mt * t * t * p2[0] + t * t * t * p3[0];
+    const y = mt * mt * mt * p0[1] + 3 * mt * mt * t * p1[1] + 3 * mt * t * t * p2[1] + t * t * t * p3[1];
+    out.push([x, y]);
+  }
+  return out;
+}
+
+export function polylineLength(points: Array<[number, number]>): number {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) {
+    total += Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
+  }
+  return total;
 }
 
 function asCoordList(value: unknown): ArrayLike<number> | null {
@@ -84,8 +117,8 @@ function decodeCommandStream(ops: Iterable<number>, argsArr: number[]): Segment[
     if (op === 13)      { segs.push({ cmd: "M", args: argsArr.slice(idx, idx + 2) }); idx += 2; }
     else if (op === 14) { segs.push({ cmd: "L", args: argsArr.slice(idx, idx + 2) }); idx += 2; }
     else if (op === 15) { segs.push({ cmd: "C", args: argsArr.slice(idx, idx + 6) }); idx += 6; }
-    else if (op === 16) { segs.push({ cmd: "C", args: argsArr.slice(idx, idx + 4) }); idx += 4; }
-    else if (op === 17) { segs.push({ cmd: "C", args: argsArr.slice(idx, idx + 4) }); idx += 4; }
+    else if (op === 16) { segs.push({ cmd: "V", args: argsArr.slice(idx, idx + 4) }); idx += 4; }
+    else if (op === 17) { segs.push({ cmd: "Y", args: argsArr.slice(idx, idx + 4) }); idx += 4; }
     else if (op === 18) { /* closePath */ }
     else if (op === 19) {
       const [x, y, w, h] = argsArr.slice(idx, idx + 4); idx += 4;
@@ -175,17 +208,48 @@ export async function extractVectorsFromPdfPage(page: any): Promise<ExtractedVec
     const ctm = ctmStack[ctmStack.length - 1];
     const pts: Array<[number, number]> = [];
     let last: [number, number] | null = null;
+    let cursor: [number, number] | null = null;
     for (const seg of path) {
       if (seg.cmd === "M" || seg.cmd === "L") {
+        cursor = [seg.args[0], seg.args[1]];
         const [wx, wy] = applyTransform(ctm, seg.args[0], seg.args[1]);
         if (!last || Math.hypot(wx - last[0], wy - last[1]) > 0.05) {
           pts.push([wx, wy]);
           last = [wx, wy];
         }
-      } else if (seg.cmd === "C") {
-        const [wx, wy] = applyTransform(ctm, seg.args[seg.args.length - 2], seg.args[seg.args.length - 1]);
-        pts.push([wx, wy]);
-        last = [wx, wy];
+      } else if (seg.cmd === "C" && seg.args.length < 6) {
+        const end: [number, number] = [seg.args[seg.args.length - 2], seg.args[seg.args.length - 1]];
+        cursor = end;
+        const [wx, wy] = applyTransform(ctm, end[0], end[1]);
+        if (!last || Math.hypot(wx - last[0], wy - last[1]) > 0.05) {
+          pts.push([wx, wy]);
+          last = [wx, wy];
+        }
+      } else if ((seg.cmd === "C" || seg.cmd === "V" || seg.cmd === "Y") && cursor) {
+        let c1: [number, number];
+        let c2: [number, number];
+        let end: [number, number];
+        if (seg.cmd === "C") {
+          c1 = [seg.args[0], seg.args[1]];
+          c2 = [seg.args[2], seg.args[3]];
+          end = [seg.args[4], seg.args[5]];
+        } else if (seg.cmd === "V") {
+          c1 = cursor;
+          c2 = [seg.args[0], seg.args[1]];
+          end = [seg.args[2], seg.args[3]];
+        } else {
+          c1 = [seg.args[0], seg.args[1]];
+          end = [seg.args[2], seg.args[3]];
+          c2 = end;
+        }
+        for (const [x, y] of flattenCubic(cursor, c1, c2, end)) {
+          const [wx, wy] = applyTransform(ctm, x, y);
+          if (!last || Math.hypot(wx - last[0], wy - last[1]) > 0.05) {
+            pts.push([wx, wy]);
+            last = [wx, wy];
+          }
+        }
+        cursor = end;
       }
     }
     if (pts.length >= 2) {
@@ -234,8 +298,8 @@ export async function extractVectorsFromPdfPage(page: any): Promise<ExtractedVec
       const next = multiply(cur, args);
       ctmStack[ctmStack.length - 1] = next;
     }
-    else if (fn === OP.setStrokeRGBColor) color = rgb(args[0] / 255, args[1] / 255, args[2] / 255);
-    else if (fn === OP.setFillRGBColor)   color = rgb(args[0] / 255, args[1] / 255, args[2] / 255);
+    else if (fn === OP.setStrokeRGBColor) color = pdfChannelHex(args[0], args[1], args[2]);
+    else if (fn === OP.setFillRGBColor)   color = pdfChannelHex(args[0], args[1], args[2]);
     else if (fn === OP.setStrokeGray)     { const g = args[0]; color = rgb(g, g, g); }
     else if (fn === OP.constructPath) {
       const decoded = decodeConstructPath(args);

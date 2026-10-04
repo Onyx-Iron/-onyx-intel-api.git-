@@ -6,15 +6,15 @@
     },
     {
       "path": "/api/internal/gmail/plan-poll",
-      "schedule": "0 */6 * * *"
+      "schedule": "0 7 * * *"
     },
     {
       "path": "/api/internal/sheets/process",
-      "schedule": "*/5 * * * *"
+      "schedule": "0 8 * * *"
     },
     {
       "path": "/api/internal/documents/supervise",
-      "schedule": "*/5 * * * *"
+      "schedule": "0 9 * * *"
     }
   ]
 }

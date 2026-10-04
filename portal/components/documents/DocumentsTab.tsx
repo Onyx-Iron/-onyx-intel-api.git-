@@ -13,9 +13,15 @@ import { uploadDocumentDirect } from "@/lib/documents/browser-upload";
 import {
   isInFlightStatus,
   isRetryable,
+  isTerminalFailure,
   isTerminalSuccess,
   needsSplitStatusPoll,
 } from "@/lib/documents/status";
+import {
+  formatStageProgress,
+  type PipelineProgress,
+  type StageCounts,
+} from "@/lib/documents/pipelineProgress";
 import { PipelineStage, type PipelineStatus } from "@/components/documents/PipelineStage";
 import {
   DOCUMENT_CLASSES,
@@ -27,6 +33,13 @@ import {
   processingStage,
   takeoffBlockReason,
 } from "@/lib/documents/processing-display";
+
+type DocPipelineSnapshot = PipelineProgress & {
+  labels: { ocr: string; takeoff: string };
+  document_status?: string;
+};
+
+const EMPTY_STAGE: StageCounts = { total: 0, done: 0, error: 0, pending: 0, processing: 0 };
 
 interface ParsedPage {
   page_number: number;
@@ -136,9 +149,12 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   const [asking, setAsking] = useState(false);
   const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
   const [retryingDocId, setRetryingDocId] = useState<string | null>(null);
+  const [retryingPageId, setRetryingPageId] = useState<string | null>(null);
+  const [pipelineByDoc, setPipelineByDoc] = useState<Record<string, DocPipelineSnapshot>>({});
   const [passwords, setPasswords] = useState<Record<string, string>>({});
   const [expandedDocId, setExpandedDocId] = useState<string | null>(null);
   const [pagesByDoc, setPagesByDoc] = useState<Record<string, { loading: boolean; pages: ParsedPage[]; questions: SavedQuestion[]; classification?: Record<string, string>; error?: string }>>({});
+  const pipelinePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadInsights = useCallback(async (docId: string) => {
     setPagesByDoc((prev) => ({ ...prev, [docId]: { loading: true, pages: prev[docId]?.pages ?? [], questions: prev[docId]?.questions ?? [], classification: prev[docId]?.classification } }));
@@ -156,13 +172,19 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
   }, []);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollStartedAtRef = useRef<number | null>(null);
+  const documentsRef = useRef(documents);
+  documentsRef.current = documents;
+  const eventSourceRef = useRef<EventSource | null>(null);
   const [pollTimedOut, setPollTimedOut] = useState(false);
+  const [liveStatus, setLiveStatus] = useState<"off" | "connecting" | "live" | "fallback">("off");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Stop polling after this many ms if status still hasn't changed —
+  // Stop watching after this many ms if status still hasn't changed —
   // a stuck "processing" usually means the fire-and-forget ingest crashed
   // before it could update the row to "error".
   const POLL_TIMEOUT_MS = 5 * 60 * 1000;
+  // Slow safety poll when SSE is live — still kicks split-status workers.
+  const SAFETY_POLL_MS = 20_000;
 
   const toggleInsights = useCallback(async (docId: string) => {
     if (expandedDocId === docId) {
@@ -188,6 +210,57 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
       }),
     );
   }, []);
+
+  const docsNeedingPipelinePoll = useCallback((docs: Document[]) => {
+    return docs.filter((d) =>
+      isInFlightStatus(d.status)
+      || needsSplitStatusPoll(d)
+      || d.status === "complete_with_errors"
+      || isTerminalFailure(d.status),
+    );
+  }, []);
+
+  const pollPipelineProgress = useCallback(async (docs: Document[]) => {
+    const targets = docsNeedingPipelinePoll(docs);
+    if (targets.length === 0) return;
+    await Promise.all(
+      targets.map(async (doc) => {
+        try {
+          const res = await fetch(
+            `/api/documents/${encodeURIComponent(doc.id)}/pipeline`,
+            { cache: "no-store" },
+          );
+          if (!res.ok) return;
+          const data = await res.json() as {
+            ocr?: StageCounts;
+            takeoff?: StageCounts;
+            failed_pages?: DocPipelineSnapshot["failed_pages"];
+            finished?: boolean;
+            labels?: { ocr?: string; takeoff?: string };
+            document_status?: string;
+          };
+          const ocr = data.ocr ?? EMPTY_STAGE;
+          const takeoff = data.takeoff ?? EMPTY_STAGE;
+          setPipelineByDoc((prev) => ({
+            ...prev,
+            [doc.id]: {
+              ocr,
+              takeoff,
+              failed_pages: data.failed_pages ?? [],
+              finished: Boolean(data.finished),
+              labels: {
+                ocr: data.labels?.ocr ?? formatStageProgress("OCR", ocr),
+                takeoff: data.labels?.takeoff ?? formatStageProgress("Takeoff", takeoff),
+              },
+              document_status: data.document_status,
+            },
+          }));
+        } catch {
+          /* best effort */
+        }
+      }),
+    );
+  }, [docsNeedingPipelinePoll]);
 
   const [docsPage, setDocsPage] = useState(1);
   const [docsHasMore, setDocsHasMore] = useState(false);
@@ -223,48 +296,147 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     loadDocuments();
   }, [loadDocuments]);
 
-  // Poll while any doc is in-flight — including async split/page workers —
-  // but give up after POLL_TIMEOUT_MS so a silent failure doesn't spin forever.
+  const hasInFlightDocs = documents.some(
+    (d) => isInFlightStatus(d.status) || needsSplitStatusPoll(d),
+  );
+
+  // Prefer SSE status stream while docs are in-flight; fall back to interval
+  // polling if EventSource fails. Split-status kicks still run on a slow
+  // safety timer because those endpoints have finalize side effects.
+  // Depend on the boolean (not `documents`) so SSE merges do not reconnect.
   useEffect(() => {
-    const hasInFlight = documents.some(
-      (d) => isInFlightStatus(d.status) || needsSplitStatusPoll(d),
-    );
-    if (hasInFlight && !pollTimedOut) {
-      if (!pollRef.current) {
-        pollStartedAtRef.current = Date.now();
-        pollRef.current = setInterval(() => {
-          void (async () => {
-            const startedAt = pollStartedAtRef.current ?? Date.now();
-            if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
-              if (pollRef.current) {
-                clearInterval(pollRef.current);
-                pollRef.current = null;
-              }
-              setPollTimedOut(true);
-              return;
-            }
-            const list = await loadDocuments(false);
-            await pollSplitStatus(list);
-            await loadDocuments(false);
-          })();
-        }, 4000);
-      }
-    } else {
+    if (!hasInFlightDocs || pollTimedOut) {
       if (pollRef.current) {
         clearInterval(pollRef.current);
         pollRef.current = null;
       }
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
       pollStartedAtRef.current = null;
-      if (!hasInFlight && pollTimedOut) setPollTimedOut(false);
+      setLiveStatus("off");
+      if (!hasInFlightDocs && pollTimedOut) setPollTimedOut(false);
+      return;
+    }
+
+    let cancelled = false;
+    let mode: "sse" | "fallback" = "sse";
+    let safetyTimer: ReturnType<typeof setInterval> | null = null;
+    let fallbackTimer: ReturnType<typeof setInterval> | null = null;
+    let es: EventSource | null = null;
+    if (!pollStartedAtRef.current) pollStartedAtRef.current = Date.now();
+    setLiveStatus("connecting");
+
+    const timedOut = () => {
+      const startedAt = pollStartedAtRef.current ?? Date.now();
+      if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        setPollTimedOut(true);
+        return true;
+      }
+      return false;
+    };
+
+    const mergeDocuments = (incoming: Document[]) => {
+      setDocuments((prev) => {
+        const byId = new Map(prev.map((doc) => [doc.id, doc]));
+        for (const doc of incoming) {
+          const existing = byId.get(doc.id);
+          byId.set(doc.id, existing ? { ...existing, ...doc } : doc);
+        }
+        const seen = new Set(incoming.map((doc) => doc.id));
+        return [
+          ...incoming.map((doc) => byId.get(doc.id)!),
+          ...prev.filter((doc) => !seen.has(doc.id)),
+        ];
+      });
+    };
+
+    const startFallbackPoll = () => {
+      if (cancelled || mode === "fallback") return;
+      mode = "fallback";
+      setLiveStatus("fallback");
+      if (es) {
+        es.close();
+        es = null;
+        eventSourceRef.current = null;
+      }
+      if (fallbackTimer) return;
+      fallbackTimer = setInterval(() => {
+        void (async () => {
+          if (cancelled || timedOut()) return;
+          await pollSplitStatus(documentsRef.current);
+          await loadDocuments(false);
+        })();
+      }, 4000);
+      pollRef.current = fallbackTimer;
+    };
+
+    es = new EventSource(
+      `/api/documents/events?project_id=${encodeURIComponent(projectId)}`,
+    );
+    eventSourceRef.current = es;
+    es.addEventListener("documents", (ev) => {
+      if (cancelled || timedOut()) return;
+      try {
+        const payload = JSON.parse((ev as MessageEvent).data) as { documents?: Document[] };
+        if (payload.documents) mergeDocuments(payload.documents);
+        if (mode === "sse") setLiveStatus("live");
+      } catch {
+        /* ignore malformed frames */
+      }
+    });
+    es.addEventListener("timeout", () => startFallbackPoll());
+    es.onerror = () => startFallbackPoll();
+
+    safetyTimer = setInterval(() => {
+      void (async () => {
+        if (cancelled || timedOut() || mode !== "sse") return;
+        await pollSplitStatus(documentsRef.current);
+      })();
+    }, SAFETY_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      if (safetyTimer) clearInterval(safetyTimer);
+      if (fallbackTimer) clearInterval(fallbackTimer);
+      if (pollRef.current === fallbackTimer) pollRef.current = null;
+      if (es) es.close();
+      if (eventSourceRef.current === es) eventSourceRef.current = null;
+    };
+  }, [
+    hasInFlightDocs,
+    loadDocuments,
+    pollSplitStatus,
+    pollTimedOut,
+    POLL_TIMEOUT_MS,
+    SAFETY_POLL_MS,
+    projectId,
+  ]);
+
+  // Faster 2s poll for OCR/takeoff page counts (no Clerk→Supabase Realtime JWT).
+  useEffect(() => {
+    const targets = docsNeedingPipelinePoll(documents);
+    if (targets.length === 0) {
+      if (pipelinePollRef.current) {
+        clearInterval(pipelinePollRef.current);
+        pipelinePollRef.current = null;
+      }
+      return;
+    }
+    void pollPipelineProgress(documents);
+    if (!pipelinePollRef.current) {
+      pipelinePollRef.current = setInterval(() => {
+        void pollPipelineProgress(documents);
+      }, 2000);
     }
     return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
+      if (pipelinePollRef.current) {
+        clearInterval(pipelinePollRef.current);
+        pipelinePollRef.current = null;
       }
-      pollStartedAtRef.current = null;
     };
-  }, [documents, loadDocuments, pollSplitStatus, pollTimedOut, POLL_TIMEOUT_MS]);
+  }, [documents, docsNeedingPipelinePoll, pollPipelineProgress]);
 
   const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -373,6 +545,52 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     }
   }, [askDoc]);
 
+  const retryPage = useCallback(async (docId: string, pageId: string, pageNumber: number) => {
+    if (retryingPageId) return;
+    setRetryingPageId(pageId);
+    try {
+      const res = await fetch(
+        `/api/documents/${encodeURIComponent(docId)}/pages/${encodeURIComponent(pageId)}/retry`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      );
+      const data = await res.json().catch(() => ({})) as { error?: string; stages?: string[] };
+      if (!res.ok) {
+        toast({ title: String(data.error ?? `Page retry failed (${res.status})`), kind: "error" });
+        return;
+      }
+      toast({
+        title: `Page ${pageNumber} re-queued (${(data.stages ?? []).join(" + ") || "workers"}).`,
+        kind: "success",
+      });
+      setDocuments((prev) => prev.map((d) => (
+        d.id === docId ? { ...d, status: "split", last_error: null, last_error_step: null } : d
+      )));
+      setPipelineByDoc((prev) => {
+        const cur = prev[docId];
+        if (!cur) return prev;
+        return {
+          ...prev,
+          [docId]: {
+            ...cur,
+            finished: false,
+            failed_pages: cur.failed_pages.filter((p) => p.id !== pageId),
+          },
+        };
+      });
+      setPollTimedOut(false);
+      await loadDocuments(false);
+      await pollPipelineProgress(await loadDocuments(false));
+    } catch (err) {
+      toast({ title: String(`Page retry failed: ${err instanceof Error ? err.message : String(err)}`), kind: "error" });
+    } finally {
+      setRetryingPageId(null);
+    }
+  }, [retryingPageId, loadDocuments, pollPipelineProgress, toast]);
+
   const retryIngest = useCallback(async (doc: Document, password?: string) => {
     if (retryingDocId) return;
     if (!documentHasAskableSource(doc)) {
@@ -479,6 +697,12 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
           <div className="flex items-center gap-2">
             <FolderOpen size={12} className="text-[#00D2FF]" />
             <span className="text-[11px] uppercase tracking-widest text-gray-400">Documents</span>
+            {liveStatus === "live" && (
+              <span className="text-[9px] uppercase tracking-widest text-[#CCFF00]/80">Live</span>
+            )}
+            {liveStatus === "fallback" && (
+              <span className="text-[9px] uppercase tracking-widest text-white/40">Polling</span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <input
@@ -623,11 +847,48 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
                           {isProcessing && <span className="w-1.5 h-1.5 rounded-full bg-[#00D2FF] animate-pulse" />}
                           {stage}
                         </span>
-                        {(doc.split_status || doc.ocr_status || doc.takeoff_status) && (
+                        {(doc.split_status || doc.ocr_status || doc.takeoff_status || pipelineByDoc[doc.id]) && (
                           <div className="mt-1.5 flex flex-wrap gap-x-2 gap-y-1">
                             <PipelineStage label="Split" status={doc.split_status ?? null} />
                             <PipelineStage label="OCR" status={doc.ocr_status ?? null} />
                             <PipelineStage label="Takeoff" status={doc.takeoff_status ?? null} />
+                          </div>
+                        )}
+                        {pipelineByDoc[doc.id] && (pipelineByDoc[doc.id].ocr.total > 0 || isProcessing) && (
+                          <p className="mt-1 font-mono text-[9px] text-white/40">
+                            {pipelineByDoc[doc.id].labels.ocr}
+                            {" · "}
+                            {pipelineByDoc[doc.id].labels.takeoff}
+                          </p>
+                        )}
+                        {pipelineByDoc[doc.id]?.failed_pages && pipelineByDoc[doc.id].failed_pages.length > 0 && (
+                          <div className="mt-1.5 space-y-1">
+                            {pipelineByDoc[doc.id].failed_pages.slice(0, 4).map((fp) => (
+                              <div key={fp.id} className="flex max-w-[16rem] items-center justify-between gap-2">
+                                <span
+                                  className="truncate text-[9px] text-[#E50914]"
+                                  title={fp.error ?? fp.takeoff_error ?? "Page failed"}
+                                >
+                                  p{fp.page_number}
+                                  {fp.ocr_failed ? " OCR" : ""}
+                                  {fp.takeoff_failed ? " TO" : ""}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => void retryPage(doc.id, fp.id, fp.page_number)}
+                                  disabled={retryingPageId === fp.id}
+                                  className="shrink-0 text-[9px] uppercase tracking-widest font-mono text-gray-500 hover:text-[#00D2FF] disabled:opacity-40"
+                                  title="Retry failed page workers"
+                                >
+                                  {retryingPageId === fp.id ? "…" : "Retry"}
+                                </button>
+                              </div>
+                            ))}
+                            {pipelineByDoc[doc.id].failed_pages.length > 4 && (
+                              <p className="text-[9px] text-gray-600">
+                                +{pipelineByDoc[doc.id].failed_pages.length - 4} more failed pages
+                              </p>
+                            )}
                           </div>
                         )}
                         {readableError && stage !== "Complete" && (

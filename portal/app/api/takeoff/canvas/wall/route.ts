@@ -6,8 +6,17 @@ import { logEvent } from "@/lib/activity";
 import { mirrorCivilItemsToTakeoff, type CivilMirrorRow } from "@/lib/estimating/civil-mirror";
 import { REBAR_UNIT_WEIGHT_LBS_PER_FT, type RebarSize } from "@/lib/math/assemblies";
 import { wallRecipeLines } from "@/lib/math/scope-recipes";
+import { quantityForMeasurement } from "@/lib/takeoff/canvas/quantity";
+import type { Point } from "@/lib/takeoff/canvas/coordinates";
 
 export const runtime = "nodejs";
+
+function pagePoints(geometry: unknown): Point[] | null {
+  if (!geometry || typeof geometry !== "object") return null;
+  const geo = geometry as { coordinate_space?: string; points?: Point[] };
+  if (geo.coordinate_space !== "page_space" || !Array.isArray(geo.points) || geo.points.length < 2) return null;
+  return geo.points;
+}
 
 const REBAR_SIZES = new Set(Object.keys(REBAR_UNIT_WEIGHT_LBS_PER_FT));
 
@@ -89,6 +98,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const db = await createServiceClient();
+  const pageIds = [...new Set(items.map((it) => it.page_id).filter((id): id is string => Boolean(id)))];
+  if (pageIds.length > 0) {
+    const { data: calibrations } = await db.from("sheet_calibrations").select("page_id, status, page_space_scale_factor").eq("tenant_id", tenantId).in("page_id", pageIds);
+    const calibrationByPage = new Map((calibrations ?? []).map((row) => [row.page_id, row]));
+    for (const it of items) {
+      if (!it.page_id) continue;
+      const calibration = calibrationByPage.get(it.page_id);
+      const factor = calibration?.status === "verified" ? calibration.page_space_scale_factor : null;
+      const points = pagePoints(it.geometry);
+      if (factor == null || !points) {
+        return NextResponse.json({ error: "Set the sheet scale before saving a wall.", code: "calibration_required" }, { status: 422 });
+      }
+      const length = quantityForMeasurement("length", points, factor);
+      if (length == null || length <= 0) {
+        return NextResponse.json({ error: "The wall length could not be calculated from the sheet.", code: "quantity_rejected" }, { status: 422 });
+      }
+      it.length_lf = length;
+    }
+  }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const anyDb = db as any;
   const projectId = items[0].project_id;

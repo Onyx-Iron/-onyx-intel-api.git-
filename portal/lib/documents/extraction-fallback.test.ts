@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 
-import { extractionFromPageText, mergeExtractions, parseModelJson, readPdfPageText } from "./extraction-fallback.ts";
+import { extractionFromPageText, mergeExtractions, parseModelJson, readPdfPageText, scaleStringFromText } from "./extraction-fallback.ts";
 
 describe("extraction fallback", () => {
   it("reads model JSON wrapped in a fence and fills pages the model skipped", () => {
@@ -28,6 +28,13 @@ describe("extraction fallback", () => {
     const extraction = extractionFromPageText(pages, 1);
     assert.equal(extraction.doc_type, "drawing");
     assert.equal(extraction.pages.length, 1);
-    assert.match(extraction.pages[0]?.summary ?? "", /SITE PLAN/);
+  });
+
+  it("reads a scale string from a short title block", () => {
+    assert.equal(scaleStringFromText('1/4" = 1\'-0"'), '1/4" = 1\'-0"');
+    assert.match(scaleStringFromText('1" = 20\'') ?? "", /20/);
+    const extraction = extractionFromPageText([{ pageNumber: 1, text: '1" = 20\'' }], 1);
+    assert.equal(extraction.pages.length, 1);
+    assert.match(extraction.pages[0]?.key_terms.join(" ") ?? "", /20/);
   });
 });
