@@ -1,130 +1,57 @@
 /**
- * PDF parser — uploads to the Gemini Files API, waits for ACTIVE, then asks
- * the model to extract structured entities biased by the optional hint.
- * Mirrors the upload/wait helpers used by app/api/documents/[id]/ingest.
+ * PDF parser — reads the embedded text layer with pdf.js.
+ * Digital sheets carry their own words, scales, and identifiers.
  */
 import type { ParseResult, ParseContext, ParseEntity } from "./index";
-import { fetchGemini, readGeminiError } from "@/lib/ai/gemini";
+import { extractionFromPageText, readPdfPageText, scaleStringFromText } from "@/lib/documents/extraction-fallback";
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
-const EXTRACT_MODEL = process.env.GEMINI_EXTRACT_MODEL ?? "gemini-2.0-flash-001";
+const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const PHONE = /\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b/g;
+const CSI = /\b\d{2}[\s-]?\d{2}[\s-]?\d{2}\b/g;
+const SHEET = /\b[A-Z]{1,3}[-.]?\d{1,4}(?:\.\d+)?\b/g;
 
-const HINT_FOCUS: Record<string, string> = {
-  takeoff:   "quantities, materials, dimensions, areas, CSI codes, sheet numbers",
-  estimate:  "line items, unit prices, quantities, totals, vendors",
-  vendors:   "company names, contacts, phone numbers, emails, addresses, trades",
-  invoices:  "invoice number, vendor, line items, amounts, totals, dates, terms",
-  punch:     "punch items, locations, trades, status, dates",
-  contacts:  "person names, roles, companies, phones, emails",
-  docs:      "sheet numbers, spec sections, RFI/submittal IDs, dates, titles",
-};
-
-async function uploadPdf(pdf: Buffer, fileName: string): Promise<{ uri: string; name: string }> {
-  const boundary = "onyx_boundary_gemini";
-  const meta = JSON.stringify({ file: { displayName: fileName } });
-  const body = Buffer.concat([
-    Buffer.from(`--${boundary}\r\nContent-Type: application/json\r\n\r\n`),
-    Buffer.from(meta),
-    Buffer.from(`\r\n--${boundary}\r\nContent-Type: application/pdf\r\n\r\n`),
-    pdf,
-    Buffer.from(`\r\n--${boundary}--`),
-  ]);
-  const res = await fetchGemini(
-    `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=multipart`,
-    {
-      method: "POST",
-      headers: {
-        "X-Goog-Api-Key": GEMINI_API_KEY,
-        "Content-Type": `multipart/related; boundary=${boundary}`,
-        "Content-Length": String(body.length),
-      },
-      body,
-    },
-    { label: "Gemini Files upload", timeoutMs: 60_000 },
-  );
-  if (!res.ok) {
-    await readGeminiError(res, "Gemini Files upload");
+function pushMatches(entities: ParseEntity[], text: string, page: number, type: string, re: RegExp): void {
+  re.lastIndex = 0;
+  const seen = new Set(entities.filter((e) => e.type === type && e.page === page).map((e) => e.value));
+  for (const match of text.match(re) ?? []) {
+    const value = match.replace(/\s+/g, " ").trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    entities.push({ type, value, page, confidence: 1 });
   }
-  const data = (await res.json()) as { file: { name: string; uri: string; state: string } };
-  return { uri: data.file.uri, name: data.file.name };
 }
 
-async function waitForActive(name: string, maxMs = 60_000): Promise<void> {
-  const deadline = Date.now() + maxMs;
-  while (Date.now() < deadline) {
-    const res = await fetchGemini(
-      `https://generativelanguage.googleapis.com/v1beta/${name}`,
-      { headers: { "X-Goog-Api-Key": GEMINI_API_KEY } },
-      { label: "Gemini file status", timeoutMs: 20_000 },
-    );
-    const data = (await res.json()) as { state: string };
-    if (data.state === "ACTIVE") return;
-    if (data.state === "FAILED") throw new Error("Gemini file processing failed");
-    await new Promise((r) => setTimeout(r, 2000));
+export function entitiesFromPageText(pages: Array<{ pageNumber: number; text: string }>): ParseEntity[] {
+  const entities: ParseEntity[] = [];
+  for (const page of pages) {
+    const scale = scaleStringFromText(page.text);
+    if (scale) entities.push({ type: "scale", value: scale, page: page.pageNumber, confidence: 1 });
+    pushMatches(entities, page.text, page.pageNumber, "email", EMAIL);
+    pushMatches(entities, page.text, page.pageNumber, "phone", PHONE);
+    pushMatches(entities, page.text, page.pageNumber, "csi_section", CSI);
+    pushMatches(entities, page.text, page.pageNumber, "sheet_number", SHEET);
   }
-  throw new Error("Gemini file did not become active within 60 s");
-}
-
-async function deleteFile(name: string): Promise<void> {
-  await fetch(`https://generativelanguage.googleapis.com/v1beta/${name}`, {
-    method: "DELETE",
-    headers: { "X-Goog-Api-Key": GEMINI_API_KEY },
-  }).catch(() => {});
+  return entities;
 }
 
 export async function parsePdf(
   bytes: Buffer,
   base: { filename: string; mime: string },
-  ctx: ParseContext,
+  _ctx: ParseContext,
 ): Promise<ParseResult> {
-  if (!GEMINI_API_KEY) {
-    return { kind: "error", ...base, error: "GEMINI_API_KEY not configured" };
-  }
-
-  const focus = ctx.hint ? HINT_FOCUS[ctx.hint] ?? "" : "";
-  const prompt = `Extract structured entities from this construction/engineering PDF.
-Return ONLY JSON — no markdown — shaped:
-{ "entities": [ { "type": "<short label>", "value": "<value>", "page": <1-indexed int>, "confidence": <0..1> } ] }
-
-${focus ? `Focus on: ${focus}.` : ""}
-Common types: sheet_number, spec_section, dimension, material, vendor, contact,
-phone, email, address, line_item, quantity, unit_price, total, date, rfi_id,
-submittal_id, room, drawing_title. Omit purely decorative items.`;
-
-  const { uri, name } = await uploadPdf(bytes, base.filename);
   try {
-    await waitForActive(name);
-    const res = await fetchGemini(
-      `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { fileData: { mimeType: "application/pdf", fileUri: uri } },
-              { text: prompt },
-            ],
-          }],
-          generationConfig: { responseMimeType: "application/json" },
-        }),
-      },
-      { label: "Gemini PDF extraction", timeoutMs: 60_000 },
-    );
-    if (!res.ok) {
-      await readGeminiError(res, "Gemini PDF extraction");
-    }
-    const data = (await res.json()) as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    const pages = await readPdfPageText(new Uint8Array(bytes));
+    const extraction = extractionFromPageText(pages, pages.length);
+    const text = pages.map((page) => page.text).filter(Boolean).join("\n");
+    return {
+      kind: "text",
+      ...base,
+      mime: "application/pdf",
+      text: extraction.title ? `${extraction.title}\n${text}` : text,
+      entities: entitiesFromPageText(pages),
     };
-    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-    let parsed: { entities?: ParseEntity[] } = {};
-    try { parsed = JSON.parse(raw); } catch { parsed = {}; }
-    const entities: ParseEntity[] = Array.isArray(parsed.entities)
-      ? parsed.entities.filter((e) => e && typeof e.type === "string" && typeof e.value === "string")
-      : [];
-    return { kind: "image", ...base, mime: "application/pdf", entities };
-  } finally {
-    await deleteFile(name);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { kind: "error", ...base, error: `Could not read PDF text: ${message}` };
   }
 }

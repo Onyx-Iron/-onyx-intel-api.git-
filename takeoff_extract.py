@@ -31,9 +31,9 @@ portal's SecureTakeoffRow contract:
       "location_tag":   str | None,
     }
 
-The dispatcher also reports *coverage*: which pages/entities produced rows and,
-for PDFs, which pages had no machine-readable tables (``ai_candidate_pages``) so
-the portal can optionally fall back to the AI vision path for those pages only.
+The dispatcher also reports *coverage*: which pages/entities produced rows.
+Dense drawing pages return no table rows and are not marked for a vision
+fallback. ``ai_candidate_pages`` stays empty.
 """
 
 from __future__ import annotations
@@ -237,12 +237,10 @@ def _release_page(pg, pdf=None) -> None:
 
 def _rows_from_pdf_page(page, idx: int) -> list[dict]:
     """Extract takeoff rows from ONE pdfplumber page. Returns [] for drawing pages
-    (too vector-dense to be a schedule) so the caller can route them to AI vision."""
+    (too vector-dense to be a schedule). Those pages are measured from vectors."""
     try:
         complexity = len(page.lines) + len(page.curves) + len(page.rects)
     except Exception:
-        # Force corrupted / unparseable pages onto the AI vision fallback path
-        # instead of silently treating them as simple schedules.
         complexity = 9999
     if complexity > _PDF_COMPLEXITY_LIMIT:
         return []
@@ -313,7 +311,7 @@ def extract_from_pdf(path: str) -> dict:
 
     # Drawing pages are dense with vector lines; pdfplumber's table finder can
     # explode (time + memory) on them and OOM the worker. Skip table detection on
-    # graphical pages (route them to the AI vision path) and cap total work.
+    # graphical pages and cap total work. They are not queued for a model.
     MAX_TABLE_PAGES = 30           # only run deterministic table-detection on the first N pages
     LINE_COMPLEXITY_LIMIT = 1200   # above this many vector objects, treat page as a drawing
 

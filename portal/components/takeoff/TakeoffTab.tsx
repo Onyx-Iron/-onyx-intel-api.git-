@@ -5,6 +5,7 @@ import Link from "next/link";
 import { getGoogleToken } from "@/lib/google/clientAuth";
 
 import { useToast } from "@/components/common/Toast";
+import { pagesQueuedForVision } from "@/lib/takeoff/vision-fallback";
 import GoogleDrivePicker from "@/components/documents/GoogleDrivePicker";
 
 // ── Types matching SecureTakeoffRow output from takeoff_validator.py ──────────
@@ -518,7 +519,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
           break;
         }
         case "COMPLETED":
-          setAiPages(ev.ai_candidate_pages ?? []);
+          setAiPages(pagesQueuedForVision());
           setProgress(100);
           setAuditStatus(collected.length > 0 ? "VERIFIED_SUCCESS" : "PARTIAL_WITH_ERRORS");
           setStatusMsg(`Complete — ${collected.length} line items from ${docName}`);
@@ -805,7 +806,7 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
 
     setSourceType(data.source_type ?? null);
     setCoverage(data.coverage ?? null);
-    setAiPages(Array.isArray(data.ai_candidate_pages) ? data.ai_candidate_pages : []);
+    setAiPages(pagesQueuedForVision());
     setRows(extracted);
     setProgress(100);
     setTotalRows(extracted.length);
@@ -876,12 +877,18 @@ export default function TakeoffTab({ projectId }: { projectId: string }) {
         setAiRunning(false);
         return;
       }
+      if (typeof data?.notice === "string" && !(Array.isArray(data.rows) && data.rows.length)) {
+        setAiPages(pagesQueuedForVision());
+        setStatusMsg(data.notice);
+        setAiRunning(false);
+        return;
+      }
       const aiRows: TakeoffRow[] = (data.rows ?? []).map((r: TakeoffRow, i: number) => ({
         ...r, id: `ai-${i}`, extraction_method: "ai_vision",
       }));
       setRows((prev) => [...prev, ...aiRows]);
-      setAiPages([]); // consumed
-      setStatusMsg(`AI added ${aiRows.length.toLocaleString()} line items from graphical pages`);
+      setAiPages(pagesQueuedForVision());
+      setStatusMsg(`Added ${aiRows.length.toLocaleString()} line items from graphical pages`);
       await persistRows([...rows, ...aiRows]);
     } catch {
       setStatusMsg("AI extraction failed — try again.");
