@@ -7,6 +7,7 @@ import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import PageHero from "@/components/layout/PageHero";
 import ProjectScopeSelect from "@/components/project/ProjectScopeSelect";
 import { useProjectContext } from "@/components/project/ProjectContext";
+import { chooseOrCreateProjectHref } from "@/lib/navigation/project-sections";
 
 type WorkKind = "RFI" | "Submittal" | "Change Order" | "Schedule" | "Punch";
 
@@ -138,9 +139,7 @@ export default function ProjectManagementPage() {
   const hasOpenItems = (data?.open_items.length ?? 0) > 0;
   const fieldLogs = useMemo(() => data?.recent_daily_logs ?? [], [data]);
   const weeklyLogs = useMemo(() => data?.recent_weekly_logs ?? [], [data]);
-  const openWorkspaceHref = activeProject
-    ? `/dashboard/projects/${activeProject.id}?phase=controls&tab=controls`
-    : "/dashboard/projects";
+  const openWorkspaceHref = chooseOrCreateProjectHref(activeProject?.id, "controls", "controls");
 
   return (
     <div>
@@ -226,10 +225,16 @@ export default function ProjectManagementPage() {
                   [...Array(6)].map((_, index) => (
                     <tr key={index}><td colSpan={6} className="px-4 py-3"><div className="h-3 w-2/3 animate-pulse rounded bg-white/5" /></td></tr>
                   ))
-                ) : !hasOpenItems && !error ? (
+                ) : !hasOpenItems ? (
                   <tr>
                     <td colSpan={6}>
-                      <EmptyState icon={<ClipboardCheck className="h-6 w-6" />} title="No open project-management items" description="RFIs, submittals, schedule tasks, change orders, and punch items appear here when they need attention." />
+                      <EmptyState
+                        icon={<ClipboardCheck className="h-6 w-6" />}
+                        title="No open project-management items"
+                        description="Field work starts inside a project — RFIs, submittals, schedule, and punch list."
+                        actionLabel={activeProject ? "Open project controls" : "Choose or create a project"}
+                        actionHref={openWorkspaceHref}
+                      />
                     </td>
                   </tr>
                 ) : (
@@ -254,7 +259,12 @@ export default function ProjectManagementPage() {
         </section>
 
         <div className="grid gap-5 xl:grid-cols-[1.2fr_0.8fr]">
-          <LogPanel title="Recent Daily Logs" emptyTitle="No daily logs yet">
+          <LogPanel
+            title="Recent Daily Logs"
+            emptyTitle="No daily logs yet"
+            actionLabel={activeProject ? "Open field logs" : "Choose or create a project"}
+            actionHref={chooseOrCreateProjectHref(activeProject?.id, "field", "daily-log")}
+          >
             {fieldLogs.map((log) => (
               <LogRow
                 key={log.id}
@@ -265,7 +275,12 @@ export default function ProjectManagementPage() {
             ))}
           </LogPanel>
 
-          <LogPanel title="Recent Weekly Logs" emptyTitle="No weekly logs yet">
+          <LogPanel
+            title="Recent Weekly Logs"
+            emptyTitle="No weekly logs yet"
+            actionLabel={activeProject ? "Open weekly logs" : "Choose or create a project"}
+            actionHref={chooseOrCreateProjectHref(activeProject?.id, "field", "weekly-log")}
+          >
             {weeklyLogs.map((log) => (
               <LogRow
                 key={log.id}
@@ -304,7 +319,19 @@ function MiniStat({ icon, label, value }: { icon: React.ReactNode; label: string
   );
 }
 
-function LogPanel({ title, emptyTitle, children }: { title: string; emptyTitle: string; children: React.ReactNode }) {
+function LogPanel({
+  title,
+  emptyTitle,
+  actionLabel,
+  actionHref,
+  children,
+}: {
+  title: string;
+  emptyTitle: string;
+  actionLabel?: string;
+  actionHref?: string;
+  children: React.ReactNode;
+}) {
   const items = Array.isArray(children) ? children.filter(Boolean) : children;
   const empty = Array.isArray(items) ? items.length === 0 : !items;
 
@@ -314,7 +341,13 @@ function LogPanel({ title, emptyTitle, children }: { title: string; emptyTitle: 
         <h2 className="text-xs font-bold uppercase tracking-[0.18em] text-white/55">{title}</h2>
       </div>
       {empty ? (
-        <EmptyState icon={<CalendarDays className="h-6 w-6" />} title={emptyTitle} description="Project field logs will roll up here as crews add them." />
+        <EmptyState
+          icon={<CalendarDays className="h-6 w-6" />}
+          title={emptyTitle}
+          description="Daily and weekly logs live on the project Field tab."
+          actionLabel={actionLabel}
+          actionHref={actionHref}
+        />
       ) : (
         <div className="divide-y divide-white/5">{items}</div>
       )}

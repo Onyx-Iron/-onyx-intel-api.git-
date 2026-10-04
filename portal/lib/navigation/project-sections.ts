@@ -116,3 +116,27 @@ export function projectSectionHref(projectId: string, slug: string, tab: string)
   const params = new URLSearchParams({ phase: slug, tab });
   return `/dashboard/projects/${projectId}?${params.toString()}`;
 }
+
+/** One-line helper shown under the active project section. */
+export const PHASE_HELPER: Record<string, string> = {
+  overview: "Project health, location, and recent activity.",
+  documents: "Upload PDFs here. Split pages feed Takeoff and search.",
+  takeoff: "Measure sheets and extract quantities from uploaded plans.",
+  estimate: "Price takeoff lines and build the bid.",
+  schedule: "Tasks and dates for this job.",
+  controls: "RFIs, submittals, and change orders.",
+  procurement: "RFQs, vendor bids, and purchase orders.",
+  financials: "Invoices and lien waivers for this job.",
+  field: "Daily logs, crew, and site to-dos.",
+  closeout: "Punch list and final documents.",
+};
+
+/** Empty company roll-up: jump into a project, or create one. */
+export function chooseOrCreateProjectHref(
+  projectId: string | null | undefined,
+  slug: string,
+  tab: string,
+): string {
+  if (projectId) return projectSectionHref(projectId, slug, tab);
+  return "/dashboard/projects?new=1";
+}

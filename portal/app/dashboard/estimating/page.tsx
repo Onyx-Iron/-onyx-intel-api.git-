@@ -6,6 +6,7 @@ import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
 import { useProjectContext } from "@/components/project/ProjectContext";
+import { chooseOrCreateProjectHref } from "@/lib/navigation/project-sections";
 
 interface EstimateItem {
   id: string;
@@ -101,9 +102,7 @@ export default function GlobalEstimatingPage() {
     review: filtered.filter((i) => i.pricing_status === "review").length,
   }), [filtered]);
 
-  const openWorkspaceHref = activeProject
-    ? `/dashboard/projects/${activeProject.id}?phase=estimate&tab=estimates`
-    : "/dashboard/projects";
+  const openWorkspaceHref = chooseOrCreateProjectHref(activeProject?.id, "estimate", "estimates");
 
   return (
     <div>
@@ -169,15 +168,15 @@ export default function GlobalEstimatingPage() {
               <tbody className="divide-y divide-white/5">
                 {loading ? (
                   <SkeletonRows />
-                ) : filtered.length === 0 && !error ? (
+                ) : filtered.length === 0 ? (
                   <tr>
                     <td colSpan={6}>
                       <div className="py-4">
                         <EmptyState
                           icon={<Calculator className="w-6 h-6" />}
                           title="No estimate items yet"
-                          description="Build estimates from a project's Estimate tab to see them roll up here."
-                          actionLabel={activeProject ? "Open estimate workspace" : "Go to projects"}
+                          description="Import takeoff or add a line from a project's Estimate tab."
+                          actionLabel={activeProject ? "Open estimate" : "Choose or create a project"}
                           actionHref={openWorkspaceHref}
                         />
                       </div>

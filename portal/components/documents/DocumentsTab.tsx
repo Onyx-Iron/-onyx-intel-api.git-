@@ -10,6 +10,8 @@ import GenerateDocDropdown from "@/components/common/GenerateDocDropdown";
 
 import { useToast } from "@/components/common/Toast";
 import { uploadDocumentDirect } from "@/lib/documents/browser-upload";
+import EmptyState from "@/components/common/EmptyState";
+import { patchFirstRun } from "@/lib/onboarding/firstRun";
 import {
   isInFlightStatus,
   isRetryable,
@@ -455,6 +457,7 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
       // upload-url/complete → ingest → page-split-worker. "From Drive" stays
       // the Drive import path.
       await uploadDocumentDirect(file, projectId);
+      patchFirstRun({ plans_uploaded: true });
       toast({ title: String(`Uploaded ${file.name}`), kind: "info" });
       setPollTimedOut(false);
       await loadDocuments(false);
@@ -778,8 +781,14 @@ export default function DocumentsTab({ projectId, mode = "all" }: { projectId: s
                 <SkeletonRows />
               ) : documents.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="text-center py-16 text-[10px] uppercase tracking-widest text-gray-600">
-                    No documents yet. Click &ldquo;Upload File&rdquo; or &ldquo;From Drive&rdquo; to add a PDF.
+                  <td colSpan={6}>
+                    <EmptyState
+                      icon={<FileText className="w-6 h-6" />}
+                      title="Upload a plan PDF"
+                      description="Split pages feed Takeoff and search. Use Upload File here or Upload Plans in the project header."
+                      actionLabel="Upload File"
+                      onAction={() => fileInputRef.current?.click()}
+                    />
                   </td>
                 </tr>
               ) : (

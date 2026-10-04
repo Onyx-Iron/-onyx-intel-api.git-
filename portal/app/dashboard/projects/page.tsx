@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { Suspense, useEffect, useState, useCallback } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   Briefcase,
   Building2,
@@ -11,7 +12,6 @@ import {
   MapPin,
   Plus,
   Trash2,
-  X,
 } from "lucide-react";
 import type { Tables } from "@/lib/supabase/types";
 import PageHero from "@/components/layout/PageHero";
@@ -20,26 +20,9 @@ import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import { useToast } from "@/components/common/Toast";
 import { useConfirm } from "@/components/common/ConfirmDialog";
 import { useProjectContext } from "@/components/project/ProjectContext";
+import NewProjectForm from "@/components/project/NewProjectForm";
 
 type Project = Tables<"projects">;
-
-interface NewProjectForm {
-  name: string;
-  address: string;
-  city: string;
-  state: string;
-  status: string;
-  budget: string;
-}
-
-const EMPTY_FORM: NewProjectForm = {
-  name: "",
-  address: "",
-  city: "",
-  state: "",
-  status: "active",
-  budget: "",
-};
 
 function statusLabel(status: string): string {
   return { active: "Active", bidding: "Bidding", on_hold: "On Hold", complete: "Complete" }[status] ?? status;
@@ -142,13 +125,20 @@ function ProjectCard({ project, onDeleted }: { project: Project; onDeleted: () =
 }
 
 export default function ProjectsPage() {
-  const { setActiveProjectId, refreshProjects } = useProjectContext();
+  return (
+    <Suspense fallback={<div className="px-4 py-10 text-sm text-white/40">Loading projects…</div>}>
+      <ProjectsPageInner />
+    </Suspense>
+  );
+}
+
+function ProjectsPageInner() {
+  const { refreshProjects } = useProjectContext();
+  const searchParams = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState<NewProjectForm>(EMPTY_FORM);
-  const [saving, setSaving] = useState(false);
+  const [showForm, setShowForm] = useState(() => searchParams.get("new") === "1");
 
   const loadProjects = useCallback(async () => {
     setLoading(true);
@@ -172,30 +162,8 @@ export default function ProjectsPage() {
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { loadProjects(); }, [loadProjects]);
 
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault();
-    setSaving(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/projects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...form, budget: form.budget ? parseFloat(form.budget) : null }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? `HTTP ${res.status}`);
-      }
-      const created = await res.json() as { project?: { id?: string } };
-      if (created.project?.id) setActiveProjectId(created.project.id);
-      setForm(EMPTY_FORM);
-      setShowForm(false);
-      await loadProjects();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSaving(false);
-    }
+  if (searchParams.get("new") === "1" && !showForm) {
+    setShowForm(true);
   }
 
   return (
@@ -220,74 +188,9 @@ export default function ProjectsPage() {
 
       {error && <div className="mb-6"><ErrorState message={error} onRetry={loadProjects} /></div>}
 
-      {/* Create Form */}
       {showForm && (
-        <div className="mb-8 rounded-xl border border-white/10 bg-[#111113] p-6">
-          <div className="mb-5 flex items-center justify-between">
-            <h2 className="font-semibold text-white">New Project</h2>
-            <button
-              type="button"
-              onClick={() => { setShowForm(false); setForm(EMPTY_FORM); }}
-              className="rounded-md p-1 text-white/30 transition-colors hover:text-white min-h-[40px]"
-              aria-label="Close new project form"
-            >
-              <X size={16} />
-            </button>
-          </div>
-          <form onSubmit={handleCreate}>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              {(
-                [
-                  { key: "name",    label: "Project Name *", placeholder: "Main Street Office Build-Out" },
-                  { key: "address", label: "Address",        placeholder: "123 Main St" },
-                  { key: "city",    label: "City",           placeholder: "Dallas" },
-                  { key: "state",   label: "State",          placeholder: "TX" },
-                  { key: "budget",  label: "Budget ($)",     placeholder: "0.00" },
-                ] as { key: keyof NewProjectForm; label: string; placeholder: string }[]
-              ).map(({ key, label, placeholder }) => (
-                <div key={key}>
-                  <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-widest text-white/40">{label}</label>
-                  <input
-                    type={key === "budget" ? "number" : "text"}
-                    value={form[key]}
-                    onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-                    placeholder={placeholder}
-                    required={key === "name"}
-                    className="h-10 w-full rounded-lg border border-white/10 bg-white/5 px-3 text-sm text-white outline-none placeholder:text-white/20 focus:border-[#CCFF00]/40"
-                  />
-                </div>
-              ))}
-              <div>
-                <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-widest text-white/40">Status</label>
-                <select
-                  value={form.status}
-                  onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))}
-                  className="h-10 w-full rounded-lg border border-white/10 bg-[#111113] px-3 text-sm text-white outline-none focus:border-[#CCFF00]/40"
-                >
-                  <option value="active">Active</option>
-                  <option value="bidding">Bidding</option>
-                  <option value="on_hold">On Hold</option>
-                  <option value="complete">Complete</option>
-                </select>
-              </div>
-            </div>
-            <div className="mt-5 flex gap-3">
-              <button
-                type="submit"
-                disabled={saving}
-                className="inline-flex h-9 items-center gap-2 rounded-lg bg-[#CCFF00] px-4 text-sm font-bold text-black disabled:opacity-50"
-              >
-                {saving ? "Creating…" : "Create Project"}
-              </button>
-              <button
-                type="button"
-                onClick={() => { setShowForm(false); setForm(EMPTY_FORM); }}
-                className="h-9 rounded-lg px-4 text-sm text-white/40 transition-colors hover:text-white"
-              >
-                Cancel
-              </button>
-            </div>
-          </form>
+        <div className="mb-8">
+          <NewProjectForm onClose={() => setShowForm(false)} />
         </div>
       )}
 

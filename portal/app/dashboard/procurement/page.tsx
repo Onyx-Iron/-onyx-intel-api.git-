@@ -7,6 +7,7 @@ import PageHero from "@/components/layout/PageHero";
 import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/ProjectScopeSelect";
 import { useProjectContext } from "@/components/project/ProjectContext";
+import { chooseOrCreateProjectHref } from "@/lib/navigation/project-sections";
 
 interface VendorBid {
   id: string;
@@ -108,9 +109,7 @@ export default function GlobalProcurementPage() {
     [purchaseOrders, activeProjectId],
   );
 
-  const openWorkspaceHref = activeProject
-    ? `/dashboard/projects/${activeProject.id}?phase=procurement&tab=procurement`
-    : "/dashboard/projects";
+  const openWorkspaceHref = chooseOrCreateProjectHref(activeProject?.id, "procurement", "procurement");
 
   return (
     <div>
@@ -165,11 +164,17 @@ export default function GlobalProcurementPage() {
                     [...Array(4)].map((_, i) => (
                       <tr key={i}><td colSpan={5} className="px-4 py-3"><div className="h-3 w-2/3 bg-white/5 animate-pulse rounded" /></td></tr>
                     ))
-                  ) : allItems.length === 0 && !error ? (
+                  ) : allItems.length === 0 ? (
                     <tr>
                       <td colSpan={5}>
                         <div className="py-4">
-                          <EmptyState icon={<Truck className="w-6 h-6" />} title="No RFQs yet" description="Package a quote request from a project's Procurement tab to see it roll up here." />
+                          <EmptyState
+                            icon={<Truck className="w-6 h-6" />}
+                            title="No RFQs yet"
+                            description="Procurement starts inside a project. Package a quote request there, then it rolls up here."
+                            actionLabel={activeProject ? "Open procurement" : "Choose or create a project"}
+                            actionHref={openWorkspaceHref}
+                          />
                         </div>
                       </td>
                     </tr>
@@ -213,11 +218,17 @@ export default function GlobalProcurementPage() {
                     [...Array(3)].map((_, i) => (
                       <tr key={i}><td colSpan={4} className="px-4 py-3"><div className="h-3 w-1/2 bg-white/5 animate-pulse rounded" /></td></tr>
                     ))
-                  ) : filteredPurchaseOrders.length === 0 && !error ? (
+                  ) : filteredPurchaseOrders.length === 0 ? (
                     <tr>
                       <td colSpan={4}>
                         <div className="py-4">
-                          <EmptyState icon={<Truck className="w-6 h-6" />} title="No purchase orders yet" description="POs appear here once a vendor bid is awarded on a project." />
+                          <EmptyState
+                            icon={<Truck className="w-6 h-6" />}
+                            title="No purchase orders yet"
+                            description="POs appear here once a vendor bid is awarded on a project."
+                            actionLabel={activeProject ? "Open procurement" : "Choose or create a project"}
+                            actionHref={openWorkspaceHref}
+                          />
                         </div>
                       </td>
                     </tr>

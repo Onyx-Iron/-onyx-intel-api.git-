@@ -21,7 +21,7 @@ export default function MobileTopBar() {
           <Menu size={20} />
         </button>
         <div className="flex items-center gap-2">
-          <OILogo className="h-6 w-auto" />
+          <OILogo className="h-7 w-auto" />
           <span className="text-sm font-black tracking-tight text-white">Onyx Intel</span>
         </div>
         <button

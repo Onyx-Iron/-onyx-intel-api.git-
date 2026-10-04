@@ -173,10 +173,10 @@ export async function GET(): Promise<NextResponse> {
     const alerts = [
       { id: "bids", label: "Bids due in 7 days", value: bidDueRows.length, href: "/dashboard/preconstruction" },
       { id: "plan_emails", label: "Plan emails (7d)", value: planEmailCount, href: "/dashboard/settings/connections" },
-      { id: "approvals", label: "Agent approvals", value: approvalCount, href: "/dashboard" },
+      { id: "approvals", label: "Agent approvals", value: approvalCount, href: "/dashboard/agents/pending" },
       { id: "docs_stuck", label: "Docs stuck / failed", value: stuckDocs, href: "/dashboard/documents" },
       ...(showFinancial
-        ? [{ id: "invoices", label: "Open invoices", value: openInvoiceCount, href: "/dashboard/projects" }]
+        ? [{ id: "invoices", label: "Open invoices", value: openInvoiceCount, href: "/dashboard/financials" }]
         : []),
       { id: "seo", label: seoHealthy ? "SEO presence set" : "SEO website missing", value: seoHealthy ? 0 : 1, href: "/dashboard/marketing" },
       { id: "connections", label: connErrors > 0 ? "Connection errors" : "Connections", value: connErrors > 0 ? connErrors : (connectionsOk ? 0 : 1), href: "/dashboard/settings/connections" },

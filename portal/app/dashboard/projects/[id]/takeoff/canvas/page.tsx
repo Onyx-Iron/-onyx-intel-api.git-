@@ -92,14 +92,20 @@ export default async function CanvasPage({ params, searchParams }: PageProps) {
           <p className="text-[11px] font-bold uppercase tracking-[0.32em] text-[#CCFF00]">Measure</p>
           <h1 className="mt-4 text-3xl font-light tracking-tight">The first sheet is not ready yet.</h1>
           <p className="mt-3 text-sm text-white/50">
-            You can measure this drawing as soon as its first sheet appears. Upload a PDF if this project does not have one yet.
+            Upload a plan PDF in Documents first. Split pages become the sheets this canvas draws on.
           </p>
           <div className="mt-8 flex justify-center gap-3">
             <Link
-              href={`/dashboard/projects/${projectId}`}
+              href={`/dashboard/projects/${projectId}?phase=documents&tab=documents`}
+              className="inline-flex h-10 items-center justify-center rounded-full bg-[#CCFF00] px-5 text-xs font-semibold uppercase tracking-widest text-black hover:opacity-85"
+            >
+              Upload plans
+            </Link>
+            <Link
+              href={`/dashboard/projects/${projectId}?phase=takeoff&tab=takeoff`}
               className="inline-flex h-10 items-center justify-center rounded-full border border-white/15 bg-white/5 px-5 text-xs font-semibold uppercase tracking-widest text-white/80 hover:border-white/30 hover:text-white"
             >
-              Back to project
+              Back to takeoff
             </Link>
           </div>
         </div>

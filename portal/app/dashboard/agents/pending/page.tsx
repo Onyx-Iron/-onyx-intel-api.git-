@@ -1,3 +1,4 @@
+import type { ComponentProps } from "react";
 import { auth } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 import { createServiceClient } from "@/lib/supabase/server";
@@ -6,6 +7,8 @@ import AgentApprovalFeed from "@/components/agents/AgentApprovalFeed";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+type FeedProps = ComponentProps<typeof AgentApprovalFeed>;
 
 /**
  * Central Human Approval Dashboard.
@@ -17,25 +20,35 @@ export default async function AgentApprovalPage() {
   const { userId, orgId, orgSlug } = await auth();
   if (!userId) redirect("/sign-in");
 
-  const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
-  const db = await createServiceClient();
+  let initialItems: FeedProps["initialItems"] = [];
+  let projectNames: FeedProps["projectNames"] = {};
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data: initialItems } = await (db as any)
-    .from("ai_agent_audit_trails")
-    .select("*")
-    .eq("tenant_id", tenantId)
-    .eq("status", "pending_human_review")
-    .order("created_at", { ascending: false })
-    .limit(200);
+  try {
+    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const db = await createServiceClient();
 
-  // Preload project names so the feed can label rows.
-  const projectIds = Array.from(new Set(((initialItems ?? []) as Array<{ project_id: string | null }>).map((r) => r.project_id).filter(Boolean))) as string[];
-  let projectNames: Record<string, string> = {};
-  if (projectIds.length > 0) {
-    const { data: projects } = await db.from("projects").select("id, name").in("id", projectIds).eq("tenant_id", tenantId);
-    projectNames = Object.fromEntries((projects ?? []).map((p) => [p.id, p.name]));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data } = await (db as any)
+      .from("ai_agent_audit_trails")
+      .select("*")
+      .eq("tenant_id", tenantId)
+      .eq("status", "pending_human_review")
+      .order("created_at", { ascending: false })
+      .limit(200);
+
+    initialItems = data ?? [];
+
+    // Preload project names so the feed can label rows.
+    const projectIds = Array.from(new Set(initialItems.map((r) => r.project_id).filter(Boolean))) as string[];
+    if (projectIds.length > 0) {
+      const { data: projects } = await db.from("projects").select("id, name").in("id", projectIds).eq("tenant_id", tenantId);
+      projectNames = Object.fromEntries((projects ?? []).map((p) => [p.id, p.name]));
+    }
+  } catch (err) {
+    console.error("[agents/pending] failed to load approvals", err);
+    initialItems = [];
+    projectNames = {};
   }
 
-  return <AgentApprovalFeed initialItems={initialItems ?? []} projectNames={projectNames} />;
+  return <AgentApprovalFeed initialItems={initialItems} projectNames={projectNames} />;
 }

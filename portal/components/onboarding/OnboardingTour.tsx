@@ -1,74 +1,88 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useOptionalProjectContext } from "@/components/project/ProjectContext";
+import { OILogo } from "@/components/brand/BrandMark";
+import {
+  FIRST_RUN_EVENT,
+  firstRunHref,
+  firstRunTargetId,
+  isFirstRunComplete,
+  nextFirstRunStep,
+  patchFirstRun,
+  readFirstRun,
+  type FirstRunFlags,
+  type FirstRunStepId,
+} from "@/lib/onboarding/firstRun";
 
-const STORAGE_KEY = "onyx_tour_completed_v2";
+const WELCOME_KEY = "onyx_first_run_welcome_v1";
 
-interface Step {
-  title: string;
-  body: string;
-  targetId?: string;
-}
-
-const STEPS: Step[] = [
-  {
-    title: "Welcome to Onyx & Iron",
-    body: "A calmer workspace for construction. Pick a project, then do the work — takeoff, estimate, field, closeout — without hunting through menus.",
+const STEP_COPY: Record<Exclude<FirstRunStepId, "welcome" | "done">, { title: string; body: string; cta: string }> = {
+  create_project: {
+    title: "Create your first project",
+    body: "Work happens inside a project. Give it a name — you can upload plans next.",
+    cta: "Create a project",
   },
-  {
-    title: "Start with a project",
-    body: "Use Working on in the sidebar. Everything important lives inside that project workspace.",
-    targetId: "active-project-picker",
+  upload_plans: {
+    title: "Upload a plan PDF",
+    body: "Use Upload Plans in the project header. We split pages into Takeoff and search.",
+    cta: "Go to Documents",
   },
-  {
-    title: "Create when you need one",
-    body: "Open Projects and click New. The new project becomes your active focus automatically.",
-    targetId: "new-project-button",
+  open_takeoff: {
+    title: "Open Takeoff",
+    body: "When pages finish splitting, measure sheets and extract quantities here.",
+    cta: "Open Takeoff",
   },
-  {
-    title: "Upload plans",
-    body: "Inside a project, use Upload Plans. We extract scope and takeoffs into shared project memory.",
-    targetId: "upload-plans-pill",
-  },
-  {
-    title: "One section at a time",
-    body: "Inside a project, the section list covers documents, takeoff, estimate, schedule, controls, procurement, financials, field, and closeout.",
-    targetId: "phase-tabs",
-  },
-  {
-    title: "Jump to any function",
-    body: "Press Ctrl K, or use Jump in the sidebar. Search takeoff, invoices, RFIs, procurement, settings — every working screen is one step away.",
-  },
-];
+};
 
 export default function OnboardingTour() {
-  const [open, setOpen] = useState(false);
-  const [step, setStep] = useState(0);
+  const router = useRouter();
+  const pathname = usePathname();
+  const projectCtx = useOptionalProjectContext();
+  const hasProject = (projectCtx?.projects.length ?? 0) > 0;
+  const projectId = projectCtx?.activeProjectId ?? projectCtx?.projects[0]?.id ?? null;
+
+  const [welcome, setWelcome] = useState(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return !window.localStorage.getItem(WELCOME_KEY);
+    } catch {
+      return false;
+    }
+  });
+  const [flags, setFlags] = useState<FirstRunFlags>(() => readFirstRun());
   const [highlight, setHighlight] = useState<DOMRect | null>(null);
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const done = window.localStorage.getItem(STORAGE_KEY);
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (!done) setOpen(true);
-    } catch {
-      // localStorage blocked — skip tour silently.
-    }
-  }, []);
+  if (hasProject && !flags.project_created) {
+    setFlags(patchFirstRun({ project_created: true }));
+  }
+
+  const step = nextFirstRunStep(flags, hasProject);
+  const done = isFirstRunComplete(flags, hasProject);
 
   useEffect(() => {
-    if (!open) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
+    const sync = () => setFlags(readFirstRun());
+    window.addEventListener(FIRST_RUN_EVENT, sync);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener(FIRST_RUN_EVENT, sync);
+      window.removeEventListener("storage", sync);
+    };
+  }, []);
+
+  /* eslint-disable react-hooks/set-state-in-effect -- measure highlight target on the current page */
+  useEffect(() => {
+    if (welcome || done || step === "done" || step === "welcome") {
       setHighlight(null);
       return;
     }
-    const current = STEPS[step];
-    if (!current?.targetId) {
+    const targetId = firstRunTargetId(step);
+    if (!targetId) {
       setHighlight(null);
       return;
     }
-    const el = document.getElementById(current.targetId);
+    const el = document.getElementById(targetId);
     if (!el) {
       setHighlight(null);
       return;
@@ -76,69 +90,80 @@ export default function OnboardingTour() {
     const rect = el.getBoundingClientRect();
     setHighlight(rect);
     el.scrollIntoView({ behavior: "smooth", block: "center" });
-  }, [step, open]);
+  }, [welcome, done, step, pathname]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        try {
-          window.localStorage.setItem(STORAGE_KEY, new Date().toISOString());
-        } catch {
-          // ignore
-        }
-        setOpen(false);
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open]);
-
-  function complete() {
+  function dismissWelcome() {
     try {
-      window.localStorage.setItem(STORAGE_KEY, new Date().toISOString());
+      window.localStorage.setItem(WELCOME_KEY, new Date().toISOString());
     } catch {
       // ignore
     }
-    setOpen(false);
+    setWelcome(false);
   }
 
-  function next() {
-    if (step >= STEPS.length - 1) {
-      complete();
-      return;
-    }
-    setStep((s) => s + 1);
+  function skipAll() {
+    dismissWelcome();
+    setFlags(patchFirstRun({ dismissed: true }));
   }
 
-  function back() {
-    setStep((s) => Math.max(0, s - 1));
+  function goNext() {
+    const href = firstRunHref(step, projectId);
+    if (href) router.push(href);
   }
 
-  if (!open) return null;
+  if (welcome) {
+    return (
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Welcome"
+        className="fixed inset-0 z-[9999] flex items-center justify-center"
+      >
+        <div className="absolute inset-0 bg-black/75 backdrop-blur-sm" onClick={dismissWelcome} />
+        <div className="relative z-10 mx-4 w-full max-w-md overflow-hidden rounded-2xl border border-white/10 bg-[#0E0F12] p-6 shadow-2xl">
+          <div className="mb-5">
+            <OILogo className="h-14 w-auto" alt="Onyx Intel" />
+          </div>
+          <h2 className="text-2xl font-black tracking-tight text-white">Welcome to Onyx &amp; Iron</h2>
+          <p className="mt-3 text-sm leading-relaxed text-white/75">
+            Create a project, upload plans, then takeoff and estimate live in that workspace.
+            Company tools stay under More tools until you need them.
+          </p>
+          <div className="mt-6 flex items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={skipAll}
+              className="text-xs font-bold uppercase tracking-widest text-white/60 transition-colors hover:text-white"
+            >
+              Skip
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                dismissWelcome();
+                if (!hasProject) router.push("/dashboard/projects?new=1");
+              }}
+              className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-5 text-xs font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85"
+            >
+              {hasProject ? "Continue" : "Create a project"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
-  const current = STEPS[step];
-  const isLast = step === STEPS.length - 1;
-  const isFirst = step === 0;
+  if (done || step === "done" || step === "welcome") return null;
+
+  const copy = STEP_COPY[step];
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Onboarding tour"
-      className="fixed inset-0 z-[9999] flex items-center justify-center"
-    >
-      {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/75 backdrop-blur-sm"
-        onClick={complete}
-      />
-
-      {/* Highlight rectangle */}
+    <>
       {highlight && (
         <div
           aria-hidden
-          className="pointer-events-none absolute rounded-xl border-2 border-[#CCFF00] shadow-[0_0_0_4px_rgba(204,255,0,0.18),0_0_40px_rgba(204,255,0,0.45)] transition-all duration-300"
+          className="pointer-events-none fixed z-[9998] rounded-xl border-2 border-[#CCFF00] shadow-[0_0_0_4px_rgba(204,255,0,0.18)]"
           style={{
             top: highlight.top - 8,
             left: highlight.left - 8,
@@ -147,69 +172,30 @@ export default function OnboardingTour() {
           }}
         />
       )}
-
-      {/* Skip link */}
-      <button
-        onClick={complete}
-        className="absolute right-5 top-5 z-10 text-xs font-bold uppercase tracking-widest text-white/60 transition-colors hover:text-white"
+      <div
+        role="status"
+        className="fixed bottom-4 right-4 z-[9997] w-[min(100%-2rem,22rem)] rounded-2xl border border-white/10 bg-[#0E0F12] p-4 shadow-2xl lg:bottom-6 lg:right-6"
       >
-        Skip tour
-      </button>
-
-      {/* Card */}
-      <div className="relative z-10 mx-4 w-full max-w-md overflow-hidden rounded-2xl border border-white/10 bg-[#0E0F12] p-6 shadow-2xl">
-        {isFirst && (
-          <div className="mb-4 flex items-center gap-2">
-            <span
-              aria-hidden
-              className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-[#CCFF00] text-lg font-black text-black"
-            >
-              ⚡
-            </span>
-            <span className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#CCFF00]">
-              OnyxIntel
-            </span>
-          </div>
-        )}
-
-        <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-white/45">
-          Step {step + 1} of {STEPS.length}
-        </p>
-        <h2 className="mt-2 text-2xl font-black tracking-tight text-white">
-          {current.title}
-        </h2>
-        <p className="mt-3 text-sm leading-relaxed text-white/75">
-          {current.body}
-        </p>
-
-        {/* Progress dots */}
-        <div className="mt-5 flex gap-1.5">
-          {STEPS.map((_, i) => (
-            <span
-              key={i}
-              className={`h-1.5 flex-1 rounded-full ${
-                i <= step ? "bg-[#CCFF00]" : "bg-white/10"
-              }`}
-            />
-          ))}
-        </div>
-
-        <div className="mt-6 flex items-center justify-between gap-3">
+        <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#CCFF00]">Next step</p>
+        <h3 className="mt-1 text-sm font-semibold text-white">{copy.title}</h3>
+        <p className="mt-1 text-xs leading-relaxed text-white/60">{copy.body}</p>
+        <div className="mt-3 flex items-center justify-between gap-2">
           <button
-            onClick={back}
-            disabled={isFirst}
-            className="text-xs font-bold uppercase tracking-widest text-white/60 transition-colors hover:text-white disabled:opacity-30"
+            type="button"
+            onClick={skipAll}
+            className="text-[10px] font-bold uppercase tracking-widest text-white/40 hover:text-white"
           >
-            Back
+            Dismiss
           </button>
           <button
-            onClick={next}
-            className="inline-flex h-9 items-center rounded-full bg-[#CCFF00] px-5 text-xs font-bold uppercase tracking-widest text-black transition-opacity hover:opacity-85"
+            type="button"
+            onClick={goNext}
+            className="inline-flex h-8 items-center rounded-full bg-[#CCFF00] px-4 text-[10px] font-bold uppercase tracking-widest text-black"
           >
-            {isLast ? "Get started" : "Next"}
+            {copy.cta}
           </button>
         </div>
       </div>
-    </div>
+    </>
   );
 }

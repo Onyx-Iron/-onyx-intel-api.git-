@@ -1,10 +1,12 @@
 import Link from "next/link";
+import { OILogo } from "@/components/brand/BrandMark";
 
 export default function NotFound() {
   return (
     <div className="min-h-screen w-full bg-[#06070A] text-white">
       <div className="mx-auto flex min-h-screen max-w-3xl flex-col items-center justify-center px-6 text-center">
-        <p className="text-[12px] font-bold uppercase tracking-[0.32em] text-[#CCFF00]">
+        <OILogo className="mx-auto h-16 w-auto" alt="Onyx Intel" />
+        <p className="mt-6 text-[12px] font-bold uppercase tracking-[0.32em] text-[#CCFF00]">
           OnyxIntel
         </p>
         <h1 className="mt-6 text-[120px] font-black leading-none tracking-tight text-white sm:text-[160px]">

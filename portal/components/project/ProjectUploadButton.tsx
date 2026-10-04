@@ -5,6 +5,7 @@ import { Upload } from "lucide-react";
 
 import { useToast } from "@/components/common/Toast";
 import { uploadDocumentDirect } from "@/lib/documents/browser-upload";
+import { patchFirstRun } from "@/lib/onboarding/firstRun";
 
 interface ProjectUploadButtonProps {
   projectId: string;
@@ -45,6 +46,7 @@ export default function ProjectUploadButton({
             onProgress: (p) => setProgress(p.percent),
           });
           uploaded += 1;
+          patchFirstRun({ plans_uploaded: true });
         } catch (err) {
           failures.push(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
         }

@@ -6,6 +6,8 @@ import { BID_STAGES, BID_STAGE_LABELS, type BidStage } from "@/lib/preconstructi
 import { useToast } from "@/components/common/Toast";
 import SamImportPanel from "./SamImportPanel";
 import ProjectContactsInline from "./ProjectContactsInline";
+import EmptyState from "@/components/common/EmptyState";
+import { ClipboardList } from "lucide-react";
 
 interface BidOpportunity {
   id: string;
@@ -224,6 +226,16 @@ export default function BidBoard() {
 
       {loading ? (
         <p className="text-sm text-white/40">Loading board…</p>
+      ) : rows.length === 0 ? (
+        <div className="rounded-xl border border-white/8 bg-[#0E0F12]">
+          <EmptyState
+            icon={<ClipboardList className="h-6 w-6" />}
+            title="No bids yet"
+            description="Create a bid with the form above, or connect SAM.gov later from Connections if market search returns nothing."
+            actionLabel="Create a project for takeoff"
+            actionHref="/dashboard/projects?new=1"
+          />
+        </div>
       ) : (
         <div className="flex gap-3 overflow-x-auto pb-2">
           {ACTIVE_COLUMNS.map((stage) => (

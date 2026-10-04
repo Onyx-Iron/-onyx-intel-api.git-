@@ -25,12 +25,15 @@ export default function ActiveProjectPicker({ onNavigate }: { onNavigate?: () =>
       <p className="mb-2 text-[9px] font-bold uppercase tracking-[0.22em] text-white/30">
         Working on
       </p>
+      <p className="mb-2 text-[10px] leading-snug text-white/35">
+        Work happens inside a project.
+      </p>
 
       {loading && projects.length === 0 ? (
         <div className="h-9 animate-pulse rounded-lg bg-white/5" />
       ) : projects.length === 0 ? (
         <Link
-          href="/dashboard/projects"
+          href="/dashboard/projects?new=1"
           onClick={onNavigate}
           className="flex items-center gap-2 rounded-lg border border-[#CCFF00]/25 bg-[#CCFF00]/10 px-3 py-2 text-xs font-semibold text-[#CCFF00] transition-opacity hover:opacity-85"
         >
@@ -65,7 +68,9 @@ export default function ActiveProjectPicker({ onNavigate }: { onNavigate?: () =>
                 <ChevronRight size={12} className="shrink-0" />
               </Link>
               <div className="mt-1 flex flex-wrap gap-1">
-                {QUICK_JUMPS.map((jump) => (
+                {QUICK_JUMPS.filter((jump) =>
+                  ["overview", "documents", "takeoff", "estimate"].includes(jump.phase),
+                ).map((jump) => (
                   <Link
                     key={jump.phase}
                     href={`/dashboard/projects/${activeProject.id}?phase=${jump.phase}&tab=${jump.tab}`}

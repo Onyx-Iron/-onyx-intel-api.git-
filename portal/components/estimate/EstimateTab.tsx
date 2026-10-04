@@ -533,9 +533,9 @@ export default function EstimateTab({ projectId }: { projectId: string }) {
                       <EmptyState
                         icon={<Calculator className="w-6 h-6" />}
                         title="No estimate yet"
-                        description="Generate an estimate from your takeoff or add line items manually."
-                        actionLabel="Add Line Item"
-                        onAction={openAdd}
+                        description="Import takeoff quantities or add a line to start pricing this job."
+                        actionLabel="Import takeoff"
+                        onAction={() => { void importFromTakeoff(); }}
                       />
                     </div>
                   </td>

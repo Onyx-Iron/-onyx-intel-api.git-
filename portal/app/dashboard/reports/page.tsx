@@ -6,6 +6,7 @@ import EmptyState, { ErrorState } from "@/components/common/EmptyState";
 import PageHero from "@/components/layout/PageHero";
 import ProjectScopeSelect from "@/components/project/ProjectScopeSelect";
 import { useProjectContext } from "@/components/project/ProjectContext";
+import { chooseOrCreateProjectHref } from "@/lib/navigation/project-sections";
 
 interface ReportRun {
   id: string;
@@ -183,7 +184,10 @@ export default function ReportsPage() {
               <EmptyState
                 icon={<FileText className="h-6 w-6" />}
                 title="No reports yet"
-                description="Generate the first project report to create a preserved report history."
+                description="Reports summarize a project. Choose one, then generate the first run."
+                actionLabel={selectedProject ? "Generate Report" : "Choose or create a project"}
+                onAction={selectedProject ? () => { void generate(); } : undefined}
+                actionHref={selectedProject ? undefined : chooseOrCreateProjectHref(null, "overview", "summary")}
               />
             ) : (
               <div className="divide-y divide-white/5">

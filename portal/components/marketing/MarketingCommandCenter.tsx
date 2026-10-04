@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import ProjectAdWrapper from "./ProjectAdWrapper";
 import PresenceSettingsPanel from "./PresenceSettingsPanel";
 import { useToast } from "@/components/common/Toast";
+import EmptyState from "@/components/common/EmptyState";
+import { Megaphone } from "lucide-react";
 
 type MarketingTab = "profiles" | "organic" | "seo" | "paid";
 
@@ -212,7 +214,21 @@ export default function MarketingCommandCenter() {
         {loading ? (
           <div className="p-8 text-center text-xs text-white/40">Loading…</div>
         ) : campaigns.length === 0 ? (
-          <div className="p-8 text-center text-xs text-white/40">No campaigns yet. Launch one from a project&apos;s progress photos.</div>
+          <EmptyState
+            icon={<Megaphone className="h-6 w-6" />}
+            title="Paid ads are idle"
+            description={
+              platformsConfigured.google_ads || platformsConfigured.meta
+                ? "Launch a campaign from a project's progress photos, or start from a project workspace."
+                : "Google Ads / Meta keys are not configured. Connect them in Settings, or skip ads and start from a project."
+            }
+            actionLabel={platformsConfigured.google_ads || platformsConfigured.meta ? "Choose or create a project" : "Open Connections"}
+            actionHref={
+              platformsConfigured.google_ads || platformsConfigured.meta
+                ? "/dashboard/projects?new=1"
+                : "/dashboard/settings/connections"
+            }
+          />
         ) : (
           <table className="w-full text-xs">
             <thead>

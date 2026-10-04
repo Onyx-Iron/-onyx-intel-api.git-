@@ -19,6 +19,8 @@ const eslintConfig = defineConfig([
     // under Deno's own tooling, not this Next.js/Node config -- same
     // reasoning as their tsconfig.json exclusion.
     "supabase/functions/**",
+    // Vendored by next.config from pdfjs-dist; not app source.
+    "public/pdf.worker.min.mjs",
   ]),
 ]);
 

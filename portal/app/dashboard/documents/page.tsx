@@ -9,6 +9,7 @@ import ProjectScopeSelect, { filterByActiveProject } from "@/components/project/
 import { useProjectContext } from "@/components/project/ProjectContext";
 import { PipelineStage, type PipelineStatus } from "@/components/documents/PipelineStage";
 import { statusLabel } from "@/lib/documents/status";
+import { chooseOrCreateProjectHref } from "@/lib/navigation/project-sections";
 
 type DocStatus =
   | "pending"
@@ -111,9 +112,7 @@ export default function DocumentsPage() {
     [documents, activeProjectId],
   );
 
-  const openWorkspaceHref = activeProject
-    ? `/dashboard/projects/${activeProject.id}?phase=documents&tab=documents`
-    : "/dashboard/projects";
+  const openWorkspaceHref = chooseOrCreateProjectHref(activeProject?.id, "documents", "documents");
 
   return (
     <div>
@@ -153,15 +152,15 @@ export default function DocumentsPage() {
             <tbody className="divide-y divide-white/5">
               {loading ? (
                 <SkeletonRows />
-              ) : filtered.length === 0 && !error ? (
+              ) : filtered.length === 0 ? (
                 <tr>
                   <td colSpan={6}>
                     <div className="py-4">
                       <EmptyState
                         icon={<FileText className="w-6 h-6" />}
                         title="No documents yet"
-                        description="Upload contracts, plans, and shared docs from a project workspace."
-                        actionLabel={activeProject ? "Open documents workspace" : "Go to projects"}
+                        description="Upload a plan PDF from a project workspace — this view tracks split, OCR, and takeoff."
+                        actionLabel={activeProject ? "Upload a plan PDF" : "Choose or create a project"}
                         actionHref={openWorkspaceHref}
                       />
                     </div>

@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import { auth } from "@clerk/nextjs/server";
 import { notFound } from "next/navigation";
 import { createServiceClient } from "@/lib/supabase/server";
+import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import StatusBadge from "@/components/ui/StatusBadge";
 import RiskDigestCard from "@/components/project/RiskDigestCard";
 import ActivityFeed from "@/components/project/ActivityFeed";
@@ -29,23 +30,12 @@ async function getProject(projectId: string, tenantId: string) {
   return data;
 }
 
-async function getTenantId(userId: string, orgId: string | null): Promise<string | null> {
-  const db = await createServiceClient();
-  const orgKey = orgId ?? `user_${userId}`;
-  const { data } = await db
-    .from("tenants")
-    .select("id")
-    .eq("clerk_org_id", orgKey)
-    .single();
-  return data?.id ?? null;
-}
-
 export default async function ProjectDetailPage({ params }: PageProps) {
   const { id } = await params;
-  const { userId, orgId } = await auth();
+  const { userId, orgId, orgSlug } = await auth();
   if (!userId) return null;
 
-  const tenantId = await getTenantId(userId, orgId ?? null);
+  const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
   if (!tenantId) notFound();
 
   const project = await getProject(id, tenantId);
