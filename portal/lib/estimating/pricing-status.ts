@@ -32,7 +32,10 @@ function money(value: number | string | null | undefined): number {
 }
 
 /** Unit rate when quantity is usable; otherwise the extended dollars. */
-function comparableRate(extended: number | null | undefined, quantity: number | null | undefined): number {
+function comparableRate(
+  extended: number | string | null | undefined,
+  quantity: number | string | null | undefined,
+): number {
   const q = money(quantity);
   const amount = money(extended);
   if (q === 0) return amount;
