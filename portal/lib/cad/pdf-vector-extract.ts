@@ -37,7 +37,6 @@ interface Segment {
   args: number[];
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function asCoordList(value: unknown): ArrayLike<number> | null {
   if (!value) return null;
   if (Array.isArray(value) || ArrayBuffer.isView(value)) return value as ArrayLike<number>;
@@ -74,7 +73,7 @@ function decodeConstructPath(args: unknown): { segs: Segment[]; closed: boolean;
   return { segs: [], closed: false, paint: null };
 }
 
-function decodeCommandStream(ops: any, argsArr: number[]): Segment[] {
+function decodeCommandStream(ops: Iterable<number>, argsArr: number[]): Segment[] {
   // Encoded like: [op0, op1, op2, ...] with argsArr flattened per pdfjs docs.
   // We only care about moveTo (M), lineTo (L), curveTo (C), quadratic (Q), and close (Z).
   // pdfjs `OPS.constructPath` args = [ [ops], [args] ]

@@ -46,6 +46,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     .eq("page_id", pageId)
     .maybeSingle();
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data: regions } = await (db as any)
     .from("sheet_scale_regions")
     .select("id, page_id, scale_text, page_space_scale_factor, min_x, min_y, max_x, max_y, covers_page, anchor_x, anchor_y, source, verified, status, active")

@@ -124,7 +124,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const decision = nextSupervisorAction(snapshot);
     if (decision.action === "idle") continue;
 
-    const nextSummary = {
+    const nextSummary: Record<string, unknown> = {
       ...summary,
       supervisor_attempts: snapshot.attempts + 1,
       last_supervisor_action: decision.action,
