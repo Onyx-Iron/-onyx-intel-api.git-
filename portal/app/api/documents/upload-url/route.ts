@@ -12,6 +12,7 @@ import {
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant } from "@/lib/project-controls/server";
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { auditInsert } from "@/lib/audit";
+import { isSha256Hex, reuseUpload } from "@/lib/documents/upload-identity";
 import type { TablesInsert } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
@@ -43,6 +44,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       file_name?: string;
       size?: number;
       content_type?: string;
+      content_sha256?: string;
     };
     const project_id = body.project_id;
     const file_name = body.file_name;
@@ -63,6 +65,83 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const db = await createServiceClient();
+    const checksum = isSha256Hex(body.content_sha256) ? body.content_sha256.toLowerCase() : null;
+    if (checksum) {
+      const { data: existing } = await db
+        .from("documents")
+        .select("id, status, meta")
+        .eq("tenant_id", tenantId)
+        .eq("project_id", project_id)
+        .eq("checksum", checksum)
+        .order("uploaded_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const decision = existing ? reuseUpload(existing.status) : "new";
+      if (existing && decision === "skip_upload") {
+        return NextResponse.json({
+          document_id: existing.id,
+          reused: true,
+          skip_upload: true,
+          path: (existing.meta as { storage_path?: string } | null)?.storage_path ?? null,
+        });
+      }
+      if (existing && decision === "replace_bytes") {
+        const meta = (existing.meta && typeof existing.meta === "object")
+          ? existing.meta as Record<string, unknown>
+          : {};
+        const storagePath = typeof meta.storage_path === "string"
+          ? meta.storage_path
+          : buildOriginalStoragePath(existing.id, file_name);
+        await db.storage.from(PLANS_UPLOAD_BUCKET).remove([storagePath]);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { data: signed, error: signErr } = await (db.storage.from(PLANS_UPLOAD_BUCKET) as any)
+          .createSignedUploadUrl(storagePath);
+        if (signErr || !signed) {
+          return NextResponse.json(
+            { error: `Could not create upload URL: ${signErr?.message ?? "unknown"}` },
+            { status: 500 },
+          );
+        }
+        const parsed = parseSignedUploadPayload(signed as Record<string, unknown>);
+        await db.from("documents").update({
+          status: "pending",
+          file_name,
+          last_error: null,
+          last_error_step: null,
+          checksum,
+          meta: { ...meta, storage_path: storagePath, size: body.size ?? null, content_type, partial_acknowledged: false },
+        }).eq("id", existing.id).eq("tenant_id", tenantId);
+        const supabaseUrl = (process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || "").replace(/\/$/, "");
+        const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "";
+        return NextResponse.json({
+          document_id: existing.id,
+          reused: true,
+          skip_upload: false,
+          path: storagePath,
+          bucket: PLANS_UPLOAD_BUCKET,
+          prefer_tus: typeof body.size === "number" && body.size >= TUS_THRESHOLD_BYTES,
+          upload: { url: parsed.url, token: parsed.token, path: storagePath, method: "PUT" as const },
+          tus: supabaseUrl && (parsed.token || anonKey)
+            ? {
+                endpoint: `${supabaseUrl}/storage/v1/upload/resumable`,
+                headers: {
+                  authorization: `Bearer ${parsed.token || anonKey}`,
+                  apikey: anonKey,
+                  "x-upsert": "true",
+                },
+                metadata: {
+                  bucketName: PLANS_UPLOAD_BUCKET,
+                  objectName: storagePath,
+                  contentType: content_type,
+                  cacheControl: "3600",
+                },
+                chunkSize: 6 * 1024 * 1024,
+              }
+            : null,
+        });
+      }
+    }
+
     const documentId = crypto.randomUUID();
     const storagePath = buildOriginalStoragePath(documentId, file_name);
 
@@ -88,6 +167,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       file_name,
       status: "pending",
       uploaded_at: new Date().toISOString(),
+      checksum,
       meta: buildDocumentRevisionMeta(file_name, {
         source: "local_upload",
         storage: PLANS_UPLOAD_BUCKET,

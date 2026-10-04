@@ -98,12 +98,19 @@ interface CitationChip {
   file_name?: string;
 }
 
+interface SkillLinkChip {
+  skill: string;
+  label: string;
+  href: string;
+}
+
 interface AIMessage {
   id: string;
   role: "user" | "system";
   content: string;
   timestamp: string;
   citations?: CitationChip[];
+  links?: SkillLinkChip[];
 }
 
 function parseCitationsHeader(raw: string | null): CitationChip[] {
@@ -168,11 +175,27 @@ const INITIAL_AI_MESSAGES: AIMessage[] = [
   },
 ];
 
-const QUICK_PROMPTS = [
+const PORTFOLIO_PROMPTS = [
   "Summarize project risks across the active jobs.",
+  "Which jobs still need a takeoff?",
   "Draft an RFI from a missing spec detail.",
-  "What takeoff items need estimate review?",
 ];
+
+const PROJECT_PROMPTS = [
+  "Which RFIs are still open?",
+  "What takeoff items are waiting for review?",
+  "Summarize recent daily logs and open punch items.",
+  "What's the estimate status, and which invoices are unpaid?",
+];
+
+function uniqueLinks(links: SkillLinkChip[]): SkillLinkChip[] {
+  const seen = new Set<string>();
+  return links.filter((link) => {
+    if (!link.href || seen.has(link.href)) return false;
+    seen.add(link.href);
+    return true;
+  });
+}
 
 function formatCurrency(value: number): string {
   if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
@@ -485,6 +508,7 @@ function AICommandPanel({
   projectLabel,
   memoryMode,
   projectId,
+  prompts,
 }: {
   aiInput: string;
   aiMessages: AIMessage[];
@@ -495,6 +519,7 @@ function AICommandPanel({
   projectLabel: string | null;
   memoryMode: boolean;
   projectId: string | null;
+  prompts: string[];
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   return (
@@ -507,8 +532,8 @@ function AICommandPanel({
         <div className="flex items-center justify-between gap-2 border-b border-white/6 px-4 py-2.5">
           <p className="text-[10px] uppercase tracking-widest text-white/35">
             {memoryMode
-              ? `Remembering ${projectLabel ?? "project"} — chat + project memory`
-              : "Portfolio assist — select a project for lasting memory"}
+              ? `Reading ${projectLabel ?? "this project"} — RFIs, takeoff, estimate, field, and the rest`
+              : "Portfolio assist — select a project to use its live records"}
           </p>
           <ProjectScopeSelect className="w-44" label="" />
         </div>
@@ -519,7 +544,7 @@ function AICommandPanel({
                 {message.role === "system" ? <Zap size={13} /> : <MessageSquare size={13} />}
               </div>
               <div className={`max-w-[84%] rounded-lg border px-3 py-2 text-sm leading-6 ${message.role === "system" ? "border-white/8 bg-white/3 text-white/80" : "border-[#00D2FF]/20 bg-[#00D2FF]/8 text-white"}`}>
-                {message.content}
+                <p className="whitespace-pre-wrap">{message.content}</p>
                 {message.citations && message.citations.length > 0 && projectId && (
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {message.citations.map((cite, idx) => {
@@ -544,6 +569,19 @@ function AICommandPanel({
                     })}
                   </div>
                 )}
+                {message.links && message.links.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {message.links.map((link) => (
+                      <Link
+                        key={`${message.id}-${link.href}`}
+                        href={link.href}
+                        className="rounded-full border border-[#CCFF00]/30 bg-[#CCFF00]/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-[#CCFF00] hover:bg-[#CCFF00]/20"
+                      >
+                        Open {link.label}
+                      </Link>
+                    ))}
+                  </div>
+                )}
                 <p className="mt-1 text-[10px] text-white/30">{message.timestamp}</p>
               </div>
             </div>
@@ -554,6 +592,9 @@ function AICommandPanel({
                 <Zap size={13} />
               </div>
               <div className="rounded-lg border border-white/8 bg-white/3 px-3 py-2.5">
+                {memoryMode && (
+                  <p className="mb-2 text-[10px] uppercase tracking-widest text-white/40">Reading project records</p>
+                )}
                 <div className="flex gap-1">
                   {[0, 1, 2].map((item) => (
                     <span key={item} className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#CCFF00]" style={{ animationDelay: `${item * 140}ms` }} />
@@ -567,7 +608,7 @@ function AICommandPanel({
 
         <div className="border-t border-white/8 p-3">
           <div className="mb-3 flex flex-wrap gap-2">
-            {QUICK_PROMPTS.map((prompt) => (
+            {prompts.map((prompt) => (
               <button
                 key={prompt}
                 type="button"
@@ -790,7 +831,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            mode: "rag",
+            mode: "agentic",
             project_id: activeProjectId,
             message: trimmed,
             conversation_id: conversationId ?? undefined,
@@ -807,6 +848,16 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
         const convHeader = response.headers.get("X-Conversation-Id");
         if (convHeader) setConversationId(convHeader);
         const citations = parseCitationsHeader(response.headers.get("X-Citations"));
+        let links: SkillLinkChip[] = [];
+        const linkHeader = response.headers.get("X-Skill-Links");
+        if (linkHeader) {
+          try {
+            const parsed = JSON.parse(decodeURIComponent(linkHeader)) as SkillLinkChip[];
+            links = uniqueLinks(Array.isArray(parsed) ? parsed : []);
+          } catch {
+            links = [];
+          }
+        }
 
         const reader = response.body?.getReader();
         const decoder = new TextDecoder();
@@ -814,7 +865,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
         const msgId = `msg-${Date.now() + 1}`;
         setAiMessages((previous) => [
           ...previous,
-          { id: msgId, role: "system", content: "", timestamp: timestamp(), citations },
+          { id: msgId, role: "system", content: "", timestamp: timestamp(), citations, links },
         ]);
         if (reader) {
           while (true) {
@@ -969,6 +1020,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
               projectLabel={activeProject?.name ?? null}
               memoryMode={Boolean(activeProjectId)}
               projectId={activeProjectId}
+              prompts={activeProjectId ? PROJECT_PROMPTS : PORTFOLIO_PROMPTS}
             />
             <ProjectPipeline projects={filteredProjects} loading={dataLoading} />
           </div>

@@ -10,6 +10,13 @@ import { auditDelete } from "@/lib/audit";
 import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { generateText, availableProviders, NoProviderError, type Provider } from "@/lib/ai/providers";
 import { formatMemoriesBlock, listProjectMemories } from "@/lib/ai/project-memories";
+import { canReadFinancial, getUserRole } from "@/lib/project-controls/permissions";
+import {
+  executeProjectSkill,
+  PROJECT_SKILL_DECLARATIONS,
+  skillLink,
+  skillSectionGuide,
+} from "@/lib/ai/project-skills";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -40,9 +47,12 @@ const SYSTEM_BASE =
 
 const SYSTEM_BASE_AGENTIC =
   "You are an expert construction project assistant for a general contractor. " +
-  "You have access to tools that can search project documents, retrieve open RFIs, " +
-  "fetch schedule tasks, and pull project data. Use them proactively when the question " +
-  "requires specific project information. " +
+  "Use the project tools whenever a question depends on live records: documents, RFIs, submittals, " +
+  "change orders, schedule, estimate, invoices, lien waivers, procurement, takeoff, logs, punch list, " +
+  "to-dos, staff, or contacts. " +
+  "Tools are read-only. Never claim you created, approved, awarded, or deleted a record. " +
+  "If a tool returns no rows, say so. If financials_redacted is true, do not invent dollar amounts. " +
+  "When the user should open a screen, include the open_in_app link from the tool result. " +
   "Quote specific values, sheet numbers, or spec sections where relevant. " +
   "Be concise and practical. After calling tools, synthesize findings into a clear answer.";
 
@@ -225,227 +235,6 @@ async function summarizeConversation(convId: string, tenantId: string, db: any, 
       .eq("id", convId)
       .eq("tenant_id", tenantId);
   } catch { /* non-fatal */ }
-}
-
-// -----------------------------------------------------------------------------
-// Agentic tool declarations + executor
-// -----------------------------------------------------------------------------
-
-const TOOL_DECLARATIONS = [
-  {
-    name: "search_project_docs",
-    description:
-      "Semantically search indexed project documents (drawings, specs, submittals, contracts). " +
-      "Use when the question involves document content, specifications, materials, quantities, or referenced sheets. " +
-      "Optionally narrow by document_ids or doc_types (e.g. drawing, spec, submittal).",
-    parameters: {
-      type: "OBJECT",
-      properties: {
-        query: { type: "STRING", description: "Natural language search query" },
-        document_ids: {
-          type: "ARRAY",
-          items: { type: "STRING" },
-          description: "Optional document UUIDs to restrict the search",
-        },
-        doc_types: {
-          type: "ARRAY",
-          items: { type: "STRING" },
-          description: "Optional document types to restrict the search (drawing, spec, submittal, contract, etc.)",
-        },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "get_open_rfis",
-    description:
-      "Retrieve open, pending, or recently answered Requests for Information (RFIs) for this project. " +
-      "Use when asked about unresolved questions, potential conflicts, clarifications needed, or RFI status.",
-    parameters: {
-      type: "OBJECT",
-      properties: {
-        status: { type: "STRING", description: "Filter by status: 'open', 'pending', 'answered', or 'all'. Default: 'all'" },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "get_schedule_tasks",
-    description:
-      "Get schedule tasks and milestones for this project with dates, status, and assignments. " +
-      "Use when asked about timelines, upcoming work, overdue items, or schedule risk.",
-    parameters: {
-      type: "OBJECT",
-      properties: {
-        filter: { type: "STRING", description: "Filter results: 'incomplete', 'overdue', 'upcoming_30d', or 'all'. Default: 'all'" },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "get_project_data",
-    description:
-      "Get core project details: name, status, budget, estimate, completion percentage, start/end dates, " +
-      "and document/task counts. Use when asked for project overview, budget, or key stats.",
-    parameters: { type: "OBJECT", properties: {}, required: [] },
-  },
-  {
-    name: "get_related_specs",
-    description:
-      "Broad cross-reference sweep of all indexed spec sections related to a CSI division, trade, or topic. " +
-      "Use when asked to summarize what the specs say about a division or system, compare requirements " +
-      "across sections, or find all references to a material or trade. Returns up to 15 excerpts.",
-    parameters: {
-      type: "OBJECT",
-      properties: {
-        division: { type: "STRING", description: "CSI division number, trade name, or topic" },
-        max_results: { type: "NUMBER", description: "How many spec excerpts to return. Default 10, max 15." },
-      },
-      required: ["division"],
-    },
-  },
-];
-
-async function executeTool(
-  name: string,
-  args: Record<string, unknown>,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  db: any,
-  tenantId: string,
-  projectId: string,
-  citationsOut: Array<{ document_id: string; page_number: number; similarity: number }>,
-): Promise<unknown> {
-  switch (name) {
-    case "search_project_docs": {
-      const query = String(args.query ?? "").trim();
-      if (!query) return "No query provided.";
-      const documentIds = Array.isArray(args.document_ids)
-        ? args.document_ids.filter((x): x is string => typeof x === "string")
-        : undefined;
-      const docTypes = Array.isArray(args.doc_types)
-        ? args.doc_types.filter((x): x is string => typeof x === "string")
-        : undefined;
-      try {
-        const embedding = await embedText(query);
-        const vectorStr = `[${embedding.join(",")}]`;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const { data } = await (db.rpc as any)("match_chunks", {
-          query_embedding: vectorStr,
-          match_tenant_id: tenantId,
-          match_project_id: projectId,
-          query_text: query,
-          match_count: 6,
-          filter_document_ids: documentIds?.length ? documentIds : null,
-          filter_doc_types: docTypes?.length ? docTypes : null,
-        }) as { data: ChunkRow[] | null };
-        const chunks = (data ?? []).filter((c) => c.rrf_score > 0.010);
-        if (chunks.length === 0) return "No relevant document excerpts found.";
-        for (const c of chunks) {
-          citationsOut.push({ document_id: c.document_id, page_number: c.page_number, similarity: c.similarity });
-        }
-        return chunks.map((c, i) => `[${i + 1}] (page:${c.page_number})\n${c.content}`).join("\n\n");
-      } catch {
-        return "Document search failed.";
-      }
-    }
-    case "get_open_rfis": {
-      const status = String(args.status ?? "all");
-      let query = db
-        .from("rfi_items")
-        .select("id, title, status, description, created_at, due_date, assignee")
-        .eq("tenant_id", tenantId)
-        .eq("project_id", projectId)
-        .order("created_at", { ascending: false })
-        .limit(25);
-      if (status !== "all") query = query.eq("status", status);
-      const { data } = await query;
-      if (!data || data.length === 0) return "No RFIs found.";
-      return data;
-    }
-    case "get_schedule_tasks": {
-      const filter = String(args.filter ?? "all");
-      let query = db
-        .from("schedule_tasks")
-        .select("id, title, status, start_date, end_date, assignee, notes")
-        .eq("tenant_id", tenantId)
-        .eq("project_id", projectId)
-        .order("start_date", { ascending: true })
-        .limit(40);
-      const today = new Date().toISOString().split("T")[0];
-      if (filter === "incomplete") {
-        query = query.neq("status", "complete").neq("status", "done");
-      } else if (filter === "overdue") {
-        query = query.lt("end_date", today).neq("status", "complete").neq("status", "done");
-      } else if (filter === "upcoming_30d") {
-        const thirtyDays = new Date(Date.now() + 30 * 86400000).toISOString().split("T")[0];
-        query = query.gte("start_date", today).lte("start_date", thirtyDays);
-      }
-      const { data } = await query;
-      if (!data || data.length === 0) return "No schedule tasks found.";
-      return data;
-    }
-    case "get_project_data": {
-      const { data } = await db
-        .from("projects")
-        .select("id, name, status, budget, estimate, completion_pct, start_date, end_date, created_at, updated_at")
-        .eq("tenant_id", tenantId)
-        .eq("id", projectId)
-        .single();
-      return data ?? "Project not found.";
-    }
-    case "get_related_specs": {
-      const division = String(args.division ?? "").trim();
-      if (!division) return "No division or topic provided.";
-      const maxResults = Math.min(Math.max(1, Number(args.max_results ?? 10)), 15);
-      const CSI_NAMES: Record<string, string> = {
-        "01": "general requirements", "02": "existing conditions site demolition",
-        "03": "concrete cast-in-place reinforced", "04": "masonry brick block",
-        "05": "metals structural steel framing", "06": "wood plastics composites rough carpentry",
-        "07": "thermal moisture protection waterproofing roofing insulation",
-        "08": "openings doors windows glazing", "09": "finishes flooring ceiling drywall paint",
-        "10": "specialties", "11": "equipment", "12": "furnishings",
-        "13": "special construction", "14": "conveying equipment elevators",
-        "21": "fire suppression sprinkler", "22": "plumbing piping fixtures",
-        "23": "HVAC heating ventilation air conditioning mechanical",
-        "26": "electrical power lighting", "27": "communications low voltage",
-        "28": "electronic safety security fire alarm", "31": "earthwork grading excavation",
-        "32": "exterior improvements paving site concrete", "33": "utilities underground",
-      };
-      const numMatch = division.match(/\b(\d{1,2})\b/);
-      const divNum = numMatch ? numMatch[1].padStart(2, "0") : null;
-      const csiFull = divNum ? CSI_NAMES[divNum] : null;
-      const searchQuery = csiFull
-        ? `Division ${divNum} ${csiFull} specifications requirements`
-        : `${division} specifications requirements`;
-      try {
-        const embedding = await embedText(searchQuery);
-        const vectorStr = `[${embedding.join(",")}]`;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const { data } = await (db.rpc as any)("match_chunks", {
-          query_embedding: vectorStr,
-          match_tenant_id: tenantId,
-          match_project_id: projectId,
-          query_text: searchQuery,
-          match_count: maxResults,
-        }) as { data: ChunkRow[] | null };
-        if (!data || data.length === 0) {
-          return `No indexed spec sections found for "${division}". Ensure spec documents are uploaded and indexed.`;
-        }
-        for (const c of data) {
-          citationsOut.push({ document_id: c.document_id, page_number: c.page_number, similarity: c.similarity });
-        }
-        const label = csiFull ? `Division ${divNum} — ${csiFull}` : division;
-        return (
-          `Cross-reference: ${label}\n\n` +
-          data.map((c, i) => `[${i + 1}] page ${c.page_number}\n${c.content}`).join("\n\n---\n\n")
-        );
-      } catch {
-        return "Spec cross-reference search failed.";
-      }
-    }
-    default:
-      return { error: `Unknown tool: ${name}` };
-  }
 }
 
 // -----------------------------------------------------------------------------
@@ -697,6 +486,7 @@ async function handleRag(
 }
 
 async function handleAgentic(
+  userId: string,
   tenantId: string,
   project_id: string,
   message: string,
@@ -714,6 +504,13 @@ async function handleAgentic(
 
   const today = new Date().toISOString().split("T")[0];
   let systemInstruction = SYSTEM_BASE_AGENTIC + "\n\n" + buildProjectBrief(project as ProjectRow, today);
+  systemInstruction += "\n\n" + skillSectionGuide(project_id);
+  let allowMoney = false;
+  try {
+    allowMoney = canReadFinancial(await getUserRole(tenantId, userId));
+  } catch {
+    allowMoney = false;
+  }
   try {
     const memories = await listProjectMemories(db, tenantId, project_id, 30);
     systemInstruction += formatMemoriesBlock(memories);
@@ -771,7 +568,7 @@ async function handleAgentic(
         body: JSON.stringify({
           system_instruction: { parts: [{ text: systemInstruction }] },
           contents,
-          tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
+          tools: [{ functionDeclarations: PROJECT_SKILL_DECLARATIONS }],
           toolConfig: { functionCallingConfig: { mode: "AUTO" } },
           generationConfig: { temperature: 0.3, maxOutputTokens: 4096 },
         }),
@@ -805,7 +602,13 @@ async function handleAgentic(
       toolCallLog.push(name);
       let result: unknown;
       try {
-        result = await executeTool(name, args, db, tenantId, project_id, agenticCitations);
+        result = await executeProjectSkill(name, args ?? {}, db, {
+          tenantId,
+          projectId: project_id,
+          canReadFinancial: allowMoney,
+          citationsOut: agenticCitations,
+          embedText,
+        });
       } catch (e) {
         result = { error: String(e) };
       }
@@ -856,8 +659,11 @@ async function handleAgentic(
       "X-Conversation-Id": convId!,
       "X-Has-Context": String(enrichedCitations.length > 0 || toolCallLog.length > 0),
       "X-Tool-Calls": toolCallLog.join(","),
+      "X-Skill-Links": encodeURIComponent(JSON.stringify(
+        toolCallLog.map((skill) => skillLink(project_id, skill)).filter((link) => link !== null),
+      )),
       "X-Citations": JSON.stringify(enrichedCitations),
-      "Access-Control-Expose-Headers": "X-Conversation-Id, X-Has-Context, X-Tool-Calls, X-Citations",
+      "Access-Control-Expose-Headers": "X-Conversation-Id, X-Has-Context, X-Tool-Calls, X-Skill-Links, X-Citations",
     },
   });
 }
@@ -940,7 +746,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     }
 
     if (mode === "agentic") {
-      return await handleAgentic(tenantId, body.project_id, body.message, body.conversation_id);
+      return await handleAgentic(userId, tenantId, body.project_id, body.message, body.conversation_id);
     }
     const documentIds = Array.isArray((body as { document_ids?: unknown }).document_ids)
       ? ((body as { document_ids: unknown[] }).document_ids).filter((x): x is string => typeof x === "string")

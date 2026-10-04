@@ -193,8 +193,7 @@ export async function reclaimStuckProcessingSheets(
     .select("id");
 
   if (error) {
-    console.error("[reclaimStuckProcessingSheets]", error);
-    return 0;
+    throw new Error(`[reclaimStuckProcessingSheets] ${error.message}`);
   }
   return (data ?? []).length;
 }

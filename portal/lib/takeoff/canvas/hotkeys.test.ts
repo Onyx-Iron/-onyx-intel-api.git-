@@ -20,8 +20,9 @@ function keyEvent(
 }
 
 describe("resolveCanvasHotkey", () => {
-  it("maps L/A/C to length/area/count tools", () => {
+  it("maps L/R/A/C to length/perimeter/area/count tools", () => {
     assert.deepEqual(resolveCanvasHotkey(keyEvent({ key: "l", type: "keydown" })), { type: "tool", tool: "length" });
+    assert.deepEqual(resolveCanvasHotkey(keyEvent({ key: "r", type: "keydown" })), { type: "tool", tool: "perimeter" });
     assert.deepEqual(resolveCanvasHotkey(keyEvent({ key: "A", type: "keydown" })), { type: "tool", tool: "area" });
     assert.deepEqual(resolveCanvasHotkey(keyEvent({ key: "c", type: "keydown" })), { type: "tool", tool: "count" });
   });

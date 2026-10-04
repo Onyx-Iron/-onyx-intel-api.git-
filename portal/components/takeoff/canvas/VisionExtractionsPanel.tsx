@@ -64,6 +64,7 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
   // could silently misalign, causing Approve/Reject to act on the wrong
   // finding.
   const [takeoffItemsByKey, setTakeoffItemsByKey] = useState<Record<string, TakeoffItemRef>>({});
+  const [alreadyDecided, setAlreadyDecided] = useState(0);
   const [open, setOpen] = useState(true);
   const [acting, setActing] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -77,9 +78,10 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
         body: JSON.stringify({ page_id: pageId, force }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? String(res.status));
-      const data = await res.json() as { result: VisionResult; takeoffItems?: Record<string, TakeoffItemRef> };
+      const data = await res.json() as { result: VisionResult; takeoffItems?: Record<string, TakeoffItemRef>; already_decided?: number };
       setState({ result: data.result, loading: false, err: null });
       setTakeoffItemsByKey(data.takeoffItems ?? {});
+      setAlreadyDecided(data.already_decided ?? 0);
       if (onCommitted) for (const it of data.result.items) onCommitted(it);
     } catch (e) {
       setState({ result: null, loading: false, err: e instanceof Error ? e.message : String(e) });
@@ -93,11 +95,12 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
       try {
         const cached = await fetch(`/api/takeoff/canvas/vision-extract?page_id=${encodeURIComponent(pageId)}`, { cache: "no-store" });
         if (!cached.ok) throw new Error(String(cached.status));
-        const data = await cached.json() as { result: VisionResult | null; takeoffItems?: Record<string, TakeoffItemRef> };
+        const data = await cached.json() as { result: VisionResult | null; takeoffItems?: Record<string, TakeoffItemRef>; already_decided?: number };
         if (data.result) {
           if (!cancelled) {
             setState({ result: data.result, loading: false, err: null });
             setTakeoffItemsByKey(data.takeoffItems ?? {});
+            setAlreadyDecided(data.already_decided ?? 0);
           }
           return;
         }
@@ -165,6 +168,7 @@ export default function VisionExtractionsPanel({ pageId, vectorDescriptions, onC
              enriched.length === 0 ? "No takeoff items detected" :
              pendingCount > 0 ? `${enriched.length} finding${enriched.length === 1 ? "" : "s"} — ${pendingCount} awaiting review` :
              `${enriched.length} finding${enriched.length === 1 ? "" : "s"} reviewed`}
+            {alreadyDecided > 0 ? ` · ${alreadyDecided} already decided` : ""}
           </div>
         </div>
         <div className="flex items-center gap-2">

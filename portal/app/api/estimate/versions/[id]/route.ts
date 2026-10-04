@@ -4,6 +4,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 import { assertVersionEditable, getServiceDb, loadVersionForTenant, NotFoundError, VersionLockedError } from "@/lib/estimating/versioning";
 import { applyVersionPercentages, calculateEstimateTotals, calculateItem } from "@/lib/estimating/calculations";
+import { quantityForLinkedLine } from "@/lib/estimating/linked-quantity";
 import { recordEstimateAudit, recordEstimateAuditBatch } from "@/lib/estimating/audit";
 
 export const runtime = "nodejs";
@@ -33,6 +34,9 @@ interface ItemPatch {
   is_allowance?: boolean;
   is_alternate?: boolean;
   alternate_accepted?: boolean;
+  item_type?: string | null;
+  csi_code?: string | null;
+  source_takeoff_id?: string | null;
 }
 
 /**
@@ -189,15 +193,22 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       contingency: derived.contingency, overhead: derived.overhead, profit: derived.profit,
     });
     const isUpdate = item.id != null && existingById.has(item.id);
+    const existing = isUpdate ? existingById.get(item.id) as { quantity?: number | null; source_takeoff_id?: string | null } : undefined;
+    const unlinking = Object.prototype.hasOwnProperty.call(item, "source_takeoff_id") && item.source_takeoff_id == null;
+    const linked = Boolean(existing?.source_takeoff_id) && !unlinking;
+    const quantity = quantityForLinkedLine(existing?.quantity, item.quantity, linked ? existing?.source_takeoff_id : null, unlinking);
     return {
       id: item.id ?? crypto.randomUUID(),
       tenant_id: tenantId,
       project_id: version.project_id,
       estimate_version_id: id,
       cost_code: item.cost_code ?? null,
+      csi_code: item.csi_code ?? item.cost_code ?? null,
+      item_type: item.item_type ?? "material",
       description: item.description ?? "Untitled item",
       scope_category: item.scope_category ?? null,
-      quantity: item.quantity ?? null,
+      quantity: quantity ?? null,
+      ...(Object.prototype.hasOwnProperty.call(item, "source_takeoff_id") ? { source_takeoff_id: item.source_takeoff_id ?? null } : {}),
       uom: item.uom ?? null,
       labor_cost: item.labor_cost ?? 0,
       material_cost: item.material_cost ?? 0,

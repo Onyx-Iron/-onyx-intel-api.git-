@@ -1,7 +1,7 @@
 -- XD-14: pgTAP cross-tenant isolation suite.
 --
--- Proves the app.clerk_org_id RLS policies on projects / takeoff_items /
--- estimate_items deny tenant B rows when the GUC is set to tenant A's org.
+-- Proves tenant RLS on projects / takeoff_items / estimate_items denies
+-- tenant B rows when impersonating tenant A's Clerk org (JWT + GUC).
 -- Runs inside a transaction that rolls back (including temporary GRANTs
 -- needed because production revokes authenticated table privileges —
 -- RLS is a backstop for future PostgREST paths).
@@ -16,9 +16,10 @@ select plan(8);
 
 -- Temporary grants so SET ROLE authenticated can exercise RLS (rolled back).
 -- Table SELECT was revoked for authenticated in production (service-role app
--- path). Migration 20261006000000 restores EXECUTE on current_tenant_id();
--- keep a session grant here so this suite stays green even if that migration
--- is not yet applied on an older local stack.
+-- path). Migration 20261006000000 restores EXECUTE on current_tenant_id()
+-- (tenants.self_select + many tenant_isolation_* policies invoke it); keep a
+-- session grant here so this suite stays green even if that migration is not
+-- yet applied on an older local stack.
 grant select on public.tenants, public.projects, public.takeoff_items, public.estimate_items
   to authenticated;
 grant execute on function public.current_tenant_id() to authenticated;

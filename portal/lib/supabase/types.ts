@@ -3027,6 +3027,7 @@ export type Database = {
           document_version_id: string | null
           geometry: Json
           id: string
+          layer_id: string | null
           page_id: string | null
           project_id: string
           quantity: number
@@ -3052,6 +3053,7 @@ export type Database = {
           document_version_id?: string | null
           geometry: Json
           id?: string
+          layer_id?: string | null
           page_id?: string | null
           project_id: string
           quantity: number
@@ -3077,6 +3079,7 @@ export type Database = {
           document_version_id?: string | null
           geometry?: Json
           id?: string
+          layer_id?: string | null
           page_id?: string | null
           project_id?: string
           quantity?: number
@@ -5371,26 +5374,35 @@ export type Database = {
         Args: { p_id: string; p_tenant_id: string }
         Returns: undefined
       }
+      restore_manual_takeoff_tx: {
+        Args: { p_actor_user_id: string; p_id: string; p_tenant_id: string }
+        Returns: {
+          already_active: boolean
+          manual_takeoff: Json
+          mirror_takeoff_item_id: string | null
+        }[]
+      }
       save_manual_takeoff_tx: {
         Args: {
           p_actor_user_id: string
-          p_calculation_formula_version: string
+          p_calculation_formula_version: string | null
           p_client_key: string
-          p_cost_code: string
-          p_document_id: string
+          p_cost_code: string | null
+          p_document_id: string | null
           p_geometry: Json
           p_is_vision_sourced: boolean
-          p_label: string
-          p_page_id: string
+          p_label: string | null
+          p_layer_id?: string | null
+          p_page_id: string | null
           p_project_id: string
           p_quantity: number
           p_takeoff_type: string
           p_tenant_id: string
-          p_unit: string
+          p_unit: string | null
         }
         Returns: {
           manual_takeoff: Json
-          mirror_takeoff_item_id: string
+          mirror_takeoff_item_id: string | null
           was_update: boolean
         }[]
       }
@@ -5404,19 +5416,20 @@ export type Database = {
       update_manual_takeoff_tx: {
         Args: {
           p_actor_user_id: string
-          p_calculation_formula_version: string
-          p_cost_code: string
+          p_calculation_formula_version: string | null
+          p_cost_code: string | null
           p_expected_row_version: number
           p_geometry: Json
           p_id: string
+          p_layer_id?: string | null
           p_quantity: number
           p_tenant_id: string
-          p_unit: string
+          p_unit: string | null
         }
         Returns: {
           conflict: boolean
           manual_takeoff: Json
-          mirror_takeoff_item_id: string
+          mirror_takeoff_item_id: string | null
         }[]
       }
     }

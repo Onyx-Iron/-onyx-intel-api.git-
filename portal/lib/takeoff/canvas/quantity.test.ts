@@ -4,7 +4,7 @@ import {
   calculateLinearLength, calculatePerimeter, calculatePolygonArea,
   calculateRectangleArea, calculateCircleArea, calculateCount,
   calculateAreaVolume, calculateBoxVolume, calculateSlopeAdjustedLength,
-  convertLinearUnit,
+  calculatedQuantityForSave, convertLinearUnit, polygonSelfIntersects, quantityForMeasurement,
 } from "./quantity";
 
 // All inputs here are PAGE-SPACE points — the whole point of this module is
@@ -97,6 +97,39 @@ describe("calculateSlopeAdjustedLength", () => {
     // 100 ft run at a slope such that rise = 100*3/4=75 -> hypotenuse 125 (3-4-5 triangle scaled)
     const len = calculateSlopeAdjustedLength([{ x: 0, y: 0 }, { x: 100, y: 0 }], 1, 75);
     assert.ok(Math.abs(len - 125) < 1e-9);
+  });
+});
+
+describe("quantityForMeasurement", () => {
+  const square = [
+    { x: 0, y: 0 },
+    { x: 10, y: 0 },
+    { x: 10, y: 10 },
+    { x: 0, y: 10 },
+  ];
+  const bowtie = [
+    { x: 0, y: 0 },
+    { x: 10, y: 10 },
+    { x: 0, y: 10 },
+    { x: 10, y: 0 },
+  ];
+
+  it("rejects a self-crossing polygon instead of storing a cancelled area", () => {
+    assert.equal(polygonSelfIntersects(bowtie), true);
+    assert.equal(quantityForMeasurement("area", bowtie, 1), null);
+    assert.equal(quantityForMeasurement("area", square, 1), 100);
+  });
+
+  it("folds thickness, width, depth, and slope into the stored quantity", () => {
+    assert.equal(quantityForMeasurement("area", square, 1, { thickness: 0.5 }), 50);
+    assert.equal(quantityForMeasurement("length", [{ x: 0, y: 0 }, { x: 10, y: 0 }], 1, { width: 2, depth: 3 }), 60);
+    const sloped = quantityForMeasurement("length", [{ x: 0, y: 0 }, { x: 100, y: 0 }], 1, { slope_pct: 75 });
+    assert.ok(sloped != null && Math.abs(sloped - 125) < 1e-9);
+  });
+
+  it("leaves calculated quantity null until the sheet scale is verified", () => {
+    assert.equal(calculatedQuantityForSave(false, 42), null);
+    assert.equal(calculatedQuantityForSave(true, 42), 42);
   });
 });
 
