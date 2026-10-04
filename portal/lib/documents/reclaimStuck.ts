@@ -100,7 +100,7 @@ export async function reclaimStuckProcessingDocuments(
 
 /**
  * Reclaims document_pages stuck in OCR (`status=processing` / stale `pending`)
- * or takeoff (`takeoff_status=processing`).
+ * or takeoff (`takeoff_status=processing` / stale `pending`).
  */
 export async function reclaimStuckProcessingPages(
   db: AnyDb,
@@ -150,20 +150,38 @@ export async function reclaimStuckProcessingPages(
     .lt("updated_at", cutoff);
   if (documentId) takeoffQ = takeoffQ.eq("document_id", documentId);
 
-  const [statusRes, pendingRes, takeoffRes] = await Promise.all([
+  // Same hole as stale OCR pending: a failed fan-out or page retry sets
+  // takeoff_status=pending and then never reaches the worker. Nothing else
+  // polls that state, so the page stays pending and Retry will not offer it.
+  let takeoffPendingQ = db
+    .from("document_pages")
+    .update({
+      takeoff_status: "error",
+      takeoff_error: "Takeoff was never claimed by a processor. Retry to continue.",
+      updated_at: now,
+    })
+    .eq("tenant_id", tenantId)
+    .eq("takeoff_status", "pending")
+    .lt("updated_at", pendingCutoff);
+  if (documentId) takeoffPendingQ = takeoffPendingQ.eq("document_id", documentId);
+
+  const [statusRes, pendingRes, takeoffRes, takeoffPendingRes] = await Promise.all([
     statusQ.select("id"),
     pendingQ.select("id"),
     takeoffQ.select("id"),
+    takeoffPendingQ.select("id"),
   ]);
 
   if (statusRes.error) console.error("[reclaimStuckProcessingPages:status]", statusRes.error);
   if (pendingRes.error) console.error("[reclaimStuckProcessingPages:pending]", pendingRes.error);
   if (takeoffRes.error) console.error("[reclaimStuckProcessingPages:takeoff]", takeoffRes.error);
+  if (takeoffPendingRes.error) console.error("[reclaimStuckProcessingPages:takeoffPending]", takeoffPendingRes.error);
 
   return {
     statusReclaimed: statusRes.error ? 0 : (statusRes.data ?? []).length,
     pendingReclaimed: pendingRes.error ? 0 : (pendingRes.data ?? []).length,
-    takeoffReclaimed: takeoffRes.error ? 0 : (takeoffRes.data ?? []).length,
+    takeoffReclaimed: (takeoffRes.error ? 0 : (takeoffRes.data ?? []).length)
+      + (takeoffPendingRes.error ? 0 : (takeoffPendingRes.data ?? []).length),
   };
 }
 
