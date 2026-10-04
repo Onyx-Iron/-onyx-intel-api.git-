@@ -17,7 +17,8 @@ export type CanvasTool =
   | "utility_pipe"
   | "spot_elevation"
   | "contour_line"
-  | "civil_area_bounds";
+  | "civil_area_bounds"
+  | "scale_region";
 
 export type HotkeyAction =
   | { type: "tool"; tool: CanvasTool }
@@ -38,6 +39,7 @@ const TOOL_BY_KEY: Record<string, CanvasTool> = {
   c: "count",
   p: "pan",
   k: "calibrate",
+  s: "scale_region",
 };
 
 export function isEditableKeyboardTarget(target: EventTarget | null): boolean {

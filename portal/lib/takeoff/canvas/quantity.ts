@@ -202,6 +202,89 @@ export function calculatedQuantityForSave(verified: boolean, serverQuantity: num
   return serverQuantity;
 }
 
+export interface ScaleRegionInput {
+  id: string;
+  polygon: Point[];
+  pageSpaceScaleFactor: number | null;
+  verified: boolean;
+}
+
+export interface ScaleFactorResult {
+  factor: number | null;
+  regionId: string | null;
+  verified: boolean;
+}
+
+/** Vertex average. A line uses the same point the area formula would. */
+export function measurementCentroid(points: Point[]): Point | null {
+  if (points.length === 0) return null;
+  let x = 0;
+  let y = 0;
+  for (const point of points) {
+    x += point.x;
+    y += point.y;
+  }
+  return { x: x / points.length, y: y / points.length };
+}
+
+function polygonAreaAbs(points: Point[]): number {
+  let sum = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    sum += a.x * b.y - b.x * a.y;
+  }
+  return Math.abs(sum) / 2;
+}
+
+/** Even-odd ray cast. A self-crossing region does not contain a point. */
+export function pointInPolygon(point: Point, polygon: Point[]): boolean {
+  if (polygon.length < 3 || polygonSelfIntersects(polygon)) return false;
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const a = polygon[i];
+    const b = polygon[j];
+    const crosses = (a.y > point.y) !== (b.y > point.y);
+    if (!crosses) continue;
+    const xAtY = ((b.x - a.x) * (point.y - a.y)) / (b.y - a.y) + a.x;
+    if (point.x < xAtY) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * A verified region that contains the measurement centroid wins over the sheet scale.
+ * An unverified region that contains the centroid produces no quantity.
+ * Outside every region, the sheet factor applies when that sheet scale is verified.
+ */
+export function scaleFactorForPoints(
+  points: Point[],
+  regions: ScaleRegionInput[],
+  sheetFactor: number | null,
+  sheetVerified: boolean,
+): ScaleFactorResult {
+  const centroid = measurementCentroid(points);
+  if (!centroid) return { factor: null, regionId: null, verified: false };
+  const covering = regions.filter((region) => pointInPolygon(centroid, region.polygon));
+  if (covering.length > 0) {
+    const verified = covering
+      .filter((region) => region.verified && region.pageSpaceScaleFactor != null && region.pageSpaceScaleFactor > 0)
+      .sort((a, b) => polygonAreaAbs(a.polygon) - polygonAreaAbs(b.polygon));
+    if (verified[0]) {
+      return {
+        factor: verified[0].pageSpaceScaleFactor,
+        regionId: verified[0].id,
+        verified: true,
+      };
+    }
+    return { factor: null, regionId: covering[0].id, verified: false };
+  }
+  if (sheetVerified && sheetFactor != null && sheetFactor > 0) {
+    return { factor: sheetFactor, regionId: null, verified: true };
+  }
+  return { factor: null, regionId: null, verified: false };
+}
+
 // ── Unit conversion ─────────────────────────────────────────────────────────
 const LENGTH_TO_FEET: Record<string, number> = {
   ft: 1, feet: 1, lf: 1,
