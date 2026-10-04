@@ -12,10 +12,10 @@ const isPublicRoute = createRouteMatcher([
   "/public/bids(.*)",
   "/api/public/(.*)",
   "/api/procurement/bids",
-  // Server-to-server outbox / sheet / gmail cron triggers (Vercel Cron +
-  // pg_net). Authenticate via Authorization: Bearer $CRON_SECRET or
-  // x-worker-secret — Clerk sessions are never present. Without these,
-  // auth.protect() 307s/401s before the route's own secret check runs.
+  // Server-to-server cron/worker triggers (Vercel Cron + pg_net). Authenticate
+  // via Authorization: Bearer $CRON_SECRET or x-worker-secret — Clerk sessions
+  // are never present. Without these, auth.protect() 307s/401s before the
+  // route's own secret check runs.
   "/api/internal/outbox/process",
   "/api/internal/sheets/process",
   "/api/internal/gmail/plan-poll",
