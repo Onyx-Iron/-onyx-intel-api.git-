@@ -22,6 +22,30 @@ const TERMINAL_DOC = new Set([
 
 const TERMINAL_TAKEOFF = new Set(["done", "error", "skipped"]);
 
+/**
+ * A batched page-split stays in `split_status=processing` until the last
+ * page batch is inserted. Early pages can finish OCR and takeoff while
+ * `page_count` still counts pages that do not exist yet. Closing the
+ * document there records those missing pages as a partial success, and
+ * the takeoff worker then skips every later page.
+ */
+export function documentSplitInProgress(doc: {
+  split_status?: string | null;
+  page_count?: number | null;
+  meta?: unknown;
+}): boolean {
+  if (doc.split_status === "processing" || doc.split_status === "pending") return true;
+  const meta = doc.meta && typeof doc.meta === "object" && !Array.isArray(doc.meta)
+    ? doc.meta as Record<string, unknown>
+    : {};
+  const summary = typeof meta.processing_summary === "object" && meta.processing_summary
+    ? meta.processing_summary as Record<string, unknown>
+    : {};
+  const through = summary.pages_split_through;
+  const declared = typeof summary.pages_total === "number" ? summary.pages_total : doc.page_count;
+  return typeof through === "number" && typeof declared === "number" && through < declared;
+}
+
 export type FinalizeResult = {
   documentId: string;
   status: string;
@@ -42,7 +66,7 @@ export async function finalizeDocumentsFromOcr(
 ): Promise<FinalizeResult[]> {
   let docsQ = db
     .from("documents")
-    .select("id, status, page_count, meta")
+    .select("id, status, split_status, page_count, meta")
     .eq("tenant_id", tenantId)
     .in("status", ["split", "processing", "queued"]);
   if (projectId) {
@@ -103,8 +127,17 @@ export async function finalizeDocumentsFromOcr(
   const results: FinalizeResult[] = [];
   const now = new Date().toISOString();
 
-  for (const doc of docs as Array<{ id: string; status: string; page_count: number | null; meta: unknown }>) {
+  for (const doc of docs as Array<{
+    id: string;
+    status: string;
+    split_status?: string | null;
+    page_count: number | null;
+    meta: unknown;
+  }>) {
     if (TERMINAL_DOC.has(String(doc.status))) continue;
+    // Later batches have not inserted their pages yet. Missing rows are not
+    // failed uploads, and closing now makes page-takeoff skip them.
+    if (documentSplitInProgress(doc)) continue;
     const stats = byDoc.get(doc.id);
     if (!stats || stats.total === 0) continue;
     const settled = stats.done + stats.errored;

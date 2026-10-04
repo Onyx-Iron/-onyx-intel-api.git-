@@ -1,7 +1,37 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { planPageTakeoffWrite } from "../../supabase/functions/_shared/page-takeoff-idempotency.ts";
+import {
+  planPageTakeoffWrite,
+  shouldSkipTakeoffForPartialDocument,
+} from "../../supabase/functions/_shared/page-takeoff-idempotency.ts";
+
+describe("shouldSkipTakeoffForPartialDocument", () => {
+  it("skips a finished partial the estimator has not accepted", () => {
+    assert.equal(shouldSkipTakeoffForPartialDocument({
+      status: "complete_with_errors",
+      meta: { processing_summary: { pages_split_through: 10, pages_total: 10 } },
+    }), true);
+  });
+
+  it("extracts later pages when the partial stamp is from an unfinished split batch", () => {
+    assert.equal(shouldSkipTakeoffForPartialDocument({
+      status: "complete_with_errors",
+      meta: { processing_summary: { pages_split_through: 75, pages_total: 200 } },
+    }), false);
+  });
+
+  it("extracts once the estimator accepts the partial plan", () => {
+    assert.equal(shouldSkipTakeoffForPartialDocument({
+      status: "complete_with_errors",
+      meta: { partial_acknowledged: true },
+    }), false);
+  });
+
+  it("extracts while the parent is still processing", () => {
+    assert.equal(shouldSkipTakeoffForPartialDocument({ status: "processing", meta: {} }), false);
+  });
+});
 
 describe("planPageTakeoffWrite", () => {
   const pageId = "page-2";
