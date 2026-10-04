@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  chunkIds,
   selectPagesForReprocess,
   stagesToRun,
   type DocumentPageRow,
@@ -25,5 +26,14 @@ describe("reprocessPage helpers", () => {
     assert.deepEqual(stagesToRun("ocr"), ["ocr"]);
     assert.deepEqual(stagesToRun("takeoff"), ["takeoff"]);
     assert.deepEqual(stagesToRun("both"), ["ocr", "takeoff"]);
+  });
+
+  it("chunks id filters so a large reprocess does not exceed the query string", () => {
+    const ids = Array.from({ length: 250 }, (_, i) => `id-${i}`);
+    const chunks = chunkIds(ids, 100);
+    assert.equal(chunks.length, 3);
+    assert.equal(chunks[0]?.length, 100);
+    assert.equal(chunks[2]?.length, 50);
+    assert.equal(chunks.flat().length, 250);
   });
 });

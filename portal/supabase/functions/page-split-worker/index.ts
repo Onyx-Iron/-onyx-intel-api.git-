@@ -44,6 +44,7 @@ import {
   DEFAULT_PAGE_BATCH,
   DEFAULT_UPLOAD_CONCURRENCY,
   computePageBatchRange,
+  fetchAllPages,
   shouldReadOriginalFromStorage,
 } from "../_shared/splitBatch.ts";
 
@@ -282,12 +283,21 @@ Deno.serve(async (req) => {
 
     // Retry must reuse existing document_pages ids. Deleting them cascades
     // sheet calibrations and orphans takeoff_items.sheet_id.
-    const { data: existingPages, error: existingPagesErr } = await db
-      .from("document_pages")
-      .select("id, page_number, status, takeoff_status")
-      .eq("document_id", body.document_id)
-      .eq("tenant_id", body.tenant_id);
-    if (existingPagesErr) throw new Error(`load document_pages: ${existingPagesErr.message}`);
+    // max_rows is 1000. A single select drops later pages, so a retry of a
+    // 1000+ page set inserts duplicates (unique violation → document error)
+    // and reconcileSheets deletes sheets it never saw.
+    const existingPageResult = await fetchAllPages((from, to) =>
+      db
+        .from("document_pages")
+        .select("id, page_number, status, takeoff_status")
+        .eq("document_id", body.document_id)
+        .eq("tenant_id", body.tenant_id)
+        .order("page_number", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to)
+    );
+    if (existingPageResult.error) throw new Error(`load document_pages: ${existingPageResult.error}`);
+    const existingPages = existingPageResult.rows;
 
     const uploadedByNumber = new Map(pageRows.map((p) => [p.page_number, p]));
     const plan = reconcileDocumentPages({
@@ -356,13 +366,19 @@ Deno.serve(async (req) => {
       if (updErr) throw new Error(`update document_pages page ${p.page_number}: ${updErr.message}`);
     }
 
-    const { data: existingSheets, error: existingSheetsErr } = await db
-      .from("sheets")
-      .select("id, document_page_id, page_number")
-      .eq("document_id", body.document_id)
-      .eq("tenant_id", body.tenant_id);
-    if (existingSheetsErr) console.warn("[page-split] load sheets failed:", existingSheetsErr.message);
+    const existingSheetResult = await fetchAllPages((from, to) =>
+      db
+        .from("sheets")
+        .select("id, document_page_id, page_number")
+        .eq("document_id", body.document_id)
+        .eq("tenant_id", body.tenant_id)
+        .order("page_number", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to)
+    );
+    if (existingSheetResult.error) console.warn("[page-split] load sheets failed:", existingSheetResult.error);
     else {
+      const existingSheets = existingSheetResult.rows;
       // Mid-split: plan.pages only includes keepers + this batch's uploads, so
       // sheets for not-yet-uploaded pages are absent from both sides and safe.
       // Retries keep all existing keepers in plan.pages, so sheet ids survive.
