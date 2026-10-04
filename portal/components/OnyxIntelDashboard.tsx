@@ -668,6 +668,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
     return projects.filter((project) => project.id === activeProjectId);
   }, [data?.projects, activeProjectId]);
 
+  const hasProjects = (data?.kpis.projects ?? 0) > 0;
   const pendingTakeoffs = filteredProjects.filter((project) => project.takeoffItems === 0).length;
   const overBudget = filteredProjects.filter((project) => project.budget > 0 && project.estimated > project.budget).length;
   const scopedDocs = filteredProjects.reduce((sum, project) => sum + project.documents, 0);
@@ -908,7 +909,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
           </div>
         )}
 
-        {dataLoading || (data?.kpis.projects ?? 0) > 0 ? (
+        {dataLoading || hasProjects ? (
         <div className="mb-10 border-y border-white/8 py-6">
           {dataLoading ? (
             <div className="h-16 animate-pulse rounded bg-white/5" />
@@ -959,6 +960,7 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
           </div>
 
           <div className="grid min-w-0 grid-cols-1 gap-4 content-start">
+            {(dataLoading || hasProjects) && (
             <Panel title="What needs attention">
               <div className="divide-y divide-white/5">
                 {([
@@ -993,7 +995,10 @@ export default function OnyxIntelDashboard({ previewData, previewProviders }: On
                 ))}
               </div>
             </Panel>
+            )}
+            {(dataLoading || hasProjects || (data?.activity?.length ?? 0) > 0) && (
             <ActivityFeed items={data?.activity ?? []} loading={dataLoading} />
+            )}
             <details className="rounded-xl border border-white/8 bg-[#0E0F12] open:pb-1">
               <summary className="cursor-pointer list-none px-4 py-3 text-[10px] font-bold uppercase tracking-[0.2em] text-white/40 marker:content-none [&::-webkit-details-marker]:hidden">
                 More panels
