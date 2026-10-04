@@ -31,6 +31,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { captureException } from "../_shared/errors.ts";
+import { planPageTakeoffWrite, type ExistingPageTakeoff } from "../_shared/page-takeoff-idempotency.ts";
 
 const SUPABASE_URL     = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -159,6 +160,53 @@ Deno.serve(async (req) => {
       await refreshDocumentSummary();
       return new Response(JSON.stringify({ ok: true, skipped: true, reason }), {
         headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    // A previous run may already have stored this page. Retry and split-retry
+    // both call this worker again; split delete nulls sheet_id and leaves the
+    // approved quantities in place. Inserting again prices the same page twice.
+    // Manual and civil rows use a different source_method, so a drawn length
+    // on the sheet does not suppress extraction.
+    const existingRes = await db.from("takeoff_items")
+      .select("id, sheet_id")
+      .eq("tenant_id", body.tenant_id)
+      .eq("document_id", body.document_id)
+      .eq("page", body.page_number)
+      .eq("type", "takeoff_import")
+      .eq("source_method", "deterministic");
+    if (existingRes.error) throw new Error(`load page takeoff: ${existingRes.error.message}`);
+    const writePlan = planPageTakeoffWrite(
+      (existingRes.data ?? []) as ExistingPageTakeoff[],
+      body.page_id,
+    );
+    if (writePlan.action === "keep") {
+      if (writePlan.relinkIds.length > 0) {
+        const { error: relinkErr } = await db.from("takeoff_items")
+          .update({ sheet_id: body.page_id })
+          .in("id", writePlan.relinkIds)
+          .eq("tenant_id", body.tenant_id)
+          .is("sheet_id", null);
+        if (relinkErr) throw new Error(`relink takeoff sheet: ${relinkErr.message}`);
+      }
+      await enqueueProjectEstimateSync(db, body.tenant_id, body.project_id, {
+        document_id: body.document_id,
+        page_id: body.page_id,
+        reused: true,
+      });
+      await db.from("document_pages")
+        .update({ takeoff_status: "done", takeoff_error: null, updated_at: new Date().toISOString() })
+        .eq("id", body.page_id)
+        .eq("tenant_id", body.tenant_id);
+      await recordEvent("succeeded", "Reused takeoff rows already stored for this page");
+      await refreshDocumentSummary();
+      return new Response(JSON.stringify({
+        ok: true,
+        page_id: body.page_id,
+        reused: true,
+        rows: writePlan.keptCount,
+      }), {
+        status: 200, headers: { "Content-Type": "application/json" },
       });
     }
 
