@@ -1,16 +1,17 @@
 /**
  * Scope Gap Verification Agent
  * -------------------------------
- * Reads vision-extracted items for a page and compares them against the
- * project's authoritative `estimate_items` ledger. Anything that appears in
- * the drawing notes but has no matching cost book line becomes a flagged
- * audit trail entry the human can approve into a real estimate line.
+ * Compares saved takeoff rows with the CSI rules in layer-classify.
+ * It does not send the sheet to a model. Anything on the sheet with no
+ * matching estimate line becomes an audit trail the human can approve.
  *
  * Invariant: this file NEVER writes to `estimate_items` directly. It
  * only produces `ai_agent_audit_trails` rows with `status =
  * 'pending_human_review'` and structured `recommendations` the approval
  * route consumes.
  */
+
+import { classifyLayer } from "@/lib/cad/layer-classify";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SupabaseAnyClient = any;
@@ -98,9 +99,10 @@ export async function runScopeGapAgent({ db, tenantId, projectId, pageId, docume
 
   for (const v of eligible) {
     const desc = v.description.toLowerCase();
+    const costCode = v.cost_code || (v.layer_hint ? classifyLayer(v.layer_hint).cost_code : undefined);
 
     // If the cost code already exists in the ledger, treat as covered.
-    if (v.cost_code && seenCodes.has(v.cost_code)) continue;
+    if (costCode && seenCodes.has(costCode)) continue;
     // If a similar description already exists, treat as covered.
     if (seenDescs.some((d) => partialMatch(d, desc))) continue;
 
@@ -113,7 +115,7 @@ export async function runScopeGapAgent({ db, tenantId, projectId, pageId, docume
       vision_source: v.source,
       raw_text: v.raw_text,
       item: {
-        cost_code: v.cost_code ?? null,
+        cost_code: costCode ?? null,
         description: v.description,
         quantity: v.quantity,
         unit: v.unit,

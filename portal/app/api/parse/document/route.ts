@@ -6,7 +6,9 @@
  *
  * Query params:
  *   hint = takeoff | estimate | vendors | invoices | punch | contacts | docs
- *          (biases the Gemini entity-extraction prompt for PDFs and images)
+ *
+ * This route stays a small direct parse at 25 MB. Larger plan sets use
+ * /api/documents/upload-url. PDF text is read in-process.
  */
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";

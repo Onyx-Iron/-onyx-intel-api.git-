@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsToTenant, assertPageBelongsToProject } from "@/lib/project-controls/server";
 import type { CalibrationPoint, CalibrationUpsertBody } from "@/lib/types/takeoff";
 import { previewRecalibration, recalibrationNeedsConfirm } from "@/lib/takeoff/recalibration";
+import { matchScalePreset, pageSpaceFactorForPreset } from "@/lib/takeoff/scale-presets";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 
 export const runtime = "nodejs";
@@ -58,6 +59,44 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   if (!project_id || !page_id) {
     return NextResponse.json({ error: "project_id and page_id required" }, { status: 400 });
   }
+
+  if (body.suggestion_only) {
+    const preset = matchScalePreset(body.scale_preset ?? "");
+    if (!preset) return NextResponse.json({ error: "Unknown scale suggestion." }, { status: 400 });
+    const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
+    const denied = await requirePermission(tenantId, userId, "field", "write");
+    if (denied) return denied;
+    try {
+      await assertProjectBelongsToTenant(project_id, tenantId);
+      await assertPageBelongsToProject(page_id, project_id, tenantId);
+    } catch (err) {
+      return NextResponse.json({ error: err instanceof Error ? err.message : "ownership check failed" }, { status: 403 });
+    }
+    const db = await createServiceClient();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyDb = db as any;
+    const { data: existing } = await anyDb.from("sheet_calibrations").select("status, verified").eq("tenant_id", tenantId).eq("page_id", page_id).maybeSingle();
+    if (existing?.status === "verified" && existing?.verified === true) {
+      return NextResponse.json({ calibration: existing, kept: "verified" });
+    }
+    const { data, error } = await anyDb.from("sheet_calibrations").upsert({
+      tenant_id: tenantId,
+      project_id,
+      page_id,
+      unit_type: "LF",
+      page_space_scale_factor: pageSpaceFactorForPreset(preset),
+      coordinate_system_version: "v1",
+      status: "needs_verification",
+      verified: false,
+      active: true,
+      known_unit: preset.label,
+      created_by: userId,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "page_id" }).select("id, page_id, status, verified, page_space_scale_factor, known_unit").single();
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ calibration: data, suggested: true });
+  }
+
   const validPoint = (p: unknown): p is CalibrationPoint => typeof p === "object" && p !== null
     && typeof (p as CalibrationPoint).x === "number" && Number.isFinite((p as CalibrationPoint).x)
     && typeof (p as CalibrationPoint).y === "number" && Number.isFinite((p as CalibrationPoint).y);

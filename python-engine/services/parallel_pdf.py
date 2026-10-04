@@ -51,14 +51,14 @@ def _extract_page_chunk(payload: tuple[str, list[int], int]) -> dict[str, Any]:
     """
     Top-level worker entry (must be picklable for ProcessPoolExecutor).
 
-    Returns rows + ai_candidate page indices for the given 1-based page list.
+    Returns schedule rows for the given 1-based page list.
+    Dense drawings and pages with no tables are not queued for a model.
     """
     _bootstrap_paths()
     path, page_indices, complexity_limit = payload
     import pdfplumber
 
     rows: list[dict] = []
-    ai_pages: list[int] = []
     pages_with_tables = 0
 
     # Local import keeps worker startup light and mirrors takeoff_extract rules.
@@ -76,7 +76,6 @@ def _extract_page_chunk(payload: tuple[str, list[int], int]) -> dict[str, Any]:
                 complexity = 9999
 
             if complexity > complexity_limit:
-                ai_pages.append(idx)
                 if hasattr(page, "close"):
                     try:
                         page.close()
@@ -129,8 +128,6 @@ def _extract_page_chunk(payload: tuple[str, list[int], int]) -> dict[str, Any]:
 
             if page_made_rows:
                 pages_with_tables += 1
-            else:
-                ai_pages.append(idx)
 
             if hasattr(page, "close"):
                 try:
@@ -145,7 +142,7 @@ def _extract_page_chunk(payload: tuple[str, list[int], int]) -> dict[str, Any]:
 
     return {
         "rows": rows,
-        "ai_candidate_pages": ai_pages,
+        "ai_candidate_pages": [],
         "pages_with_tables": pages_with_tables,
     }
 
@@ -179,13 +176,11 @@ def extract_pdf_parallel(
         page_count = len(pdf.pages)
 
     table_pages = list(range(1, min(page_count, max_table_pages) + 1))
-    overflow_ai = list(range(max_table_pages + 1, page_count + 1))
 
     if workers <= 1 or len(table_pages) < min_pages:
         # Sequential path — reuse chunk worker once for identical semantics.
         single = _extract_page_chunk((path, table_pages, complexity_limit))
         rows = single["rows"]
-        ai_pages = sorted(set(single["ai_candidate_pages"]) | set(overflow_ai))
         return {
             "source_type": "pdf",
             "rows": rows,
@@ -195,7 +190,7 @@ def extract_pdf_parallel(
                 "rows_extracted": len(rows),
                 "parallel_workers": 1,
             },
-            "ai_candidate_pages": ai_pages,
+            "ai_candidate_pages": [],
         }
 
     chunks = _chunk_pages(table_pages, workers)
@@ -208,7 +203,6 @@ def extract_pdf_parallel(
     )
 
     rows: list[dict] = []
-    ai_pages: list[int] = list(overflow_ai)
     pages_with_tables = 0
 
     # spawn avoids fork+Celery deadlocks when nested under a prefork worker.
@@ -223,7 +217,6 @@ def extract_pdf_parallel(
         for fut in as_completed(futures):
             part = fut.result()
             rows.extend(part["rows"])
-            ai_pages.extend(part["ai_candidate_pages"])
             pages_with_tables += int(part["pages_with_tables"])
 
     # Stable order: by drawing_ref page hint then description.
@@ -232,7 +225,6 @@ def extract_pdf_parallel(
         return (ref, str(r.get("description") or ""))
 
     rows.sort(key=_sort_key)
-    ai_pages = sorted(set(ai_pages))
 
     return {
         "source_type": "pdf",
@@ -243,5 +235,5 @@ def extract_pdf_parallel(
             "rows_extracted": len(rows),
             "parallel_workers": len(chunks),
         },
-        "ai_candidate_pages": ai_pages,
+        "ai_candidate_pages": [],
     }

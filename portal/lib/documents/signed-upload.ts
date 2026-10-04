@@ -10,8 +10,17 @@ export const VERCEL_SAFE_UPLOAD_BYTES = 3.5 * 1024 * 1024;
 /** Prefer TUS resumable protocol above this size (spotty jobsite networks). */
 export const TUS_THRESHOLD_BYTES = 50 * 1024 * 1024;
 
-/** Hard ceiling aligned with plans-bucket file_size_limit (Supabase Pro). */
+/**
+ * Hard ceiling. The live plans-bucket file_size_limit is 1073741824 (1 GiB).
+ * Bytes go straight to storage; this function does not accept the body.
+ */
 export const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
+
+export function uploadLimitLabel(bytes = MAX_UPLOAD_BYTES): string {
+  const gb = bytes / (1024 * 1024 * 1024);
+  if (Number.isInteger(gb)) return `${gb}GB`;
+  return `${gb.toFixed(1)}GB`;
+}
 
 const SAFE_NAME_RE = /[^\w.\-]+/g;
 
@@ -56,7 +65,7 @@ export function parseSignedUploadPayload(signed: Record<string, unknown>): {
 export function assertUploadSize(size: number | null | undefined): string | null {
   if (typeof size !== "number" || !Number.isFinite(size) || size < 0) return null;
   if (size > MAX_UPLOAD_BYTES) {
-    return "File exceeds the 1GB limit. Split the drawing set and retry.";
+    return `File exceeds the ${uploadLimitLabel()} limit. Split the drawing set and retry.`;
   }
   return null;
 }

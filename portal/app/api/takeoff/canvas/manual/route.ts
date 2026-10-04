@@ -5,10 +5,10 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { logEvent } from "@/lib/activity";
 import { processOutboxBatch } from "@/lib/estimating/outbox-worker";
-import { quantityForMeasurement, FORMULA_VERSION } from "@/lib/takeoff/canvas/quantity";
+import { quantityForMeasurement, calculatedQuantityForSave, FORMULA_VERSION, type QuantityGeometry } from "@/lib/takeoff/canvas/quantity";
 import { measurementUnit, storedTakeoffType } from "@/lib/takeoff/measure-kind";
 import type { Point } from "@/lib/takeoff/canvas/coordinates";
-import type { ManualTakeoffItem, ManualTakeoffUpdateBody } from "@/lib/types/takeoff";
+import type { ManualTakeoffItem, ManualTakeoffUpdateBody, TakeoffGeometry } from "@/lib/types/takeoff";
 import type { Json } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
@@ -37,7 +37,10 @@ export const runtime = "nodejs";
  * page-space calibration, the server recalculates quantity from geometry +
  * calibration itself (lib/takeoff/canvas/quantity.ts) and uses that
  * authoritative value — a manipulated browser-submitted quantity cannot
- * silently persist. When calibration is legacy/unverified, no authoritative
+ * silently persist. When calibration is legacy/unverified, the row is still
+ * saved and calculated_quantity stays null so an unscaled length is not a
+ * real quantity. Estimate sync stays withheld until the sheet is verified.
+ * When calibration is legacy/unverified, no authoritative
  * recalculation is possible (no page-space scale factor exists yet), so the
  * submitted quantity is trusted as-is and the response carries a warning;
  * this is also when estimate-sync is skipped, per the "unverified
@@ -72,6 +75,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 type Item = ManualTakeoffItem;
 
 const QUANTITY_TOLERANCE_PCT = 1; // >1% discrepancy between submitted and server-calculated quantity is flagged
+
+function quantityGeometry(geo: TakeoffGeometry): QuantityGeometry {
+  const num = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+  return {
+    measure: typeof geo.measure === "string" ? geo.measure : null,
+    thickness: num(geo.thickness),
+    width: num(geo.width),
+    depth: num(geo.depth),
+    slope_pct: num(geo.slope_pct ?? geo.slopePct),
+  };
+}
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
@@ -145,38 +159,32 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const documentId = it.page_id ? pageInfoById.get(it.page_id)?.documentId ?? null : null;
     const calibration = it.page_id ? calibrationByPageId.get(it.page_id) : undefined;
 
-    if (it.page_id && !isVisionSourced) {
-      const verified = calibration?.status === "verified" && calibration.page_space_scale_factor != null;
-      if (!verified) {
-        return NextResponse.json({
-          error: "Set the sheet scale before saving a measurement.",
-          code: "calibration_required",
-        }, { status: 422 });
-      }
-    }
-
     let quantity = it.quantity;
     let calculationFormulaVersion: string | null = null;
     let discrepancyWarning: string | null = null;
     let calibrationWarning: string | null = null;
 
     const isPageSpace = geo.coordinate_space === "page_space" && Array.isArray(geo.points);
-    if (calibration?.status === "verified" && calibration.page_space_scale_factor != null && isPageSpace) {
+    const verified = calibration?.status === "verified" && calibration.page_space_scale_factor != null;
+    const countOnly = it.takeoff_type === "count";
+    if (isPageSpace && (countOnly || verified)) {
       const points = geo.points as Point[];
-      const serverQuantity = quantityForMeasurement(
-        it.takeoff_type,
-        points,
-        calibration.page_space_scale_factor,
-        typeof geo.measure === "string" ? geo.measure : null,
-      );
+      const factor = countOnly ? (calibration?.page_space_scale_factor ?? 1) : calibration!.page_space_scale_factor!;
+      const serverQuantity = quantityForMeasurement(it.takeoff_type, points, factor, quantityGeometry(geo));
+      if (serverQuantity == null) {
+        return NextResponse.json({
+          error: "This polygon crosses itself, so its area is not stored.",
+          code: "polygon_rejected",
+        }, { status: 422 });
+      }
 
       const pctDiff = it.quantity !== 0 ? Math.abs(serverQuantity - it.quantity) / Math.abs(it.quantity) * 100 : (serverQuantity === 0 ? 0 : 100);
       if (pctDiff > QUANTITY_TOLERANCE_PCT) {
         discrepancyWarning = `submitted quantity ${it.quantity} differed from server-calculated ${serverQuantity.toFixed(4)} by ${pctDiff.toFixed(1)}% — server value used`;
       }
       quantity = serverQuantity;
-      calculationFormulaVersion = FORMULA_VERSION;
-      anyVerifiedCalibrationUsed = true;
+      calculationFormulaVersion = calculatedQuantityForSave(countOnly || verified, serverQuantity) == null ? null : FORMULA_VERSION;
+      if (verified) anyVerifiedCalibrationUsed = true;
     } else if (it.page_id) {
       // No verified page-space calibration for this sheet — cannot
       // authoritatively recompute, so the submitted quantity is trusted
@@ -374,24 +382,28 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     ...(typeof (body.geometry ?? {}).measure !== "string" && storedMeasure === "perimeter" ? { measure: "perimeter" } : {}),
   };
   const isPageSpace = geo.coordinate_space === "page_space" && Array.isArray(geo.points);
-  if (existing.page_id && isPageSpace) {
+    if (existing.page_id && isPageSpace) {
     const { data: calibration } = await db
       .from("sheet_calibrations").select("page_space_scale_factor, status").eq("tenant_id", tenantId).eq("page_id", existing.page_id).maybeSingle();
-    if (calibration?.status === "verified" && calibration.page_space_scale_factor != null) {
+    const verified = calibration?.status === "verified" && calibration.page_space_scale_factor != null;
+    const countOnly = existing.takeoff_type === "count";
+    if (countOnly || verified) {
       const points = geo.points as Point[];
-      const serverQuantity = quantityForMeasurement(
-        existing.takeoff_type,
-        points,
-        calibration.page_space_scale_factor,
-        typeof geo.measure === "string" ? geo.measure : null,
-      );
+      const factor = countOnly ? (calibration?.page_space_scale_factor ?? 1) : calibration!.page_space_scale_factor!;
+      const serverQuantity = quantityForMeasurement(existing.takeoff_type, points, factor, quantityGeometry(geo));
+      if (serverQuantity == null) {
+        return NextResponse.json({
+          error: "This polygon crosses itself, so its area is not stored.",
+          code: "polygon_rejected",
+        }, { status: 422 });
+      }
 
       const pctDiff = body.quantity !== 0 ? Math.abs(serverQuantity - body.quantity) / Math.abs(body.quantity) * 100 : (serverQuantity === 0 ? 0 : 100);
       if (pctDiff > QUANTITY_TOLERANCE_PCT) {
         discrepancyWarning = `submitted quantity ${body.quantity} differed from server-calculated ${serverQuantity.toFixed(4)} by ${pctDiff.toFixed(1)}% — server value used`;
       }
       quantity = serverQuantity;
-      calculationFormulaVersion = FORMULA_VERSION;
+      calculationFormulaVersion = calculatedQuantityForSave(countOnly || verified, serverQuantity) == null ? null : FORMULA_VERSION;
     }
   }
 

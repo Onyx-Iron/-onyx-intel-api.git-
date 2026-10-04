@@ -10,6 +10,9 @@ import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { utilityRecipeFromRun, wallRecipeLines } from "@/lib/math/scope-recipes";
 import type { RebarSize } from "@/lib/math/assemblies";
 import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
+import { quantityForMeasurement } from "@/lib/takeoff/canvas/quantity";
+import { SCALE_PRESETS, matchScalePreset, pageSpaceFactorForPreset } from "@/lib/takeoff/scale-presets";
+import QuantityGrid from "@/components/takeoff/QuantityGrid";
 import { cachedPdfDocument } from "@/lib/takeoff/canvas/pdf-cache";
 import { CANVAS_HOTKEY_HINT, resolveCanvasHotkey, type CanvasTool } from "@/lib/takeoff/canvas/hotkeys";
 import { displayTakeoffTool } from "@/lib/takeoff/measure-kind";
@@ -186,7 +189,7 @@ type SnapWorkerResponse = { type: "snap-result"; id: number; result: SnapResult 
 
 export default function SheetCanvas({ projectId, projectName, pageId, pageNumber, documentId }: Props) {
   const queryClient = useQueryClient();
-  const { data: calibration = null } = useSheetCalibration(pageId);
+  const { data: calibration = null, isSuccess: calibrationLoaded } = useSheetCalibration(pageId);
   const wrapRef   = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const priorCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -500,6 +503,40 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     return () => { cancelled = true; };
   }, [pdfUrl, pageId]);
 
+  const suggestedScale = useRef(false);
+  useEffect(() => {
+    if (!pdfUrl || !calibrationLoaded || calibration || suggestedScale.current) return;
+    suggestedScale.current = true;
+    let cancelled = false;
+    (async () => {
+      try {
+        const pdfjs = await import("pdfjs-dist");
+        const doc = await cachedPdfDocument(pdfUrl, () => pdfjs.getDocument({ url: pdfUrl }).promise);
+        const page = await doc.getPage(1);
+        const content = await page.getTextContent();
+        const text = content.items.map((item) => ("str" in item ? item.str : "")).join(" ");
+        const preset = matchScalePreset(text);
+        if (!preset || cancelled) return;
+        await fetch("/api/takeoff/canvas/calibration", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            project_id: projectId,
+            page_id: pageId,
+            scale_preset: preset.label,
+            suggestion_only: true,
+          }),
+        });
+        if (!cancelled) {
+          await queryClient.invalidateQueries({ queryKey: takeoffQueryKeys.calibration(pageId) });
+        }
+      } catch {
+        suggestedScale.current = false;
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [pdfUrl, calibrationLoaded, calibration, projectId, pageId, queryClient]);
+
   useEffect(() => {
     if (!documentId) return;
     let cancelled = false;
@@ -801,8 +838,17 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const DEFAULT_COVER_FT = 4;
 
   const commitUtilityRun = useCallback((inputs: UtilityRunInputs) => {
-    if (!utilityModalPts) return;
-    const lengthLf = totalLen(utilityModalPts) * scale;
+    if (!utilityModalPts || renderScale <= 0) return;
+    const pagePoints = pointsToPageSpace(utilityModalPts, renderScale);
+    const factor = calibration?.status === "verified" ? calibration.page_space_scale_factor : null;
+    const plan = factor != null ? quantityForMeasurement("length", pagePoints, factor) : null;
+    const rise = inputs.invert_elevation_end - inputs.invert_elevation_start;
+    const slope = plan != null && plan > 0 && Number.isFinite(rise) ? (rise / plan) * 100 : 0;
+    const lengthLf = plan == null
+      ? 0
+      : slope !== 0
+        ? (quantityForMeasurement("length", pagePoints, factor!, { slope_pct: slope }) ?? plan)
+        : plan;
     const trenchFull = calcPipeEmbedment({
       length_lf: lengthLf,
       diameter_in: inputs.pipe_diameter_in,
@@ -811,8 +857,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     });
     const run: UtilityRun = {
       key: `u-${Date.now()}`,
-      points: utilityModalPts,
-      coordinateSpace: "legacy_pixel",
+      points: pagePoints,
+      coordinateSpace: "page_space",
       run_length_lf: lengthLf,
       inputs,
       trench: {
@@ -824,15 +870,17 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     setUtilityRuns((prev) => [...prev, run]);
     setUtilityModalPts(null);
     setUtilityDraftPts([]);
-  }, [utilityModalPts, scale]);
+  }, [utilityModalPts, renderScale, calibration]);
 
   const commitWall = useCallback((inputs: WallInputs) => {
-    if (!wallModalPts) return;
-    const lengthLf = totalLen(wallModalPts) * scale;
+    if (!wallModalPts || renderScale <= 0) return;
+    const pagePoints = pointsToPageSpace(wallModalPts, renderScale);
+    const factor = calibration?.status === "verified" ? calibration.page_space_scale_factor : null;
+    const lengthLf = factor != null ? (quantityForMeasurement("length", pagePoints, factor) ?? 0) : 0;
     const run: WallRun = {
       key: `w-${Date.now()}`,
-      points: wallModalPts,
-      coordinateSpace: "legacy_pixel",
+      points: pagePoints,
+      coordinateSpace: "page_space",
       length_lf: lengthLf,
       height_ft: inputs.height_ft,
       thickness_in: inputs.thickness_in,
@@ -842,7 +890,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     setWallRuns((prev) => [...prev, run]);
     setWallModalPts(null);
     setDraftPoints([]);
-  }, [wallModalPts, scale]);
+  }, [wallModalPts, renderScale, calibration]);
 
   const finishContourDraft = useCallback(() => {
     if (contourDraftPts.length < 2) { setContourDraftPts([]); return; }
@@ -1148,6 +1196,25 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }, [tool, selectTool, clearDrafts, finishDraft, undoLast, redoLast, deleteSelection, selectAllShapes, duplicateSelection]);
 
   // ── Persistence ───────────────────────────────────────────────────────────
+  async function suggestScale(label: string) {
+    const preset = matchScalePreset(label);
+    if (!preset) return;
+    const res = await fetch("/api/takeoff/canvas/calibration", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project_id: projectId,
+        page_id: pageId,
+        scale_preset: preset.label,
+        suggestion_only: true,
+        page_space_scale_factor: pageSpaceFactorForPreset(preset),
+      }),
+    });
+    if (res.ok) {
+      await queryClient.invalidateQueries({ queryKey: takeoffQueryKeys.calibration(pageId) });
+    }
+  }
+
   async function saveCalibration(pointA: Pt, pointB: Pt, knownDistanceFt: number, applyToDrafts = false) {
     const res = await fetch("/api/takeoff/canvas/calibration", {
       method: "PUT",
@@ -1493,11 +1560,6 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     const unsavedWalls = wallRuns.filter((w) => !w.saved);
     if (unsaved.length === 0 && unsavedRuns.length === 0 && unsavedTopo.length === 0 && unsavedAreas.length === 0 && unsavedWalls.length === 0) return;
     const pageSpaceReady = calibration?.status === "verified" && calibration.page_space_scale_factor != null;
-    if (!pageSpaceReady) {
-      alert("Set the sheet scale before saving a measurement.");
-      selectTool("calibrate");
-      return;
-    }
     setSaving(true);
     try {
       const requests: Promise<Response>[] = [];
@@ -1544,7 +1606,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         requests.push(manualSaveRequest);
       }
 
-      if (unsavedRuns.length > 0) {
+      if (pageSpaceReady && unsavedRuns.length > 0) {
         const items = unsavedRuns.map((r) => ({
           project_id: projectId,
           page_id: pageId,
@@ -1601,7 +1663,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         }));
       }
 
-      if (unsavedWalls.length > 0) {
+      if (pageSpaceReady && unsavedWalls.length > 0) {
         const items = unsavedWalls.map((w) => ({
           project_id: projectId,
           page_id: pageId,
@@ -1757,13 +1819,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
   const totals = useMemo(() => {
     let count = 0, len = 0, area = 0;
+    const scaled = calibration?.status === "verified" && calibration.page_space_scale_factor != null;
     for (const s of shapes) {
       if (s.tool === "count")  count += 1;
-      if (s.tool === "length") len   += s.quantity;
+      if (!scaled) continue;
+      if (s.tool === "length" || s.tool === "perimeter") len += s.quantity;
       if (s.tool === "area")   area  += s.quantity;
     }
-    return { count, len, area };
-  }, [shapes]);
+    return { count, len, area, scaled };
+  }, [shapes, calibration]);
 
   const qtyLegend = useMemo(
     () => buildQuantitySummary(shapes.map((s) => ({
@@ -1864,6 +1928,22 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
         </div>
 
         {/* Context bar: topo auto-match toggle + area-bounds boundary config */}
+        {tool === "calibrate" && (
+          <div className="flex flex-wrap items-center gap-1 border-t border-white/5 bg-white/[0.02] px-4 py-2">
+            <span className="text-[10px] uppercase tracking-widest text-white/50">Scale suggestion</span>
+            {SCALE_PRESETS.map((preset) => (
+              <button
+                key={preset.label}
+                type="button"
+                className="h-7 rounded-full border border-white/15 px-2 text-[10px] font-mono text-white/70 hover:text-white"
+                onClick={() => { void suggestScale(preset.label); }}
+              >
+                {preset.label}
+              </button>
+            ))}
+            <span className="text-[10px] text-white/35">A suggestion stays unverified until you confirm it against a known dimension.</span>
+          </div>
+        )}
         {scaleDraft && (
           <form
             className="flex flex-wrap items-center gap-2 border-t border-white/5 bg-white/[0.02] px-4 py-2"
@@ -1887,7 +1967,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               aria-label="Known distance in feet"
             />
             <span className="text-[10px] uppercase tracking-widest text-white/40">feet</span>
-            <button type="submit" className="h-8 rounded-full bg-[#CCFF00] px-3 text-[10px] font-bold uppercase tracking-widest text-black">Set scale</button>
+            <button type="submit" className="h-8 rounded-full bg-[#CCFF00] px-3 text-[10px] font-bold uppercase tracking-widest text-black">Confirm scale</button>
             <button type="button" onClick={() => setScaleDraft(null)} className="text-[10px] uppercase tracking-widest text-white/40">Cancel</button>
           </form>
         )}
@@ -2420,6 +2500,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           >
             {markupMode ? "Markup on — click sheet" : "Markup (non-qty)"}
           </button>
+          <QuantityGrid projectId={projectId} />
           <div className="flex items-center justify-between gap-2">
             <div className="text-[10px] uppercase tracking-widest font-mono text-white/40">Measurements</div>
             <a
@@ -2471,7 +2552,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
           })()}
           <div className="mt-1 text-sm font-semibold">
             {shapes.length} item{shapes.length === 1 ? "" : "s"}
-            <span className="text-white/40 font-normal"> · {totals.count} EA · {totals.len.toFixed(1)} LF · {totals.area.toFixed(1)} SF</span>
+            <span className="text-white/40 font-normal"> · {totals.count} EA · {totals.scaled ? `${totals.len.toFixed(1)} LF · ${totals.area.toFixed(1)} SF` : "scale not confirmed"}</span>
           </div>
           {qtyLegend.length > 0 && (
             <div className="mt-2 max-h-28 space-y-0.5 overflow-y-auto rounded border border-white/5 bg-black/30 p-2">
@@ -2507,7 +2588,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   <div className="flex items-center gap-2">
                     <span className={`text-[9px] uppercase tracking-widest font-mono ${color}`}>{s.tool}</span>
                     <span className="text-sm font-mono">
-                      {s.quantity.toFixed(2)} <span className="text-white/40">{s.unit}</span>
+                      {s.tool !== "count" && !totals.scaled ? "Unscaled" : <>{s.quantity.toFixed(2)} <span className="text-white/40">{s.unit}</span></>}
                     </span>
                   </div>
                   <button

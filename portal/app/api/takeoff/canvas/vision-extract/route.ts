@@ -1,10 +1,12 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
+import { visionStoredQuantity } from "@/lib/takeoff/vision-quantity";
+import { itemsFromPageGeometry, itemsFromScheduleRows, loadPageGeometry, type LocalSheetItem } from "@/lib/takeoff/local-sheet-items";
+import type { ExtractedVector } from "@/lib/cad/pdf-vector-extract";
 import { getOrCreateTenant, authTenantKey, authTenantName, assertPageBelongsToProject } from "@/lib/project-controls/server";
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { auditUpdate } from "@/lib/audit";
-import { headerSafe } from "@/lib/http";
 import { runScopeGapAgent } from "@/lib/agents/scope-gap";
 import { runRfiDrafterAgent } from "@/lib/agents/rfi-drafter";
 import { quantitiesAllowedForDocType, takeoffBlockReason } from "@/lib/documents/processing-display";
@@ -17,17 +19,13 @@ type ServiceClient = SupabaseClient<Database>;
 export const runtime = "nodejs";
 export const maxDuration = 90;
 
-const PLANS_BUCKET     = "plans-bucket";
-const GEMINI_API_KEY   = headerSafe(process.env.GEMINI_API_KEY);
-const GEMINI_MODEL     = process.env.GEMINI_VISION_MODEL ?? process.env.GEMINI_MODEL ?? "gemini-2.5-pro";
-const GEMINI_BASE      = "https://generativelanguage.googleapis.com/v1beta";
+const PLANS_BUCKET = "plans-bucket";
 
 /**
  * POST /api/takeoff/canvas/vision-extract { page_id, force? }
  *
- * Runs Gemini vision over the single-page PDF and returns structured takeoff
- * candidates pulled from raster images, schedule tables, notes, callouts,
- * dimensions — anything the pdfjs vector walk missed.
+ * Shows geometry already saved on the page: vectors and schedule rows.
+ * A page with no text and no vectors stays empty.
  *
  * Idempotent: cached in document_pages.vision_extractions. Pass force=true
  * to re-run.
@@ -35,16 +33,7 @@ const GEMINI_BASE      = "https://generativelanguage.googleapis.com/v1beta";
  * GET /api/takeoff/canvas/vision-extract?page_id=  → returns cached result only.
  */
 
-interface VisionItem {
-  description: string;
-  quantity: number;
-  unit: string;              // LF / SF / EA / CY / TON etc.
-  cost_code?: string;        // NN-NN-NN if visible
-  layer_hint?: string;       // heuristic ("C-SSWR", "SANITARY")
-  source: "schedule" | "note" | "callout" | "image" | "text";
-  confidence: number;        // 0..1
-  raw_text?: string;         // the substring the model quoted
-}
+type VisionItem = LocalSheetItem;
 
 interface VisionResult {
   items: VisionItem[];
@@ -106,8 +95,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  if (!GEMINI_API_KEY) return NextResponse.json({ error: "GEMINI_API_KEY not configured" }, { status: 500 });
-
   const body = await req.json().catch(() => ({})) as { page_id?: string; force?: boolean };
   if (!body.page_id) return NextResponse.json({ error: "page_id required" }, { status: 400 });
 
@@ -118,7 +105,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const { data: page } = await db
     .from("document_pages")
-    .select("id, storage_path, page_number, vision_extractions, vision_extracted_at, document_id")
+    .select("id, storage_path, page_number, vision_extractions, vision_extracted_at, document_id, vectors, ocr_text")
     .eq("id", body.page_id).eq("tenant_id", tenantId).single();
   if (!page) return NextResponse.json({ error: "Page not found" }, { status: 404 });
 
@@ -148,116 +135,32 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ result: cached, cached: true, takeoffItems, already_decided: alreadyDecided });
   }
 
-  // Download page PDF bytes
-  const dl = await db.storage.from(PLANS_BUCKET).download(page.storage_path);
-  if (dl.error || !dl.data) {
-    return NextResponse.json({ error: `Storage download failed: ${dl.error?.message ?? "empty"}` }, { status: 502 });
+  let vectors = Array.isArray(page.vectors) ? page.vectors as unknown as ExtractedVector[] : [];
+  let pageText = typeof page.ocr_text === "string" ? page.ocr_text : "";
+  if (vectors.length === 0 || !pageText.trim()) {
+    const dl = await db.storage.from(PLANS_BUCKET).download(page.storage_path);
+    if (!dl.error && dl.data) {
+      const loaded = await loadPageGeometry(new Uint8Array(await dl.data.arrayBuffer()));
+      if (vectors.length === 0) vectors = loaded.vectors;
+      if (!pageText.trim()) pageText = loaded.text;
+    }
   }
-  const bytes = new Uint8Array(await dl.data.arrayBuffer());
-
-  // Chunk-safe base64 encode
-  const base64 = bufferToBase64(bytes);
-
-  // Ask Gemini to return strict JSON matching our schema.
-  const geminiBody = {
-    contents: [{
-      role: "user",
-      parts: [
-        {
-          text: [
-            "You are a construction estimator reading a single construction drawing page.",
-            "Extract EVERY takeoff-relevant quantity you can see from:",
-            "  1. Schedule tables (door, window, fixture, equipment, material schedules)",
-            "  2. Notes and general notes",
-            "  3. Leader callouts (e.g. \"8\" SANITARY, 240 LF\")",
-            "  4. Bill of materials or key legends",
-            "  5. Raster images / photo insets showing tagged items",
-            "  6. Dimension strings that imply lengths, widths, areas",
-            "  7. Civil grading plans — spot elevations, contour lines, EX/EXIST (existing",
-            "     grade), PROP/FG (proposed/finish grade), TC/FL (top/flow line), TW/BW",
-            "     (top/bottom of wall) callouts. When present, emit SEPARATE earthwork items",
-            "     by scope rather than one generic line: 31-11-00 clearing & grubbing (AC),",
-            "     31-14-13 topsoil strip (CY, assume 6in depth if not noted), 31-23-16 mass",
-            "     excavation/cut-fill (CY — read every existing/proposed elevation visible,",
-            "     area-weight them across the graded region rather than a flat few-point",
-            "     average, and put the elevations and areas used in raw_text), 31-25-00",
-            "     erosion control (LF/SF), 32-32-00 retaining walls (LF, from TW/BW pairs).",
-            "     Only emit 31-23-23 building-pad/subgrade-prep if this specific sheet states",
-            "     a recompaction depth and offset — otherwise skip it; that spec usually lives",
-            "     in the geotechnical report, not the grading plan.",
-            "",
-            "Return STRICT JSON matching this schema (no prose, no markdown fences):",
-            "{",
-            "  \"page_summary\": \"one-sentence description of what this sheet shows\",",
-            "  \"items\": [",
-            "    {",
-            "      \"description\": \"...\",",
-            "      \"quantity\": number,",
-            "      \"unit\": \"LF|SF|EA|CY|TON|GAL|LB\",",
-            "      \"cost_code\": \"NN-NN-NN or null\",",
-            "      \"layer_hint\": \"C-SSWR|A-DOOR|... optional\",",
-            "      \"source\": \"schedule|note|callout|image|text\",",
-            "      \"confidence\": 0.0..1.0,",
-            "      \"raw_text\": \"the exact substring you read\"",
-            "    }",
-            "  ]",
-            "}",
-            "",
-            "Rules:",
-            " - Skip anything you can't quantify.",
-            " - If a schedule shows counts of doors/windows/fixtures, emit one item PER TYPE with quantity=count.",
-            " - Use CSI MasterFormat cost_code when you can infer it.",
-            " - confidence < 0.5 for guesses; > 0.85 only when the label AND number are unambiguous.",
-            " - Do not invent items. If the sheet is a title block only, return items: []."
-          ].join("\n"),
-        },
-        { inlineData: { mimeType: "application/pdf", data: base64 } },
-      ],
-    }],
-    generationConfig: {
-      temperature: 0.1,
-      responseMimeType: "application/json",
-      maxOutputTokens: 8192,
-    },
-  };
-
-  const res = await fetch(
-    `${GEMINI_BASE}/models/${GEMINI_MODEL}:generateContent`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-goog-api-key": GEMINI_API_KEY },
-      body: JSON.stringify(geminiBody),
-    },
-  );
-  if (!res.ok) {
-    const errText = (await res.text().catch(() => "")).slice(0, 500);
-    return NextResponse.json({ error: `Gemini ${res.status}: ${errText}` }, { status: 502 });
-  }
-  const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-  const raw = (data.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join("").trim();
-
-  let parsed: { page_summary?: string; items?: VisionItem[] };
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return NextResponse.json({ error: "Gemini returned non-JSON", raw: raw.slice(0, 400) }, { status: 502 });
-  }
-  const items: VisionItem[] = Array.isArray(parsed.items) ? parsed.items.slice(0, 500).map((it) => ({
-    description: String(it.description ?? "").slice(0, 400),
-    quantity: safeNumber(it.quantity, 0),
-    unit: String(it.unit ?? "EA").toUpperCase().slice(0, 12),
-    cost_code: typeof it.cost_code === "string" && /^\d{2}-\d{2}-\d{2}$/.test(it.cost_code) ? it.cost_code : undefined,
-    layer_hint: typeof it.layer_hint === "string" ? it.layer_hint.slice(0, 60) : undefined,
-    source: (["schedule", "note", "callout", "image", "text"].includes(String(it.source)) ? it.source : "text") as VisionItem["source"],
-    confidence: safeNumber(it.confidence, 0.5, 0, 1),
-    raw_text: typeof it.raw_text === "string" ? it.raw_text.slice(0, 400) : undefined,
-  })) : [];
+  const geometry = itemsFromPageGeometry(vectors, pageText);
+  const { data: scheduleRows } = page.document_id
+    ? await db.from("takeoff_items")
+      .select("label, quantity, unit, csi_code")
+      .eq("tenant_id", tenantId)
+      .eq("document_id", page.document_id)
+      .eq("page", page.page_number ?? 0)
+      .eq("source_method", "deterministic")
+    : { data: [] };
+  const items: VisionItem[] = [...geometry.items, ...itemsFromScheduleRows(scheduleRows ?? [])].slice(0, 500);
 
   const result: VisionResult = {
     items,
-    page_summary: String(parsed.page_summary ?? "").slice(0, 400),
+    page_summary: geometry.page_summary,
     extracted_at: new Date().toISOString(),
-    model: GEMINI_MODEL,
+    model: "pdfjs",
   };
 
   await db
@@ -312,7 +215,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       p_page_number: (page as { page_number?: number }).page_number ?? 0,
       p_items: items.map((it) => ({
         description: it.description,
-        quantity: it.quantity,
+        quantity: visionStoredQuantity(it.source, it.quantity),
         unit: it.unit,
         cost_code: it.cost_code ?? null,
         layer_hint: it.layer_hint ?? null,
@@ -408,22 +311,4 @@ async function runBackgroundAgents(args: { db: ServiceClient; tenantId: string; 
       visionItems,
     }),
   ]);
-}
-
-function safeNumber(v: unknown, fallback: number, min?: number, max?: number): number {
-  const n = typeof v === "number" ? v : Number(v);
-  if (!Number.isFinite(n)) return fallback;
-  if (typeof min === "number" && n < min) return min;
-  if (typeof max === "number" && n > max) return max;
-  return n;
-}
-
-function bufferToBase64(bytes: Uint8Array): string {
-  // Chunk to avoid stack overflow on large PDFs.
-  let out = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    out += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
-  }
-  return Buffer.from(out, "binary").toString("base64");
 }

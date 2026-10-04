@@ -1,41 +1,24 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
-import { getAccessToken } from "@/lib/google/oauth";
-import { headerSafe } from "@/lib/http";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditUpdate } from "@/lib/audit";
 import { checkAiRateLimit } from "@/lib/ai/rate-limit";
-import { embedQueryText } from "@/lib/ai/embeddings";
-import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
+import { excerptsForQuestion, formatExcerpts, type TextPage } from "@/lib/documents/text-excerpts";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
-
-const GEMINI_API_KEY = headerSafe(process.env.GEMINI_API_KEY);
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-pro";
-
-const SYSTEM =
-  "You are a construction document assistant. Answer the user's question using ONLY the attached " +
-  "document. Quote specific sections, sheet numbers, or values where possible. If the answer is not " +
-  "in the document, say so plainly — do not guess.";
+export const maxDuration = 60;
 
 /**
- * Document Q&A — downloads a stored PDF and lets Gemini read it natively to
- * answer a question about it. Tenant-isolated; only works on docs with a
- * Supabase storage_path (uploaded files, not Drive-only imports).
+ * Document Q&A searches text already stored for the file and returns the
+ * matching excerpts with their page numbers.
  */
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     const { userId, orgId, orgSlug } = await auth();
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     const email = (await currentUser())?.primaryEmailAddress?.emailAddress;
-
-    if (!GEMINI_API_KEY) {
-      return NextResponse.json({ error: "AI is not configured (GEMINI_API_KEY missing).", code: "NO_PROVIDER" }, { status: 503 });
-    }
 
     const { document_id, question } = await req.json() as { document_id?: string; question?: string };
     if (!document_id || !question?.trim()) {
@@ -56,11 +39,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (error || !doc) return NextResponse.json({ error: "Document not found" }, { status: 404 });
 
     const meta = (doc.meta ?? {}) as Record<string, unknown>;
-
-    // Short-circuit repeat/duplicate questions about the same document — this
-    // route sends the ENTIRE PDF to Gemini on every call (see below), so
-    // re-asking a question a user already asked would otherwise re-upload and
-    // reprocess the full file for an answer we already have.
     const normalizedQuestion = question.trim().toLowerCase();
     const existingQsForCache = Array.isArray(meta.questions) ? meta.questions as Array<Record<string, unknown>> : [];
     const cached = existingQsForCache.find(
@@ -77,185 +55,80 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
       );
     }
-    const storagePath = meta.storage_path as string | undefined;
-    const driveFileId = meta.drive_file_id as string | undefined;
 
-    const persistAnswer = async (answer: string, source: string) => {
-      const newQ = {
-        id: `q_${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
-        question: question.trim(),
-        answer,
-        asked_at: new Date().toISOString(),
-        asked_by: userId,
-      };
-      const updatedMeta = { ...meta, questions: [...existingQsForCache, newQ] };
-      await db.from("documents").update({ meta: updatedMeta } as never).eq("id", doc.id).eq("tenant_id", tenantId);
-      auditUpdate({
-        tenant_id: tenantId,
-        user_id: userId,
-        table_name: "documents",
-        record_id: doc.id,
-        old_values: { meta } as unknown as Record<string, unknown>,
-        new_values: { meta: updatedMeta } as unknown as Record<string, unknown>,
-      });
-      return NextResponse.json({ answer, document: doc.file_name, question_id: newQ.id, source });
+    const pages = await loadStoredText(db, tenantId, document_id);
+    const answer = formatExcerpts(excerptsForQuestion(pages, question));
+
+    const newQ = {
+      id: `q_${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
+      question: question.trim(),
+      answer,
+      asked_at: new Date().toISOString(),
+      asked_by: userId,
     };
-
-    const answerFromTextContext = async (context: string, sourceLabel: string, source: string) => {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-goog-api-key": GEMINI_API_KEY },
-          body: JSON.stringify({
-            system_instruction: {
-              parts: [{
-                text: buildGroundedSystemPrompt(SYSTEM, {
-                  requireCitations: true,
-                  sourceLabel,
-                }),
-              }],
-            },
-            contents: [{
-              role: "user",
-              parts: [{ text: `${context}\n\nQuestion: ${question.trim()}` }],
-            }],
-            generationConfig: { temperature: 0.2, maxOutputTokens: 2048 },
-          }),
-        },
-      );
-      if (!res.ok) {
-        const detail = await res.text().catch(() => res.statusText);
-        return NextResponse.json({ error: `[gemini ${res.status}] ${detail.slice(0, 300)}` }, { status: 502 });
-      }
-      const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-      const answer = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "(no answer)";
-      return persistAnswer(answer, source);
-    };
-
-    // Indexed chunks (sync ingest or async page-processor) — no full PDF upload.
-    try {
-      const embedding = await embedQueryText(question.trim());
-      const vectorStr = `[${embedding.join(",")}]`;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data: matchedChunks } = await (db.rpc as any)("match_document_chunks", {
-        query_embedding: vectorStr,
-        match_tenant_id: tenantId,
-        match_document_id: document_id,
-        match_count: 8,
-      }) as { data: Array<{ content: string; page_number: number; similarity: number }> | null };
-      const relevant = (matchedChunks ?? []).filter((c) => c.similarity > 0.55);
-      if (relevant.length > 0) {
-        const context = relevant
-          .map((c, i) => `[${i + 1}] (page ${c.page_number})\n${c.content}`)
-          .join("\n\n");
-        return await answerFromTextContext(context, "document excerpts", "document_chunks");
-      }
-    } catch {
-      /* fall through to OCR / PDF paths */
-    }
-
-    // Async split pipeline stores OCR per page — prefer that over re-uploading
-    // the full PDF when available (large Drive plans live in plans-bucket).
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data: asyncPages } = await (db as any)
-      .from("document_pages")
-      .select("page_number, ocr_text, status")
-      .eq("document_id", document_id)
-      .eq("tenant_id", tenantId)
-      .eq("status", "done")
-      .not("ocr_text", "is", null)
-      .order("page_number", { ascending: true });
-    const ocrPages = (asyncPages ?? []) as Array<{ page_number: number; ocr_text: string }>;
-    if (ocrPages.length > 0) {
-      const context = ocrPages
-        .map((p) => `=== Page ${p.page_number} ===\n${p.ocr_text}`)
-        .join("\n\n");
-      return await answerFromTextContext(context, "document OCR excerpts", "document_pages_ocr");
-    }
-
-    let bytes: Buffer;
-    let contentType = "application/pdf";
-
-    if (storagePath) {
-      if (!doc.file_name.toLowerCase().endsWith(".pdf")) {
-        return NextResponse.json({ error: "Document Q&A currently supports PDF files only." }, { status: 422 });
-      }
-      // Prefer the bucket recorded on the row; fall back across plans-bucket
-      // (async page-split path) and legacy project-documents.
-      const primaryBucket = resolveDocumentStorageBucket(meta);
-      const bucketsToTry = primaryBucket === "project-documents"
-        ? [primaryBucket, "plans-bucket"]
-        : [primaryBucket, "project-documents"];
-      let fileData: Blob | null = null;
-      let dlErr: { message?: string } | null = null;
-      for (const bucket of bucketsToTry) {
-        const dl = await db.storage.from(bucket).download(storagePath);
-        if (!dl.error && dl.data) {
-          fileData = dl.data;
-          dlErr = null;
-          break;
-        }
-        dlErr = dl.error;
-      }
-      if (!fileData) return NextResponse.json({ error: `Could not load file: ${dlErr?.message ?? "not found"}` }, { status: 502 });
-      bytes = Buffer.from(await fileData.arrayBuffer());
-      contentType = "application/pdf";
-    } else if (driveFileId) {
-      const token = await getAccessToken(tenantId, userId);
-      if (!token) {
-        return NextResponse.json({ error: "Google Drive is connected in the database, but no refresh token is available yet. Reconnect Google." }, { status: 422 });
-      }
-      const driveRes = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveFileId)}?alt=media`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!driveRes.ok) {
-        const detail = await driveRes.text().catch(() => driveRes.statusText);
-        return NextResponse.json({ error: `[drive ${driveRes.status}] ${detail.slice(0, 200)}` }, { status: 502 });
-      }
-      contentType = driveRes.headers.get("content-type") || "application/pdf";
-      bytes = Buffer.from(await driveRes.arrayBuffer());
-      if (!contentType.includes("pdf") && !doc.file_name.toLowerCase().endsWith(".pdf")) {
-        return NextResponse.json({ error: "Document Q&A currently supports PDF files only." }, { status: 422 });
-      }
-    } else {
-      return NextResponse.json({ error: "This document has no stored file or Drive file id to read." }, { status: 422 });
-    }
-
-    if (bytes.byteLength > 32 * 1024 * 1024) {
-      return NextResponse.json({ error: "PDF exceeds 32 MB — too large for Q&A." }, { status: 413 });
-    }
-    const base64 = bytes.toString("base64");
-
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-goog-api-key": GEMINI_API_KEY },
-        body: JSON.stringify({
-          system_instruction: { parts: [{ text: buildGroundedSystemPrompt(SYSTEM, { requireCitations: true, sourceLabel: "attached document" }) }] },
-          contents: [{
-            role: "user",
-            parts: [
-              { inline_data: { mime_type: "application/pdf", data: base64 } },
-              { text: question },
-            ],
-          }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 2048 },
-        }),
-      },
-    );
-    if (!res.ok) {
-      const detail = await res.text().catch(() => res.statusText);
-      return NextResponse.json({ error: `[gemini ${res.status}] ${detail.slice(0, 300)}` }, { status: 502 });
-    }
-    const data = await res.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-    const answer = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "(no answer)";
-
-    // Persist Q&A to documents.meta.questions so it survives panel close + reload
-    return persistAnswer(answer, "pdf_inline");
+    const updatedMeta = { ...meta, questions: [...existingQsForCache, newQ] };
+    await db.from("documents").update({ meta: updatedMeta } as never).eq("id", doc.id).eq("tenant_id", tenantId);
+    auditUpdate({
+      tenant_id: tenantId,
+      user_id: userId,
+      table_name: "documents",
+      record_id: doc.id,
+      old_values: { meta } as unknown as Record<string, unknown>,
+      new_values: { meta: updatedMeta } as unknown as Record<string, unknown>,
+    });
+    return NextResponse.json({ answer, document: doc.file_name, question_id: newQ.id, source: "stored_text" });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[POST /api/documents/ask] ${msg}` }, { status: 502 });
   }
+}
+
+async function loadStoredText(
+  db: Awaited<ReturnType<typeof createServiceClient>>,
+  tenantId: string,
+  documentId: string,
+): Promise<TextPage[]> {
+  const byPage = new Map<number, string[]>();
+  const add = (pageNumber: number | null | undefined, text: string | null | undefined) => {
+    const clean = (text ?? "").trim();
+    if (pageNumber == null || !clean || !Number.isFinite(pageNumber)) return;
+    const list = byPage.get(pageNumber) ?? [];
+    list.push(clean);
+    byPage.set(pageNumber, list);
+  };
+
+  const { data: syncChunks } = await db
+    .from("chunks")
+    .select("page_number, content")
+    .eq("document_id", documentId)
+    .eq("tenant_id", tenantId);
+  for (const row of syncChunks ?? []) add(row.page_number, row.content);
+
+  const { data: pageChunks } = await db
+    .from("document_chunks")
+    .select("page_number, content")
+    .eq("document_id", documentId)
+    .eq("tenant_id", tenantId);
+  for (const row of pageChunks ?? []) {
+    if (row.page_number != null) add(row.page_number, row.content);
+  }
+
+  const { data: ocrPages } = await db
+    .from("document_pages")
+    .select("page_number, ocr_text")
+    .eq("document_id", documentId)
+    .eq("tenant_id", tenantId)
+    .not("ocr_text", "is", null);
+  for (const row of ocrPages ?? []) add(row.page_number, row.ocr_text);
+
+  const { data: extracted } = await db
+    .from("pages")
+    .select("page_number, extracted_text")
+    .eq("document_id", documentId)
+    .eq("tenant_id", tenantId);
+  for (const row of extracted ?? []) add(row.page_number, row.extracted_text);
+
+  return [...byPage.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([page_number, parts]) => ({ page_number, text: parts.join("\n") }));
 }

@@ -617,8 +617,7 @@ async def extract_takeoff(
       .xlsx / .xls    tabular estimate/BOM  (openpyxl)
 
     Returns: { source_type, rows[], coverage{}, ai_candidate_pages[] }.
-    For PDFs, ai_candidate_pages lists drawing pages with no machine-readable
-    table — the portal may optionally run the AI vision path on just those.
+    Dense drawing pages return no table rows. ai_candidate_pages is empty.
     """
     from takeoff_extract import extract as _extract
 
@@ -685,8 +684,8 @@ async def extract_takeoff_stream(
     releases its memory before the next, so arbitrarily large drawing sets stream
     without OOM-ing the worker. Emits NDJSON events:
       {"event":"STARTED","total_pages":N}
-      {"event":"PAGE","page":i,"total_pages":N,"rows":[...]}   (rows=[] -> drawing page -> AI candidate)
-      {"event":"COMPLETED","total_rows":R,"ai_candidate_pages":[...]}
+      {"event":"PAGE","page":i,"total_pages":N,"rows":[...]}   (rows=[] -> drawing page, measured from vectors)
+      {"event":"COMPLETED","total_rows":R,"ai_candidate_pages":[]}
       {"event":"ERROR","message":"..."}
     DXF/IFC/XLSX are extracted whole and emitted as a single page.
     """
@@ -718,7 +717,6 @@ async def extract_takeoff_stream(
     def gen():
         try:
             if ext == ".pdf":
-                ai_pages: list[int] = []
                 total_rows = 0
                 started = False
                 for idx, total, rows in iter_pdf_pages(tmp_path):
@@ -727,13 +725,10 @@ async def extract_takeoff_stream(
                         started = True
                     if rows:
                         total_rows += len(rows)
-                        yield _frame({"event": "PAGE", "page": idx, "total_pages": total, "rows": rows})
-                    else:
-                        ai_pages.append(idx)
-                        yield _frame({"event": "PAGE", "page": idx, "total_pages": total, "rows": []})
+                    yield _frame({"event": "PAGE", "page": idx, "total_pages": total, "rows": rows})
                 if not started:
                     yield _frame({"event": "STARTED", "total_pages": 0, "file": filename})
-                yield _frame({"event": "COMPLETED", "total_rows": total_rows, "ai_candidate_pages": ai_pages})
+                yield _frame({"event": "COMPLETED", "total_rows": total_rows, "ai_candidate_pages": []})
             else:
                 result = _extract(tmp_path)
                 rows = result.get("rows", [])
@@ -1157,6 +1152,124 @@ async def get_job(job_id: str) -> dict:
     elif isinstance(result.info, dict):
         body["meta"] = result.info
     return body
+
+
+@app.post(
+    "/api/documents/split-pdf",
+    summary="Split a large PDF into single-page objects in storage",
+    dependencies=[Depends(verify_secret)],
+)
+def split_pdf(payload: dict = Body(...)) -> dict:
+    """
+    Stream a source PDF to disk, write one page at a time with pypdf, and
+    upload each page to the plans bucket. The portal then inserts document_pages.
+
+    Body: { source_url, document_id, bucket?, authorization?, upload_original_path? }
+    """
+    import httpx
+    import re
+    from pypdf import PdfReader, PdfWriter
+
+    source_url = payload.get("source_url")
+    document_id = str(payload.get("document_id") or "")
+    bucket = str(payload.get("bucket") or "plans-bucket")
+    authorization = payload.get("authorization")
+    upload_original = payload.get("upload_original_path")
+    supabase_url = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or ""
+    if not supabase_url or not service_key:
+        raise HTTPException(
+            status_code=503,
+            detail="SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required to split a large PDF",
+        )
+    if not isinstance(source_url, str) or not (source_url.startswith("https://") or source_url.startswith("http://")):
+        raise HTTPException(status_code=400, detail="source_url must be http(s)")
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", document_id):
+        raise HTTPException(status_code=400, detail="document_id must be a uuid")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}", bucket):
+        raise HTTPException(status_code=400, detail="bucket name is not valid")
+
+    headers: dict[str, str] = {}
+    if isinstance(authorization, str) and authorization:
+        headers["Authorization"] = authorization
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        timeout = httpx.Timeout(600.0, connect=30.0)
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            with client.stream("GET", source_url, headers=headers) as resp:
+                resp.raise_for_status()
+                with open(tmp_path, "wb") as out:
+                    for chunk in resp.iter_bytes(1024 * 1024):
+                        if chunk:
+                            out.write(chunk)
+            if isinstance(upload_original, str) and re.fullmatch(r"originals/[0-9a-fA-F-]{36}\.pdf", upload_original):
+                _put_storage_object(client, supabase_url, service_key, bucket, upload_original, tmp_path)
+
+        reader = PdfReader(tmp_path)
+        if getattr(reader, "is_encrypted", False):
+            try:
+                reader.decrypt("")
+            except Exception as exc:
+                raise HTTPException(status_code=422, detail="This PDF is encrypted. Unlock it before splitting.") from exc
+
+        pages: list[dict] = []
+        for index, page in enumerate(reader.pages, start=1):
+            writer = PdfWriter()
+            writer.add_page(page)
+            page_tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+            page_path = page_tmp.name
+            page_tmp.close()
+            try:
+                with open(page_path, "wb") as page_file:
+                    writer.write(page_file)
+                storage_path = f"pages/{document_id}/page-{index}.pdf"
+                with httpx.Client(timeout=httpx.Timeout(120.0, connect=30.0)) as uploader:
+                    _put_storage_object(uploader, supabase_url, service_key, bucket, storage_path, page_path)
+                pages.append({"page_number": index, "storage_path": storage_path})
+            finally:
+                Path(page_path).unlink(missing_ok=True)
+        if not pages:
+            raise HTTPException(status_code=422, detail="PDF has zero pages")
+        return {"pages": pages, "page_count": len(pages)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("[split_pdf] failed for %s", document_id)
+        raise HTTPException(status_code=500, detail=f"PDF split failed: {exc}") from exc
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def _put_storage_object(client, supabase_url: str, service_key: str, bucket: str, storage_path: str, file_path: str) -> None:
+    import httpx
+
+    url = f"{supabase_url}/storage/v1/object/{bucket}/{storage_path}"
+
+    def _chunks():
+        with open(file_path, "rb") as handle:
+            while True:
+                block = handle.read(1024 * 1024)
+                if not block:
+                    break
+                yield block
+
+    resp = client.post(
+        url,
+        content=_chunks(),
+        headers={
+            "Authorization": f"Bearer {service_key}",
+            "Content-Type": "application/pdf",
+            "x-upsert": "true",
+        },
+    )
+    if resp.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail=f"storage upload failed ({resp.status_code}): {resp.text[:200]}",
+        )
 
 
 @app.get("/api/health")

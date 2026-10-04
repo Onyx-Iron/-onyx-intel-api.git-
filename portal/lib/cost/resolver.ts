@@ -1,11 +1,13 @@
 import { createServiceClient } from "@/lib/supabase/server";
 import {
+  actualsNeedPpiAging,
   escalateStaleUnitCost,
   scaleOptionalCost,
   type EscalateResult,
 } from "@/lib/cost/ppi";
 import { scoreCostConfidence } from "@/lib/cost/confidence";
 import { scaleMoney, selectLocationFactor, type LocationIndexRow } from "@/lib/cost/location-adjust";
+import { normalizeRegionToken, regionCodeAliases } from "@/lib/cost/region-code";
 
 export interface CostResolveInput {
   cost_code: string;
@@ -22,8 +24,8 @@ export function regionFromProject(project: {
 } | null | undefined): CostResolveInput["region"] {
   return {
     zip: project?.zip_code?.trim() || undefined,
-    metro: project?.city?.trim() || undefined,
-    state: project?.state?.trim() || undefined,
+    metro: normalizeRegionToken(project?.city),
+    state: normalizeRegionToken(project?.state),
   };
 }
 
@@ -75,6 +77,8 @@ function applyPpiAging(
   // Actuals / regional / national catalog prices age when stale.
   const stamped = { ...result, uom: uom ?? result.uom ?? null };
   if (stamped.source === "tenant_override" || stamped.source === "none") return stamped;
+  // Actuals already average the last six months. Do not PPI-age that window.
+  if (stamped.source === "actuals_avg" && !actualsNeedPpiAging(stamped.observed_at)) return stamped;
 
   const aged: EscalateResult = escalateStaleUnitCost({
     unitCost: result.unit_cost,
@@ -137,12 +141,13 @@ export async function resolveCost(
 
   // Candidate region codes in priority order
   const zip = region.zip?.trim();
-  const metro = region.metro?.trim();
-  const state = region.state?.trim();
-  const regionCandidates: string[] = [];
-  if (zip) regionCandidates.push(zip);
-  if (metro) regionCandidates.push(metro);
-  if (state) regionCandidates.push(state);
+  const metro = normalizeRegionToken(region.metro);
+  const state = normalizeRegionToken(region.state);
+  const regionCandidates = [...new Set([
+    ...regionCodeAliases(zip),
+    ...regionCodeAliases(metro),
+    ...regionCodeAliases(state),
+  ])];
 
   // 2) Tenant override — region-specific first
   if (regionCandidates.length > 0) {
@@ -205,7 +210,8 @@ export async function resolveCost(
     .eq("tenant_id", tenant_id)
     .eq("csi_code", cost_code)
     .gte("observed_at", sixMonthsAgoStr);
-  if (state) actualsQuery = actualsQuery.eq("region_code", state);
+  const stateAliases = regionCodeAliases(state);
+  if (stateAliases.length > 0) actualsQuery = actualsQuery.in("region_code", stateAliases);
   const { data: actuals } = await actualsQuery;
   if (actuals && actuals.length > 0) {
     const n = actuals.length;
@@ -389,12 +395,13 @@ export async function resolveCostsBatch(
   for (const group of groups.values()) {
     const { tenant_id, region } = group[0];
     const zip = region.zip?.trim();
-    const metro = region.metro?.trim();
-    const state = region.state?.trim();
-    const regionCandidates: string[] = [];
-    if (zip) regionCandidates.push(zip);
-    if (metro) regionCandidates.push(metro);
-    if (state) regionCandidates.push(state);
+    const metro = normalizeRegionToken(region.metro);
+    const state = normalizeRegionToken(region.state);
+    const regionCandidates = [...new Set([
+      ...regionCodeAliases(zip),
+      ...regionCodeAliases(metro),
+      ...regionCodeAliases(state),
+    ])];
 
     const codes = [...new Set(group.map((g) => g.cost_code))];
 
@@ -452,7 +459,8 @@ export async function resolveCostsBatch(
       .eq("tenant_id", tenant_id)
       .in("csi_code", codes)
       .gte("observed_at", sixMonthsAgoStr);
-    if (state) actualsQuery = actualsQuery.eq("region_code", state);
+    const stateAliases = regionCodeAliases(state);
+    if (stateAliases.length > 0) actualsQuery = actualsQuery.in("region_code", stateAliases);
     const { data: actuals } = await actualsQuery;
     const actualsByCsi = new Map<string, Row[]>();
     for (const r of (actuals ?? []) as Row[]) {
