@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { requirePermission, isUniqueViolation } from "@/lib/project-controls/route-guards";
+import { issueAwardedPurchaseOrder } from "@/lib/procurement/award-bid";
 import { requireGoogleToken } from "@/lib/google/api";
 import { logEvent } from "@/lib/activity";
 import { auditInsert, auditUpdate } from "@/lib/audit";
@@ -24,9 +25,10 @@ function buildRaw(to: string, subject: string, body: string): string {
  * vendor. A missing/unconnected Google account does NOT fail the approval —
  * the PO is the authoritative record; the email is a courtesy notification.
  *
- * Concurrency: UNIQUE(vendor_bid_id) + conditional status updates
- * (bid still pending, request still open) turn double-submit / raced
- * sibling awards into 409 instead of duplicate POs.
+ * Concurrency: the request is claimed before the purchase order insert.
+ * UNIQUE(vendor_bid_id) only stops a second PO for the same bid. Two
+ * Approve clicks on different bids used to insert two issued POs, mark
+ * both bids awarded, and return 409 to the loser.
  */
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }): Promise<NextResponse> {
   const { userId, orgId, orgSlug } = await auth();
@@ -61,52 +63,27 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   if (reqErr || !request) return NextResponse.json({ error: reqErr?.message ?? "Request not found" }, { status: 404 });
   if (request.status === "awarded") return NextResponse.json({ error: "This request has already been awarded." }, { status: 409 });
 
-  const totalAmount = Number(bid.unit_price) * Number(request.quantity);
-
-  const { data: po, error: poErr } = await anyDb.from("purchase_orders").insert({
-    tenant_id: tenantId,
-    project_id: request.project_id,
-    vendor_bid_id: bid.id,
-    total_amount: totalAmount,
+  const awarded = await issueAwardedPurchaseOrder(anyDb, {
+    tenantId,
+    userId,
     terms: body.terms ?? null,
-    status: "issued",
-    created_by: userId,
-  }).select("*").single();
-  if (poErr) {
-    if (isUniqueViolation(poErr)) {
-      return NextResponse.json({ error: "A purchase order already exists for this bid." }, { status: 409 });
-    }
-    return NextResponse.json({ error: poErr.message }, { status: 500 });
+    bid: {
+      id: bid.id,
+      request_id: bid.request_id,
+      unit_price: bid.unit_price,
+    },
+    request: {
+      id: request.id,
+      project_id: request.project_id,
+      quantity: request.quantity,
+      status: request.status,
+    },
+  }, isUniqueViolation);
+  if (!awarded.ok) {
+    return NextResponse.json({ error: awarded.error }, { status: awarded.status });
   }
-
-  // Conditional award: only flip status if still pending/open so a raced
-  // sibling approve cannot overwrite an already-awarded request.
-  const [{ data: awardedBid, error: awardErr }, { data: awardedReq, error: reqAwardErr }] = await Promise.all([
-    anyDb.from("vendor_bids")
-      .update({ status: "awarded" })
-      .eq("id", bid.id)
-      .eq("status", "pending")
-      .select("id"),
-    anyDb.from("marketplace_requests")
-      .update({ status: "awarded", updated_at: new Date().toISOString() })
-      .eq("id", request.id)
-      .neq("status", "awarded")
-      .select("id"),
-  ]);
-
-  if (awardErr || reqAwardErr) {
-    return NextResponse.json({ error: (awardErr ?? reqAwardErr).message }, { status: 500 });
-  }
-  if (!awardedBid?.length || !awardedReq?.length) {
-    // PO row exists (unique) but status race lost — treat as conflict.
-    return NextResponse.json({ error: "This request was awarded concurrently. Refresh and retry." }, { status: 409 });
-  }
-
-  await anyDb.from("vendor_bids")
-    .update({ status: "declined" })
-    .eq("request_id", bid.request_id)
-    .neq("id", bid.id)
-    .eq("status", "pending");
+  const po = awarded.purchaseOrder;
+  const totalAmount = awarded.totalAmount;
 
   auditInsert({
     tenant_id: tenantId,
