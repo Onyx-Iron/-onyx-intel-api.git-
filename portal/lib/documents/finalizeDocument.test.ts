@@ -11,6 +11,7 @@ type FakePage = {
 type FakeDoc = {
   id: string;
   status: string;
+  split_status?: string | null;
   page_count?: number | null;
   meta: Record<string, unknown> | null;
 };
@@ -137,6 +138,52 @@ describe("finalizeDocumentsFromOcr", () => {
         { document_id: "d3", status: "done" },
         { document_id: "d3", status: "pending" },
       ],
+      updates,
+    });
+
+    const results = await finalizeDocumentsFromOcr(db, "tenant-1");
+    assert.equal(results.length, 0);
+    assert.equal(updates.length, 0);
+  });
+
+  it("does not close a multi-batch split after only the first pages finish", async () => {
+    const updates: Array<{ id: string; patch: Record<string, unknown> }> = [];
+    const db = makeDb({
+      docs: [{
+        id: "d6",
+        status: "processing",
+        split_status: "processing",
+        page_count: 200,
+        meta: { processing_summary: { pages_split_through: 75, pages_total: 200 } },
+      }],
+      pages: Array.from({ length: 75 }, () => ({
+        document_id: "d6",
+        status: "done",
+        takeoff_status: "done",
+      })),
+      updates,
+    });
+
+    const results = await finalizeDocumentsFromOcr(db, "tenant-1");
+    assert.equal(results.length, 0);
+    assert.equal(updates.length, 0);
+  });
+
+  it("does not treat an unfinished page batch as missing uploads", async () => {
+    const updates: Array<{ id: string; patch: Record<string, unknown> }> = [];
+    const db = makeDb({
+      docs: [{
+        id: "d7",
+        status: "processing",
+        split_status: "done",
+        page_count: 200,
+        meta: { processing_summary: { pages_split_through: 75, pages_total: 200 } },
+      }],
+      pages: Array.from({ length: 75 }, () => ({
+        document_id: "d7",
+        status: "done",
+        takeoff_status: "done",
+      })),
       updates,
     });
 
