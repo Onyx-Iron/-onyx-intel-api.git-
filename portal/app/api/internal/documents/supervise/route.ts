@@ -3,7 +3,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import { publishSheetPages } from "@/lib/documents/sheet-pages";
 import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
-import { nextSupervisorAction, type SupervisorSnapshot } from "@/lib/documents/pipeline-supervisor";
+import { nextSupervisorAction, supervisorStatusWrite, type SupervisorSnapshot } from "@/lib/documents/pipeline-supervisor";
 import { measurePdfBytes, saveMeasuredPages } from "@/lib/takeoff/measure-pdf";
 
 export const runtime = "nodejs";
@@ -166,7 +166,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
             if (inserted.error) throw new Error(inserted.error.message);
           },
         }, { tenantId: doc.tenant_id, documentId: doc.id, pdfBytes: bytes });
-        await db.from("documents").update({ status: "split", split_status: "done" }).eq("id", doc.id).eq("tenant_id", doc.tenant_id);
+        const splitWrite = supervisorStatusWrite("portal_split").document;
+        if (splitWrite) {
+          await db.from("documents").update(splitWrite).eq("id", doc.id).eq("tenant_id", doc.tenant_id);
+        }
       } else if (decision.action === "measure") {
         const pages = await db.from("document_pages")
           .select("id, page_number, storage_path")
@@ -194,16 +197,20 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         nextSummary.geometry_measured = true;
         nextSummary.unscaled_pages = unscaled;
       } else if (decision.action === "kick_takeoff") {
-        await db.from("document_pages").update({ takeoff_status: "done", updated_at: new Date().toISOString() })
-          .eq("document_id", doc.id).eq("tenant_id", doc.tenant_id);
-        await db.from("documents").update({ takeoff_status: "done", status: "complete" })
-          .eq("id", doc.id).eq("tenant_id", doc.tenant_id);
+        const write = supervisorStatusWrite("kick_takeoff");
+        if (write.page) {
+          await db.from("document_pages").update({ ...write.page, updated_at: new Date().toISOString() })
+            .eq("document_id", doc.id).eq("tenant_id", doc.tenant_id);
+        }
+        if (write.document) {
+          await db.from("documents").update(write.document).eq("id", doc.id).eq("tenant_id", doc.tenant_id);
+        }
         nextSummary.takeoff_done = true;
       } else if (decision.action === "terminal") {
+        const failed = supervisorStatusWrite("terminal").document ?? {};
         await db.from("documents").update({
-          status: "failed",
+          ...failed,
           last_error: doc.last_error ?? decision.reason,
-          last_error_step: "supervisor",
         }).eq("id", doc.id).eq("tenant_id", doc.tenant_id);
       }
       await db.from("documents").update({
