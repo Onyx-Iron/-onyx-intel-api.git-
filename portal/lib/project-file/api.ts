@@ -86,6 +86,7 @@ export const MONEY_FIELDS = [
   "balance",
   "unit_price",
   "hourly_rate",
+  "labor_amount",
   "total_amount",
 ] as const;
 

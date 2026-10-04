@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { MONEY_FIELDS, projectContext, redactAmounts, requireProjectWrite, viewerContactId } from "@/lib/project-file/api";
-import { computePayLine, waiverCoversDraw } from "@/lib/project-file/money";
+import { computePayLine, payAppInvoiceTotals, waiverCoversDraw } from "@/lib/project-file/money";
 import { subCanSeeRecord } from "@/lib/project-file/records";
 
 export const runtime = "nodejs";
@@ -178,18 +178,42 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   }
 
   if (body.status === "payable") {
+    if (app.status !== "draft") {
+      return NextResponse.json({ error: `Pay application is already ${app.status}` }, { status: 409 });
+    }
     const { data: freshLines } = await gate.ctx.db
       .from("pay_application_lines")
-      .select("this_period")
-      .eq("pay_application_id", app.id);
-    const drawAmount = (freshLines ?? []).reduce((sum: number, line: { this_period: number }) => sum + Number(line.this_period ?? 0), 0);
+      .select("this_period, stored_materials, previous_amount")
+      .eq("pay_application_id", app.id)
+      .eq("tenant_id", gate.ctx.tenantId);
+    const totals = payAppInvoiceTotals(
+      (freshLines ?? []).map((line: { this_period: number; stored_materials: number; previous_amount: number }) => ({
+        previous: Number(line.previous_amount ?? 0),
+        thisPeriod: Number(line.this_period ?? 0),
+        storedMaterials: Number(line.stored_materials ?? 0),
+      })),
+      Number(app.retainage_pct ?? 0),
+    );
     const { data: waivers } = await gate.ctx.db
       .from("lien_waivers")
       .select("status, amount, draw_number")
       .eq("tenant_id", gate.ctx.tenantId)
       .eq("project_id", gate.projectId);
-    if (!waiverCoversDraw(waivers ?? [], app.draw_number, drawAmount)) {
+    if (!waiverCoversDraw(waivers ?? [], app.draw_number, totals.amount)) {
       return NextResponse.json({ error: "Lien waivers do not cover this draw" }, { status: 409 });
+    }
+    const { data: claimed, error: claimError } = await gate.ctx.db
+      .from("pay_applications")
+      .update({ status: "payable" })
+      .eq("id", app.id)
+      .eq("tenant_id", gate.ctx.tenantId)
+      .eq("project_id", gate.projectId)
+      .eq("status", "draft")
+      .select("id")
+      .maybeSingle();
+    if (claimError) return NextResponse.json({ error: claimError.message }, { status: 422 });
+    if (!claimed) {
+      return NextResponse.json({ error: "Pay application is already payable" }, { status: 409 });
     }
     const direction = app.side === "commitment" ? "payable" : "receivable";
     const { data: invoice, error: invoiceError } = await gate.ctx.db.from("invoices").insert({
@@ -198,14 +222,26 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       direction,
       vendor_or_customer: app.side === "commitment" ? "Commitment" : "Owner",
       description: `Pay app ${app.number ?? app.id}`,
-      amount: drawAmount,
-      retainage: 0,
+      amount: totals.amount,
+      retainage: totals.retainage,
       status: "open",
       invoice_date: new Date().toISOString().slice(0, 10),
     }).select("id").single();
-    if (invoiceError) return NextResponse.json({ error: invoiceError.message }, { status: 422 });
-    await gate.ctx.db.from("pay_applications").update({ status: "payable", invoice_id: invoice.id }).eq("id", app.id);
-    return NextResponse.json({ status: "payable", invoice_id: invoice.id });
+    if (invoiceError) {
+      await gate.ctx.db
+        .from("pay_applications")
+        .update({ status: "draft" })
+        .eq("id", app.id)
+        .eq("tenant_id", gate.ctx.tenantId)
+        .eq("status", "payable");
+      return NextResponse.json({ error: invoiceError.message }, { status: 422 });
+    }
+    await gate.ctx.db
+      .from("pay_applications")
+      .update({ invoice_id: invoice.id })
+      .eq("id", app.id)
+      .eq("tenant_id", gate.ctx.tenantId);
+    return NextResponse.json({ status: "payable", invoice_id: invoice.id, amount: totals.amount, retainage: totals.retainage });
   }
 
   if (body.status === "issued" || body.status === "void") {

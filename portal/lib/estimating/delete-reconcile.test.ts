@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { collectDeletedMirrorIds, filterDraftEstimateItemIds } from "./delete-reconcile.ts";
+import { collectDeletedMirrorIds, detachedTakeoffEstimateFields, filterDraftEstimateItemIds, sourceRemovedEstimateFields } from "./delete-reconcile.ts";
 
 describe("delete-reconcile", () => {
   it("prefers payload mirror_id and unions history/retained ids", () => {
@@ -33,5 +33,19 @@ describe("delete-reconcile", () => {
       ],
     );
     assert.deepEqual(ids.sort(), ["a", "c"]);
+  });
+
+  it("zeros a removed takeoff's price and does not stack the source-removed note", () => {
+    const fields = sourceRemovedEstimateFields("Source: takeoff import");
+    assert.equal(fields.notes, "Source removed — Source: takeoff import");
+    assert.equal(fields.pricing_status, "unpriced");
+    assert.equal(fields.total_price, 0);
+    assert.equal(fields.unit_cost, null);
+    assert.equal(fields.labor_cost, 0);
+    assert.equal(sourceRemovedEstimateFields(fields.notes).notes, fields.notes);
+    assert.equal(sourceRemovedEstimateFields("  ").notes, "Source removed");
+    const detached = detachedTakeoffEstimateFields("Source: takeoff import");
+    assert.equal(detached.total_price, 0);
+    assert.equal(detached.source_fingerprint, null);
   });
 });

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { projectContext, requireProjectWrite } from "@/lib/project-file/api";
 import { addApprovedChange } from "@/lib/project-file/budget-store";
-import { eventPostsBudget } from "@/lib/project-file/money";
+import { eventPostsBudget, withBudgetPosted } from "@/lib/project-file/money";
 import { shiftTaskDates } from "@/lib/project-file/cpm";
 import { recomputeProjectSchedule } from "@/lib/project-file/schedule-store";
 
@@ -29,25 +29,57 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
 
   if (body.action === "void") {
-    const { error: voidError } = await gate.ctx.db
+    const { data: claimed, error: voidError } = await gate.ctx.db
       .from("change_events")
       .update({ status: "void" })
       .eq("id", id)
-      .eq("tenant_id", gate.ctx.tenantId);
+      .eq("tenant_id", gate.ctx.tenantId)
+      .eq("project_id", gate.projectId)
+      .in("status", ["draft", "pending"])
+      .select("id")
+      .maybeSingle();
     if (voidError) return NextResponse.json({ error: voidError.message }, { status: 422 });
+    if (!claimed) return NextResponse.json({ error: "Change event was already decided" }, { status: 409 });
     return NextResponse.json({ status: "void", posted_budget: eventPostsBudget("void") });
   }
 
   if (body.action !== "approve") return NextResponse.json({ error: "action must be approve or void" }, { status: 400 });
+
+  const { data: claimed, error: claimError } = await gate.ctx.db
+    .from("change_events")
+    .update({ status: "approved" })
+    .eq("id", id)
+    .eq("tenant_id", gate.ctx.tenantId)
+    .eq("project_id", gate.projectId)
+    .in("status", ["draft", "pending"])
+    .select("id")
+    .maybeSingle();
+  if (claimError) return NextResponse.json({ error: claimError.message }, { status: 422 });
+  if (!claimed) return NextResponse.json({ error: "Change event was already decided" }, { status: 409 });
 
   const { data: lines, error: lineError } = await gate.ctx.db
     .from("change_event_lines")
     .select("*")
     .eq("change_event_id", id)
     .eq("tenant_id", gate.ctx.tenantId);
-  if (lineError) return NextResponse.json({ error: lineError.message }, { status: 500 });
+  if (lineError) {
+    await gate.ctx.db
+      .from("change_events")
+      .update({ status: event.status })
+      .eq("id", id)
+      .eq("tenant_id", gate.ctx.tenantId)
+      .eq("status", "approved");
+    return NextResponse.json({ error: lineError.message }, { status: 500 });
+  }
   const eventLines = lines ?? [];
   const amount = eventLines.reduce((sum: number, line: { amount: number | null }) => sum + Number(line.amount ?? 0), 0);
+  const allocations = eventLines
+    .filter((line: { budget_line_id: string | null }) => line.budget_line_id)
+    .map((line: { budget_line_id: string; amount: number }) => ({
+      budgetLineId: line.budget_line_id,
+      amount: Number(line.amount ?? 0),
+    }));
+  const postsBudget = eventPostsBudget("approved") && allocations.length > 0;
 
   const { data: changeOrder, error: coError } = await gate.ctx.db
     .from("change_order_items")
@@ -58,20 +90,27 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       status: "approved",
       amount,
       approved_date: new Date().toISOString().slice(0, 10),
-      meta: {},
+      meta: postsBudget ? withBudgetPosted({}) : {},
     })
     .select("id")
     .single();
-  if (coError) return NextResponse.json({ error: coError.message }, { status: 422 });
+  if (coError) {
+    await gate.ctx.db
+      .from("change_events")
+      .update({ status: event.status })
+      .eq("id", id)
+      .eq("tenant_id", gate.ctx.tenantId)
+      .eq("status", "approved");
+    return NextResponse.json({ error: coError.message }, { status: 422 });
+  }
 
-  const allocations = eventLines
-    .filter((line: { budget_line_id: string | null }) => line.budget_line_id)
-    .map((line: { budget_line_id: string; amount: number }) => ({
-      budgetLineId: line.budget_line_id,
-      amount: Number(line.amount ?? 0),
-    }));
-  if (eventPostsBudget("approved") && allocations.length) {
-    await addApprovedChange(gate.ctx.db, gate.ctx.tenantId, gate.projectId, allocations);
+  if (postsBudget) {
+    try {
+      await addApprovedChange(gate.ctx.db, gate.ctx.tenantId, gate.projectId, allocations);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return NextResponse.json({ error: message, change_order_id: changeOrder.id }, { status: 422 });
+    }
   }
 
   for (const line of eventLines) {
@@ -115,5 +154,5 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     .eq("tenant_id", gate.ctx.tenantId);
   if (approveError) return NextResponse.json({ error: approveError.message }, { status: 422 });
 
-  return NextResponse.json({ status: "approved", change_order_id: changeOrder.id, posted_budget: true });
+  return NextResponse.json({ status: "approved", change_order_id: changeOrder.id, posted_budget: postsBudget });
 }
