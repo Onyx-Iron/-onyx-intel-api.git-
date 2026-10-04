@@ -11,6 +11,13 @@ interface GanttTask {
   critical: boolean;
 }
 
+interface BaselineBar {
+  source_task_id: string | null;
+  name: string;
+  start_date: string | null;
+  end_date: string | null;
+}
+
 const DAY = 86400000;
 
 const BAR_COLOR: Record<TaskStatus, string> = {
@@ -44,7 +51,7 @@ function monthTicks(start: number, end: number): { label: string; pct: number }[
   return ticks;
 }
 
-export default function GanttView({ tasks }: { tasks: GanttTask[] }) {
+export default function GanttView({ tasks, baselines = [] }: { tasks: GanttTask[]; baselines?: BaselineBar[] }) {
   const scheduled = tasks
     .map((t) => ({ ...t, s: parse(t.start_date), e: parse(t.end_date) }))
     .filter((t) => t.s !== null && t.e !== null && (t.e as number) >= (t.s as number)) as
@@ -92,6 +99,11 @@ export default function GanttView({ tasks }: { tasks: GanttTask[] }) {
               const leftPct = ((t.s - minStart) / span) * 100;
               const widthPct = Math.max(((t.e - t.s) / span) * 100, 1.2);
               const days = Math.round((t.e - t.s) / DAY);
+              const baseline = baselines.find((bar) => bar.source_task_id === t.id);
+              const baseStart = parse(baseline?.start_date ?? null);
+              const baseEnd = parse(baseline?.end_date ?? null);
+              const baseLeft = baseStart == null ? null : ((baseStart - minStart) / span) * 100;
+              const baseWidth = baseStart == null || baseEnd == null ? null : Math.max(((baseEnd - baseStart) / span) * 100, 1.2);
               return (
                 <div key={t.id} className="flex items-center h-9 hover:bg-white/[0.02] transition-colors">
                   <div className="w-56 shrink-0 px-4 truncate flex items-center gap-1.5">
@@ -99,6 +111,13 @@ export default function GanttView({ tasks }: { tasks: GanttTask[] }) {
                     <span className="text-xs text-white truncate">{t.name}</span>
                   </div>
                   <div className="relative flex-1 h-full">
+                    {baseLeft != null && baseWidth != null && (
+                      <div
+                        className="absolute top-1 h-1.5 rounded bg-white/25"
+                        style={{ left: `${baseLeft}%`, width: `${baseWidth}%` }}
+                        title="Baseline"
+                      />
+                    )}
                     <div
                       className={`absolute top-1/2 -translate-y-1/2 h-3.5 rounded ${t.critical ? "bg-[#E50914]" : BAR_COLOR[t.status]} ${t.critical ? "" : "opacity-90"}`}
                       style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
@@ -118,6 +137,7 @@ export default function GanttView({ tasks }: { tasks: GanttTask[] }) {
           <span key={k} className="flex items-center gap-1.5"><span className={`w-3 h-2 rounded-sm ${BAR_COLOR[k]}`} />{label}</span>
         ))}
         <span className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-[#E50914]" />Critical path</span>
+        <span className="flex items-center gap-1.5"><span className="w-3 h-1 rounded-sm bg-white/25" />Baseline</span>
         <span className="flex items-center gap-1.5"><span className="w-px h-3 bg-[#CCFF00]/60" />Today</span>
       </div>
     </div>

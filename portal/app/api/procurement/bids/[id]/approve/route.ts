@@ -33,7 +33,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const { id: bidId } = await ctx.params;
-  const body = await req.json().catch(() => ({})) as { terms?: string };
+  const body = await req.json().catch(() => ({})) as { terms?: string; budget_line_id?: string };
 
   const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
   const denied = await requirePermission(tenantId, userId, "financial", "write");
@@ -107,6 +107,27 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     .eq("request_id", bid.request_id)
     .neq("id", bid.id)
     .eq("status", "pending");
+
+  if (body.budget_line_id) {
+    const { data: commitment } = await anyDb.from("project_commitments").insert({
+      tenant_id: tenantId,
+      project_id: request.project_id,
+      source: "purchase_order",
+      purchase_order_id: po.id,
+      title: request.item_description ?? "Purchase order",
+      status: "open",
+    }).select("id").single();
+    if (commitment?.id) {
+      await anyDb.from("project_commitment_lines").insert({
+        commitment_id: commitment.id,
+        tenant_id: tenantId,
+        project_id: request.project_id,
+        budget_line_id: body.budget_line_id,
+        description: request.item_description ?? "Purchase order",
+        amount: totalAmount,
+      });
+    }
+  }
 
   auditInsert({
     tenant_id: tenantId,

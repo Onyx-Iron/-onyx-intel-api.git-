@@ -137,7 +137,9 @@ function SkeletonRows() {
   );
 }
 
-export default function DocumentsTab({ projectId }: { projectId: string }) {
+const CLOSEOUT_TYPES = new Set(["report", "submittal", "contract", "other"]);
+
+export default function DocumentsTab({ projectId, mode = "all" }: { projectId: string; mode?: "all" | "closeout" }) {
   const { toast } = useToast();
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
@@ -270,7 +272,11 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
     try {
       const r = await fetch(`/api/documents?project_id=${encodeURIComponent(projectId)}&page=${page}&limit=200`);
       const d = await r.json() as { documents?: Document[]; pagination?: { hasMore?: boolean } };
-      const incoming = d.documents ?? [];
+      const incoming = (d.documents ?? []).filter((doc) => {
+        if (mode !== "closeout") return true;
+        const name = doc.file_name.toLowerCase();
+        return CLOSEOUT_TYPES.has(doc.doc_type ?? "") || /as-built|closeout|warranty|o&m|manual/.test(name);
+      });
       let next = incoming;
       setDocuments((prev) => {
         if (page === 1) {
@@ -290,7 +296,7 @@ export default function DocumentsTab({ projectId }: { projectId: string }) {
       setLoading(false);
       return [];
     }
-  }, [projectId]);
+  }, [projectId, mode]);
 
   useEffect(() => {
     loadDocuments();
