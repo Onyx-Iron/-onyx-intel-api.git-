@@ -7,6 +7,8 @@ import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
+import { getUserRole } from "@/lib/project-controls/permissions";
+import { rowsForSubcontractor } from "@/lib/project-file/api";
 
 export const runtime = "nodejs";
 
@@ -33,8 +35,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       .range(offset, offset + limit - 1);
 
     if (error) return NextResponse.json({ error: `[GET /api/punch-list] ${error.message}` }, { status: 500 });
+    const role = await getUserRole(tenantId, userId);
+    const items = await rowsForSubcontractor(
+      role,
+      db,
+      tenantId,
+      projectId,
+      userId,
+      (data ?? []) as Array<{ ball_contact_id?: string | null }>,
+    );
     return NextResponse.json({
-      items: data ?? [],
+      items,
       pagination: paginationMeta(count ?? 0, page, limit),
     });
   } catch (err: unknown) {

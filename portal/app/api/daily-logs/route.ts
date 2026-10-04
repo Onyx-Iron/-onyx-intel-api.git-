@@ -7,6 +7,8 @@ import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
+import { getUserRole } from "@/lib/project-controls/permissions";
+import { clientCanSeeDailyLog } from "@/lib/project-file/records";
 
 export const runtime = "nodejs";
 
@@ -43,7 +45,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     if (error) return NextResponse.json({ error: `[GET /api/daily-logs] ${error.message}` }, { status: 500 });
 
     // Re-sign every stored photo path so the client gets working URLs.
-    const logs = (data ?? []) as unknown as DailyLog[];
+    const role = await getUserRole(tenantId, userId);
+    const logs = ((data ?? []) as unknown as Array<DailyLog & { client_visible?: boolean }>).filter((log) =>
+      clientCanSeeDailyLog(role === "ClientView" ? "ClientView" : "other", Boolean(log.client_visible)),
+    );
     const out = await Promise.all(logs.map(async (log) => {
       const paths = Array.isArray(log.photo_urls) ? log.photo_urls : [];
       const photos = await Promise.all(paths.map(async (p) => {
@@ -94,6 +99,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         crew_count:     body.crew_count ?? null,
         work_performed: body.work_performed ?? null,
         notes:          body.notes ?? null,
+        client_visible: body.client_visible === true,
         photo_urls:     Array.isArray(body.photo_urls) ? body.photo_urls : [],
         created_by:     userId,
       })

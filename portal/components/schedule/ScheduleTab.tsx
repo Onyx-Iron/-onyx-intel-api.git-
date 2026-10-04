@@ -30,6 +30,9 @@ interface ScheduleTask {
   start_date: string | null;
   end_date: string | null;
   critical: boolean;
+  deps: string[] | null;
+  total_float: number | null;
+  percent_complete: number | null;
 }
 
 interface FormState {
@@ -38,6 +41,20 @@ interface FormState {
   start_date: string;
   end_date: string;
   critical: boolean;
+  predecessors: string;
+  percent_complete: string;
+}
+
+interface LookaheadPayload {
+  tasks: ScheduleTask[];
+  blockers: Array<{ id: string; from_type: string; to_type: string; link_role: string }>;
+}
+
+interface BaselineTask {
+  source_task_id: string | null;
+  name: string;
+  start_date: string | null;
+  end_date: string | null;
 }
 
 const STATUS_CYCLE: TaskStatus[] = ["not_started", "in_progress", "complete", "blocked"];
@@ -70,6 +87,8 @@ const EMPTY_FORM: FormState = {
   start_date: "",
   end_date: "",
   critical: false,
+  predecessors: "",
+  percent_complete: "",
 };
 
 function SkeletonRows() {
@@ -96,7 +115,9 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [submitting, setSubmitting] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
-  const [view, setView] = useState<"list" | "timeline">("list");
+  const [view, setView] = useState<"list" | "timeline" | "lookahead">("list");
+  const [lookahead, setLookahead] = useState<LookaheadPayload>({ tasks: [], blockers: [] });
+  const [baselines, setBaselines] = useState<BaselineTask[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const loadTasks = () => {
@@ -111,8 +132,22 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
       .catch(() => setLoading(false));
   };
 
+  const loadLookahead = () => {
+    fetch(`/api/schedule/lookahead?project_id=${encodeURIComponent(projectId)}`)
+      .then((r) => r.json())
+      .then((d: LookaheadPayload) => setLookahead({ tasks: d.tasks ?? [], blockers: d.blockers ?? [] }))
+      .catch(() => setLookahead({ tasks: [], blockers: [] }));
+  };
+
+  const loadBaseline = () => {
+    fetch(`/api/schedule/baselines?project_id=${encodeURIComponent(projectId)}`)
+      .then((r) => r.json())
+      .then((d: { tasks?: BaselineTask[] }) => setBaselines(d.tasks ?? []))
+      .catch(() => setBaselines([]));
+  };
+
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { loadTasks();   }, [projectId]);
+  useEffect(() => { loadTasks(); loadLookahead(); loadBaseline(); }, [projectId]);
 
   const importTasks = useBulkImport<{ project_id: string; name: string; status: TaskStatus; start_date: string | null; end_date: string | null; critical: boolean }>(projectId, {
     endpoint: "/api/schedule",
@@ -189,6 +224,8 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
       start_date: task.start_date ?? "",
       end_date: task.end_date ?? "",
       critical: task.critical,
+      predecessors: (task.deps ?? []).join(", "),
+      percent_complete: task.percent_complete == null ? "" : String(task.percent_complete),
     });
     setShowForm(true);
   };
@@ -203,6 +240,8 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
     e.preventDefault();
     if (!form.name.trim()) return;
     setSubmitting(true);
+    const deps = form.predecessors.split(",").map((id) => id.trim()).filter(Boolean);
+    const percent = form.percent_complete.trim() === "" ? null : Number(form.percent_complete);
     const payload = {
       name: form.name.trim(),
       status: form.status,
@@ -210,6 +249,9 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
       end_date: form.end_date || null,
       critical: form.critical,
       project_id: projectId,
+      deps,
+      dependencies: deps,
+      percent_complete: percent,
     };
     try {
       setErrorMsg(null);
@@ -231,6 +273,7 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
       }
       cancelForm();
       loadTasks();
+      loadLookahead();
     } catch {
       setErrorMsg("Network error — could not reach the server.");
     } finally {
@@ -256,7 +299,7 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
           </div>
           <div className="flex items-center gap-2">
             <div className="flex rounded-lg border border-white/10 overflow-hidden">
-              {(["list", "timeline"] as const).map((v) => (
+              {(["list", "timeline", "lookahead"] as const).map((v) => (
                 <button
                   key={v}
                   onClick={() => setView(v)}
@@ -264,10 +307,29 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
                     view === v ? "bg-[#00D2FF]/15 text-[#00D2FF]" : "text-gray-600 hover:text-gray-400"
                   }`}
                 >
-                  {v === "list" ? "List" : "Timeline"}
+                  {v === "list" ? "List" : v === "timeline" ? "Timeline" : "21-day"}
                 </button>
               ))}
             </div>
+            <button
+              type="button"
+              onClick={async () => {
+                const res = await fetch("/api/schedule/baselines", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ project_id: projectId }),
+                });
+                if (!res.ok) {
+                  const d = await res.json().catch(() => ({}));
+                  setErrorMsg(typeof d?.error === "string" ? d.error : "Could not save a baseline");
+                  return;
+                }
+                loadBaseline();
+              }}
+              className="rounded-lg border border-white/10 px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-gray-400 hover:text-white"
+            >
+              Save baseline
+            </button>
             <UniversalImportButton
               hint="schedule"
               onParsed={importTasks}
@@ -283,9 +345,30 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
         </div>
 
         {/* Body — list or timeline */}
-        {view === "timeline" ? (
+        {view === "lookahead" ? (
+          <div className="p-4 space-y-3">
+            {lookahead.tasks.length === 0 ? (
+              <p className="text-xs text-white/40">No tasks intersect the next 21 days.</p>
+            ) : lookahead.tasks.map((task) => (
+              <div key={task.id} className="rounded-lg border border-white/10 px-3 py-2">
+                <p className="text-xs text-white">{task.name}</p>
+                <p className="text-[10px] text-white/40">{fmt(task.start_date)} – {fmt(task.end_date)} · {task.percent_complete ?? 0}% · float {task.total_float ?? "—"}</p>
+              </div>
+            ))}
+            {lookahead.blockers.length > 0 && (
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-white/30">Linked blockers</p>
+                <ul className="mt-2 space-y-1 text-xs text-white/70">
+                  {lookahead.blockers.map((link) => (
+                    <li key={link.id}>{link.from_type} {link.link_role} {link.to_type}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        ) : view === "timeline" ? (
           <div className="p-4">
-            <GanttView tasks={tasks} />
+            <GanttView tasks={tasks} baselines={baselines} />
           </div>
         ) : (
         <div className="overflow-x-auto">
@@ -297,6 +380,9 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
                 <th className="text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3 text-left">Start</th>
                 <th className="text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3 text-left">End</th>
                 <th className="text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3 text-left">Duration</th>
+                <th className="text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3 text-left">Pred.</th>
+                <th className="text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3 text-left">Float</th>
+                <th className="text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3 text-left">%</th>
                 <th className="text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3 text-left">Critical</th>
                 <th className="text-[10px] uppercase tracking-widest text-gray-600 font-medium px-4 py-3 text-right">Actions</th>
               </tr>
@@ -306,7 +392,7 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
                 <SkeletonRows />
               ) : tasks.length === 0 ? (
                 <tr>
-                  <td colSpan={7}>
+                  <td colSpan={10}>
                     <div className="py-4">
                       <EmptyState
                         icon={<Calendar className="w-6 h-6" />}
@@ -333,6 +419,9 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
                     <td className="px-4 py-3 text-gray-400 text-xs">{fmt(task.start_date)}</td>
                     <td className="px-4 py-3 text-gray-400 text-xs">{fmt(task.end_date)}</td>
                     <td className="px-4 py-3 text-gray-400 text-xs font-mono">{daysBetween(task.start_date, task.end_date)}</td>
+                    <td className="px-4 py-3 text-gray-400 text-xs font-mono">{task.deps?.length ?? 0}</td>
+                    <td className="px-4 py-3 text-gray-400 text-xs font-mono">{task.total_float ?? "—"}</td>
+                    <td className="px-4 py-3 text-gray-400 text-xs font-mono">{task.percent_complete ?? "—"}</td>
                     <td className="px-4 py-3">
                       {task.critical
                         ? <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#E50914]" title="Critical path" />
@@ -422,6 +511,27 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
                   value={form.start_date}
                   onChange={(e) => setForm((f) => ({ ...f, start_date: e.target.value }))}
                   className="w-full bg-[#0A0A0B] border border-white/10 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-[#CCFF00]/40 focus:border-[#CCFF00]/40 transition-colors"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] uppercase tracking-widest text-gray-600 mb-1.5">Predecessors</label>
+                <input
+                  type="text"
+                  value={form.predecessors}
+                  onChange={(e) => setForm((f) => ({ ...f, predecessors: e.target.value }))}
+                  className="w-full bg-[#0A0A0B] border border-white/10 rounded-lg px-3 py-2 text-white text-xs placeholder-gray-700 focus:outline-none focus:border-[#CCFF00]/40"
+                  placeholder="Task ids, comma separated"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] uppercase tracking-widest text-gray-600 mb-1.5">Percent complete</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={form.percent_complete}
+                  onChange={(e) => setForm((f) => ({ ...f, percent_complete: e.target.value }))}
+                  className="w-full bg-[#0A0A0B] border border-white/10 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-[#CCFF00]/40"
                 />
               </div>
               <div>

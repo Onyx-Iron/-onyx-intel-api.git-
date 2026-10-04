@@ -9,7 +9,8 @@ import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
 import { calcPipeEmbedment } from "@/lib/math/civil-scope";
 import { utilityRecipeFromRun, wallRecipeLines } from "@/lib/math/scope-recipes";
 import type { RebarSize } from "@/lib/math/assemblies";
-import { pointsToPageSpace, pointsToScreenSpace, toPageSpace } from "@/lib/takeoff/canvas/coordinates";
+import { pointsToPageSpace, pointsToScreenSpace, toPageSpace, toScreenSpace } from "@/lib/takeoff/canvas/coordinates";
+import { isRecordType, recordHref, type RecordType } from "@/lib/project-file/records";
 import { quantityForMeasurement } from "@/lib/takeoff/canvas/quantity";
 import { SCALE_PRESETS, matchScalePreset, pageSpaceFactorForPreset } from "@/lib/takeoff/scale-presets";
 import QuantityGrid from "@/components/takeoff/QuantityGrid";
@@ -236,6 +237,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   const [hiddenLayerIds, setHiddenLayerIds] = useState<Set<string>>(new Set());
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const [markupMode, setMarkupMode] = useState(false);
+  const [pinMode, setPinMode] = useState(false);
+  const [pins, setPins] = useState<Array<{
+    id: string;
+    entity_type: RecordType;
+    entity_id: string;
+    x: number;
+    y: number;
+    label: string | null;
+  }>>([]);
   const [markups, setMarkups] = useState<Array<{
     id: string;
     markup_type: string;
@@ -731,11 +741,66 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
 
   const onCanvasMouseLeave = () => setSnapTarget(null);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/sheet-pins?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}`)
+      .then((res) => res.json())
+      .then((data: { pins?: Array<{ id: string; entity_type: string; entity_id: string; x: number; y: number; label: string | null }> }) => {
+        if (cancelled) return;
+        setPins((data.pins ?? []).flatMap((pin) => (
+          isRecordType(pin.entity_type)
+            ? [{ ...pin, entity_type: pin.entity_type }]
+            : []
+        )));
+      })
+      .catch(() => { if (!cancelled) setPins([]); });
+    return () => { cancelled = true; };
+  }, [projectId, pageId]);
+
   // ── Click handling ────────────────────────────────────────────────────────
   const onCanvasClick: React.MouseEventHandler<SVGSVGElement> = (e) => {
     if (!renderSize) return;
     const raw = toLocal(e.clientX, e.clientY, e.currentTarget);
     const p = resolveSnapPoint(raw);
+
+    // A pin is a location on this sheet. It never becomes a count takeoff.
+    if (pinMode) {
+      if (renderScale <= 0) return;
+      const pagePoint = toPageSpace(p, renderScale);
+      const entityType = window.prompt("Record type to pin (rfi, submittal, punch, schedule_task, daily_log)", "punch");
+      if (!entityType || !isRecordType(entityType)) return;
+      const entityId = window.prompt("Record id");
+      if (!entityId?.trim()) return;
+      const label = window.prompt("Pin label", "") ?? "";
+      void (async () => {
+        const res = await fetch("/api/sheet-pins", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            project_id: projectId,
+            page_id: pageId,
+            entity_type: entityType,
+            entity_id: entityId.trim(),
+            x: pagePoint.x,
+            y: pagePoint.y,
+            label: label.trim() || null,
+          }),
+        });
+        if (!res.ok) return;
+        const data = await res.json() as { pin: { id: string; entity_type: string; entity_id: string; x: number; y: number; label: string | null } };
+        const pinnedType = data.pin.entity_type;
+        if (!isRecordType(pinnedType)) return;
+        setPins((prev) => [{
+          id: data.pin.id,
+          entity_type: pinnedType,
+          entity_id: data.pin.entity_id,
+          x: data.pin.x,
+          y: data.pin.y,
+          label: data.pin.label,
+        }, ...prev]);
+      })();
+      return;
+    }
 
     // Non-quantity markups (excluded from estimate sync).
     if (markupMode) {
@@ -1893,6 +1958,15 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
             <p className="hidden px-1 text-[9px] font-mono uppercase tracking-widest text-white/30 sm:block">
               {CANVAS_HOTKEY_HINT}
             </p>
+            <button
+              type="button"
+              onClick={() => setPinMode((on) => !on)}
+              className={`rounded-full border px-3 py-1 text-[10px] uppercase tracking-widest font-mono ${
+                pinMode ? "border-[#CCFF00] bg-[#CCFF00] text-black" : "border-white/15 text-white/60 hover:text-white"
+              }`}
+            >
+              {pinMode ? "Pinning" : "Pin record"}
+            </button>
           </div>
 
           <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest font-mono text-white/40">
@@ -2073,7 +2147,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               width={renderSize.w}
               height={renderSize.h}
               viewBox={`0 0 ${renderSize.w} ${renderSize.h}`}
-              className={`absolute inset-0 select-none ${tool === "pan" ? "cursor-grab" : "cursor-crosshair"}`}
+              className={`absolute inset-0 select-none ${pinMode || tool !== "pan" ? "cursor-crosshair" : "cursor-grab"}`}
               onClick={onCanvasClick}
               onMouseMove={(e) => {
                 onCanvasMouseMove(e);
@@ -2175,6 +2249,17 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                   pointerEvents="none"
                 />
               )}
+              {pins.map((pin) => {
+                const screen = toScreenSpace({ x: pin.x, y: pin.y }, renderScale);
+                return (
+                  <a key={pin.id} href={recordHref(projectId, pin.entity_type)}>
+                    <circle cx={screen.x} cy={screen.y} r={7} fill="#F5A623" stroke="#000" strokeWidth={2} />
+                    <text x={screen.x + 10} y={screen.y + 4} fill="#F5A623" fontSize={11} fontFamily="monospace">
+                      {pin.label ?? pin.entity_type}
+                    </text>
+                  </a>
+                );
+              })}
               {/* Non-quantity markups */}
               {markups.map((m) => {
                 const pts = m.geometry?.points ?? [];
