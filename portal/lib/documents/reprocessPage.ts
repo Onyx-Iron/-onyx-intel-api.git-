@@ -6,9 +6,37 @@
 import { after } from "next/server";
 import { invokePageProcessor, invokePageTakeoffWorker } from "@/lib/documents/invokePageWorkers";
 import { logDocumentProcessingEvent } from "@/lib/documents/processingEvents";
+import { fetchAllPages } from "../../supabase/functions/_shared/splitBatch.ts";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyDb = any;
+
+/** PostgREST `.in()` filters go on the query string; keep each chunk small. */
+export const REPROCESS_ID_CHUNK = 100;
+
+export function chunkIds<T>(ids: readonly T[], size = REPROCESS_ID_CHUNK): T[][] {
+  const n = Math.max(1, Math.floor(size) || REPROCESS_ID_CHUNK);
+  const chunks: T[][] = [];
+  for (let i = 0; i < ids.length; i += n) chunks.push(ids.slice(i, i + n));
+  return chunks;
+}
+
+async function updatePagesById(
+  db: AnyDb,
+  tenantId: string,
+  ids: string[],
+  patch: Record<string, unknown>,
+  failureLabel: string,
+): Promise<void> {
+  for (const chunk of chunkIds(ids)) {
+    const { error } = await db
+      .from("document_pages")
+      .update(patch)
+      .in("id", chunk)
+      .eq("tenant_id", tenantId);
+    if (error) throw new Error(`${failureLabel}: ${error.message}`);
+  }
+}
 
 export type ReprocessStage = "ocr" | "takeoff" | "both";
 
@@ -45,15 +73,19 @@ export async function reprocessDocumentPages(args: {
   const { db, tenantId, projectId, documentId, stage, pageNumber } = args;
   const source = args.source ?? "portal:reprocess";
 
-  const { data: pageRows, error: pagesErr } = await db
-    .from("document_pages")
-    .select("id, page_number, storage_path, status, takeoff_status")
-    .eq("document_id", documentId)
-    .eq("tenant_id", tenantId)
-    .order("page_number", { ascending: true });
-  if (pagesErr) throw new Error(pagesErr.message);
+  const loaded = await fetchAllPages((from, to) =>
+    db
+      .from("document_pages")
+      .select("id, page_number, storage_path, status, takeoff_status")
+      .eq("document_id", documentId)
+      .eq("tenant_id", tenantId)
+      .order("page_number", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+  if (loaded.error) throw new Error(loaded.error);
 
-  const allPages = (pageRows ?? []) as DocumentPageRow[];
+  const allPages = loaded.rows as DocumentPageRow[];
   const selected = selectPagesForReprocess(allPages, pageNumber);
   if (selected.length === 0) {
     throw new Error(
@@ -73,20 +105,18 @@ export async function reprocessDocumentPages(args: {
   const ids = selected.map((p) => p.id);
 
   if (stages.includes("ocr")) {
-    const { error } = await db.from("document_pages").update({
+    await updatePagesById(db, tenantId, ids, {
       status: "pending",
       error: null,
       updated_at: now,
-    }).in("id", ids).eq("tenant_id", tenantId);
-    if (error) throw new Error(`reset OCR status: ${error.message}`);
+    }, "reset OCR status");
   }
   if (stages.includes("takeoff")) {
-    const { error } = await db.from("document_pages").update({
+    await updatePagesById(db, tenantId, ids, {
       takeoff_status: "pending",
       takeoff_error: null,
       updated_at: now,
-    }).in("id", ids).eq("tenant_id", tenantId);
-    if (error) throw new Error(`reset takeoff status: ${error.message}`);
+    }, "reset takeoff status");
   }
 
   // Pull parent out of a terminal Partial/Failed so list polling + finalize resume.

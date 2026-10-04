@@ -5,6 +5,7 @@ import {
   DEFAULT_PAGE_BATCH,
   batchCountForPages,
   computePageBatchRange,
+  fetchAllPages,
   parseMaintainFlag,
   shouldClearPages,
   shouldMaintainOnTick,
@@ -102,5 +103,48 @@ describe("parseMaintainFlag / shouldMaintainOnTick", () => {
     assert.equal(shouldMaintainOnTick(3, 3), true);
     assert.equal(shouldMaintainOnTick(6, 3), true);
     assert.equal(shouldMaintainOnTick(0, 3), false);
+  });
+});
+
+describe("fetchAllPages", () => {
+  it("follows a full page and stops on a short page", async () => {
+    const calls: Array<[number, number]> = [];
+    const result = await fetchAllPages(async (from, to) => {
+      calls.push([from, to]);
+      if (from === 0) return { data: [1, 2], error: null };
+      return { data: [3], error: null };
+    }, 2);
+    assert.equal(result.error, null);
+    assert.deepEqual(result.rows, [1, 2, 3]);
+    assert.deepEqual(calls, [[0, 1], [2, 3]]);
+  });
+
+  it("requests the next page when the first page is exactly full", async () => {
+    const calls: number[] = [];
+    const result = await fetchAllPages(async (from) => {
+      calls.push(from);
+      if (from === 0) return { data: ["a", "b"], error: null };
+      return { data: [], error: null };
+    }, 2);
+    assert.equal(result.error, null);
+    assert.deepEqual(result.rows, ["a", "b"]);
+    assert.deepEqual(calls, [0, 2]);
+  });
+
+  it("returns the error and does not read further pages", async () => {
+    let calls = 0;
+    const result = await fetchAllPages(async () => {
+      calls += 1;
+      return { data: [1, 2], error: { message: "statement timeout" } };
+    }, 2);
+    assert.equal(calls, 1);
+    assert.equal(result.error, "statement timeout");
+    assert.deepEqual(result.rows, []);
+  });
+
+  it("rejects a non-positive page size", async () => {
+    const result = await fetchAllPages(async () => ({ data: [], error: null }), 0);
+    assert.equal(result.error, "pageSize must be a positive integer");
+    assert.deepEqual(result.rows, []);
   });
 });

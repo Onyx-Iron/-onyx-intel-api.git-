@@ -90,6 +90,21 @@ describe("reconcileDocumentPages", () => {
     assert.deepEqual(plan.deleteIds, []);
   });
 
+  it("plans a new insert when the existing row was not in the loaded page", () => {
+    const plan = reconcileDocumentPages({
+      ...base,
+      existing: [
+        { id: "page-a", page_number: 1, status: "done", takeoff_status: "done" },
+      ],
+      uploadedPageNumbers: [1001],
+      pageCount: 1001,
+      newId: ids("new"),
+    });
+    const inserted = plan.pages.find((page) => page.page_number === 1001);
+    assert.equal(inserted?.insert, true);
+    assert.notEqual(inserted?.id, "page-a");
+  });
+
   it("collapses duplicate page rows and keeps the lowest id", () => {
     const plan = reconcileDocumentPages({
       ...base,
@@ -146,6 +161,67 @@ describe("reconcileSheets", () => {
     assert.deepEqual(plan.inserts, []);
     assert.deepEqual(plan.updates, [{ id: "sheet-dup", document_page_id: "page-a", page_number: 1 }]);
     assert.deepEqual(plan.deleteIds, ["sheet-orphan"]);
+  });
+
+  it("keeps later sheets when every existing page is in the plan", () => {
+    const pagePlan = reconcileDocumentPages({
+      ...base,
+      existing: [
+        { id: "page-a", page_number: 1, status: "done", takeoff_status: "done" },
+        { id: "page-b", page_number: 2, status: "done", takeoff_status: "done" },
+        { id: "page-c", page_number: 3, status: "done", takeoff_status: "done" },
+      ],
+      uploadedPageNumbers: [1],
+      pageCount: 3,
+      newId: ids("new"),
+    });
+    const sheetPlan = reconcileSheets({
+      existing: [
+        { id: "sheet-1", document_page_id: "page-a", page_number: 1 },
+        { id: "sheet-2", document_page_id: "page-b", page_number: 2 },
+        { id: "sheet-3", document_page_id: "page-c", page_number: 3 },
+      ],
+      pages: pagePlan.pages.map((page) => ({
+        id: page.id,
+        page_number: page.page_number,
+        tenant_id: "tenant-1",
+        document_id: "doc-1",
+        project_id: "proj-1",
+      })),
+      pageCount: 3,
+    });
+    assert.equal(pagePlan.pages.find((page) => page.page_number === 3)?.insert, false);
+    assert.deepEqual(sheetPlan.deleteIds, []);
+    assert.deepEqual(sheetPlan.inserts, []);
+  });
+
+  it("deletes later sheets when those pages were missing from the loaded list", () => {
+    const pagePlan = reconcileDocumentPages({
+      ...base,
+      existing: [
+        { id: "page-a", page_number: 1, status: "done", takeoff_status: "done" },
+      ],
+      uploadedPageNumbers: [1],
+      pageCount: 3,
+      newId: ids("new"),
+    });
+    const sheetPlan = reconcileSheets({
+      existing: [
+        { id: "sheet-1", document_page_id: "page-a", page_number: 1 },
+        { id: "sheet-2", document_page_id: "page-b", page_number: 2 },
+        { id: "sheet-3", document_page_id: "page-c", page_number: 3 },
+      ],
+      pages: pagePlan.pages.map((page) => ({
+        id: page.id,
+        page_number: page.page_number,
+        tenant_id: "tenant-1",
+        document_id: "doc-1",
+        project_id: "proj-1",
+      })),
+      pageCount: 3,
+    });
+    assert.equal(pagePlan.pages.length, 1);
+    assert.deepEqual(sheetPlan.deleteIds, ["sheet-2", "sheet-3"]);
   });
 
   it("deletes sheets for pages removed from the pdf", () => {
