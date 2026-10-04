@@ -110,25 +110,66 @@ export async function measurePdfBytes(bytes: Uint8Array): Promise<MeasuredPdfPag
   return pages;
 }
 
+interface MeasuredQuery extends Promise<{ error: { message: string } | null; data: unknown }> {
+  eq: (column: string, value: unknown) => MeasuredQuery;
+  in: (column: string, values: readonly unknown[]) => MeasuredQuery;
+}
+
 type MeasurementDb = {
   from: (table: string) => {
-    delete: () => {
-      eq: (column: string, value: unknown) => {
-        eq: (column: string, value: unknown) => {
-          eq: (column: string, value: unknown) => Promise<{ error: { message: string } | null }>;
-        };
-      };
-    };
-    update: (row: Record<string, unknown>) => {
-      eq: (column: string, value: unknown) => {
-        eq: (column: string, value: unknown) => {
-          eq: (column: string, value: unknown) => Promise<{ error: { message: string } | null }>;
-        };
-      };
-    };
+    delete: () => MeasuredQuery;
+    update: (row: Record<string, unknown>) => MeasuredQuery;
     insert: (rows: unknown) => Promise<{ error: { message: string } | null }>;
+    select: (columns: string) => MeasuredQuery;
   };
 };
+
+function asPoints(value: unknown): Array<{ x: number; y: number }> {
+  if (!Array.isArray(value)) return [];
+  const points: Array<{ x: number; y: number }> = [];
+  for (const point of value) {
+    if (!point || typeof point !== "object") continue;
+    const record = point as { x?: unknown; y?: unknown };
+    const x = Number(record.x);
+    const y = Number(record.y);
+    if (Number.isFinite(x) && Number.isFinite(y)) points.push({ x, y });
+  }
+  return points;
+}
+
+/** Identity for one measured path, so a remeasure can keep a row a person already decided. */
+export function measuredGeometryKey(input: {
+  page: number;
+  type: string;
+  quantity: number | null;
+  points: Array<{ x: number; y: number }>;
+}): string {
+  const qty = input.quantity == null || !Number.isFinite(input.quantity) ? "" : input.quantity.toFixed(3);
+  const first = input.points[0];
+  const last = input.points[input.points.length - 1];
+  const anchor = first && last
+    ? `${first.x.toFixed(1)}:${first.y.toFixed(1)}:${last.x.toFixed(1)}:${last.y.toFixed(1)}:${input.points.length}`
+    : "0";
+  return `${input.page}|${input.type}|${qty}|${anchor}`;
+}
+
+export function skipDecidedMeasurements<T extends {
+  page: number;
+  type: string;
+  quantity: number | null;
+  points: Array<{ x: number; y: number }>;
+}>(
+  incoming: T[],
+  decided: Array<{ page?: unknown; type?: unknown; quantity?: unknown; points?: unknown }>,
+): T[] {
+  const keys = new Set(decided.map((row) => measuredGeometryKey({
+    page: Number(row.page),
+    type: typeof row.type === "string" ? row.type : "",
+    quantity: row.quantity == null || row.quantity === "" ? null : Number(row.quantity),
+    points: asPoints(row.points),
+  })));
+  return incoming.filter((row) => !keys.has(measuredGeometryKey(row)));
+}
 
 /** Writes scale regions and page-space quantities. Replaces an earlier stated-scale pass on this file. */
 export async function saveMeasuredPages(
@@ -141,7 +182,23 @@ export async function saveMeasuredPages(
   },
 ): Promise<number[]> {
   const unscaled: number[] = [];
-  await db.from("takeoff_items").delete().eq("document_id", args.documentId).eq("tenant_id", args.tenantId).eq("source_method", "stated_scale");
+  // Drop only undecided rows. Deleting an approved id sets estimate source_takeoff_id
+  // null, and the replacement insert is priced again on the next sync.
+  const removed = await db.from("takeoff_items").delete()
+    .eq("document_id", args.documentId)
+    .eq("tenant_id", args.tenantId)
+    .eq("source_method", "stated_scale")
+    .in("review_status", ["suggested", "reviewed"]);
+  if (removed.error) throw new Error(removed.error.message);
+  const decided = await db.from("takeoff_items").select("page, type, quantity, points")
+    .eq("document_id", args.documentId)
+    .eq("tenant_id", args.tenantId)
+    .eq("source_method", "stated_scale")
+    .in("review_status", ["approved", "rejected"]);
+  if (decided.error) throw new Error(decided.error.message);
+  const kept = Array.isArray(decided.data)
+    ? decided.data as Array<{ page?: unknown; type?: unknown; quantity?: unknown; points?: unknown }>
+    : [];
   for (const page of args.pages) {
     const sheet = page.measured;
     await db.from("sheet_scale_regions").update({ active: false, updated_at: new Date().toISOString() })
@@ -169,7 +226,7 @@ export async function saveMeasuredPages(
       if (inserted.error) throw new Error(inserted.error.message);
     }
     if (sheet.rows.length > 0 && args.projectId) {
-      const payload = sheet.rows.map((row) => ({
+      const payload = skipDecidedMeasurements(sheet.rows.map((row) => ({
         tenant_id: args.tenantId,
         project_id: args.projectId,
         document_id: args.documentId,
@@ -182,8 +239,10 @@ export async function saveMeasuredPages(
         coordinate_system: "page_space",
         origin_method: row.originMethod,
         origin_actor: "deterministic_parser",
+        // Every stroke on the sheet is measured. It stays suggested so a border,
+        // dimension, or hatch cannot price the draft until a person approves it.
         source_method: "stated_scale",
-        review_status: row.quantity == null ? "suggested" : "approved",
+        review_status: "suggested" as const,
         scale_unit: "ft",
         printed_scale: row.scaleText,
         points: row.points,
@@ -193,7 +252,7 @@ export async function saveMeasuredPages(
           page_space_scale_factor: row.pageSpaceScaleFactor,
           origin_method: row.originMethod,
         },
-      }));
+      })), kept);
       for (let i = 0; i < payload.length; i += 200) {
         const inserted = await db.from("takeoff_items").insert(payload.slice(i, i + 200));
         if (inserted.error) throw new Error(inserted.error.message);
