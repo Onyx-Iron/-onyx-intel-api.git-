@@ -1,6 +1,6 @@
 import { createServiceClient } from "@/lib/supabase/server";
 import { buildEstimateImportRows, scaledDirectCosts, type CostCatalogForImport, type EstimateImportRow, type ExistingEstimateForImport, type TakeoffItemForEstimate } from "@/lib/estimating/takeoff-import";
-import { excludeUnscaledManualTakeoff } from "@/lib/estimating/unscaled-takeoff";
+import { excludeUnscaledManualTakeoff, loadVerifiedCalibrationPageIds } from "@/lib/estimating/unscaled-takeoff";
 import { regionFromProject, resolveCostsBatch } from "@/lib/cost/resolver";
 import { applyVersionPercentages, calculateItem } from "@/lib/estimating/calculations";
 import { getOrCreateDraftVersion } from "@/lib/estimating/versioning";
@@ -79,15 +79,19 @@ export async function syncTakeoffToEstimate(
       .eq("tenant_id", tenantId)
       .eq("project_id", projectId)
       .in("review_status", ["suggested", "reviewed", "rejected"]),
-    anyDb
-      .from("sheet_calibrations")
-      .select("page_id")
-      .eq("tenant_id", tenantId)
-      .eq("project_id", projectId)
-      .eq("verified", true)
-      .eq("status", "verified")
-      .eq("active", true)
-      .not("page_space_scale_factor", "is", null),
+    loadVerifiedCalibrationPageIds((from, to) =>
+      anyDb
+        .from("sheet_calibrations")
+        .select("page_id")
+        .eq("tenant_id", tenantId)
+        .eq("project_id", projectId)
+        .eq("verified", true)
+        .eq("status", "verified")
+        .eq("active", true)
+        .not("page_space_scale_factor", "is", null)
+        .order("id", { ascending: true })
+        .range(from, to),
+    ),
   ]);
 
   if (takeoff.error || catalog.error) {
@@ -98,11 +102,7 @@ export async function syncTakeoffToEstimate(
   if (calibrations.error) {
     console.error("[syncTakeoffToEstimate] calibrations", calibrations.error);
   }
-  const verifiedPageIds = new Set<string>(
-    calibrations.error
-      ? []
-      : (calibrations.data ?? []).map((row: { page_id: string }) => row.page_id),
-  );
+  const verifiedPageIds = new Set<string>(calibrations.error ? [] : calibrations.pageIds);
   const takeoffRows = (takeoff.data ?? []) as Array<TakeoffItemForEstimate & { sheet_id?: string | null }>;
   const scaledTakeoff = excludeUnscaledManualTakeoff(takeoffRows, verifiedPageIds);
 
