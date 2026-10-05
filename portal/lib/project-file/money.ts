@@ -206,18 +206,29 @@ export interface WaiverCoverInput {
   draw_number: string | null;
 }
 
-/** A pay app becomes payable only when received waivers cover this draw. */
+function normalizeDraw(value: string | null | undefined): string {
+  return (value ?? "").trim();
+}
+
+/**
+ * A pay app becomes payable only when received waivers name the same draw
+ * and their amounts cover it. A blank draw on either side does not match:
+ * the waiver form leaves draw empty by default, and that waiver must not
+ * satisfy every later pay app.
+ */
 export function waiverCoversDraw(
   waivers: WaiverCoverInput[],
   drawNumber: string | null,
   drawAmount: number,
 ): boolean {
   if (drawAmount < 0) return false;
-  const received = waivers.filter((waiver) => waiver.status === "received");
-  const matching = received.filter((waiver) =>
-    !drawNumber || waiver.draw_number == null || waiver.draw_number === drawNumber,
-  );
-  const covered = matching.reduce((sum, waiver) => sum + (waiver.amount ?? 0), 0);
+  const draw = normalizeDraw(drawNumber);
+  if (drawAmount > 0 && !draw) return false;
+  const covered = waivers.reduce((sum, waiver) => {
+    if (waiver.status !== "received") return sum;
+    if (normalizeDraw(waiver.draw_number) !== draw) return sum;
+    return sum + (waiver.amount ?? 0);
+  }, 0);
   return covered + 0.009 >= drawAmount;
 }
 
