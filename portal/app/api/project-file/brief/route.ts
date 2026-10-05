@@ -90,7 +90,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     id: row.id,
     number: row.number,
     status: row.status,
-    waiverCovered: waiverCoversDraw(waivers.data ?? [], row.draw_number, 0) || row.status !== "draft",
+    waiverCovered: row.status !== "draft"
+      || waiverCoversDraw(waivers.data ?? [], row.draw_number, 0.01),
   }));
 
   const lines = buildProjectBrief({
@@ -98,7 +99,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     today,
     balls,
     submittals: submittalBrief,
-    payApps: payAppBrief.map((row) => ({ ...row, waiverCovered: row.status !== "draft" ? true : waiverCoversDraw(waivers.data ?? [], null, 0.01) })),
+    payApps: payAppBrief,
     tasksWithoutProduction: tasksWithoutProduction.map((task) => ({ id: task.id, name: task.name })),
   });
 
