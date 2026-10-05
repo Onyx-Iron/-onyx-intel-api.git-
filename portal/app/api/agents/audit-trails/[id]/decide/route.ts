@@ -7,6 +7,11 @@ import { logEvent } from "@/lib/activity";
 import { auditInsert, auditUpdate } from "@/lib/audit";
 import { getOrCreateDraftVersion } from "@/lib/estimating/versioning";
 import { applyVersionPercentages, calculateItem } from "@/lib/estimating/calculations";
+import {
+  auditStatusForDecision,
+  claimPendingReview,
+  releaseAuditClaim,
+} from "@/lib/agents/claimAudit";
 
 export const runtime = "nodejs";
 
@@ -55,22 +60,23 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
 
   let appliedResult: Record<string, unknown> = { decision };
-
-  if (decision === "reject") {
-    const { data: rejected, error: rejErr } = await anyDb.from("ai_agent_audit_trails")
-      .update({
-        status: "rejected",
-        reviewed_by: userId,
-        reviewed_at: new Date().toISOString(),
-        applied_result: appliedResult,
-      })
-      .eq("id", id)
-      .eq("status", "pending_human_review")
-      .select("id");
-    if (rejErr) return NextResponse.json({ error: rejErr.message }, { status: 500 });
-    if (!rejected?.length) {
+  const nextStatus = auditStatusForDecision(decision);
+  // Claim before any insert. A second approver must lose here, not after the estimate write.
+  const claim = await claimPendingReview(anyDb, {
+    id,
+    tenantId,
+    userId,
+    status: nextStatus,
+    appliedResult: decision === "reject" ? appliedResult : undefined,
+  });
+  if (!claim.ok) {
+    if (claim.conflict) {
       return NextResponse.json({ error: "already decided by another reviewer" }, { status: 409 });
     }
+    return NextResponse.json({ error: claim.message }, { status: 500 });
+  }
+
+  if (decision === "reject") {
     auditUpdate({
       tenant_id: tenantId,
       user_id: userId,
@@ -83,6 +89,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
 
   const overrides = (body.overrides ?? {}) as Record<string, unknown>;
+  let committed = false;
 
   try {
     if (audit.agent_name === "scope_gap_verifier") {
@@ -156,6 +163,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           .insert(payload)
           .select("id");
         if (insErr) throw new Error(`insert estimate: ${insErr.message}`);
+        committed = true;
         appliedResult = { decision, inserted_ids: (inserted ?? []).map((r: { id: string }) => r.id), count: inserted?.length ?? 0, version_id: versionId };
 
         for (const row of inserted ?? []) {
@@ -199,6 +207,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           .select("id")
           .single();
         if (rfiErr) throw new Error(`insert rfi draft: ${rfiErr.message}`);
+        committed = true;
         appliedResult = { decision, rfi_id: rfi.id };
 
         auditInsert({
@@ -234,6 +243,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         client_visible: false,
       }).select("id").single();
       if (logErr) throw new Error(`insert daily log: ${logErr.message}`);
+      committed = true;
       appliedResult = { decision, daily_log_id: log.id };
     }
     else if (audit.agent_name === "change_event_drafter") {
@@ -249,6 +259,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           day_impact: Number(draft.day_impact ?? 0),
         }).select("id").single();
         if (eventErr) throw new Error(`insert change event: ${eventErr.message}`);
+        committed = true;
         appliedResult = { decision, change_event_id: event.id, posted_budget: false };
       }
     }
@@ -256,23 +267,20 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       appliedResult.note = `no dispatcher for agent "${audit.agent_name}"`;
     }
   } catch (err) {
+    if (!committed) {
+      await releaseAuditClaim(anyDb, { id, tenantId, status: nextStatus });
+    }
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
   }
 
-  const nextStatus = decision === "modify" ? "approved_with_modifications" : "approved";
-  const { data: decided, error: decideErr } = await anyDb.from("ai_agent_audit_trails")
-    .update({
-      status: nextStatus,
-      reviewed_by: userId,
-      reviewed_at: new Date().toISOString(),
-      applied_result: appliedResult,
-    })
+  const { error: resultErr } = await anyDb.from("ai_agent_audit_trails")
+    .update({ applied_result: appliedResult })
     .eq("id", id)
-    .eq("status", "pending_human_review")
-    .select("id");
-  if (decideErr) return NextResponse.json({ error: decideErr.message }, { status: 500 });
-  if (!decided?.length) {
-    return NextResponse.json({ error: "already decided by another reviewer" }, { status: 409 });
+    .eq("tenant_id", tenantId)
+    .eq("status", nextStatus);
+  if (resultErr && !committed) {
+    await releaseAuditClaim(anyDb, { id, tenantId, status: nextStatus });
+    return NextResponse.json({ error: resultErr.message }, { status: 500 });
   }
 
   auditUpdate({
