@@ -105,6 +105,8 @@ export async function syncProjectBudgetHeader(db: AnyDb, tenantId: string, proje
   return revised;
 }
 
+const APPROVED_CHANGE_ATTEMPTS = 5;
+
 export async function addApprovedChange(
   db: AnyDb,
   tenantId: string,
@@ -112,22 +114,39 @@ export async function addApprovedChange(
   allocations: Array<{ budgetLineId: string; amount: number }>,
 ): Promise<void> {
   for (const allocation of allocations) {
-    const { data: line, error } = await db
-      .from("project_budget_lines")
-      .select("id, approved_change_amount")
-      .eq("id", allocation.budgetLineId)
-      .eq("tenant_id", tenantId)
-      .eq("project_id", projectId)
-      .maybeSingle();
-    if (error) throw new Error(error.message);
-    if (!line) continue;
-    const next = Number(line.approved_change_amount ?? 0) + allocation.amount;
-    const { error: updateError } = await db
-      .from("project_budget_lines")
-      .update({ approved_change_amount: next })
-      .eq("id", line.id)
-      .eq("tenant_id", tenantId);
-    if (updateError) throw new Error(updateError.message);
+    if (!allocation.budgetLineId || !Number.isFinite(allocation.amount) || allocation.amount === 0) continue;
+    let applied = false;
+    for (let attempt = 0; attempt < APPROVED_CHANGE_ATTEMPTS; attempt++) {
+      const { data: line, error } = await db
+        .from("project_budget_lines")
+        .select("id, approved_change_amount")
+        .eq("id", allocation.budgetLineId)
+        .eq("tenant_id", tenantId)
+        .eq("project_id", projectId)
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      if (!line) {
+        applied = true;
+        break;
+      }
+      const current = Number(line.approved_change_amount ?? 0);
+      const next = roundMoney(current + allocation.amount);
+      const { data: updated, error: updateError } = await db
+        .from("project_budget_lines")
+        .update({ approved_change_amount: next })
+        .eq("id", line.id)
+        .eq("tenant_id", tenantId)
+        .eq("approved_change_amount", line.approved_change_amount)
+        .select("id");
+      if (updateError) throw new Error(updateError.message);
+      if (Array.isArray(updated) && updated.length > 0) {
+        applied = true;
+        break;
+      }
+    }
+    if (!applied) {
+      throw new Error(`Could not post the approved change onto budget line ${allocation.budgetLineId}`);
+    }
   }
   await syncProjectBudgetHeader(db, tenantId, projectId);
 }
