@@ -62,11 +62,13 @@ function ProductionEditor({ projectId, logId }: { projectId: string; logId: stri
       body: JSON.stringify({
         project_id: projectId,
         daily_log_id: logId,
-        manpower: headcount ? [{ company_name: "Crew", headcount: Number(headcount), hours: Number(hours) || 0 }] : [],
-        delays: delayReason ? [{ reason_code: delayReason, hours: Number(delayHours) || 0 }] : [],
-        equipment: equipment ? [{ name: equipment, hours: Number(equipmentHours) || 0 }] : [],
-        deliveries: delivery ? [{ note: delivery }] : [],
-        quantities: quantity ? [{ quantity: Number(quantity), unit: unit || null }] : [],
+        // Omit blank groups. The form does not load saved rows, so [] would
+        // ask the server to erase quantities the user is not looking at.
+        ...(headcount ? { manpower: [{ company_name: "Crew", headcount: Number(headcount), hours: Number(hours) || 0 }] } : {}),
+        ...(delayReason ? { delays: [{ reason_code: delayReason, hours: Number(delayHours) || 0 }] } : {}),
+        ...(equipment ? { equipment: [{ name: equipment, hours: Number(equipmentHours) || 0 }] } : {}),
+        ...(delivery ? { deliveries: [{ note: delivery }] } : {}),
+        ...(quantity ? { quantities: [{ quantity: Number(quantity), unit: unit || null }] } : {}),
       }),
     });
     if (!res.ok) {

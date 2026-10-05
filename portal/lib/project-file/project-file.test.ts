@@ -12,6 +12,7 @@ import {
   waiverCoversDraw,
   withBudgetPosted,
 } from "./money.ts";
+import { productionWrites } from "./production.ts";
 import {
   approvedRfiWritesTo,
   buildProjectBrief,
@@ -207,6 +208,28 @@ describe("project file records", () => {
   it("leaves remaining quantity as budget minus installed", () => {
     assert.equal(remainingQuantity(12, 5), 7);
     assert.equal(remainingQuantity(null, 5), null);
+  });
+
+  it("keeps saved production when a later save leaves those fields blank", () => {
+    const writes = productionWrites({
+      manpower: [],
+      delays: [{ reason_code: "weather", hours: 2, id: "client-id", tenant_id: "other" }],
+      equipment: undefined,
+      deliveries: [],
+      quantities: [],
+    });
+    assert.deepEqual(writes.map((group) => group.table), ["daily_log_delays"]);
+    assert.deepEqual(writes[0]?.rows, [{ reason_code: "weather", hours: 2 }]);
+  });
+
+  it("writes an installed quantity without touching the other production groups", () => {
+    const writes = productionWrites({
+      quantities: [{ quantity: 120, unit: "LF", budget_line_id: "line-1" }],
+    });
+    assert.deepEqual(writes, [{
+      table: "daily_log_quantities",
+      rows: [{ quantity: 120, unit: "LF", budget_line_id: "line-1" }],
+    }]);
   });
 
   it("writes nothing when an agent decision is rejected", () => {
