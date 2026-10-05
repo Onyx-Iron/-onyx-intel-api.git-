@@ -7,6 +7,16 @@
 
 export const SUPERVISOR_ATTEMPT_CAP = 5;
 
+/** How many documents one cron run will actually advance. */
+export const SUPERVISOR_BATCH = 8;
+
+/**
+ * Oldest rows are scanned until the batch is full. Stopped files stay in the
+ * status filter, so a hard limit of SUPERVISOR_BATCH would otherwise reread
+ * the same stopped uploads and never reach a newer one.
+ */
+export const SUPERVISOR_SCAN_CAP = 400;
+
 export type SupervisorActionName =
   | "kick_split"
   | "portal_split"
@@ -73,4 +83,35 @@ export function nextSupervisorAction(doc: SupervisorSnapshot): SupervisorDecisio
 /** Takeoff kicked by the supervisor is the deterministic extractor. It does not call a model. */
 export function takeoffKickUsesModel(): boolean {
   return false;
+}
+
+/** True once the attempt cap or a damaged file has already stopped this document. */
+export function supervisorAlreadyStopped(meta: unknown): boolean {
+  if (!meta || typeof meta !== "object") return false;
+  const summary = (meta as { processing_summary?: unknown }).processing_summary;
+  if (!summary || typeof summary !== "object") return false;
+  return (summary as { last_supervisor_action?: unknown }).last_supervisor_action === "terminal";
+}
+
+/**
+ * Walk oldest-first pages, skipping documents the supervisor has already
+ * stopped, until `batchSize` actionable rows are collected.
+ */
+export async function collectActionableSupervisorDocs<T extends { meta?: unknown }>(
+  loadPage: (offset: number, limit: number) => Promise<T[]>,
+  batchSize = SUPERVISOR_BATCH,
+  scanCap = SUPERVISOR_SCAN_CAP,
+): Promise<T[]> {
+  const picked: T[] = [];
+  const pageSize = Math.max(1, batchSize);
+  for (let offset = 0; picked.length < batchSize && offset < scanCap; offset += pageSize) {
+    const page = await loadPage(offset, pageSize);
+    for (const row of page) {
+      if (supervisorAlreadyStopped(row.meta)) continue;
+      picked.push(row);
+      if (picked.length >= batchSize) break;
+    }
+    if (page.length < pageSize) break;
+  }
+  return picked;
 }
