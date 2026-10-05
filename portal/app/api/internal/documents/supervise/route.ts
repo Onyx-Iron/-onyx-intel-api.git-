@@ -3,7 +3,12 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import { publishSheetPages } from "@/lib/documents/sheet-pages";
 import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
-import { nextSupervisorAction, type SupervisorSnapshot } from "@/lib/documents/pipeline-supervisor";
+import {
+  collectActionableSupervisorDocs,
+  nextSupervisorAction,
+  SUPERVISOR_BATCH,
+  type SupervisorSnapshot,
+} from "@/lib/documents/pipeline-supervisor";
 import { measurePdfBytes, saveMeasuredPages } from "@/lib/takeoff/measure-pdf";
 
 export const runtime = "nodejs";
@@ -41,6 +46,7 @@ type AnyQuery = {
   in: (col: string, val: unknown[]) => AnyQuery;
   order: (col: string, opts: Record<string, unknown>) => AnyQuery;
   limit: (n: number) => AnyQuery;
+  range: (from: number, to: number) => AnyQuery;
   maybeSingle: () => Promise<{ data: Record<string, unknown> | null; error: { message: string } | null }>;
   then: PromiseLike<{ data: unknown; error: { message: string } | null; count?: number | null }>["then"];
 };
@@ -79,15 +85,22 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   }
 
   const db = await createServiceClient() as unknown as AnyDb;
-  const listed = await db
-    .from("documents")
-    .select("id, tenant_id, project_id, file_name, status, split_status, takeoff_status, last_error, meta")
-    .in("status", ["queued", "pending", "processing", "split", "error", "failed", "complete_with_errors"])
-    .order("uploaded_at", { ascending: true })
-    .limit(8);
+  let listError: string | null = null;
+  const docs = await collectActionableSupervisorDocs(async (offset, limit) => {
+    const listed = await db
+      .from("documents")
+      .select("id, tenant_id, project_id, file_name, status, split_status, takeoff_status, last_error, meta")
+      .in("status", ["queued", "pending", "processing", "split", "error", "failed", "complete_with_errors"])
+      .order("uploaded_at", { ascending: true })
+      .range(offset, offset + limit - 1);
+    if (listed.error) {
+      listError = listed.error.message;
+      return [];
+    }
+    return (listed.data ?? []) as Array<Record<string, unknown>>;
+  }, SUPERVISOR_BATCH);
 
-  if (listed.error) return NextResponse.json({ error: listed.error.message }, { status: 500 });
-  const docs = (listed.data ?? []) as Array<Record<string, unknown>>;
+  if (listError) return NextResponse.json({ error: listError }, { status: 500 });
   const actions: Array<{ id: string; action: string; reason: string }> = [];
 
   for (const raw of docs) {
@@ -103,7 +116,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       meta: (raw.meta && typeof raw.meta === "object" ? raw.meta : {}) as Record<string, unknown>,
     };
     const summary = summaryOf(doc.meta);
-    if (summary.last_supervisor_action === "terminal") continue;
 
     const pageCount = await db
       .from("document_pages")
