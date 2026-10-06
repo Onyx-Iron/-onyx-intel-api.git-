@@ -27,6 +27,10 @@ export class NotFoundError extends Error {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyDb = any;
 
+/** PostgREST returns at most this many rows unless the query pages. */
+const ESTIMATE_ITEM_PAGE = 1000;
+const ESTIMATE_ITEM_INSERT_BATCH = 200;
+
 export interface EstimateVersionRow {
   id: string;
   estimate_id: string;
@@ -136,19 +140,14 @@ export async function createDraftFromVersion(
   if (!newVersion) throw new Error(lastError?.message ?? "Failed to create a new estimate version after retrying a version_number conflict.");
 
   if (params.sourceVersionId) {
-    const { data: sourceItems, error: itemsError } = await db
-      .from("estimate_items")
-      .select("*")
-      .eq("estimate_version_id", params.sourceVersionId);
-    if (itemsError) throw itemsError;
-
-    if (sourceItems && sourceItems.length > 0) {
-      const copies = sourceItems.map((item: Record<string, unknown>) => {
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const { id, created_at, updated_at, ...rest } = item;
-        return { ...rest, estimate_version_id: newVersion.id, updated_by: params.userId };
-      });
-      const { error: copyError } = await db.from("estimate_items").insert(copies);
+    const sourceItems = await loadAllEstimateItems(db, params.sourceVersionId);
+    const copies = sourceItems.map((item) => {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { id, created_at, updated_at, ...rest } = item;
+      return { ...rest, estimate_version_id: newVersion.id, updated_by: params.userId };
+    });
+    for (let i = 0; i < copies.length; i += ESTIMATE_ITEM_INSERT_BATCH) {
+      const { error: copyError } = await db.from("estimate_items").insert(copies.slice(i, i + ESTIMATE_ITEM_INSERT_BATCH));
       if (copyError) throw copyError;
     }
   }
@@ -291,10 +290,81 @@ export async function getOrCreateDraftVersion(
   }
 
   // Current version is approved/superseded/void — never write to it. Open a
-  // new draft (seeded from it) instead.
+  // new draft (seeded from it) and make that draft the one later syncs and
+  // the estimate screen use. Leaving current_version_id on the locked
+  // version made every later takeoff sync open another copy, so quantities
+  // landed on drafts the screen never loaded.
   const newDraft = await createDraftFromVersion(db, {
     estimateId: estimate.id, sourceVersionId: current.id, userId: actorUserId,
     notes: "Auto-created because the current version was locked.",
   });
+  const published = await pointEstimateAtDraft(db, estimate.id, current.id, newDraft.id);
+  if (published) return { estimateId: estimate.id, versionId: newDraft.id };
+
+  const { data: winner, error: winnerError } = await db
+    .from("estimates")
+    .select("current_version_id")
+    .eq("id", estimate.id)
+    .maybeSingle();
+  if (winnerError) throw winnerError;
+  const winnerId = typeof winner?.current_version_id === "string" ? winner.current_version_id : null;
+  if (winnerId && winnerId !== newDraft.id && winnerId !== current.id) {
+    await discardDraftVersion(db, newDraft.id);
+    return { estimateId: estimate.id, versionId: winnerId };
+  }
   return { estimateId: estimate.id, versionId: newDraft.id };
+}
+
+/** Every line on a version. A single select stops at the API row cap. */
+async function loadAllEstimateItems(db: AnyDb, versionId: string): Promise<Record<string, unknown>[]> {
+  const items: Record<string, unknown>[] = [];
+  for (let from = 0; ; from += ESTIMATE_ITEM_PAGE) {
+    const { data, error } = await db
+      .from("estimate_items")
+      .select("*")
+      .eq("estimate_version_id", versionId)
+      .order("id", { ascending: true })
+      .range(from, from + ESTIMATE_ITEM_PAGE - 1);
+    if (error) throw error;
+    const page = (data ?? []) as Record<string, unknown>[];
+    items.push(...page);
+    if (page.length < ESTIMATE_ITEM_PAGE) break;
+  }
+  return items;
+}
+
+/**
+ * Point the estimate at `draftId` only while it still names the locked
+ * version. Overlapping syncs each create a draft; the loser drops its copy
+ * and writes to the draft that won.
+ */
+async function pointEstimateAtDraft(
+  db: AnyDb,
+  estimateId: string,
+  lockedVersionId: string,
+  draftId: string,
+): Promise<boolean> {
+  const { data, error } = await db
+    .from("estimates")
+    .update({ current_version_id: draftId, updated_at: new Date().toISOString() })
+    .eq("id", estimateId)
+    .eq("current_version_id", lockedVersionId)
+    .select("id")
+    .maybeSingle();
+  if (error) throw error;
+  return data != null;
+}
+
+async function discardDraftVersion(db: AnyDb, versionId: string): Promise<void> {
+  const { error: itemError } = await db.from("estimate_items").delete().eq("estimate_version_id", versionId);
+  if (itemError) {
+    console.error("[getOrCreateDraftVersion] failed to discard draft items", itemError);
+    return;
+  }
+  const { error: versionError } = await db
+    .from("estimate_versions")
+    .delete()
+    .eq("id", versionId)
+    .eq("status", "draft");
+  if (versionError) console.error("[getOrCreateDraftVersion] failed to discard draft version", versionError);
 }
