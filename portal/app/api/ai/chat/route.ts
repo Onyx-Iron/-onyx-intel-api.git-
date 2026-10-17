@@ -9,7 +9,13 @@ import { logEvent } from "@/lib/activity";
 import { auditDelete } from "@/lib/audit";
 import { buildGroundedSystemPrompt } from "@/lib/ai/grounding";
 import { generateText, availableProviders, NoProviderError, type Provider } from "@/lib/ai/providers";
-import { formatMemoriesBlock, listProjectMemories } from "@/lib/ai/project-memories";
+import { buildProjectBrief } from "@/lib/ai/project-brief";
+import {
+  formatMemoriesBlock,
+  isFinancialMemoryFact,
+  listProjectMemories,
+  memoriesForFinancialAccess,
+} from "@/lib/ai/project-memories";
 import { canReadFinancial, getUserRole } from "@/lib/project-controls/permissions";
 import {
   executeProjectSkill,
@@ -89,6 +95,14 @@ interface ProjectRow {
   meta: Record<string, unknown> | null;
 }
 
+async function callerCanReadFinancial(tenantId: string, userId: string): Promise<boolean> {
+  try {
+    return canReadFinancial(await getUserRole(tenantId, userId));
+  } catch {
+    return false;
+  }
+}
+
 interface ChatMessage {
   role: "user" | "assistant";
   content: string;
@@ -118,42 +132,6 @@ interface ChunkRow {
 // -----------------------------------------------------------------------------
 // Shared helpers
 // -----------------------------------------------------------------------------
-
-function buildProjectBrief(p: ProjectRow, today: string): string {
-  const lines: string[] = [`\n--- Active Project Context ---`];
-  lines.push(`Project: ${p.name}`);
-  const location = [p.address, p.city, p.state].filter(Boolean).join(", ");
-  if (location) lines.push(`Location: ${location}`);
-  lines.push(`Status: ${p.status}`);
-  const meta = p.meta ?? {};
-  const estimate = typeof meta.estimate === "number" ? meta.estimate : null;
-  const completionPct = typeof meta.completion_pct === "number" ? meta.completion_pct : null;
-  if (p.budget != null) {
-    let budgetLine = `Budget: $${p.budget.toLocaleString()}`;
-    if (estimate != null) {
-      const variance = p.budget - estimate;
-      const sign = variance >= 0 ? "+" : "-";
-      budgetLine += ` | Estimate: $${estimate.toLocaleString()} | Variance: ${sign}$${Math.abs(variance).toLocaleString()}`;
-    }
-    lines.push(budgetLine);
-  }
-  if (completionPct != null) lines.push(`Completion: ${completionPct}%`);
-  if (p.start_date || p.end_date) {
-    const parts: string[] = [];
-    if (p.start_date) parts.push(`Start: ${p.start_date}`);
-    if (p.end_date) {
-      parts.push(`End: ${p.end_date}`);
-      const daysRemaining = Math.ceil(
-        (new Date(p.end_date).getTime() - new Date(today).getTime()) / 86_400_000,
-      );
-      parts.push(daysRemaining > 0 ? `${daysRemaining}d remaining` : `${Math.abs(daysRemaining)}d overdue`);
-    }
-    lines.push(parts.join(" | "));
-  }
-  lines.push(`Today: ${today}`);
-  lines.push(`--- End Project Context ---`);
-  return lines.join("\n");
-}
 
 async function embedText(text: string): Promise<number[]> {
   const res = await fetch(
@@ -309,13 +287,14 @@ async function handleRag(
     currentMessageCount = row?.message_count ?? 0;
   }
 
-  let SYSTEM = SYSTEM_BASE + "\n\n" + buildProjectBrief(project as ProjectRow, today);
-  if (convSummary) {
+  const allowMoney = await callerCanReadFinancial(tenantId, userId);
+  let SYSTEM = SYSTEM_BASE + "\n\n" + buildProjectBrief(project as ProjectRow, today, allowMoney);
+  if (convSummary && (allowMoney || !isFinancialMemoryFact(convSummary))) {
     SYSTEM += `\n\n--- Prior Conversation Summary ---\n${convSummary}\n--- End Summary ---`;
   }
   try {
     const memories = await listProjectMemories(db, tenantId, project_id, 30);
-    SYSTEM += formatMemoriesBlock(memories);
+    SYSTEM += formatMemoriesBlock(memoriesForFinancialAccess(memories, allowMoney));
   } catch {
     // non-fatal — chat still works without the memory block
   }
@@ -500,17 +479,12 @@ async function handleAgentic(
   if (projErr || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
 
   const today = new Date().toISOString().split("T")[0];
-  let systemInstruction = SYSTEM_BASE_AGENTIC + "\n\n" + buildProjectBrief(project as ProjectRow, today);
+  const allowMoney = await callerCanReadFinancial(tenantId, userId);
+  let systemInstruction = SYSTEM_BASE_AGENTIC + "\n\n" + buildProjectBrief(project as ProjectRow, today, allowMoney);
   systemInstruction += "\n\n" + skillSectionGuide(project_id);
-  let allowMoney = false;
-  try {
-    allowMoney = canReadFinancial(await getUserRole(tenantId, userId));
-  } catch {
-    allowMoney = false;
-  }
   try {
     const memories = await listProjectMemories(db, tenantId, project_id, 30);
-    systemInstruction += formatMemoriesBlock(memories);
+    systemInstruction += formatMemoriesBlock(memoriesForFinancialAccess(memories, allowMoney));
   } catch {
     // non-fatal
   }

@@ -29,6 +29,24 @@ export async function listProjectMemories(
   return (data ?? []) as ProjectMemory[];
 }
 
+const CURRENCY_AMOUNT = /\$\s*\d/;
+const MONEY_WORD = /\b(budget|retainage|markup|profit|contract value|unit cost|unit price)\b/i;
+const LARGE_AMOUNT = /\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{4,}(?:\.\d+)?/;
+
+/** True when free text states a dollar figure a restricted role must not receive. */
+export function isFinancialMemoryFact(fact: string): boolean {
+  if (CURRENCY_AMOUNT.test(fact)) return true;
+  return MONEY_WORD.test(fact) && LARGE_AMOUNT.test(fact);
+}
+
+export function memoriesForFinancialAccess(
+  memories: ProjectMemory[],
+  canReadFinancial: boolean,
+): ProjectMemory[] {
+  if (canReadFinancial) return memories;
+  return memories.filter((memory) => !isFinancialMemoryFact(memory.fact));
+}
+
 export function formatMemoriesBlock(memories: ProjectMemory[]): string {
   if (memories.length === 0) return "";
   const lines = memories.map((m, i) => `${i + 1}. ${m.fact}`).join("\n");

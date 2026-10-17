@@ -5,9 +5,18 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { auditInsert, auditDelete } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
-import { listProjectMemories, upsertMemoryFacts } from "@/lib/ai/project-memories";
+import { listProjectMemories, memoriesForFinancialAccess, upsertMemoryFacts } from "@/lib/ai/project-memories";
+import { canReadFinancial, getUserRole } from "@/lib/project-controls/permissions";
 
 export const runtime = "nodejs";
+
+async function allowFinancial(tenantId: string, userId: string): Promise<boolean> {
+  try {
+    return canReadFinancial(await getUserRole(tenantId, userId));
+  } catch {
+    return false;
+  }
+}
 
 async function resolveTenant() {
   const { userId, orgId, orgSlug } = await auth();
@@ -30,7 +39,10 @@ export async function GET(
 
     await assertProjectBelongsToTenant(parsed.data, ctx.tenantId);
     const db = await createServiceClient();
-    const memories = await listProjectMemories(db, ctx.tenantId, parsed.data);
+    const memories = memoriesForFinancialAccess(
+      await listProjectMemories(db, ctx.tenantId, parsed.data),
+      await allowFinancial(ctx.tenantId, ctx.userId),
+    );
     return NextResponse.json({ memories });
   } catch (err: unknown) {
     const owned = ownershipDenied(err);
@@ -89,7 +101,10 @@ export async function POST(
         new_values: { inserted, facts } as unknown as Record<string, unknown>,
       });
     }
-    const memories = await listProjectMemories(db, ctx.tenantId, parsed.data);
+    const memories = memoriesForFinancialAccess(
+      await listProjectMemories(db, ctx.tenantId, parsed.data),
+      await allowFinancial(ctx.tenantId, ctx.userId),
+    );
     return NextResponse.json({ inserted, memories }, { status: inserted > 0 ? 201 : 200 });
   } catch (err: unknown) {
     const owned = ownershipDenied(err);

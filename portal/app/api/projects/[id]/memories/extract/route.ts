@@ -5,7 +5,8 @@ import { getOrCreateTenant, authTenantKey, authTenantName, assertProjectBelongsT
 import { requirePermission, ownershipDenied } from "@/lib/project-controls/route-guards";
 import { auditInsert } from "@/lib/audit";
 import { uuidSchema } from "@/lib/validation";
-import { listProjectMemories, upsertMemoryFacts } from "@/lib/ai/project-memories";
+import { listProjectMemories, memoriesForFinancialAccess, upsertMemoryFacts } from "@/lib/ai/project-memories";
+import { canReadFinancial, getUserRole } from "@/lib/project-controls/permissions";
 import { generateText, NoProviderError } from "@/lib/ai/providers";
 
 export const runtime = "nodejs";
@@ -46,6 +47,13 @@ export async function POST(
       .single();
 
     if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
+
+    let allowMoney = false;
+    try {
+      allowMoney = canReadFinancial(await getUserRole(ctx.tenantId, ctx.userId));
+    } catch {
+      allowMoney = false;
+    }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const anyDb = db as any;
@@ -103,13 +111,15 @@ export async function POST(
     const prompt = [
       "Extract up to 12 durable project facts for a construction GC platform.",
       "Facts should be useful across Takeoff, Estimating, Procurement, Field, and Closeout.",
-      "Prefer concrete, stable facts (owner, GC, address, key dates, budget, systems, constraints, open risks).",
+      allowMoney
+        ? "Prefer concrete, stable facts (owner, GC, address, key dates, budget, systems, constraints, open risks)."
+        : "Prefer concrete, stable facts (owner, GC, address, key dates, systems, constraints, open risks). Do not include budget, cost, or price figures.",
       "Return ONLY a JSON array of strings. No markdown.",
       "",
       `Project: ${project.name}`,
       `Status: ${project.status}`,
       `Location: ${[project.address, project.city, project.state].filter(Boolean).join(", ") || "unknown"}`,
-      `Budget: ${project.budget ?? "unknown"}`,
+      ...(allowMoney ? [`Budget: ${project.budget ?? "unknown"}`] : []),
       `Dates: ${project.start_date ?? "TBD"} → ${project.end_date ?? "TBD"}`,
       `Estimate line items: ${estimateCount ?? 0}`,
       `Open RFIs: ${rfiList || "none"}`,
@@ -149,7 +159,10 @@ export async function POST(
         new_values: { inserted, source: "extract" } as unknown as Record<string, unknown>,
       });
     }
-    const memories = await listProjectMemories(db, ctx.tenantId, parsed.data);
+    const memories = memoriesForFinancialAccess(
+      await listProjectMemories(db, ctx.tenantId, parsed.data),
+      allowMoney,
+    );
     return NextResponse.json({ inserted, memories, provider: result.provider });
   } catch (err: unknown) {
     if (err instanceof NoProviderError) {
