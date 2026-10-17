@@ -88,18 +88,37 @@ if (!ENV.ready) {
     if (reqErr || !request) throw new Error("Request not found");
     if (request.status === "awarded") throw new Error("Request already awarded");
 
+    const { data: claimed, error: claimErr } = await db.from("marketplace_requests")
+      .update({ status: "awarded" })
+      .eq("id", request.id)
+      .eq("tenant_id", tenantId)
+      .neq("status", "awarded")
+      .select("id");
+    if (claimErr) throw claimErr;
+    if (!claimed?.length) throw new Error("Request already awarded");
+
     const totalAmount = Number(bid.unit_price) * Number(request.quantity);
     const { data: po, error: poErr } = await db.from("purchase_orders").insert({
       tenant_id: tenantId, project_id: request.project_id, vendor_bid_id: bid.id,
       total_amount: totalAmount, status: "issued", created_by: "integration_test_user",
     }).select("*").single();
-    if (poErr) throw poErr;
+    if (poErr) {
+      await db.from("marketplace_requests").update({ status: request.status }).eq("id", request.id).eq("tenant_id", tenantId);
+      throw poErr;
+    }
 
-    await Promise.all([
-      db.from("vendor_bids").update({ status: "awarded" }).eq("id", bid.id),
-      db.from("vendor_bids").update({ status: "declined" }).eq("request_id", bid.request_id).neq("id", bid.id),
-      db.from("marketplace_requests").update({ status: "awarded" }).eq("id", request.id),
-    ]);
+    const { data: awardedBid, error: awardErr } = await db.from("vendor_bids")
+      .update({ status: "awarded" })
+      .eq("id", bid.id)
+      .eq("tenant_id", tenantId)
+      .eq("status", "pending")
+      .select("id");
+    if (awardErr || !awardedBid?.length) {
+      await db.from("purchase_orders").delete().eq("id", po.id).eq("tenant_id", tenantId);
+      await db.from("marketplace_requests").update({ status: request.status }).eq("id", request.id).eq("tenant_id", tenantId);
+      throw awardErr ?? new Error("Already awarded");
+    }
+    await db.from("vendor_bids").update({ status: "declined" }).eq("request_id", bid.request_id).eq("tenant_id", tenantId).neq("id", bid.id).eq("status", "pending");
     return po;
   }
 
