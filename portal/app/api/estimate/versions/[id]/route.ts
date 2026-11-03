@@ -5,7 +5,7 @@ import { assertPermission, canReadFinancial, getUserRole, PermissionError, redac
 import { ESTIMATE_FINANCIAL_FIELDS, VERSION_MARKUP_FIELDS } from "@/lib/project-controls/financial-redaction";
 import { assertVersionEditable, getServiceDb, loadVersionForTenant, NotFoundError, VersionLockedError } from "@/lib/estimating/versioning";
 import { applyVersionPercentages, calculateEstimateTotals, calculateItem } from "@/lib/estimating/calculations";
-import { quantityForLinkedLine } from "@/lib/estimating/linked-quantity";
+import { directCostsForKeptQuantity, quantityForLinkedLine } from "@/lib/estimating/linked-quantity";
 import { pricingStatusAfterEdit, type PricingStatusLine } from "@/lib/estimating/pricing-status";
 import { recordEstimateAudit, recordEstimateAuditBatch } from "@/lib/estimating/audit";
 
@@ -196,23 +196,6 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   // dollar amounts and the server applies the same cascade the version's
   // sliders represent.
   const payload = body.items.map((item) => {
-    const totalDirectCostPreview = [
-      item.labor_cost, item.material_cost, item.equipment_cost, item.trucking_cost,
-      item.subcontract_cost, item.disposal_cost, item.testing_cost, item.other_direct_cost,
-    ].reduce((s: number, v) => s + (typeof v === "number" ? v : 0), 0);
-    const indirectCost = item.indirect_cost ?? 0;
-    const hasExplicitPctFields = item.contingency != null || item.overhead != null || item.profit != null;
-    const derived = hasExplicitPctFields
-      ? { contingency: item.contingency ?? 0, overhead: item.overhead ?? 0, profit: item.profit ?? 0 }
-      : applyVersionPercentages(totalDirectCostPreview, indirectCost, pct);
-
-    const calc = calculateItem({
-      laborCost: item.labor_cost, materialCost: item.material_cost, equipmentCost: item.equipment_cost,
-      truckingCost: item.trucking_cost, subcontractCost: item.subcontract_cost, disposalCost: item.disposal_cost,
-      testingCost: item.testing_cost, otherDirectCost: item.other_direct_cost,
-      quantity: item.quantity, indirectCost,
-      contingency: derived.contingency, overhead: derived.overhead, profit: derived.profit,
-    });
     const isUpdate = item.id != null && existingById.has(item.id);
     const existing = isUpdate ? existingById.get(item.id) as PricingStatusLine & { source_takeoff_id?: string | null } : undefined;
     const unlinking = Object.prototype.hasOwnProperty.call(item, "source_takeoff_id") && item.source_takeoff_id == null;
@@ -221,14 +204,51 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       ? existing?.quantity
       : Number(existing.quantity);
     const quantity = quantityForLinkedLine(existingQuantity, item.quantity, linked ? existing?.source_takeoff_id : null, unlinking);
+    const directCosts = directCostsForKeptQuantity(
+      {
+        labor_cost: item.labor_cost,
+        material_cost: item.material_cost,
+        equipment_cost: item.equipment_cost,
+        trucking_cost: item.trucking_cost,
+        subcontract_cost: item.subcontract_cost,
+        disposal_cost: item.disposal_cost,
+        testing_cost: item.testing_cost,
+        other_direct_cost: item.other_direct_cost,
+      },
+      existing,
+      item.quantity,
+      typeof quantity === "number" ? quantity : null,
+    );
+    const totalDirectCostPreview = Object.values(directCosts).reduce((sum, value) => sum + value, 0);
+    const indirectCost = item.indirect_cost ?? 0;
+    const hasExplicitPctFields = item.contingency != null || item.overhead != null || item.profit != null;
+    const derived = hasExplicitPctFields
+      ? { contingency: item.contingency ?? 0, overhead: item.overhead ?? 0, profit: item.profit ?? 0 }
+      : applyVersionPercentages(totalDirectCostPreview, indirectCost, pct);
+
+    const calc = calculateItem({
+      laborCost: directCosts.labor_cost,
+      materialCost: directCosts.material_cost,
+      equipmentCost: directCosts.equipment_cost,
+      truckingCost: directCosts.trucking_cost,
+      subcontractCost: directCosts.subcontract_cost,
+      disposalCost: directCosts.disposal_cost,
+      testingCost: directCosts.testing_cost,
+      otherDirectCost: directCosts.other_direct_cost,
+      quantity,
+      indirectCost,
+      contingency: derived.contingency,
+      overhead: derived.overhead,
+      profit: derived.profit,
+    });
     const nextCosts: PricingStatusLine = {
       quantity,
-      labor_cost: item.labor_cost ?? 0,
-      material_cost: item.material_cost ?? 0,
-      equipment_cost: item.equipment_cost ?? 0,
-      trucking_cost: item.trucking_cost ?? 0,
-      subcontract_cost: item.subcontract_cost ?? 0,
-      disposal_cost: item.disposal_cost ?? 0,
+      labor_cost: directCosts.labor_cost,
+      material_cost: directCosts.material_cost,
+      equipment_cost: directCosts.equipment_cost,
+      trucking_cost: directCosts.trucking_cost,
+      subcontract_cost: directCosts.subcontract_cost,
+      disposal_cost: directCosts.disposal_cost,
     };
     return {
       id: item.id ?? crypto.randomUUID(),
@@ -243,14 +263,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       quantity: quantity ?? null,
       ...(Object.prototype.hasOwnProperty.call(item, "source_takeoff_id") ? { source_takeoff_id: item.source_takeoff_id ?? null } : {}),
       uom: item.uom ?? null,
-      labor_cost: item.labor_cost ?? 0,
-      material_cost: item.material_cost ?? 0,
-      equipment_cost: item.equipment_cost ?? 0,
-      trucking_cost: item.trucking_cost ?? 0,
-      subcontract_cost: item.subcontract_cost ?? 0,
-      disposal_cost: item.disposal_cost ?? 0,
-      testing_cost: item.testing_cost ?? 0,
-      other_direct_cost: item.other_direct_cost ?? 0,
+      labor_cost: directCosts.labor_cost,
+      material_cost: directCosts.material_cost,
+      equipment_cost: directCosts.equipment_cost,
+      trucking_cost: directCosts.trucking_cost,
+      subcontract_cost: directCosts.subcontract_cost,
+      disposal_cost: directCosts.disposal_cost,
+      testing_cost: directCosts.testing_cost,
+      other_direct_cost: directCosts.other_direct_cost,
       total_direct_cost: calc.totalDirectCost,
       indirect_cost: indirectCost,
       contingency: derived.contingency,
