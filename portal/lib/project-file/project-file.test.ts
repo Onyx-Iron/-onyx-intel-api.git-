@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { CpmCycleError, computeCpm, shiftTaskDates } from "./cpm.ts";
+import { CpmCycleError, computeCpm, previewScheduleChange, shiftTaskDates } from "./cpm.ts";
 import {
   approvedChangeDelta,
   budgetAlreadyPosted,
@@ -55,6 +55,32 @@ describe("schedule CPM", () => {
     assert.deepEqual(
       shiftTaskDates({ start_date: "2026-10-01", end_date: "2026-10-05" }, 10),
       { start_date: "2026-10-11", end_date: "2026-10-15" },
+    );
+  });
+
+  it("rejects a predecessor edit that would close a cycle", () => {
+    const existing = [
+      { id: "a", duration: 3, start_date: "2026-10-01", end_date: "2026-10-04", deps: [] as string[] },
+      { id: "b", duration: 2, start_date: "2026-10-04", end_date: "2026-10-06", deps: ["a"] },
+    ];
+    const acyclic = previewScheduleChange(existing, {
+      id: "b",
+      duration: 4,
+      start_date: "2026-10-04",
+      end_date: "2026-10-08",
+      deps: ["a"],
+    });
+    assert.equal(acyclic.find((task) => task.id === "b")?.es, 3);
+
+    assert.throws(
+      () => previewScheduleChange(existing, {
+        id: "a",
+        duration: 3,
+        start_date: "2026-10-01",
+        end_date: "2026-10-04",
+        deps: ["b"],
+      }),
+      CpmCycleError,
     );
   });
 });

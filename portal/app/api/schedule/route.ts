@@ -7,7 +7,7 @@ import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { auditInsert } from "@/lib/audit";
 import { scheduleTaskCreateSchema, parseBody } from "@/lib/validation";
-import { recomputeProjectSchedule } from "@/lib/project-file/schedule-store";
+import { assertScheduleChangeIsAcyclic, recomputeProjectSchedule } from "@/lib/project-file/schedule-store";
 import { CpmCycleError } from "@/lib/project-file/cpm";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
@@ -69,9 +69,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     await assertProjectBelongsToTenant(project_id, tenantId);
 
     const db = await createServiceClient();
+    const taskId = crypto.randomUUID();
+    try {
+      await assertScheduleChangeIsAcyclic(db, tenantId, project_id, {
+        id: taskId,
+        duration: duration ?? null,
+        start_date: start_date ?? null,
+        end_date: end_date ?? null,
+        deps: dependencies ?? [],
+      });
+    } catch (err) {
+      if (err instanceof CpmCycleError) {
+        return NextResponse.json({ error: err.message }, { status: 409 });
+      }
+      throw err;
+    }
+
     const { data, error } = await db
       .from("schedule_tasks")
       .insert({
+        id: taskId,
         tenant_id: tenantId,
         project_id,
         name: name.trim(),
@@ -88,6 +105,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     if (error) {
       return NextResponse.json({ error: `[POST /api/schedule] ${error.message}` }, { status: 422 });
+    }
+
+    try {
+      await recomputeProjectSchedule(db, tenantId, project_id);
+    } catch (err) {
+      if (err instanceof CpmCycleError) {
+        const { error: deleteError } = await db
+          .from("schedule_tasks")
+          .delete()
+          .eq("id", taskId)
+          .eq("tenant_id", tenantId);
+        if (deleteError) {
+          return NextResponse.json({ error: deleteError.message }, { status: 500 });
+        }
+        return NextResponse.json({ error: err.message }, { status: 409 });
+      }
+      throw err;
     }
 
     auditInsert({
@@ -109,15 +143,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       action: "created",
       title: `Schedule task created: ${name.trim()}`,
     });
-
-    try {
-      await recomputeProjectSchedule(db, tenantId, project_id);
-    } catch (err) {
-      if (err instanceof CpmCycleError) {
-        return NextResponse.json({ task: data, error: err.message }, { status: 409 });
-      }
-      throw err;
-    }
 
     return NextResponse.json({ task: data }, { status: 201 });
   } catch (err: unknown) {

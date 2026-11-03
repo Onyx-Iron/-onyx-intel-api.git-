@@ -5,7 +5,7 @@ import type { TablesUpdate } from "@/lib/supabase/types";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditUpdate, auditDelete } from "@/lib/audit";
-import { recomputeProjectSchedule } from "@/lib/project-file/schedule-store";
+import { assertScheduleChangeIsAcyclic, recomputeProjectSchedule } from "@/lib/project-file/schedule-store";
 import { CpmCycleError } from "@/lib/project-file/cpm";
 
 interface RouteContext {
@@ -89,6 +89,24 @@ export async function PUT(req: NextRequest, context: RouteContext): Promise<Next
       .eq("tenant_id", tenantId)
       .maybeSingle();
 
+    const touchesScheduleMath = deps !== undefined || duration !== undefined || start_date !== undefined || end_date !== undefined;
+    if (before && touchesScheduleMath) {
+      try {
+        await assertScheduleChangeIsAcyclic(db, tenantId, before.project_id, {
+          id,
+          duration: duration !== undefined ? duration : before.duration,
+          start_date: start_date !== undefined ? start_date : before.start_date,
+          end_date: end_date !== undefined ? end_date : before.end_date,
+          deps: deps !== undefined ? deps : before.deps,
+        });
+      } catch (err) {
+        if (err instanceof CpmCycleError) {
+          return NextResponse.json({ error: err.message }, { status: 409 });
+        }
+        throw err;
+      }
+    }
+
     const { data, error } = await db
       .from("schedule_tasks")
       .update(updates)
@@ -101,6 +119,40 @@ export async function PUT(req: NextRequest, context: RouteContext): Promise<Next
       return NextResponse.json({ error: `[PUT /api/schedule/${id}] ${error.message}` }, { status: 422 });
     }
 
+    if (before && touchesScheduleMath) {
+      try {
+        await recomputeProjectSchedule(db, tenantId, before.project_id);
+      } catch (err) {
+        if (err instanceof CpmCycleError) {
+          const { error: restoreError } = await db
+            .from("schedule_tasks")
+            .update({
+              name: before.name,
+              status: before.status,
+              start_date: before.start_date,
+              end_date: before.end_date,
+              duration: before.duration,
+              critical: before.critical,
+              deps: before.deps,
+              percent_complete: before.percent_complete,
+              es: before.es,
+              ef: before.ef,
+              ls: before.ls,
+              lf: before.lf,
+              total_float: before.total_float,
+              free_float: before.free_float,
+            })
+            .eq("id", id)
+            .eq("tenant_id", tenantId);
+          if (restoreError) {
+            return NextResponse.json({ error: restoreError.message }, { status: 500 });
+          }
+          return NextResponse.json({ error: err.message }, { status: 409 });
+        }
+        throw err;
+      }
+    }
+
     auditUpdate({
       tenant_id: tenantId,
       user_id: userId,
@@ -109,17 +161,6 @@ export async function PUT(req: NextRequest, context: RouteContext): Promise<Next
       old_values: (before ?? null) as Record<string, unknown> | null,
       new_values: data as Record<string, unknown>,
     });
-
-    if (before && (deps !== undefined || duration !== undefined || start_date !== undefined || end_date !== undefined)) {
-      try {
-        await recomputeProjectSchedule(db, tenantId, before.project_id);
-      } catch (err) {
-        if (err instanceof CpmCycleError) {
-          return NextResponse.json({ task: data, error: err.message }, { status: 409 });
-        }
-        throw err;
-      }
-    }
 
     return NextResponse.json({ task: data });
   } catch (err: unknown) {

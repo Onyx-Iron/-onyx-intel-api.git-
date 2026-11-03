@@ -110,6 +110,39 @@ export function durationDays(task: {
   return 1;
 }
 
+export interface ScheduleChangeInput {
+  id: string;
+  duration: number | null;
+  start_date: string | null;
+  end_date: string | null;
+  deps: string[] | null;
+}
+
+/**
+ * CPM after `change` replaces a matching task or is appended.
+ * Throws `CpmCycleError` when the resulting predecessor graph has a cycle.
+ */
+export function previewScheduleChange(existing: ScheduleChangeInput[], change: ScheduleChangeInput): CpmTaskResult[] {
+  const next = existing.some((task) => task.id === change.id)
+    ? existing.map((task) => (
+      task.id === change.id
+        ? {
+          ...task,
+          duration: change.duration,
+          start_date: change.start_date,
+          end_date: change.end_date,
+          deps: change.deps,
+        }
+        : task
+    ))
+    : [...existing, change];
+  return computeCpm(next.map((task) => ({
+    id: task.id,
+    duration: durationDays(task),
+    deps: task.deps ?? [],
+  })));
+}
+
 /** Shift a task's calendar dates by whole days. Dates stay null when unset. */
 export function shiftTaskDates(
   task: { start_date: string | null; end_date: string | null },
