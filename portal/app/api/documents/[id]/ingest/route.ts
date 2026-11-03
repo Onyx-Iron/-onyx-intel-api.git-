@@ -12,6 +12,7 @@ import { PDFDocument } from "pdf-lib";
 import { looksLikePdf, publishSheetPages } from "@/lib/documents/sheet-pages";
 import { missingPageNumbers, normalizeDocumentClass, pdfDeclaresEncryption } from "@/lib/documents/processing-display";
 import { extractionFromPageText, readPdfPageText } from "@/lib/documents/extraction-fallback";
+import { readEveryRow } from "@/lib/supabase/read-every-row";
 import { measurePdfBytes, saveMeasuredPages } from "@/lib/takeoff/measure-pdf";
 import { unlockPdf } from "@/lib/documents/pdf-unlock";
 import {
@@ -475,20 +476,28 @@ export async function POST(
     if (pdfDocument && pdfBytes.byteLength > 0) {
       try {
         const measured = await measurePdfBytes(pdfBytes);
-        const { data: sheetRows, error: sheetErr } = await db.from("document_pages")
-          .select("id, page_number")
-          .eq("document_id", docId)
-          .eq("tenant_id", resolvedTenantId);
-        if (sheetErr) throw new Error(sheetErr.message);
-        const byNumber = new Map((sheetRows ?? []).map((row) => [row.page_number, row.id]));
+        const sheetRows = await readEveryRow<{ id: string; page_number: number }>(async (from, to) => {
+          const page = await db.from("document_pages")
+            .select("id, page_number")
+            .eq("document_id", docId)
+            .eq("tenant_id", resolvedTenantId)
+            .order("page_number", { ascending: true })
+            .range(from, to);
+          return { data: page.data ?? [], error: page.error };
+        });
+        const byNumber = new Map(sheetRows.map((row) => [row.page_number, row.id]));
+        const linked = measured.flatMap((sheet) => {
+          const id = byNumber.get(sheet.pageNumber);
+          return id ? [{ id, pageNumber: sheet.pageNumber, measured: sheet }] : [];
+        });
+        if (linked.length !== measured.length) {
+          throw new Error(`Measured ${measured.length} pages but only ${linked.length} have a sheet row`);
+        }
         unscaledPages = await saveMeasuredPages(db as never, {
           tenantId: resolvedTenantId,
           projectId,
           documentId: docId,
-          pages: measured.flatMap((sheet) => {
-            const id = byNumber.get(sheet.pageNumber);
-            return id ? [{ id, pageNumber: sheet.pageNumber, measured: sheet }] : [];
-          }),
+          pages: linked,
         });
         geometryMeasured = true;
       } catch (measureErr) {

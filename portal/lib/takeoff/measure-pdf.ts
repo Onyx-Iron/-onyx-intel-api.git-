@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { extractVectorsFromPdfPage } from "@/lib/cad/pdf-vector-extract";
+import { readEveryRow } from "@/lib/supabase/read-every-row";
 import { measurePageGeometry, type MeasuredGeometry, type PagePath } from "@/lib/takeoff/measure-geometry";
 import { scaleRegionsFromMarks, type ScaleRegion, type TextMark } from "@/lib/takeoff/stated-scale";
 
@@ -113,6 +114,7 @@ export async function measurePdfBytes(bytes: Uint8Array): Promise<MeasuredPdfPag
 interface MeasuredQuery extends Promise<{ error: { message: string } | null; data: unknown }> {
   eq: (column: string, value: unknown) => MeasuredQuery;
   in: (column: string, values: readonly unknown[]) => MeasuredQuery;
+  range: (from: number, to: number) => MeasuredQuery;
 }
 
 type MeasurementDb = {
@@ -171,7 +173,19 @@ export function skipDecidedMeasurements<T extends {
   return incoming.filter((row) => !keys.has(measuredGeometryKey(row)));
 }
 
-/** Writes scale regions and page-space quantities. Replaces an earlier stated-scale pass on this file. */
+const SHEET_ID_CHUNK = 80;
+
+function chunkValues<T>(values: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += size) chunks.push(values.slice(index, index + size));
+  return chunks;
+}
+
+/**
+ * Writes scale regions and page-space quantities for the sheets in `args.pages`.
+ * Suggested rows on any other sheet stay. A caller that only loaded the first
+ * PostgREST page must not wipe the rest of the set.
+ */
 export async function saveMeasuredPages(
   db: MeasurementDb,
   args: {
@@ -182,23 +196,37 @@ export async function saveMeasuredPages(
   },
 ): Promise<number[]> {
   const unscaled: number[] = [];
-  // Drop only undecided rows. Deleting an approved id sets estimate source_takeoff_id
-  // null, and the replacement insert is priced again on the next sync.
-  const removed = await db.from("takeoff_items").delete()
-    .eq("document_id", args.documentId)
-    .eq("tenant_id", args.tenantId)
-    .eq("source_method", "stated_scale")
-    .in("review_status", ["suggested", "reviewed"]);
-  if (removed.error) throw new Error(removed.error.message);
-  const decided = await db.from("takeoff_items").select("page, type, quantity, points")
-    .eq("document_id", args.documentId)
-    .eq("tenant_id", args.tenantId)
-    .eq("source_method", "stated_scale")
-    .in("review_status", ["approved", "rejected"]);
-  if (decided.error) throw new Error(decided.error.message);
-  const kept = Array.isArray(decided.data)
-    ? decided.data as Array<{ page?: unknown; type?: unknown; quantity?: unknown; points?: unknown }>
-    : [];
+  const sheetIds = [...new Set(args.pages.map((page) => page.id))];
+  if (sheetIds.length === 0) return unscaled;
+  // Drop only undecided rows on the sheets being rewritten. Deleting an approved
+  // id sets estimate source_takeoff_id null, and the replacement insert is priced
+  // again on the next sync.
+  for (const sheetChunk of chunkValues(sheetIds, SHEET_ID_CHUNK)) {
+    const removed = await db.from("takeoff_items").delete()
+      .eq("document_id", args.documentId)
+      .eq("tenant_id", args.tenantId)
+      .eq("source_method", "stated_scale")
+      .in("review_status", ["suggested", "reviewed"])
+      .in("sheet_id", sheetChunk);
+    if (removed.error) throw new Error(removed.error.message);
+  }
+  const kept: Array<{ page?: unknown; type?: unknown; quantity?: unknown; points?: unknown }> = [];
+  for (const sheetChunk of chunkValues(sheetIds, SHEET_ID_CHUNK)) {
+    const decided = await readEveryRow(async (from, to) => {
+      const page = await db.from("takeoff_items").select("page, type, quantity, points")
+        .eq("document_id", args.documentId)
+        .eq("tenant_id", args.tenantId)
+        .eq("source_method", "stated_scale")
+        .in("review_status", ["approved", "rejected"])
+        .in("sheet_id", sheetChunk)
+        .range(from, to);
+      const data = Array.isArray(page.data)
+        ? page.data as Array<{ page?: unknown; type?: unknown; quantity?: unknown; points?: unknown }>
+        : [];
+      return { data, error: page.error };
+    });
+    kept.push(...decided);
+  }
   for (const page of args.pages) {
     const sheet = page.measured;
     await db.from("sheet_scale_regions").update({ active: false, updated_at: new Date().toISOString() })
