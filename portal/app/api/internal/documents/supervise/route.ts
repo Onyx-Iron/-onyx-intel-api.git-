@@ -4,6 +4,7 @@ import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import { publishSheetPages } from "@/lib/documents/sheet-pages";
 import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
 import { nextSupervisorAction, type SupervisorSnapshot } from "@/lib/documents/pipeline-supervisor";
+import { readEveryRow } from "@/lib/supabase/read-every-row";
 import { measurePdfBytes, saveMeasuredPages } from "@/lib/takeoff/measure-pdf";
 
 export const runtime = "nodejs";
@@ -41,6 +42,7 @@ type AnyQuery = {
   in: (col: string, val: unknown[]) => AnyQuery;
   order: (col: string, opts: Record<string, unknown>) => AnyQuery;
   limit: (n: number) => AnyQuery;
+  range: (from: number, to: number) => AnyQuery;
   maybeSingle: () => Promise<{ data: Record<string, unknown> | null; error: { message: string } | null }>;
   then: PromiseLike<{ data: unknown; error: { message: string } | null; count?: number | null }>["then"];
 };
@@ -168,13 +170,18 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         }, { tenantId: doc.tenant_id, documentId: doc.id, pdfBytes: bytes });
         await db.from("documents").update({ status: "split", split_status: "done" }).eq("id", doc.id).eq("tenant_id", doc.tenant_id);
       } else if (decision.action === "measure") {
-        const pages = await db.from("document_pages")
-          .select("id, page_number, storage_path")
-          .eq("document_id", doc.id)
-          .eq("tenant_id", doc.tenant_id);
-        if (pages.error) throw new Error(pages.error.message);
+        const pageRows = await readEveryRow(async (from, to) => {
+          const pages = await db.from("document_pages")
+            .select("id, page_number, storage_path")
+            .eq("document_id", doc.id)
+            .eq("tenant_id", doc.tenant_id)
+            .order("page_number", { ascending: true })
+            .range(from, to);
+          const data = Array.isArray(pages.data) ? pages.data as Array<Record<string, unknown>> : [];
+          return { data, error: pages.error };
+        });
         const prepared: Array<{ id: string; pageNumber: number; measured: Awaited<ReturnType<typeof measurePdfBytes>>[number] }> = [];
-        for (const page of (pages.data ?? []) as Array<Record<string, unknown>>) {
+        for (const page of pageRows) {
           const storagePath = typeof page.storage_path === "string" ? page.storage_path : null;
           if (!storagePath) continue;
           const bucket = resolveDocumentStorageBucket(doc.meta);

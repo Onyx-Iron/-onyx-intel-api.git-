@@ -29,6 +29,7 @@ describe("save measured pages", () => {
           id: "kept",
           document_id: "doc",
           tenant_id: "ten",
+          sheet_id: "page-1",
           source_method: "stated_scale",
           review_status: "approved",
           page: 1,
@@ -40,6 +41,7 @@ describe("save measured pages", () => {
           id: "stale",
           document_id: "doc",
           tenant_id: "ten",
+          sheet_id: "page-1",
           source_method: "stated_scale",
           review_status: "suggested",
           page: 1,
@@ -47,14 +49,28 @@ describe("save measured pages", () => {
           quantity: 10,
           points: [{ x: 0, y: 0 }, { x: 8, y: 0 }],
         },
+        {
+          id: "other-sheet",
+          document_id: "doc",
+          tenant_id: "ten",
+          sheet_id: "page-2",
+          source_method: "stated_scale",
+          review_status: "suggested",
+          page: 2,
+          type: "length",
+          quantity: 15,
+          points: [{ x: 1, y: 1 }, { x: 9, y: 1 }],
+        },
       ],
       sheet_scale_regions: [],
       document_pages: [{ id: "page-1", tenant_id: "ten" }],
     };
     const inserted: Array<Record<string, unknown>> = [];
 
-    function query(run: (filters: Array<(row: Record<string, unknown>) => boolean>) => { error: null; data: unknown }) {
+    function query(run: (filters: Array<(row: Record<string, unknown>) => boolean>, from: number, to: number) => { error: null; data: unknown }) {
       const filters: Array<(row: Record<string, unknown>) => boolean> = [];
+      let from = 0;
+      let to = Number.POSITIVE_INFINITY;
       const builder = {
         eq(column: string, value: unknown) {
           filters.push((row) => row[column] === value);
@@ -64,9 +80,14 @@ describe("save measured pages", () => {
           filters.push((row) => values.includes(row[column]));
           return builder;
         },
+        range(start: number, end: number) {
+          from = start;
+          to = end;
+          return builder;
+        },
         then(resolve: (value: { error: null; data: unknown }) => void, reject?: (reason: unknown) => void) {
           try {
-            resolve(run(filters));
+            resolve(run(filters, from, to));
           } catch (err) {
             reject?.(err);
           }
@@ -97,9 +118,9 @@ describe("save measured pages", () => {
             return Promise.resolve({ error: null });
           },
           select() {
-            return query((filters) => ({
+            return query((filters, from, to) => ({
               error: null,
-              data: tables[table].filter((row) => filters.every((fn) => fn(row))),
+              data: tables[table].filter((row) => filters.every((fn) => fn(row))).slice(from, to + 1),
             }));
           },
         };
@@ -156,6 +177,7 @@ describe("save measured pages", () => {
 
     assert.equal(tables.takeoff_items.some((row) => row.id === "kept" && row.review_status === "approved"), true);
     assert.equal(tables.takeoff_items.some((row) => row.id === "stale"), false);
+    assert.equal(tables.takeoff_items.some((row) => row.id === "other-sheet"), true);
     assert.equal(inserted.length, 1);
     assert.equal(inserted[0].review_status, "suggested");
     assert.equal(inserted[0].quantity, 20);
