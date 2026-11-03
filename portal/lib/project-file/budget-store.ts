@@ -1,5 +1,6 @@
-import { computeBudgetLine, roundMoney, sumMoney } from "@/lib/project-file/money";
 import type { AnyDb } from "@/lib/project-file/api";
+import { computeBudgetLine, roundMoney, sumMoney } from "@/lib/project-file/money";
+import { readEveryRow } from "@/lib/project-file/read-every-row";
 
 export interface StoredBudgetLine {
   id: string;
@@ -25,23 +26,30 @@ export async function loadCurrentBudget(db: AnyDb, tenantId: string, projectId: 
     .maybeSingle();
   if (error) throw new Error(error.message);
   if (!budget) return null;
-  const { data: lines, error: lineError } = await db
+  // A bare select stops at PostgREST max_rows. The next cost, commitment,
+  // or budget line would otherwise vanish from revised, actual, and forecast.
+  const lines = await readEveryRow<StoredBudgetLine>((from, to) => db
     .from("project_budget_lines")
     .select("*")
     .eq("budget_id", budget.id)
     .eq("tenant_id", tenantId)
-    .order("sort_order", { ascending: true });
-  if (lineError) throw new Error(lineError.message);
-  const { data: commitments } = await db
+    .order("sort_order", { ascending: true })
+    .order("id", { ascending: true })
+    .range(from, to));
+  const commitments = await readEveryRow<{ budget_line_id: string | null; amount: number | null }>((from, to) => db
     .from("project_commitment_lines")
     .select("budget_line_id, amount")
     .eq("tenant_id", tenantId)
-    .eq("project_id", projectId);
-  const { data: actuals } = await db
+    .eq("project_id", projectId)
+    .order("id", { ascending: true })
+    .range(from, to));
+  const actuals = await readEveryRow<{ budget_line_id: string | null; amount: number | null }>((from, to) => db
     .from("project_cost_entries")
     .select("budget_line_id, amount")
     .eq("tenant_id", tenantId)
-    .eq("project_id", projectId);
+    .eq("project_id", projectId)
+    .order("id", { ascending: true })
+    .range(from, to));
 
   const committed = new Map<string, number>();
   for (const row of commitments ?? []) {
