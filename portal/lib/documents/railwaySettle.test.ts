@@ -38,6 +38,14 @@ function matches(row: Record<string, unknown>, filters: Array<[string, string, u
         if ((meta as Record<string, unknown>)[key] !== expected) return false;
       }
     }
+    if (op === "is" && col === "meta->>railway_settled_at") {
+      const meta = row.meta;
+      const settled = meta && typeof meta === "object"
+        ? (meta as Record<string, unknown>).railway_settled_at
+        : null;
+      const missing = settled == null || settled === "";
+      if (val == null ? !missing : settled !== val) return false;
+    }
   }
   return true;
 }
@@ -46,15 +54,20 @@ function createFakeDb(docs: FakeDoc[], items: FakeItem[] = []) {
   const state = { docs, items, inserts: 0 };
   function chain(table: "documents" | "takeoff_items", op: "select" | "update" | "insert", payload?: unknown) {
     const filters: Array<[string, string, unknown]> = [];
+    let limitN: number | null = null;
     const api = {
       select() { return api; },
       eq(col: string, val: unknown) { filters.push(["eq", col, val]); return api; },
       in(col: string, val: unknown) { filters.push(["in", col, val]); return api; },
       contains(col: string, val: unknown) { filters.push(["contains", col, val]); return api; },
-      limit() { return api; },
+      is(col: string, val: unknown) { filters.push(["is", col, val]); return api; },
+      order() { return api; },
+      limit(n: number) { limitN = n; return api; },
       then(resolve: (value: { data: unknown; error: null }) => void) {
         if (table === "documents" && op === "select") {
-          resolve({ data: state.docs.filter((doc) => matches(doc as unknown as Record<string, unknown>, filters)), error: null });
+          let rows = state.docs.filter((doc) => matches(doc as unknown as Record<string, unknown>, filters));
+          if (limitN != null) rows = rows.slice(0, limitN);
+          resolve({ data: rows, error: null });
           return;
         }
         if (table === "documents" && op === "update") {
@@ -182,6 +195,50 @@ describe("settleRailwayExtracts", () => {
     assert.equal(db.state.docs[0].processing_started_at, NOW.toISOString());
     assert.equal(db.state.docs[0].last_error_step, null);
     assert.equal(db.state.items.length, 0);
+  });
+
+  it("imports a new CAD extract when settled failures already fill the poll window", async () => {
+    const settled = Array.from({ length: 8 }, (_, index) => processingDoc({
+      id: `failed-${index}`,
+      status: "error",
+      last_error_step: "railway_extract",
+      meta: {
+        processing: "railway_celery",
+        railway_job_id: `failed-job-${index}`,
+        railway_settled_at: "2026-10-01T00:00:00.000Z",
+      },
+    }));
+    const live = processingDoc({
+      id: "doc-live",
+      meta: {
+        processing: "railway_celery",
+        railway_job_id: "job-live",
+        railway_enqueued_at: "2026-10-03T11:50:00.000Z",
+      },
+    });
+    const db = createFakeDb([...settled, live]);
+    const result = await settleRailwayExtracts(db, "tenant-1", {
+      now: NOW,
+      fetchJob: async (jobId) => jobId === "job-live"
+        ? {
+          status: "success",
+          ready: true,
+          successful: true,
+          result: {
+            source_type: "dxf",
+            rows: [{ description: "storm pipe", total_qty: 40, uom: "LF", cost_code: "33-40-00" }],
+          },
+        }
+        : null,
+      syncProject: async () => {},
+    });
+
+    assert.equal(result.imported, 1);
+    assert.equal(db.state.items.length, 1);
+    assert.equal(db.state.items[0].quantity, 40);
+    const saved = db.state.docs.find((doc) => doc.id === "doc-live");
+    assert.equal(saved?.status, "complete");
+    assert.equal(db.state.docs.filter((doc) => doc.id.startsWith("failed-")).every((doc) => doc.status === "error"), true);
   });
 
   it("records a worker failure instead of leaving the document processing", async () => {

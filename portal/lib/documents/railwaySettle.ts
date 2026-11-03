@@ -76,12 +76,17 @@ export async function settleRailwayExtracts(
   const syncProject = options.syncProject ?? defaultSync;
   const result: SettleRailwayResult = { imported: 0, failed: 0, waiting: 0 };
 
+  // Failed extracts stay status=error with railway_settled_at set. Leaving
+  // them in this limited poll fills the window, so a later successful job
+  // is never imported and the documents reclaim marks it timed out.
   const { data, error } = await db
     .from("documents")
     .select("id, project_id, status, processing_started_at, last_error_step, meta")
     .eq("tenant_id", tenantId)
     .in("status", ["processing", "error"])
     .contains("meta", { processing: RAILWAY_PROCESSING_KIND })
+    .is("meta->>railway_settled_at", null)
+    .order("processing_started_at", { ascending: true })
     .limit(8);
   if (error) throw error;
 
