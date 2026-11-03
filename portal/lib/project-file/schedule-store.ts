@@ -1,4 +1,4 @@
-import { computeCpm, CpmCycleError, durationDays } from "@/lib/project-file/cpm";
+import { computeCpm, CpmCycleError, durationDays, previewScheduleChange, type ScheduleChangeInput } from "@/lib/project-file/cpm";
 import type { AnyDb } from "@/lib/project-file/api";
 
 interface TaskRow {
@@ -10,6 +10,21 @@ interface TaskRow {
   deps: string[] | null;
   status: string;
   percent_complete: number | null;
+}
+
+export async function assertScheduleChangeIsAcyclic(
+  db: AnyDb,
+  tenantId: string,
+  projectId: string,
+  change: ScheduleChangeInput,
+): Promise<void> {
+  const { data, error } = await db
+    .from("schedule_tasks")
+    .select("id, duration, start_date, end_date, deps")
+    .eq("tenant_id", tenantId)
+    .eq("project_id", projectId);
+  if (error) throw new Error(error.message);
+  previewScheduleChange((data ?? []) as ScheduleChangeInput[], change);
 }
 
 export async function recomputeProjectSchedule(db: AnyDb, tenantId: string, projectId: string): Promise<{ updated: number }> {
