@@ -22,6 +22,39 @@ const TERMINAL_DOC = new Set([
 
 const TERMINAL_TAKEOFF = new Set(["done", "error", "skipped"]);
 
+/** PostgREST stops an unbounded select at `max_rows` (default 1000). */
+const PAGE_ROW_CHUNK = 1000;
+
+type FinalizePageRow = {
+  document_id: string;
+  status: string | null;
+  takeoff_status: string | null;
+  page_number?: number | null;
+};
+
+/** Every split page, including rows past the first PostgREST page. */
+async function loadFinalizePages(
+  db: AnyDb,
+  tenantId: string,
+  documentIds: string[],
+): Promise<{ pages: FinalizePageRow[]; error: { message: string } | null }> {
+  const pages: FinalizePageRow[] = [];
+  for (let offset = 0; ; offset += PAGE_ROW_CHUNK) {
+    const { data, error } = await db
+      .from("document_pages")
+      .select("document_id, status, takeoff_status, page_number")
+      .eq("tenant_id", tenantId)
+      .in("document_id", documentIds)
+      .order("id", { ascending: true })
+      .range(offset, offset + PAGE_ROW_CHUNK - 1);
+    if (error) return { pages: [], error };
+    const batch = (data ?? []) as FinalizePageRow[];
+    pages.push(...batch);
+    if (batch.length < PAGE_ROW_CHUNK) break;
+  }
+  return { pages, error: null };
+}
+
 export type FinalizeResult = {
   documentId: string;
   status: string;
@@ -59,11 +92,7 @@ export async function finalizeDocumentsFromOcr(
   if (!docs?.length) return [];
 
   const ids = (docs as Array<{ id: string }>).map((d) => d.id);
-  const { data: pages, error: pagesErr } = await db
-    .from("document_pages")
-    .select("document_id, status, takeoff_status, page_number")
-    .eq("tenant_id", tenantId)
-    .in("document_id", ids);
+  const { pages, error: pagesErr } = await loadFinalizePages(db, tenantId, ids);
   if (pagesErr) {
     console.error("[finalizeDocumentsFromOcr] list pages", pagesErr);
     return [];
@@ -77,12 +106,7 @@ export async function finalizeDocumentsFromOcr(
     takeoffError: number;
     pageNumbers: number[];
   }>();
-  for (const p of (pages ?? []) as Array<{
-    document_id: string;
-    status: string | null;
-    takeoff_status: string | null;
-    page_number?: number | null;
-  }>) {
+  for (const p of pages) {
     const cur = byDoc.get(p.document_id) ?? {
       total: 0, done: 0, errored: 0, takeoffInFlight: 0, takeoffError: 0, pageNumbers: [],
     };
