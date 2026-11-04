@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { aiCreditGrant, billingPeriodEnded } from "@/lib/billing/credit-grant";
 import { getPaddleConfig, verifyWebhookSignature } from "@/lib/billing/paddle";
 import { getTenantBilling, setTenantBilling } from "@/lib/billing/tenantBilling";
 import { PLANS, type PlanTier } from "@/lib/billing/plans";
@@ -106,6 +107,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           break;
         }
 
+        const period = getObj(data, "current_billing_period");
+        const periodEndsAt = period ? getStr(period, "ends_at") ?? null : null;
+        const nowMs = Date.now();
+        // A follow-up subscription.updated for an ended cancellation still
+        // carries the old price. Leave the tenant on trial instead of
+        // restoring that paid plan and its credit allotment.
+        if (status === "canceled" && billingPeriodEnded(periodEndsAt, nowMs)) {
+          await setTenantBilling(tenantId, {
+            plan_tier: "trial",
+            subscription_status: "canceled",
+            paddle_customer_id: paddleCustomerId,
+            paddle_subscription_id: paddleSubscriptionId,
+          });
+          break;
+        }
+
         const priceId = firstPriceId(data);
         const tierInfo = priceId ? planTierFromPriceId(priceId) : null;
         if (!tierInfo) {
@@ -113,17 +130,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           break;
         }
 
-        const resetAt = new Date(
-          Date.now() + 30 * 24 * 60 * 60 * 1000,
-        ).toISOString();
+        const creditGrant = aiCreditGrant({
+          status,
+          periodEndsAt,
+          storedResetAt: existing?.ai_credits_reset_at ?? null,
+          previousTier: existing?.plan_tier ?? null,
+          nextTier: tierInfo.plan_tier,
+          nextCredits: tierInfo.ai_credits,
+          nowMs,
+        });
 
         await setTenantBilling(tenantId, {
           plan_tier: tierInfo.plan_tier,
           subscription_status: status,
           paddle_customer_id: paddleCustomerId,
           paddle_subscription_id: paddleSubscriptionId,
-          ai_credits_remaining: tierInfo.ai_credits,
-          ai_credits_reset_at: resetAt,
+          ...(creditGrant ?? {}),
         });
         break;
       }
@@ -147,13 +169,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         }
 
         const period = getObj(data, "current_billing_period");
-        const endsAtStr = period ? getStr(period, "ends_at") : null;
-        const endsAt = endsAtStr ? new Date(endsAtStr).getTime() : null;
-        const periodEnded = endsAt !== null && endsAt < Date.now();
+        const endsAtStr = period ? getStr(period, "ends_at") ?? null : null;
 
         await setTenantBilling(tenantId, {
           subscription_status: "canceled",
-          ...(periodEnded ? { plan_tier: "trial" as PlanTier } : {}),
+          ...(billingPeriodEnded(endsAtStr, Date.now()) ? { plan_tier: "trial" as PlanTier } : {}),
         });
         break;
       }
