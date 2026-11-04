@@ -10,6 +10,7 @@ import { fetchDriveFileSize } from "@/lib/google/driveFile";
 import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
 import { PDFDocument } from "pdf-lib";
 import { looksLikePdf, publishSheetPages } from "@/lib/documents/sheet-pages";
+import { ingestCompletion } from "@/lib/documents/ingest-completion";
 import { missingPageNumbers, normalizeDocumentClass, pdfDeclaresEncryption } from "@/lib/documents/processing-display";
 import { extractionFromPageText, readPdfPageText } from "@/lib/documents/extraction-fallback";
 import { measurePdfBytes, saveMeasuredPages } from "@/lib/takeoff/measure-pdf";
@@ -465,6 +466,10 @@ export async function POST(
       }
     }
 
+    // Replace search text on every pass. A geometry failure leaves the file
+    // processing, and the retry would otherwise insert a second copy.
+    const { error: clearChunksErr } = await db.from("chunks").delete().eq("document_id", docId).eq("tenant_id", resolvedTenantId);
+    if (clearChunksErr) throw new Error(`Chunks clear failed: ${clearChunksErr.message}`);
     if (chunkRows.length > 0) {
       const { error: chunksErr } = await db.from("chunks").insert(chunkRows);
       if (chunksErr) throw new Error(`Chunks insert failed: ${chunksErr.message}`);
@@ -496,13 +501,17 @@ export async function POST(
       }
     }
 
-    const finalStatus = geometryMeasured || missingPages.length === 0 ? "complete" : "processing";
+    const completion = ingestCompletion({
+      geometryRequired: Boolean(pdfDocument && pdfBytes.byteLength > 0),
+      geometryMeasured,
+      missingPages,
+    });
     await db.from("documents").update({
-      status: finalStatus,
-      processed_at: geometryMeasured || missingPages.length === 0 ? new Date().toISOString() : null,
-      last_error: !geometryMeasured && missingPages.length > 0 ? `Missing pages: ${missingPages.join(", ")}` : null,
-      last_error_step: !geometryMeasured && missingPages.length > 0 ? "parse" : null,
-      ...(geometryMeasured ? { takeoff_status: "done" } : {}),
+      status: completion.status,
+      processed_at: completion.processedAt ? new Date().toISOString() : null,
+      last_error: completion.lastError,
+      last_error_step: completion.lastErrorStep,
+      ...(completion.takeoffDone ? { takeoff_status: "done" } : {}),
       meta: {
         ...meta,
         title: extraction.title ?? null,
@@ -513,7 +522,7 @@ export async function POST(
           reader: "local",
           geometry_measured: geometryMeasured,
           unscaled_pages: unscaledPages,
-          takeoff_done: geometryMeasured,
+          takeoff_done: completion.takeoffDone,
         },
       },
     }).eq("id", docId).eq("tenant_id", resolvedTenantId);
