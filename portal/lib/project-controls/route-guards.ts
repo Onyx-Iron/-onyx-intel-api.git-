@@ -13,10 +13,32 @@ import {
   type RoleLookup,
 } from "@/lib/project-controls/permissions";
 
-/** Clerk org role for this request, used to recognize the workspace owner. */
-export async function roleLookupFor(userId: string): Promise<RoleLookup> {
+type ClerkSessionForRole = {
+  userId: string | null;
+  orgId?: string | null;
+  orgRole?: string | null;
+};
+
+async function readClerkSession(): Promise<ClerkSessionForRole> {
+  const session = await auth();
+  return {
+    userId: session.userId,
+    orgId: session.orgId,
+    orgRole: session.orgRole,
+  };
+}
+
+/**
+ * Clerk org role for this request, used to recognize the workspace owner.
+ * A session for a different user, or a Clerk failure, yields no role so the
+ * caller cannot inherit someone else's org admin.
+ */
+export async function roleLookupFor(
+  userId: string,
+  readSession: () => Promise<ClerkSessionForRole> = readClerkSession,
+): Promise<RoleLookup> {
   try {
-    const session = await auth();
+    const session = await readSession();
     if (session.userId !== userId) return {};
     return { orgId: session.orgId, orgRole: session.orgRole };
   } catch {

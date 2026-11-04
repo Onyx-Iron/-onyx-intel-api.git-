@@ -18,4 +18,28 @@ describe("excludeUnscaledManualTakeoff", () => {
     assert.equal(result.held, 2);
     assert.deepEqual(result.items.map((item) => item.id), ["scaled-wall", "extracted"]);
   });
+
+  it("holds rows marked manual only on the extraction method", () => {
+    const result = excludeUnscaledManualTakeoff(
+      [
+        {
+          id: "meta-manual",
+          source_method: "deterministic",
+          sheet_id: "page-raw",
+          meta: { extraction_method: "manual" },
+          quantity: 400,
+        },
+        {
+          id: "meta-scaled",
+          source_method: "vision",
+          sheet_id: "page-scaled",
+          meta: { extraction_method: "manual" },
+          quantity: 12,
+        },
+      ],
+      new Set(["page-scaled"]),
+    );
+    assert.equal(result.held, 1);
+    assert.deepEqual(result.items.map((item) => item.id), ["meta-scaled"]);
+  });
 });

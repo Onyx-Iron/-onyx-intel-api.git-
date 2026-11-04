@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
+import { clampProcessingEventLimit } from "@/lib/documents/eventLimit";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 
 export const dynamic = "force-dynamic";
@@ -33,8 +34,7 @@ export async function GET(
       .maybeSingle();
     if (docErr || !doc) return NextResponse.json({ error: "Document not found" }, { status: 404 });
 
-    const limitRaw = Number(req.nextUrl.searchParams.get("limit") ?? "80");
-    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(1, Math.floor(limitRaw)), 200) : 80;
+    const limit = clampProcessingEventLimit(req.nextUrl.searchParams.get("limit"));
 
     const { data: events, error } = await db
       .from("document_processing_events")

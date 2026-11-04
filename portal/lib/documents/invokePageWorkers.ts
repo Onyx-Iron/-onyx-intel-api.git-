@@ -25,10 +25,20 @@ function isRetryableStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
+function defaultWait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export interface PageWorkerInvokeOptions {
+  /** Replaces the backoff delay. Production uses exponential setTimeout waits. */
+  wait?: (ms: number) => Promise<void>;
+}
+
 async function invokeFunction(
   slug: "page-processor" | "page-takeoff-worker",
   payload: PageWorkerPayload,
   maxAttempts = 3,
+  wait: (ms: number) => Promise<void> = defaultWait,
 ): Promise<void> {
   const { base, serviceKey } = getSupabaseFunctionsBase();
   const url = `${base}/functions/v1/${slug}`;
@@ -48,7 +58,7 @@ async function invokeFunction(
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       if (attempt === maxAttempts) throw lastError;
-      await new Promise((r) => setTimeout(r, 500 * 2 ** (attempt - 1)));
+      await wait(500 * 2 ** (attempt - 1));
       continue;
     }
 
@@ -59,16 +69,16 @@ async function invokeFunction(
     if (!isRetryableStatus(res.status)) throw err;
     lastError = err;
     if (attempt === maxAttempts) throw lastError;
-    await new Promise((r) => setTimeout(r, 500 * 2 ** (attempt - 1)));
+    await wait(500 * 2 ** (attempt - 1));
   }
 
   throw lastError ?? new Error(`${slug} invoke failed`);
 }
 
-export function invokePageProcessor(payload: PageWorkerPayload): Promise<void> {
-  return invokeFunction("page-processor", payload);
+export function invokePageProcessor(payload: PageWorkerPayload, options?: PageWorkerInvokeOptions): Promise<void> {
+  return invokeFunction("page-processor", payload, 3, options?.wait);
 }
 
-export function invokePageTakeoffWorker(payload: PageWorkerPayload): Promise<void> {
-  return invokeFunction("page-takeoff-worker", payload);
+export function invokePageTakeoffWorker(payload: PageWorkerPayload, options?: PageWorkerInvokeOptions): Promise<void> {
+  return invokeFunction("page-takeoff-worker", payload, 3, options?.wait);
 }
