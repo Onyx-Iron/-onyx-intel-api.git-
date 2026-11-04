@@ -5,7 +5,7 @@ import type { TablesUpdate } from "@/lib/supabase/types";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditUpdate, auditDelete } from "@/lib/audit";
-import { recomputeProjectSchedule } from "@/lib/project-file/schedule-store";
+import { deleteScheduleTask, recomputeProjectSchedule, ScheduleTaskDeleteError } from "@/lib/project-file/schedule-store";
 import { CpmCycleError } from "@/lib/project-file/cpm";
 
 interface RouteContext {
@@ -152,14 +152,20 @@ export async function DELETE(_req: NextRequest, context: RouteContext): Promise<
       .eq("tenant_id", tenantId)
       .maybeSingle();
 
-    const { error } = await db
-      .from("schedule_tasks")
-      .delete()
-      .eq("id", id)
-      .eq("tenant_id", tenantId);
-
-    if (error) {
-      return NextResponse.json({ error: `[DELETE /api/schedule/${id}] ${error.message}` }, { status: 422 });
+    let removed: Awaited<ReturnType<typeof deleteScheduleTask>>;
+    try {
+      removed = await deleteScheduleTask(db, tenantId, id);
+    } catch (err) {
+      if (err instanceof CpmCycleError) {
+        return NextResponse.json({ error: err.message }, { status: 409 });
+      }
+      if (err instanceof ScheduleTaskDeleteError) {
+        return NextResponse.json({ error: `[DELETE /api/schedule/${id}] ${err.message}` }, { status: 422 });
+      }
+      throw err;
+    }
+    if (!removed.deleted) {
+      return NextResponse.json({ error: "Schedule task not found" }, { status: 404 });
     }
 
     auditDelete({
