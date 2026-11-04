@@ -7,7 +7,7 @@ import { parsePagination, paginationMeta } from "@/lib/pagination";
 import { logEvent } from "@/lib/activity";
 import { auditInsert } from "@/lib/audit";
 import { scheduleTaskCreateSchema, parseBody } from "@/lib/validation";
-import { recomputeProjectSchedule } from "@/lib/project-file/schedule-store";
+import { readAllPages, recomputeProjectSchedule } from "@/lib/project-file/schedule-store";
 import { CpmCycleError } from "@/lib/project-file/cpm";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
@@ -23,15 +23,38 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
-    const { page, limit, offset } = parsePagination(req.nextUrl.searchParams);
-
     const db = await createServiceClient();
+
+    // The schedule screen asks for the project with no page. The default
+    // page size is 50, so every task after that disappeared from the list
+    // and the timeline. An explicit page or limit still paginates.
+    const explicitPage = req.nextUrl.searchParams.has("page") || req.nextUrl.searchParams.has("limit");
+    if (!explicitPage) {
+      const tasks = await readAllPages(async (offset, limit) => {
+        const { data, error } = await db
+          .from("schedule_tasks")
+          .select("*")
+          .eq("tenant_id", tenantId)
+          .eq("project_id", projectId)
+          .order("created_at", { ascending: true })
+          .order("id", { ascending: true })
+          .range(offset, offset + limit - 1);
+        return { data, error };
+      });
+      return NextResponse.json({
+        tasks,
+        pagination: paginationMeta(tasks.length, 1, Math.max(tasks.length, 1)),
+      });
+    }
+
+    const { page, limit, offset } = parsePagination(req.nextUrl.searchParams);
     const { data, error, count } = await db
       .from("schedule_tasks")
       .select("*", { count: "exact" })
       .eq("tenant_id", tenantId)
       .eq("project_id", projectId)
       .order("created_at", { ascending: true })
+      .order("id", { ascending: true })
       .range(offset, offset + limit - 1);
 
     if (error) {
