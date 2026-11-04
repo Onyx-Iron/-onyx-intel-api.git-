@@ -9,6 +9,9 @@ import { scoreCostConfidence } from "@/lib/cost/confidence";
 import { scaleMoney, selectLocationFactor, type LocationIndexRow } from "@/lib/cost/location-adjust";
 import { normalizeRegionToken, regionCodeAliases } from "@/lib/cost/region-code";
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyDb = any;
+
 export interface CostResolveInput {
   cost_code: string;
   tenant_id: string;
@@ -113,10 +116,10 @@ function applyPpiAging(
 // national cost_prices → none.
 export async function resolveCost(
   input: CostResolveInput,
+  injectedDb?: AnyDb,
 ): Promise<CostResolveResult> {
   const { cost_code, tenant_id, region } = input;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const db = (await createServiceClient()) as any;
+  const db: AnyDb = injectedDb ?? await createServiceClient();
   const pctChangeByDivision = await loadPctChangeByDivision(db);
 
   // 1) Look up cost_code row
@@ -376,10 +379,10 @@ function regionKey(input: CostResolveInput): string {
  */
 export async function resolveCostsBatch(
   inputs: CostResolveInput[],
+  injectedDb?: AnyDb,
 ): Promise<CostResolveResult[]> {
   if (inputs.length === 0) return [];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const db = (await createServiceClient()) as any;
+  const db: AnyDb = injectedDb ?? await createServiceClient();
   const pctChangeByDivision = await loadPctChangeByDivision(db);
 
   const results = new Map<CostResolveInput, CostResolveResult>();
