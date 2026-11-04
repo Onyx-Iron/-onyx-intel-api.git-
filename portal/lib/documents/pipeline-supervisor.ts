@@ -7,9 +7,13 @@
 
 export const SUPERVISOR_ATTEMPT_CAP = 5;
 
+/** A split batch that has not refreshed since this is treated as stalled. */
+export const SPLIT_BATCH_STALE_MS = 15 * 60 * 1000;
+
 export type SupervisorActionName =
   | "kick_split"
   | "portal_split"
+  | "resume_split"
   | "measure"
   | "kick_takeoff"
   | "terminal"
@@ -24,6 +28,8 @@ export interface SupervisorSnapshot {
   attempts: number;
   last_error?: string | null;
   last_action?: string | null;
+  /** Set while a page-split batch is still uploading. Null means the first batch has not checkpointed. */
+  processing_started_at?: string | null;
 }
 
 export interface SupervisorDecision {
@@ -42,7 +48,40 @@ export function isUnretryableDocumentError(error: string | null | undefined): bo
     || lower.includes("malformed");
 }
 
-export function nextSupervisorAction(doc: SupervisorSnapshot): SupervisorDecision {
+/**
+ * True when some pages are stored but the split worker has not finished the
+ * deck. `processing` is the checkpoint the worker sets until the last batch.
+ * Downstream measure/takeoff would close the set on that prefix.
+ */
+export function splitBatchStillOpen(doc: Pick<SupervisorSnapshot, "pages_on_disk" | "split_status">): boolean {
+  if (doc.pages_on_disk <= 0) return false;
+  return doc.split_status === "processing";
+}
+
+/**
+ * A live first batch has no checkpoint yet, so a null start time is not stale.
+ * Reclaim already moved error/failed files off the worker; those are stalled.
+ */
+export function splitBatchStale(
+  doc: Pick<SupervisorSnapshot, "status" | "processing_started_at">,
+  now = Date.now(),
+): boolean {
+  if (doc.status === "error" || doc.status === "failed") return true;
+  if (!doc.processing_started_at) return false;
+  const started = Date.parse(doc.processing_started_at);
+  if (!Number.isFinite(started)) return true;
+  return now - started >= SPLIT_BATCH_STALE_MS;
+}
+
+/** Continuation cursor saved by the page-split worker. Null starts the worker at page 1. */
+export function resumeSplitPageFrom(summary: Record<string, unknown>): number | null {
+  const raw = summary.next_page_from;
+  const page = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+  if (!Number.isInteger(page) || page < 1) return null;
+  return page;
+}
+
+export function nextSupervisorAction(doc: SupervisorSnapshot, now = Date.now()): SupervisorDecision {
   if (isUnretryableDocumentError(doc.last_error)) {
     return { action: "terminal", reason: "password_or_damaged" };
   }
@@ -51,6 +90,12 @@ export function nextSupervisorAction(doc: SupervisorSnapshot): SupervisorDecisio
   }
   if (doc.attempts >= SUPERVISOR_ATTEMPT_CAP) {
     return { action: "terminal", reason: "attempt_cap" };
+  }
+  if (splitBatchStillOpen(doc)) {
+    if (splitBatchStale(doc, now)) {
+      return { action: "resume_split", reason: "split_batch_stalled" };
+    }
+    return { action: "idle", reason: "split_batch_in_flight" };
   }
   if (doc.pages_on_disk <= 0) {
     const workerAlreadyTried = doc.last_action === "kick_split"

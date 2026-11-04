@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { nextSupervisorAction, takeoffKickUsesModel } from "./pipeline-supervisor.ts";
+import {
+  nextSupervisorAction,
+  resumeSplitPageFrom,
+  SPLIT_BATCH_STALE_MS,
+  takeoffKickUsesModel,
+} from "./pipeline-supervisor.ts";
 
 const base = {
   status: "queued",
@@ -34,6 +39,30 @@ describe("document supervisor", () => {
       measured: true,
       takeoff_done: true,
     }).action, "idle");
+  });
+
+  it("does not measure a multi-batch split that still has pages left", () => {
+    const now = Date.parse("2026-11-04T09:00:00Z");
+    const partial = {
+      ...base,
+      status: "processing",
+      split_status: "processing",
+      pages_on_disk: 75,
+      processing_started_at: new Date(now - 60_000).toISOString(),
+    };
+    assert.equal(nextSupervisorAction(partial, now).action, "idle");
+    assert.equal(nextSupervisorAction(partial, now).reason, "split_batch_in_flight");
+
+    const stalled = {
+      ...partial,
+      processing_started_at: new Date(now - SPLIT_BATCH_STALE_MS - 1_000).toISOString(),
+    };
+    assert.equal(nextSupervisorAction(stalled, now).action, "resume_split");
+
+    const reclaimed = { ...partial, status: "error", processing_started_at: null };
+    assert.equal(nextSupervisorAction(reclaimed, now).action, "resume_split");
+    assert.equal(resumeSplitPageFrom({ next_page_from: 76 }), 76);
+    assert.equal(resumeSplitPageFrom({}), null);
   });
 
   it("stops on a password-protected file and at the attempt cap", () => {

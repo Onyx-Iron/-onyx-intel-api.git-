@@ -3,7 +3,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { invokePageSplitWorker } from "@/lib/documents/pageSplitWorker";
 import { publishSheetPages } from "@/lib/documents/sheet-pages";
 import { resolveDocumentStorageBucket } from "@/lib/documents/storage";
-import { nextSupervisorAction, type SupervisorSnapshot } from "@/lib/documents/pipeline-supervisor";
+import { nextSupervisorAction, resumeSplitPageFrom, type SupervisorSnapshot } from "@/lib/documents/pipeline-supervisor";
 import { measurePdfBytes, saveMeasuredPages } from "@/lib/takeoff/measure-pdf";
 
 export const runtime = "nodejs";
@@ -81,7 +81,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const db = await createServiceClient() as unknown as AnyDb;
   const listed = await db
     .from("documents")
-    .select("id, tenant_id, project_id, file_name, status, split_status, takeoff_status, last_error, meta")
+    .select("id, tenant_id, project_id, file_name, status, split_status, takeoff_status, last_error, processing_started_at, meta")
     .in("status", ["queued", "pending", "processing", "split", "error", "failed", "complete_with_errors"])
     .order("uploaded_at", { ascending: true })
     .limit(8);
@@ -99,6 +99,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       status: String(raw.status ?? ""),
       split_status: raw.split_status == null ? null : String(raw.split_status),
       takeoff_status: raw.takeoff_status == null ? null : String(raw.takeoff_status),
+      processing_started_at: raw.processing_started_at == null ? null : String(raw.processing_started_at),
       last_error: raw.last_error == null ? null : String(raw.last_error),
       meta: (raw.meta && typeof raw.meta === "object" ? raw.meta : {}) as Record<string, unknown>,
     };
@@ -114,6 +115,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const snapshot: SupervisorSnapshot = {
       status: doc.status,
       split_status: doc.split_status,
+      processing_started_at: doc.processing_started_at,
       pages_on_disk: pagesOnDisk,
       measured: summary.geometry_measured === true,
       takeoff_done: doc.takeoff_status === "done" || summary.takeoff_done === true,
@@ -142,6 +144,20 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           user_id: "supervisor",
           is_local_upload: true,
           source_bucket: resolveDocumentStorageBucket(doc.meta),
+        });
+      } else if (decision.action === "resume_split") {
+        const storagePath = typeof doc.meta.storage_path === "string" ? doc.meta.storage_path : null;
+        if (!storagePath || !doc.project_id) throw new Error("Document has no stored PDF to resume split");
+        const pageFrom = resumeSplitPageFrom(summary);
+        await invokePageSplitWorker({
+          document_id: doc.id,
+          tenant_id: doc.tenant_id,
+          project_id: doc.project_id,
+          original_path: storagePath,
+          user_id: "supervisor",
+          is_local_upload: true,
+          source_bucket: resolveDocumentStorageBucket(doc.meta),
+          ...(pageFrom != null ? { page_from: pageFrom } : {}),
         });
       } else if (decision.action === "portal_split") {
         const storagePath = typeof doc.meta.storage_path === "string" ? doc.meta.storage_path : null;

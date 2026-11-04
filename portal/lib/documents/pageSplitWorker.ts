@@ -4,6 +4,8 @@ export interface PageSplitPayloadBase {
   project_id: string;
   original_path: string;
   user_id: string;
+  /** 1-based page to continue a stalled multi-batch split. Omitted restarts at page 1. */
+  page_from?: number;
 }
 
 export type PageSplitPayload =
