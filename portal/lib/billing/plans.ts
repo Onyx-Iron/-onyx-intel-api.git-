@@ -149,3 +149,46 @@ export function getPlan(tier: PlanTier): PlanDef {
   }
   return plan;
 }
+
+export function isPlanTier(value: string | null | undefined): value is PlanTier {
+  return value != null && (TIER_ORDER as readonly string[]).includes(value);
+}
+
+/**
+ * Seats this workspace may fill.
+ *
+ * A Paddle plan change stores `plan_tier` but used to leave `seat_limit` at
+ * the trial default of 1, so Crew and Business could not invite. A stored
+ * limit other than that default is an explicit override and wins. An active
+ * comp grant bypasses the cap, matching the rest of the billing gate.
+ */
+export function effectiveSeatLimit(input: {
+  planTier: string | null | undefined;
+  storedSeatLimit: number | null | undefined;
+  compUntil?: string | null;
+  now?: number;
+}): number {
+  const now = input.now ?? Date.now();
+  if (input.compUntil) {
+    const until = new Date(input.compUntil).getTime();
+    if (Number.isFinite(until) && until > now) return getPlan("comp").seatLimit;
+  }
+  const tier = isPlanTier(input.planTier) ? input.planTier : "trial";
+  const catalog = getPlan(tier).seatLimit;
+  const stored = input.storedSeatLimit;
+  const trialCap = getPlan("trial").seatLimit;
+  if (stored == null || !Number.isFinite(stored)) return catalog;
+  if (stored === trialCap && catalog !== trialCap) return catalog;
+  return stored;
+}
+
+/** Members plus outstanding invitations. Accepted invites become members. */
+export function occupiedSeatCount(members: number, pendingInvitations: number): number {
+  const memberCount = Number.isFinite(members) ? Math.max(0, members) : 0;
+  const pendingCount = Number.isFinite(pendingInvitations) ? Math.max(0, pendingInvitations) : 0;
+  return memberCount + pendingCount;
+}
+
+export function seatLimitReached(occupied: number, seatLimit: number): boolean {
+  return seatLimit !== -1 && occupied >= seatLimit;
+}

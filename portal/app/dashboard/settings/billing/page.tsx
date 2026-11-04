@@ -7,7 +7,7 @@ import {
   authTenantName,
 } from "@/lib/project-controls/server";
 import { getTenantBilling } from "@/lib/billing/tenantBilling";
-import { getPlan, type PlanTier } from "@/lib/billing/plans";
+import { effectiveSeatLimit, getPlan, type PlanTier } from "@/lib/billing/plans";
 import { getPaddleConfig } from "@/lib/billing/paddle";
 import PageHero from "@/components/layout/PageHero";
 
@@ -87,7 +87,12 @@ export default async function BillingSettingsPage() {
   const trialDays = tier === "trial" ? daysUntil(billing?.trial_ends_at ?? null) : null;
 
   const seatsUsed = billing?.seats_used ?? 0;
-  const seatsTotal = billing?.seat_limit ?? plan.seatLimit;
+  const seatsTotal = effectiveSeatLimit({
+    planTier: tier,
+    storedSeatLimit: billing?.seat_limit,
+    compUntil: billing?.comp_until,
+    now,
+  });
   const aiTotal = plan.aiCreditsPerMonth;
   const aiRemaining = billing?.ai_credits_remaining ?? aiTotal;
   const aiUsed = aiTotal === -1 ? 0 : Math.max(0, aiTotal - aiRemaining);

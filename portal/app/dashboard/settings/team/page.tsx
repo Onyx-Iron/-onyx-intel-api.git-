@@ -6,6 +6,7 @@ import {
   authTenantKey,
   authTenantName,
 } from "@/lib/project-controls/server";
+import { effectiveSeatLimit } from "@/lib/billing/plans";
 import { getTenantBilling } from "@/lib/billing/tenantBilling";
 import PageHero from "@/components/layout/PageHero";
 import TeamManager from "./TeamManager";
@@ -30,7 +31,11 @@ export default async function TeamSettingsPage() {
     authTenantName(userId, orgSlug),
   );
   const billing = await getTenantBilling(tenantId);
-  const seatLimit = billing?.seat_limit ?? 1;
+  const seatLimit = effectiveSeatLimit({
+    planTier: billing?.plan_tier,
+    storedSeatLimit: billing?.seat_limit,
+    compUntil: billing?.comp_until,
+  });
 
   let members: MemberRow[] = [];
   let isAdmin = false;
