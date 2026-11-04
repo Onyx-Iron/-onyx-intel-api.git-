@@ -121,6 +121,71 @@ describe("project cost math", () => {
     assert.equal(posted[1].amount + removed[1].amount, 0);
   });
 
+  it("posts only the difference when an approved change order amount changes", () => {
+    const even = changeOrderBudgetDelta(
+      { status: "approved", amount: 10000 },
+      { status: "approved", amount: 12000 },
+      ["concrete", "rebar"],
+      [],
+    );
+    assert.deepEqual(even, [
+      { budgetLineId: "concrete", amount: 1000 },
+      { budgetLineId: "rebar", amount: 1000 },
+    ]);
+
+    const weighted = changeOrderBudgetDelta(
+      { status: "approved", amount: 10000 },
+      { status: "approved", amount: 12000 },
+      ["ignored"],
+      [
+        { budgetLineId: "concrete", amount: 9000 },
+        { budgetLineId: "rebar", amount: 1000 },
+      ],
+    );
+    assert.deepEqual(weighted, [
+      { budgetLineId: "concrete", amount: 1800 },
+      { budgetLineId: "rebar", amount: 200 },
+    ]);
+  });
+
+  it("splits a posted change across budget lines without losing a cent", () => {
+    const delta = changeOrderBudgetDelta(
+      { status: "pending", amount: 10 },
+      { status: "approved", amount: 10 },
+      ["a", "b", "c"],
+      [],
+    );
+    assert.deepEqual(delta, [
+      { budgetLineId: "a", amount: 3.33 },
+      { budgetLineId: "b", amount: 3.33 },
+      { budgetLineId: "c", amount: 3.34 },
+    ]);
+    assert.equal(delta.reduce((sum, line) => sum + line.amount, 0), 10);
+  });
+
+  it("puts a credit back on the budget when an approved credit is voided", () => {
+    const delta = changeOrderBudgetDelta(
+      { status: "approved", amount: -2500 },
+      { status: "void", amount: -2500 },
+      ["concrete"],
+      [],
+    );
+    assert.deepEqual(delta, [{ budgetLineId: "concrete", amount: 2500 }]);
+  });
+
+  it("keeps a zero event line from taking a share or falling back to other links", () => {
+    const delta = changeOrderBudgetDelta(
+      { status: "draft", amount: 10000 },
+      { status: "approved", amount: 10000 },
+      ["ignored"],
+      [
+        { budgetLineId: "concrete", amount: 10000 },
+        { budgetLineId: "rebar", amount: 0 },
+      ],
+    );
+    assert.deepEqual(delta, [{ budgetLineId: "concrete", amount: 10000 }]);
+  });
+
   it("forecasts the remainder unless a line override is set", () => {
     const computed = computeBudgetLine({
       original: 1000,
