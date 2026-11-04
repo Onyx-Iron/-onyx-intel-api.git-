@@ -8,6 +8,7 @@ import { applyVersionPercentages, calculateEstimateTotals, calculateItem } from 
 import { quantityForLinkedLine } from "@/lib/estimating/linked-quantity";
 import { pricingStatusAfterEdit, type PricingStatusLine } from "@/lib/estimating/pricing-status";
 import { recordEstimateAudit, recordEstimateAuditBatch } from "@/lib/estimating/audit";
+import { estimateItemIdsOutsideVersion } from "@/lib/writes/scoped-ids";
 
 export const runtime = "nodejs";
 
@@ -149,6 +150,38 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     throw e;
   }
 
+  const submittedItems = Array.isArray(body.items) ? body.items : [];
+  let existingRows: Array<{ id: string }> = [];
+  if (submittedItems.length > 0) {
+    const loaded = await db
+      .from("estimate_items")
+      .select("*")
+      .eq("estimate_version_id", id);
+    if (loaded.error) return NextResponse.json({ error: loaded.error.message }, { status: 500 });
+    existingRows = (loaded.data ?? []) as Array<{ id: string }>;
+    const knownIds = new Set(existingRows.map((row) => row.id));
+    const unseenIds = [...new Set(
+      submittedItems
+        .map((item) => item.id)
+        .filter((itemId): itemId is string => typeof itemId === "string" && itemId !== "" && !knownIds.has(itemId)),
+    )];
+    if (unseenIds.length > 0) {
+      const { data: located, error: locatedError } = await db
+        .from("estimate_items")
+        .select("id, tenant_id, estimate_version_id")
+        .in("id", unseenIds);
+      if (locatedError) return NextResponse.json({ error: locatedError.message }, { status: 500 });
+      const outside = estimateItemIdsOutsideVersion(
+        (located ?? []) as Array<{ id: string; tenant_id: string; estimate_version_id: string | null }>,
+        tenantId,
+        id,
+      );
+      if (outside.length > 0) {
+        return NextResponse.json({ error: "Estimate item belongs to another version" }, { status: 409 });
+      }
+    }
+  }
+
   // Version-level percentage settings (the "sliders") update the version
   // row directly — draft-only, same lock as items. This is the internal
   // day-to-day editing path; the separate buyer-adjustment endpoint is for
@@ -173,11 +206,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     return NextResponse.json({ items: [], totals, version: effectiveVersion });
   }
 
-  const { data: existingRows } = await db
-    .from("estimate_items")
-    .select("*")
-    .eq("estimate_version_id", id);
-  const existingById = new Map((existingRows ?? []).map((row: { id: string }) => [row.id, row]));
+  const existingById = new Map(existingRows.map((row) => [row.id, row]));
 
   const pct = {
     contingencyPct: effectiveVersion.contingency_pct ?? 0,
@@ -213,8 +242,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       quantity: item.quantity, indirectCost,
       contingency: derived.contingency, overhead: derived.overhead, profit: derived.profit,
     });
-    const isUpdate = item.id != null && existingById.has(item.id);
-    const existing = isUpdate ? existingById.get(item.id) as PricingStatusLine & { source_takeoff_id?: string | null } : undefined;
+    const submittedId = item.id;
+    const existing = submittedId != null && existingById.has(submittedId)
+      ? existingById.get(submittedId) as PricingStatusLine & { source_takeoff_id?: string | null }
+      : undefined;
+    const isUpdate = existing !== undefined;
     const unlinking = Object.prototype.hasOwnProperty.call(item, "source_takeoff_id") && item.source_takeoff_id == null;
     const linked = Boolean(existing?.source_takeoff_id) && !unlinking;
     const existingQuantity = typeof existing?.quantity === "number" || existing?.quantity == null

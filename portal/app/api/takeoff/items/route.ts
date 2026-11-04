@@ -11,6 +11,7 @@ import { takeoffItemsSchema, parseBody } from "@/lib/validation";
 import { detachedTakeoffEstimateFields, filterDraftEstimateItemIds } from "@/lib/estimating/delete-reconcile";
 import { recordTakeoffHistory, recordTakeoffHistoryBatch } from "@/lib/takeoff/history";
 import { isVisionMeta, provenanceForNewItem } from "@/lib/takeoff/provenance";
+import { takeoffIdsOutsideProject } from "@/lib/writes/scoped-ids";
 import type { Json } from "@/lib/supabase/types";
 
 function jsonObject(value: Json | null | undefined): Record<string, unknown> | null {
@@ -111,8 +112,30 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ items: [], skipped: prepared.skipped }, { status: 201 });
     }
 
+    const updateIds = new Set(existingById.keys());
+    const unseenIds = [...new Set(
+      prepared.rows
+        .map((row) => row.id)
+        .filter((rowId): rowId is string => typeof rowId === "string" && rowId !== "" && !updateIds.has(rowId)),
+    )];
+    if (unseenIds.length > 0) {
+      const { data: located, error: locatedError } = await db
+        .from("takeoff_items")
+        .select("id, tenant_id, project_id")
+        .in("id", unseenIds);
+      if (locatedError) {
+        return NextResponse.json({ error: `[POST /api/takeoff/items] ${locatedError.message}` }, { status: 422 });
+      }
+      const locatedRows = (located ?? []) as Array<{ id: string; tenant_id: string; project_id: string | null }>;
+      const outside = takeoffIdsOutsideProject(locatedRows, tenantId, project_id);
+      if (outside.length > 0) {
+        return NextResponse.json({ error: "Takeoff item belongs to another project" }, { status: 409 });
+      }
+      for (const row of locatedRows) updateIds.add(row.id);
+    }
+
     const payload = prepared.rows.map((row) => {
-      const isUpdate = row.id != null && existingById.has(row.id);
+      const isUpdate = row.id != null && updateIds.has(row.id);
       const meta = (row.meta ?? {}) as Record<string, unknown>;
       const vision = isVisionMeta(meta);
       const stamp = provenanceForNewItem({
