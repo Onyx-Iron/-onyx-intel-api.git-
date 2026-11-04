@@ -4,9 +4,11 @@ import { describe, it } from "node:test";
 import { finalizeDocumentsFromOcr } from "./finalizeDocument.ts";
 
 type FakePage = {
+  id?: string;
   document_id: string;
   status: string | null;
   takeoff_status?: string | null;
+  page_number?: number;
 };
 type FakeDoc = {
   id: string;
@@ -60,8 +62,30 @@ function makeDb(args: {
               eq() {
                 return {
                   in(_col: string, ids: string[]) {
-                    const data = args.pages.filter((p) => ids.includes(p.document_id));
-                    return Promise.resolve({ data, error: null });
+                    const filtered = args.pages
+                      .filter((p) => ids.includes(p.document_id))
+                      .slice()
+                      .sort((a, b) => String(a.id ?? "").localeCompare(String(b.id ?? "")));
+                    let start = 0;
+                    let end = filtered.length - 1;
+                    const result = {
+                      order() { return result; },
+                      range(from: number, to: number) {
+                        start = from;
+                        end = to;
+                        return result;
+                      },
+                      then(
+                        onFulfilled: (value: { data: FakePage[]; error: null }) => unknown,
+                        onRejected?: (reason: unknown) => unknown,
+                      ) {
+                        return Promise.resolve({
+                          data: filtered.slice(start, end + 1),
+                          error: null as null,
+                        }).then(onFulfilled, onRejected);
+                      },
+                    };
+                    return result;
                   },
                 };
               },
@@ -158,5 +182,54 @@ describe("finalizeDocumentsFromOcr", () => {
     const results = await finalizeDocumentsFromOcr(db, "tenant-1");
     assert.equal(results.length, 0);
     assert.equal(updates.length, 0);
+  });
+
+  it("keeps a plan open when a page past the first 1000 rows is still pending", async () => {
+    const updates: Array<{ id: string; patch: Record<string, unknown> }> = [];
+    const pages: FakePage[] = Array.from({ length: 1000 }, (_, i) => ({
+      id: String(i).padStart(6, "0"),
+      document_id: "d6",
+      status: "done",
+      takeoff_status: "done",
+      page_number: i + 1,
+    }));
+    pages.push({
+      id: "001000",
+      document_id: "d6",
+      status: "pending",
+      takeoff_status: "pending",
+      page_number: 1001,
+    });
+    const db = makeDb({
+      docs: [{ id: "d6", status: "split", page_count: 1001, meta: {} }],
+      pages,
+      updates,
+    });
+
+    const results = await finalizeDocumentsFromOcr(db, "tenant-1");
+    assert.equal(results.length, 0);
+    assert.equal(updates.length, 0);
+  });
+
+  it("finalizes a plan whose pages span more than one 1000-row read", async () => {
+    const updates: Array<{ id: string; patch: Record<string, unknown> }> = [];
+    const pages: FakePage[] = Array.from({ length: 1001 }, (_, i) => ({
+      id: String(i).padStart(6, "0"),
+      document_id: "d7",
+      status: "done",
+      takeoff_status: "done",
+      page_number: i + 1,
+    }));
+    const db = makeDb({
+      docs: [{ id: "d7", status: "split", page_count: 1001, meta: {} }],
+      pages,
+      updates,
+    });
+
+    const results = await finalizeDocumentsFromOcr(db, "tenant-1");
+    assert.equal(results.length, 1);
+    assert.equal(results[0]?.status, "complete");
+    assert.equal(updates[0]?.patch.status, "complete");
+    assert.equal(updates[0]?.patch.last_error, null);
   });
 });
