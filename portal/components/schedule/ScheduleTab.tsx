@@ -202,12 +202,12 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
         setErrorMsg(typeof d?.error === "string" ? d.error : `Delete failed (${res.status})`);
-        loadTasks();
       }
     } catch {
       setErrorMsg("Network error — could not delete task.");
-      loadTasks();
     }
+    loadTasks();
+    loadLookahead();
   };
 
   const openAdd = () => {

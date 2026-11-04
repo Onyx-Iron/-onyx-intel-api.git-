@@ -12,6 +12,43 @@ interface TaskRow {
   percent_complete: number | null;
 }
 
+export class ScheduleTaskDeleteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ScheduleTaskDeleteError";
+  }
+}
+
+/**
+ * Remove one task, then recompute float and the critical path for whatever
+ * remains. Callers that only delete leave the stored CPM columns on the
+ * other activities pointing at a schedule that no longer exists.
+ */
+export async function deleteScheduleTask(
+  db: AnyDb,
+  tenantId: string,
+  taskId: string,
+): Promise<{ deleted: false } | { deleted: true; projectId: string; updated: number }> {
+  const { data: before, error: readError } = await db
+    .from("schedule_tasks")
+    .select("id, project_id")
+    .eq("id", taskId)
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  if (readError) throw new ScheduleTaskDeleteError(readError.message);
+  if (!before?.project_id) return { deleted: false };
+
+  const { error } = await db
+    .from("schedule_tasks")
+    .delete()
+    .eq("id", taskId)
+    .eq("tenant_id", tenantId);
+  if (error) throw new ScheduleTaskDeleteError(error.message);
+
+  const { updated } = await recomputeProjectSchedule(db, tenantId, before.project_id);
+  return { deleted: true, projectId: before.project_id, updated };
+}
+
 export async function recomputeProjectSchedule(db: AnyDb, tenantId: string, projectId: string): Promise<{ updated: number }> {
   const { data, error } = await db
     .from("schedule_tasks")
