@@ -1,3 +1,5 @@
+import { moneyAmount } from "./calculations";
+
 export type PricingStatus = "manual" | "priced" | "unpriced" | "review";
 
 export interface EstimateQcItem {
@@ -6,9 +8,10 @@ export interface EstimateQcItem {
   csi_code?: string | null;
   trade?: string | null;
   item_type?: string | null;
-  quantity?: number | null;
+  quantity?: number | string | null;
   uom?: string | null;
-  unit_cost?: number | null;
+  unit_cost?: number | string | null;
+  total_direct_cost?: number | string | null;
   source_takeoff_id?: string | null;
   source_fingerprint?: string | null;
   quantity_basis?: string | null;
@@ -77,7 +80,7 @@ export function buildEstimateQualityReport(items: EstimateQcItem[]): EstimateQua
       increment(totals.by_trade, normalizeBucket(item.trade, "Unassigned trade"), total);
     }
 
-    const status = normalizePricingStatus(item.pricing_status, item.unit_cost);
+    const status = normalizePricingStatus(item.pricing_status, item);
     if (status === "priced") counts.priced++;
     if (status === "unpriced") counts.unpriced++;
     if (status === "review") counts.review++;
@@ -90,11 +93,11 @@ export function buildEstimateQualityReport(items: EstimateQcItem[]): EstimateQua
     if (status === "unpriced") reasons.push("Needs unit pricing");
     if (status === "review") reasons.push("Estimator review required");
     if (!isFinitePositive(item.quantity)) reasons.push("Missing or zero quantity");
-    if (!isFinitePositive(item.unit_cost)) reasons.push("Missing or zero unit cost");
+    if (!hasUsableDirectPrice(item)) reasons.push("Missing or zero unit cost");
     if (sourceBacked && !hasEvidence(item)) reasons.push("Source-backed row missing drawing, location, or quantity basis");
 
     if (!isFinitePositive(item.quantity)) counts.missing_quantity++;
-    if (!isFinitePositive(item.unit_cost)) counts.missing_unit_cost++;
+    if (!hasUsableDirectPrice(item)) counts.missing_unit_cost++;
     if (sourceBacked && !hasEvidence(item)) counts.missing_evidence++;
 
     if (reasons.length > 0) {
@@ -148,13 +151,20 @@ function calculateRiskScore(counts: EstimateQualityReport["counts"]): number {
 }
 
 function lineTotal(item: EstimateQcItem): number | null {
-  if (!isFinitePositive(item.quantity) || !isFinitePositive(item.unit_cost)) return null;
-  return roundCurrency(Number(item.quantity) * Number(item.unit_cost));
+  const quantity = moneyAmount(item.quantity);
+  if (quantity <= 0) return null;
+  if (isFinitePositive(item.unit_cost)) return roundCurrency(quantity * moneyAmount(item.unit_cost));
+  if (isFinitePositive(item.total_direct_cost)) return roundCurrency(moneyAmount(item.total_direct_cost));
+  return null;
 }
 
-function normalizePricingStatus(status: string | null | undefined, unitCost: number | null | undefined): PricingStatus {
+function hasUsableDirectPrice(item: EstimateQcItem): boolean {
+  return isFinitePositive(item.unit_cost) || isFinitePositive(item.total_direct_cost);
+}
+
+function normalizePricingStatus(status: string | null | undefined, item: EstimateQcItem): PricingStatus {
   if (status === "manual" || status === "priced" || status === "unpriced" || status === "review") return status;
-  return isFinitePositive(unitCost) ? "priced" : "unpriced";
+  return hasUsableDirectPrice(item) ? "priced" : "unpriced";
 }
 
 function hasEvidence(item: EstimateQcItem): boolean {
@@ -185,7 +195,7 @@ function roundCurrency(value: number): number {
 }
 
 function isFinitePositive(value: unknown): boolean {
-  return typeof value === "number" && Number.isFinite(value) && value > 0;
+  return moneyAmount(value) > 0;
 }
 
 function clean(value: unknown): string | null {

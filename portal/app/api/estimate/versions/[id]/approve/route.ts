@@ -48,7 +48,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
   const { data: items, error: itemsErr } = await db
     .from("estimate_items")
-    .select("id,description,csi_code,trade,item_type,quantity,uom,unit_cost,source_takeoff_id,source_fingerprint,quantity_basis,drawing_ref,location_tag,pricing_status")
+    .select("id,description,csi_code,trade,item_type,quantity,uom,unit_cost,total_direct_cost,source_takeoff_id,source_fingerprint,quantity_basis,drawing_ref,location_tag,pricing_status")
     .eq("estimate_version_id", id);
   if (itemsErr) return NextResponse.json({ error: itemsErr.message }, { status: 500 });
 

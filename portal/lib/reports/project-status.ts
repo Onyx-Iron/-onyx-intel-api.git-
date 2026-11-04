@@ -45,7 +45,7 @@ export async function generateProjectStatusReport(
     db.from("schedule_tasks").select("status").eq("tenant_id", tenantId).eq("project_id", projectId).limit(3000),
     anyDb
       .from("estimate_items")
-      .select("id,description,csi_code,trade,item_type,quantity,uom,unit_cost,source_takeoff_id,source_fingerprint,quantity_basis,drawing_ref,location_tag,pricing_status")
+      .select("id,description,csi_code,trade,item_type,quantity,uom,unit_cost,total_direct_cost,source_takeoff_id,source_fingerprint,quantity_basis,drawing_ref,location_tag,pricing_status")
       .eq("tenant_id", tenantId)
       .eq("project_id", projectId)
       .limit(5000),

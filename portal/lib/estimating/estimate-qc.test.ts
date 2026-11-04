@@ -113,4 +113,47 @@ describe("estimate quality report", () => {
     assert.equal(report.ready_for_proposal, false);
     assert.match(report.audit_items[0].reasons.join(", "), /Missing or zero quantity/);
   });
+
+  it("accepts a matrix line priced only in category costs", () => {
+    const report = buildEstimateQualityReport([
+      {
+        id: "matrix-1",
+        description: "Estimator allowance",
+        csi_code: "01-21-00",
+        trade: "General Conditions",
+        item_type: "allowance",
+        quantity: 10,
+        unit_cost: null,
+        total_direct_cost: 250,
+        pricing_status: "manual",
+      },
+    ]);
+
+    assert.equal(report.counts.missing_unit_cost, 0);
+    assert.equal(report.totals.grand_total, 250);
+    assert.equal(report.ready_for_proposal, true);
+  });
+
+  it("reads numeric strings the database returns for quantity and unit cost", () => {
+    const report = buildEstimateQualityReport([
+      {
+        id: "string-1",
+        description: "4 inch sanitary pipe",
+        csi_code: "22-13-16",
+        trade: "Plumbing",
+        item_type: "material",
+        quantity: "125.0000",
+        unit_cost: "42.5000",
+        source_takeoff_id: "takeoff-1",
+        quantity_basis: "Measured polyline on P2.1",
+        drawing_ref: "P2.1",
+        pricing_status: "priced",
+      },
+    ]);
+
+    assert.equal(report.counts.missing_quantity, 0);
+    assert.equal(report.counts.missing_unit_cost, 0);
+    assert.equal(report.totals.grand_total, 5312.5);
+    assert.equal(report.ready_for_proposal, true);
+  });
 });

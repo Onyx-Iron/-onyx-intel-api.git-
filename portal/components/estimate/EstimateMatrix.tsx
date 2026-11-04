@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useVirtualizer } from "@tanstack/react-virtual";
 import Link from "next/link";
 import { calculateAssemblyQuantities, type RebarSize, REBAR_UNIT_WEIGHT_LBS_PER_FT } from "@/lib/math/assemblies";
-import { applyVersionPercentages, calculateEstimateTotals, calculateItem } from "@/lib/estimating/calculations";
+import { applyVersionPercentages, calculateEstimateTotals, calculateItem, moneyAmount, unitRateFromExtended } from "@/lib/estimating/calculations";
 import { ESTIMATE_LINE_TYPES, listCsiSections, lookupCsi, normalizeLineType } from "@/lib/estimating/csi-catalog";
 import { quantitySourceLabel } from "@/lib/estimating/estimate-export";
 import { buildEstimateQualityReport, type EstimateQualityReport } from "@/lib/estimating/estimate-qc";
@@ -87,26 +87,25 @@ const ESTIMATE_ROW_HEIGHT_PX = 36;
 // into the grid's editable per-unit-rate shape. Division is exact (not
 // rounded) so a round-trip load -> save reproduces the same dollar totals.
 function itemToRow(it: {
-  id: string; cost_code: string | null; csi_code?: string | null; description: string | null; quantity: number | null; uom: string | null;
-  labor_cost: number | null; material_cost: number | null; equipment_cost: number | null; trucking_cost: number | null;
-  subcontract_cost: number | null; disposal_cost: number | null; notes: string | null; sort_order?: number;
+  id: string; cost_code: string | null; csi_code?: string | null; description: string | null; quantity: unknown; uom: string | null;
+  labor_cost: unknown; material_cost: unknown; equipment_cost: unknown; trucking_cost: unknown;
+  subcontract_cost: unknown; disposal_cost: unknown; notes: string | null; sort_order?: number;
   item_type?: string | null; drawing_ref?: string | null; location_tag?: string | null;
   source_takeoff_id?: string | null; pricing_status?: string | null; quantity_basis?: string | null;
 }, index: number): EstimateRow {
-  const q = it.quantity && it.quantity !== 0 ? it.quantity : 1;
-  const perUnit = (value: number | null) => (typeof value === "number" && Number.isFinite(value) ? value / q : 0);
+  const quantity = moneyAmount(it.quantity);
   return {
     id: it.id,
     cost_code: it.csi_code || it.cost_code || "",
     description: it.description ?? "",
-    quantity: it.quantity ?? 0,
+    quantity,
     unit: it.uom ?? "EA",
-    labor_unit: perUnit(it.labor_cost),
-    material_unit: perUnit(it.material_cost),
-    equipment_unit: perUnit(it.equipment_cost),
-    subcontractor_unit: perUnit(it.subcontract_cost),
-    trucking_unit: perUnit(it.trucking_cost),
-    disposal_unit: perUnit(it.disposal_cost),
+    labor_unit: unitRateFromExtended(it.labor_cost, quantity),
+    material_unit: unitRateFromExtended(it.material_cost, quantity),
+    equipment_unit: unitRateFromExtended(it.equipment_cost, quantity),
+    subcontractor_unit: unitRateFromExtended(it.subcontract_cost, quantity),
+    trucking_unit: unitRateFromExtended(it.trucking_cost, quantity),
+    disposal_unit: unitRateFromExtended(it.disposal_cost, quantity),
     notes: it.notes ?? "",
     sort_order: it.sort_order ?? index,
     item_type: normalizeLineType(it.item_type),
