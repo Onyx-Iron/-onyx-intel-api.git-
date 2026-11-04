@@ -8,6 +8,7 @@ import { useBulkImport, toStr, toDate } from "@/components/common/useBulkImport"
 
 import { useConfirm } from "@/components/common/ConfirmDialog";
 import EmptyState from "@/components/common/EmptyState";
+import { scheduleTaskStatusLabel, type ScheduleTaskStatus } from "@/lib/project-file/schedule-status";
 
 function pick(row: Record<string, string | number | null>, keys: string[]): string | null {
   for (const k of keys) {
@@ -21,7 +22,7 @@ function pick(row: Record<string, string | number | null>, keys: string[]): stri
   return null;
 }
 
-type TaskStatus = "not_started" | "in_progress" | "complete" | "blocked";
+type TaskStatus = ScheduleTaskStatus;
 
 interface ScheduleTask {
   id: string;
@@ -57,17 +58,17 @@ interface BaselineTask {
   end_date: string | null;
 }
 
-const STATUS_CYCLE: TaskStatus[] = ["not_started", "in_progress", "complete", "blocked"];
+const STATUS_CYCLE: TaskStatus[] = ["pending", "in_progress", "complete", "blocked"];
 
 const STATUS_STYLES: Record<TaskStatus, string> = {
-  not_started: "bg-white/5 text-gray-500 border-white/10",
+  pending: "bg-white/5 text-gray-500 border-white/10",
   in_progress:  "bg-[#00D2FF]/10 text-[#00D2FF] border-[#00D2FF]/20",
   complete:     "bg-[#CCFF00]/10 text-[#CCFF00] border-[#CCFF00]/20",
   blocked:      "bg-[#E50914]/10 text-[#E50914] border-[#E50914]/20",
 };
 
 function statusLabel(s: TaskStatus): string {
-  return s.replace("_", " ");
+  return scheduleTaskStatusLabel(s);
 }
 
 function daysBetween(start: string | null, end: string | null): string {
@@ -83,7 +84,7 @@ function fmt(d: string | null): string {
 
 const EMPTY_FORM: FormState = {
   name: "",
-  status: "not_started",
+  status: "pending",
   start_date: "",
   end_date: "",
   critical: false,
@@ -159,7 +160,7 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
         statusRaw.includes("progress") ? "in_progress" :
         statusRaw.includes("complete") || statusRaw === "done" ? "complete" :
         statusRaw.includes("block") ? "blocked" :
-        "not_started";
+        "pending";
       const criticalRaw = (toStr(pick(row, ["critical", "iscritical"])) ?? "").toLowerCase();
       return {
         project_id: pid,
@@ -487,7 +488,7 @@ export default function ScheduleTab({ projectId }: { projectId: string }) {
                   onChange={(e) => setForm((f) => ({ ...f, status: e.target.value as TaskStatus }))}
                   className="w-full bg-[#0A0A0B] border border-white/10 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-[#CCFF00]/40 focus:border-[#CCFF00]/40 transition-colors"
                 >
-                  <option value="not_started">Not Started</option>
+                  <option value="pending">Not Started</option>
                   <option value="in_progress">In Progress</option>
                   <option value="complete">Complete</option>
                   <option value="blocked">Blocked</option>
