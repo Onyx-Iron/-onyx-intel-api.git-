@@ -116,7 +116,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const unseenIds = [...new Set(
       prepared.rows
         .map((row) => row.id)
-        .filter((rowId): rowId is string => Boolean(rowId) && !updateIds.has(rowId)),
+        .filter((rowId): rowId is string => typeof rowId === "string" && rowId !== "" && !updateIds.has(rowId)),
     )];
     if (unseenIds.length > 0) {
       const { data: located, error: locatedError } = await db

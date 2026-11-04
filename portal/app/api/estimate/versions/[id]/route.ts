@@ -163,7 +163,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     const unseenIds = [...new Set(
       submittedItems
         .map((item) => item.id)
-        .filter((itemId): itemId is string => Boolean(itemId) && !knownIds.has(itemId)),
+        .filter((itemId): itemId is string => typeof itemId === "string" && itemId !== "" && !knownIds.has(itemId)),
     )];
     if (unseenIds.length > 0) {
       const { data: located, error: locatedError } = await db
@@ -242,8 +242,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       quantity: item.quantity, indirectCost,
       contingency: derived.contingency, overhead: derived.overhead, profit: derived.profit,
     });
-    const isUpdate = item.id != null && existingById.has(item.id);
-    const existing = isUpdate ? existingById.get(item.id) as PricingStatusLine & { source_takeoff_id?: string | null } : undefined;
+    const submittedId = item.id;
+    const existing = submittedId != null && existingById.has(submittedId)
+      ? existingById.get(submittedId) as PricingStatusLine & { source_takeoff_id?: string | null }
+      : undefined;
+    const isUpdate = existing !== undefined;
     const unlinking = Object.prototype.hasOwnProperty.call(item, "source_takeoff_id") && item.source_takeoff_id == null;
     const linked = Boolean(existing?.source_takeoff_id) && !unlinking;
     const existingQuantity = typeof existing?.quantity === "number" || existing?.quantity == null
