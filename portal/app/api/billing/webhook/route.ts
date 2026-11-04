@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPaddleConfig, verifyWebhookSignature } from "@/lib/billing/paddle";
 import { getTenantBilling, setTenantBilling } from "@/lib/billing/tenantBilling";
-import { PLANS, type PlanTier } from "@/lib/billing/plans";
+import { getPlan, PLANS, type PlanTier } from "@/lib/billing/plans";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -122,6 +122,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           subscription_status: status,
           paddle_customer_id: paddleCustomerId,
           paddle_subscription_id: paddleSubscriptionId,
+          seat_limit: getPlan(tierInfo.plan_tier).seatLimit,
           ai_credits_remaining: tierInfo.ai_credits,
           ai_credits_reset_at: resetAt,
         });
@@ -153,7 +154,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
         await setTenantBilling(tenantId, {
           subscription_status: "canceled",
-          ...(periodEnded ? { plan_tier: "trial" as PlanTier } : {}),
+          ...(periodEnded
+            ? { plan_tier: "trial" as PlanTier, seat_limit: getPlan("trial").seatLimit }
+            : {}),
         });
         break;
       }

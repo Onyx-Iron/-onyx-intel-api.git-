@@ -6,6 +6,7 @@ import {
   authTenantName,
 } from "@/lib/project-controls/server";
 import { requirePermission } from "@/lib/project-controls/route-guards";
+import { effectiveSeatLimit, occupiedSeatCount, seatLimitReached } from "@/lib/billing/plans";
 import { getTenantBilling } from "@/lib/billing/tenantBilling";
 
 export const runtime = "nodejs";
@@ -54,19 +55,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (denied) return denied;
 
     const billing = await getTenantBilling(tenantId);
-    const seatLimit = billing?.seat_limit ?? 1;
+    const seatLimit = effectiveSeatLimit({
+      planTier: billing?.plan_tier,
+      storedSeatLimit: billing?.seat_limit,
+      compUntil: billing?.comp_until,
+    });
 
     const client = await clerkClient();
 
-    // Count current org members for the seat check.
-    const memberships =
-      await client.organizations.getOrganizationMembershipList({
+    // Members plus invitations that have not been accepted yet. Counting
+    // only current members lets a 5-seat plan send unlimited invites.
+    const [memberships, invitations] = await Promise.all([
+      client.organizations.getOrganizationMembershipList({
         organizationId: orgId,
         limit: 100,
-      });
-    const currentCount = memberships.data.length;
+      }),
+      client.organizations.getOrganizationInvitationList({
+        organizationId: orgId,
+        status: ["pending"],
+        limit: 100,
+      }),
+    ]);
+    const currentCount = occupiedSeatCount(
+      memberships.totalCount ?? memberships.data.length,
+      invitations.totalCount ?? invitations.data.length,
+    );
 
-    if (seatLimit !== -1 && currentCount >= seatLimit) {
+    if (seatLimitReached(currentCount, seatLimit)) {
       return NextResponse.json(
         {
           error: `Seat limit reached (${currentCount} of ${seatLimit}). Upgrade your plan to invite more teammates.`,
