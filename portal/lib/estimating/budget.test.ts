@@ -56,10 +56,13 @@ interface ProjectRow {
   budget: number | null;
 }
 
-function matches(row: Record<string, unknown>, filters: Array<[string, string, unknown]>): boolean {
+type StoredRow = BudgetHeader | BudgetLine | ProjectRow;
+
+function matches(row: StoredRow, filters: Array<[string, string, unknown]>): boolean {
+  const record = row as unknown as Record<string, unknown>;
   for (const [op, col, val] of filters) {
-    if (op === "eq" && row[col] !== val) return false;
-    if (op === "neq" && row[col] === val) return false;
+    if (op === "eq" && record[col] !== val) return false;
+    if (op === "neq" && record[col] === val) return false;
   }
   return true;
 }
@@ -82,7 +85,7 @@ function createFakeDb(options?: { failLines?: boolean; missFirstVersionRead?: bo
   let ids = 0;
   let missedVersionRead = false;
 
-  function rowsFor(table: string): Array<Record<string, unknown>> {
+  function rowsFor(table: string): StoredRow[] {
     if (table === "project_budgets") return budgets;
     if (table === "project_budget_lines") return lines;
     return projects;
