@@ -9,6 +9,7 @@ import {
   computePayLine,
   eventPostsBudget,
   payAppInvoiceTotals,
+  planBudgetMovement,
   waiverCoversDraw,
   withBudgetPosted,
 } from "./money.ts";
@@ -177,6 +178,21 @@ describe("project cost math", () => {
     assert.equal(budgetAlreadyPosted({}), false);
     assert.equal(budgetAlreadyPosted({ budget_posted: true }), true);
     assert.deepEqual(withBudgetPosted({ source: "event" }), { source: "event", budget_posted: true });
+    assert.deepEqual(planBudgetMovement({ budget_posted: true }, "approved", 0), { apply: false, meta: null });
+  });
+
+  it("posts again after a reversal and when an approved amount increases", () => {
+    const repost = planBudgetMovement({ source: "event", budget_posted: true }, "approved", 10000);
+    assert.equal(repost.apply, true);
+    assert.deepEqual(repost.meta, { source: "event", budget_posted: true });
+
+    const reversal = planBudgetMovement({ source: "event", budget_posted: true }, "rejected", -10000);
+    assert.equal(reversal.apply, true);
+    assert.equal(budgetAlreadyPosted(reversal.meta), false);
+
+    const increase = planBudgetMovement({ budget_posted: true }, "approved", 2000);
+    assert.equal(increase.apply, true);
+    assert.equal(budgetAlreadyPosted(increase.meta), true);
   });
 
   it("holds a pay app until received lien waivers cover the draw", () => {

@@ -10,9 +10,8 @@ import {
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditUpdate, auditDelete } from "@/lib/audit";
 import {
-  budgetAlreadyPosted,
   changeOrderBudgetDelta,
-  withBudgetPosted,
+  planBudgetMovement,
   type ChangeOrderBudgetWeight,
 } from "@/lib/project-file/money";
 import { addApprovedChange } from "@/lib/project-file/budget-store";
@@ -211,17 +210,15 @@ async function syncChangeOrderBudget(
   if (allocations.length === 0) return;
 
   const net = allocations.reduce((sum, row) => sum + row.amount, 0);
-  // First-post guard from #115: do not add again when already posted.
-  if (net > 0 && budgetAlreadyPosted(previous.meta)) return;
+  const plan = planBudgetMovement(previous.meta, next.status ?? "", net);
+  if (!plan.apply || !plan.meta) return;
 
   await addApprovedChange(db, tenantId, projectId, allocations);
 
-  if (net > 0) {
-    const { error: flagError } = await db
-      .from("change_order_items")
-      .update({ meta: withBudgetPosted(previous.meta) })
-      .eq("id", changeOrderId)
-      .eq("tenant_id", tenantId);
-    if (flagError) throw new Error(flagError.message);
-  }
+  const { error: flagError } = await db
+    .from("change_order_items")
+    .update({ meta: plan.meta })
+    .eq("id", changeOrderId)
+    .eq("tenant_id", tenantId);
+  if (flagError) throw new Error(flagError.message);
 }

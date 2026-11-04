@@ -186,18 +186,57 @@ export function payAppInvoiceTotals(lines: PayAppDrawLine[], retainagePct: numbe
   return { amount: roundMoney(amount), retainage: roundMoney(retainage) };
 }
 
-/** True once this change order has already moved the revised budget. */
+/**
+ * True when this change order's current approved amount is on the revised
+ * budget. Cleared once the order leaves approved. It is not a permanent
+ * lock: a later approval, or an amount increase while it stays approved,
+ * still has to post.
+ */
 export function budgetAlreadyPosted(meta: unknown): boolean {
   if (!meta || typeof meta !== "object" || Array.isArray(meta)) return false;
   return (meta as { budget_posted?: unknown }).budget_posted === true;
 }
 
-export function withBudgetPosted(meta: unknown): Record<string, unknown> {
-  const base = meta && typeof meta === "object" && !Array.isArray(meta)
+function budgetMetaBase(meta: unknown): Record<string, unknown> {
+  return meta && typeof meta === "object" && !Array.isArray(meta)
     ? { ...(meta as Record<string, unknown>) }
     : {};
+}
+
+export function withBudgetPosted(meta: unknown): Record<string, unknown> {
+  const base = budgetMetaBase(meta);
   base.budget_posted = true;
   return base;
+}
+
+export function withoutBudgetPosted(meta: unknown): Record<string, unknown> {
+  const base = budgetMetaBase(meta);
+  base.budget_posted = false;
+  return base;
+}
+
+/** Flag stored after a movement. Approved keeps it set; every other status clears it. */
+export function budgetMetaForStatus(meta: unknown, status: string): Record<string, unknown> {
+  return status === "approved" ? withBudgetPosted(meta) : withoutBudgetPosted(meta);
+}
+
+export interface BudgetMovementPlan {
+  apply: boolean;
+  meta: Record<string, unknown> | null;
+}
+
+/**
+ * Write every non-zero revised-budget movement. A sticky `budget_posted`
+ * flag must not swallow the re-post after a reversal or an amount increase.
+ * Idempotency is `changeOrderBudgetDelta` returning zero when nothing changed.
+ */
+export function planBudgetMovement(
+  meta: unknown,
+  nextStatus: string,
+  net: number,
+): BudgetMovementPlan {
+  if (net === 0) return { apply: false, meta: null };
+  return { apply: true, meta: budgetMetaForStatus(meta, nextStatus) };
 }
 
 export interface WaiverCoverInput {
