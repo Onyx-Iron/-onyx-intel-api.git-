@@ -4,7 +4,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { assertPermission, canReadFinancial, getUserRole, PermissionError, redactFinancialFields } from "@/lib/project-controls/permissions";
 import { ESTIMATE_FINANCIAL_FIELDS, VERSION_MARKUP_FIELDS } from "@/lib/project-controls/financial-redaction";
 import { assertVersionEditable, getServiceDb, loadVersionForTenant, NotFoundError, VersionLockedError } from "@/lib/estimating/versioning";
-import { applyVersionPercentages, calculateEstimateTotals, calculateItem } from "@/lib/estimating/calculations";
+import { applyVersionPercentages, calculateEstimateTotals, calculateItem, directUnitCost } from "@/lib/estimating/calculations";
 import { quantityForLinkedLine } from "@/lib/estimating/linked-quantity";
 import { pricingStatusAfterEdit, type PricingStatusLine } from "@/lib/estimating/pricing-status";
 import { recordEstimateAudit, recordEstimateAuditBatch } from "@/lib/estimating/audit";
@@ -249,6 +249,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       trucking_cost: item.trucking_cost ?? 0,
       subcontract_cost: item.subcontract_cost ?? 0,
       disposal_cost: item.disposal_cost ?? 0,
+      unit_cost: directUnitCost(calc.totalDirectCost, quantity),
       testing_cost: item.testing_cost ?? 0,
       other_direct_cost: item.other_direct_cost ?? 0,
       total_direct_cost: calc.totalDirectCost,

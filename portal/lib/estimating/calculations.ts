@@ -40,6 +40,34 @@ export interface ItemCalculationResult {
 
 const n = (v: number | null | undefined): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 
+/** Postgres `numeric` columns arrive as strings. Blank and non-numeric values are 0. */
+export function moneyAmount(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
+/**
+ * Direct dollars per stored unit. Category costs are extended dollars, so the
+ * unit rate is that total divided by quantity. A zero quantity has no rate.
+ */
+export function directUnitCost(totalDirectCost: unknown, quantity: unknown): number | null {
+  const direct = moneyAmount(totalDirectCost);
+  const qty = moneyAmount(quantity);
+  if (direct <= 0 || qty <= 0) return null;
+  return roundCurrency(direct / qty);
+}
+
+/** Per-unit rate from an extended category amount. A zero quantity keeps the extended dollars. */
+export function unitRateFromExtended(extended: unknown, quantity: unknown): number {
+  const amount = moneyAmount(extended);
+  const qty = moneyAmount(quantity);
+  return qty !== 0 ? amount / qty : amount;
+}
+
 // Rounds to the nearest cent using standard rounding (never truncation),
 // applied once at the very end of a calculation chain — intermediate
 // values are kept at full precision so rounding error cannot compound

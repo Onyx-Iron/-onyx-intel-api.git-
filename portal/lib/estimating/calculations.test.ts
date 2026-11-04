@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   applyVersionPercentages, calculateEstimateTotals, calculateItem,
-  computeCostBeforeProfit, computeDirectCost, computeMargin, computeMarkup, computeSellingPrice, roundCurrency,
+  computeCostBeforeProfit, computeDirectCost, computeMargin, computeMarkup, computeSellingPrice,
+  directUnitCost, moneyAmount, roundCurrency, unitRateFromExtended,
 } from "./calculations";
 
 describe("cost calculations", () => {
@@ -124,5 +125,25 @@ describe("estimate-level roll-up", () => {
     assert.equal(totals.totalPrice, 0);
     assert.equal(totals.markup, null);
     assert.equal(totals.margin, null);
+  });
+});
+
+describe("estimate money parsed from the database", () => {
+  it("reads numeric strings and treats blanks as zero", () => {
+    assert.equal(moneyAmount("250.00"), 250);
+    assert.equal(moneyAmount(10), 10);
+    assert.equal(moneyAmount(""), 0);
+    assert.equal(moneyAmount(null), 0);
+  });
+
+  it("stores the direct unit rate from extended category costs", () => {
+    assert.equal(directUnitCost(250, 10), 25);
+    assert.equal(directUnitCost("250.00", "10.0000"), 25);
+    assert.equal(directUnitCost(250, 0), null);
+  });
+
+  it("keeps a category unit rate when the stored amount is a numeric string", () => {
+    assert.equal(unitRateFromExtended("250.00", "10.0000"), 25);
+    assert.equal(unitRateFromExtended("250.00", 0), 250);
   });
 });
