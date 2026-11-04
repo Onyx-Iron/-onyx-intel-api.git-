@@ -6,6 +6,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditUpdate, auditDelete } from "@/lib/audit";
 import { recomputeProjectSchedule } from "@/lib/project-file/schedule-store";
+import { scheduleTaskStatusForWrite } from "@/lib/project-file/schedule-status";
 import { CpmCycleError } from "@/lib/project-file/cpm";
 
 interface RouteContext {
@@ -63,7 +64,13 @@ export async function PUT(req: NextRequest, context: RouteContext): Promise<Next
 
     const updates: TablesUpdate<"schedule_tasks"> = {};
     if (name !== undefined) updates.name = name;
-    if (status !== undefined) updates.status = status;
+    if (status !== undefined) {
+      const storedStatus = scheduleTaskStatusForWrite(status);
+      if (!storedStatus) {
+        return NextResponse.json({ error: "status must be pending, in_progress, complete, or blocked" }, { status: 400 });
+      }
+      updates.status = storedStatus;
+    }
     if (start_date !== undefined) updates.start_date = start_date;
     if (end_date !== undefined) updates.end_date = end_date;
     if (duration !== undefined) updates.duration = duration;

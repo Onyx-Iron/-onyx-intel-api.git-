@@ -1,6 +1,8 @@
 "use client";
 
-type TaskStatus = "not_started" | "in_progress" | "complete" | "blocked";
+import type { ScheduleTaskStatus } from "@/lib/project-file/schedule-status";
+
+type TaskStatus = ScheduleTaskStatus;
 
 interface GanttTask {
   id: string;
@@ -21,7 +23,7 @@ interface BaselineBar {
 const DAY = 86400000;
 
 const BAR_COLOR: Record<TaskStatus, string> = {
-  not_started: "bg-white/15",
+  pending: "bg-white/15",
   in_progress: "bg-[#00D2FF]",
   complete:    "bg-[#CCFF00]",
   blocked:     "bg-[#E50914]",
@@ -133,7 +135,7 @@ export default function GanttView({ tasks, baselines = [] }: { tasks: GanttTask[
 
       {/* Legend */}
       <div className="flex flex-wrap items-center gap-4 px-4 py-3 border-t border-white/10 text-[10px] text-gray-500">
-        {([["complete", "Complete"], ["in_progress", "In Progress"], ["not_started", "Not Started"], ["blocked", "Blocked"]] as [TaskStatus, string][]).map(([k, label]) => (
+        {([["complete", "Complete"], ["in_progress", "In Progress"], ["pending", "Not Started"], ["blocked", "Blocked"]] as [TaskStatus, string][]).map(([k, label]) => (
           <span key={k} className="flex items-center gap-1.5"><span className={`w-3 h-2 rounded-sm ${BAR_COLOR[k]}`} />{label}</span>
         ))}
         <span className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-[#E50914]" />Critical path</span>

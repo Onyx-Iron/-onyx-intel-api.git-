@@ -8,6 +8,7 @@ import { logEvent } from "@/lib/activity";
 import { auditInsert } from "@/lib/audit";
 import { scheduleTaskCreateSchema, parseBody } from "@/lib/validation";
 import { recomputeProjectSchedule } from "@/lib/project-file/schedule-store";
+import { scheduleTaskStatusForWrite } from "@/lib/project-file/schedule-status";
 import { CpmCycleError } from "@/lib/project-file/cpm";
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
@@ -62,6 +63,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const { project_id, name, status, start_date, end_date, duration, critical, dependencies, percent_complete } = parsed.data;
+    const storedStatus = status == null || status === "" ? null : scheduleTaskStatusForWrite(status);
+    if (status != null && status !== "" && !storedStatus) {
+      return NextResponse.json({ error: "status must be pending, in_progress, complete, or blocked" }, { status: 400 });
+    }
 
     const tenantId = await getOrCreateTenant(authTenantKey(userId, orgId), authTenantName(userId, orgSlug));
     const denied = await requirePermission(tenantId, userId, "field", "write");
@@ -75,7 +80,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         tenant_id: tenantId,
         project_id,
         name: name.trim(),
-        status: status ?? undefined,
+        ...(storedStatus ? { status: storedStatus } : {}),
         start_date: start_date ?? undefined,
         end_date: end_date ?? undefined,
         duration: duration ?? undefined,
