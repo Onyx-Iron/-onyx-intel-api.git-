@@ -186,6 +186,14 @@ export function payAppInvoiceTotals(lines: PayAppDrawLine[], retainagePct: numbe
   return { amount: roundMoney(amount), retainage: roundMoney(retainage) };
 }
 
+/**
+ * A pay application can become an invoice only when this draw bills something.
+ * A zero draw (SOV lines copied with this period still blank) must stay a draft.
+ */
+export function payAppDrawIsBillable(amount: number): boolean {
+  return Number.isFinite(amount) && amount > 0.009;
+}
+
 /** True once this change order has already moved the revised budget. */
 export function budgetAlreadyPosted(meta: unknown): boolean {
   if (!meta || typeof meta !== "object" || Array.isArray(meta)) return false;

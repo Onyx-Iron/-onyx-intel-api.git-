@@ -8,6 +8,7 @@ import {
   computeBudgetLine,
   computePayLine,
   eventPostsBudget,
+  payAppDrawIsBillable,
   payAppInvoiceTotals,
   waiverCoversDraw,
   withBudgetPosted,
@@ -170,6 +171,16 @@ describe("project cost math", () => {
     const workOnly = payAppInvoiceTotals([{ previous: 0, thisPeriod: 1000, storedMaterials: 0 }], 10);
     assert.equal(workOnly.amount, 1000);
     assert.equal(workOnly.retainage, 100);
+  });
+
+  it("does not invoice a pay app whose this-period amount is still zero", () => {
+    const blank = payAppInvoiceTotals([{ previous: 0, thisPeriod: 0, storedMaterials: 0 }], 10);
+    const worked = payAppInvoiceTotals([{ previous: 0, thisPeriod: 25000, storedMaterials: 0 }], 10);
+    assert.equal(blank.amount, 0);
+    assert.equal(payAppDrawIsBillable(blank.amount), false);
+    assert.equal(payAppDrawIsBillable(0), false);
+    assert.equal(payAppDrawIsBillable(Number.NaN), false);
+    assert.equal(payAppDrawIsBillable(worked.amount), true);
   });
 
   it("posts a change order to the budget only once", () => {
