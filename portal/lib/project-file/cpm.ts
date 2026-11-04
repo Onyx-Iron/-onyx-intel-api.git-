@@ -97,16 +97,22 @@ export function computeCpm(tasks: CpmTaskInput[]): CpmTaskResult[] {
   });
 }
 
+/**
+ * Activity length in days for CPM.
+ * The schedule screen's duration is the calendar span. The stored duration
+ * column defaults to 1 and that form never writes it, so a positive span
+ * wins. Stored duration is the fallback when dates are missing.
+ */
 export function durationDays(task: {
   duration?: number | null;
   start_date?: string | null;
   end_date?: string | null;
 }): number {
-  if (task.duration != null && task.duration > 0) return task.duration;
   if (task.start_date && task.end_date) {
     const diff = (new Date(task.end_date).getTime() - new Date(task.start_date).getTime()) / 86400000;
     if (Number.isFinite(diff) && diff > 0) return Math.round(diff);
   }
+  if (task.duration != null && task.duration > 0) return task.duration;
   return 1;
 }
 

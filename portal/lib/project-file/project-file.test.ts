@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { CpmCycleError, computeCpm, shiftTaskDates } from "./cpm.ts";
+import { CpmCycleError, computeCpm, durationDays, shiftTaskDates } from "./cpm.ts";
 import {
   approvedChangeDelta,
   budgetAlreadyPosted,
@@ -56,6 +56,23 @@ describe("schedule CPM", () => {
       shiftTaskDates({ start_date: "2026-10-01", end_date: "2026-10-05" }, 10),
       { start_date: "2026-10-11", end_date: "2026-10-15" },
     );
+  });
+
+  it("uses the calendar span when stored duration is still the 1-day default", () => {
+    const pour = durationDays({ duration: 1, start_date: "2026-11-01", end_date: "2026-11-21" });
+    const strip = durationDays({ duration: 1, start_date: "2026-11-21", end_date: "2026-11-22" });
+    assert.equal(pour, 20);
+    assert.equal(strip, 1);
+    const byId = Object.fromEntries(computeCpm([
+      { id: "pour", duration: pour, deps: [] },
+      { id: "strip", duration: strip, deps: ["pour"] },
+    ]).map((row) => [row.id, row]));
+    assert.equal(byId.pour.ef, 20);
+    assert.equal(byId.strip.es, 20);
+  });
+
+  it("keeps a stored duration when the task has no calendar dates", () => {
+    assert.equal(durationDays({ duration: 12, start_date: null, end_date: null }), 12);
   });
 });
 
