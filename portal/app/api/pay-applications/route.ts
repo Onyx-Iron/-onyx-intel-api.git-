@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { MONEY_FIELDS, projectContext, redactAmounts, requireProjectWrite, viewerContactId } from "@/lib/project-file/api";
-import { computePayLine, payAppInvoiceTotals, waiverCoversDraw } from "@/lib/project-file/money";
+import { computePayLine, payAppDrawIsBillable, payAppInvoiceTotals, waiverCoversDraw } from "@/lib/project-file/money";
 import { subCanSeeRecord } from "@/lib/project-file/records";
 
 export const runtime = "nodejs";
@@ -194,6 +194,9 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       })),
       Number(app.retainage_pct ?? 0),
     );
+    if (!payAppDrawIsBillable(totals.amount)) {
+      return NextResponse.json({ error: "Pay application has no amount to bill" }, { status: 409 });
+    }
     const { data: waivers } = await gate.ctx.db
       .from("lien_waivers")
       .select("status, amount, draw_number")
