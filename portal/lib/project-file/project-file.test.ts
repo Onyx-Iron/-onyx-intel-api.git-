@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { CpmCycleError, computeCpm, shiftTaskDates } from "./cpm.ts";
+import { readAllPages } from "./schedule-store.ts";
 import {
   approvedChangeDelta,
   budgetAlreadyPosted,
@@ -56,6 +57,21 @@ describe("schedule CPM", () => {
       shiftTaskDates({ start_date: "2026-10-01", end_date: "2026-10-05" }, 10),
       { start_date: "2026-10-11", end_date: "2026-10-15" },
     );
+  });
+
+});
+
+describe("schedule task pages", () => {
+  it("keeps reading schedule tasks after the first page", async () => {
+    const tasks = Array.from({ length: 51 }, (_, index) => ({ id: `task-${index}` }));
+    const seen: number[] = [];
+    const loaded = await readAllPages(async (offset, limit) => {
+      seen.push(offset);
+      return { data: tasks.slice(offset, offset + limit), error: null };
+    }, 50);
+    assert.deepEqual(seen, [0, 50]);
+    assert.equal(loaded.length, 51);
+    assert.equal(loaded[50]?.id, "task-50");
   });
 });
 
