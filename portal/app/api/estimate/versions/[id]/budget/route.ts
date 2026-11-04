@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 import { getServiceDb, loadVersionForTenant, NotFoundError } from "@/lib/estimating/versioning";
-import { snapshotBudget, type BudgetSourceItem } from "@/lib/estimating/budget";
+import { BudgetPublishError, publishApprovedBudget, snapshotBudget, type BudgetSourceItem } from "@/lib/estimating/budget";
 
 export const runtime = "nodejs";
 
@@ -70,9 +70,6 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
     return NextResponse.json({ error: "Only an approved version can become a budget." }, { status: 409 });
   }
 
-  const existing = await loadSnapshot(db, tenantId, id);
-  if (existing) return NextResponse.json({ tenant_id: tenantId, created: false, ...existing });
-
   const { data: items, error: itemError } = await db
     .from("estimate_items")
     .select("id, source_takeoff_id, csi_code, description, quantity, uom, labor_cost, material_cost, equipment_cost, total_price, sort_order")
@@ -80,46 +77,18 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
     .order("sort_order", { ascending: true });
   if (itemError) return NextResponse.json({ error: itemError.message }, { status: 500 });
 
-  const snapshot = snapshotBudget((items ?? []) as BudgetSourceItem[]);
-  await db
-    .from("project_budgets")
-    .update({ is_current: false })
-    .eq("tenant_id", tenantId)
-    .eq("project_id", version.project_id)
-    .eq("is_current", true);
-
-  const { data: budget, error: budgetError } = await db
-    .from("project_budgets")
-    .insert({
-      tenant_id: tenantId,
-      project_id: version.project_id,
-      source_estimate_version_id: version.id,
-      version_number: version.version_number,
-      total_price: snapshot.totalPrice,
-      line_count: snapshot.lineCount,
-      created_by: userId,
-      is_current: true,
-    })
-    .select("*")
-    .single();
-  if (budgetError) return NextResponse.json({ error: budgetError.message }, { status: 500 });
-
-  if (snapshot.lines.length > 0) {
-    const { error: lineError } = await db.from("project_budget_lines").insert(
-      snapshot.lines.map((line) => ({
-        ...line,
-        budget_id: budget.id,
-        tenant_id: tenantId,
-        project_id: version.project_id,
-        original_amount: line.total_price,
-        approved_change_amount: 0,
-      })),
-    );
-    if (lineError) return NextResponse.json({ error: lineError.message }, { status: 500 });
+  try {
+    const published = await publishApprovedBudget(db, {
+      tenantId,
+      projectId: version.project_id,
+      versionId: version.id,
+      versionNumber: version.version_number,
+      userId,
+      snapshot: snapshotBudget((items ?? []) as BudgetSourceItem[]),
+    });
+    return NextResponse.json({ tenant_id: tenantId, ...published });
+  } catch (e) {
+    if (e instanceof BudgetPublishError) return NextResponse.json({ error: e.message }, { status: 500 });
+    throw e;
   }
-
-  await db.from("projects").update({ budget: snapshot.totalPrice }).eq("id", version.project_id).eq("tenant_id", tenantId);
-
-  const saved = await loadSnapshot(db, tenantId, id);
-  return NextResponse.json({ tenant_id: tenantId, created: true, ...saved });
 }
