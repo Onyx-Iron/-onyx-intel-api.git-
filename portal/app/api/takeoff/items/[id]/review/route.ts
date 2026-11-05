@@ -4,6 +4,7 @@ import { createServiceClient } from "@/lib/supabase/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { recordTakeoffHistory } from "@/lib/takeoff/history";
 import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
+import { planRejectedEstimateUpdates } from "@/lib/estimating/delete-reconcile";
 import { logEvent } from "@/lib/activity";
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 
@@ -118,15 +119,68 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       meta: { review_status: reviewStatus },
     });
 
-    // Only approving can add anything new to the estimate — rejected items
-    // are excluded by buildEstimateImportRows, so no sync needed for that path.
+    // Reject must pull a price that an earlier approval already wrote.
+    // buildEstimateImportRows only skips new inserts; it does not revisit
+    // a draft line that is already linked to this takeoff id.
+    if (reviewStatus === "rejected" && before.project_id) {
+      await dropRejectedTakeoffFromDraft(anyDb, tenantId, before.project_id, id);
+    }
+
     const sync = reviewStatus === "approved" && before.project_id
       ? await syncTakeoffToEstimate(tenantId, before.project_id)
       : null;
+
+    // Approval sync can still be in flight when a second reviewer rejects.
+    // If the row is no longer approved once sync returns, drop the line
+    // that sync may have just inserted.
+    if (reviewStatus === "approved" && before.project_id) {
+      const { data: latest, error: latestErr } = await anyDb
+        .from("takeoff_items")
+        .select("review_status")
+        .eq("id", id)
+        .eq("tenant_id", tenantId)
+        .maybeSingle();
+      if (latestErr) return NextResponse.json({ error: latestErr.message }, { status: 500 });
+      if (latest?.review_status !== "approved") {
+        await dropRejectedTakeoffFromDraft(anyDb, tenantId, before.project_id, id);
+      }
+    }
 
     return NextResponse.json({ item: updated, estimate_synced: sync });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `[PATCH /api/takeoff/items/[id]/review] ${msg}` }, { status: 500 });
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function dropRejectedTakeoffFromDraft(db: any, tenantId: string, projectId: string, takeoffId: string): Promise<void> {
+  const { data: linkedItems, error } = await db
+    .from("estimate_items")
+    .select("id, estimate_version_id, notes")
+    .eq("tenant_id", tenantId)
+    .eq("project_id", projectId)
+    .eq("source_takeoff_id", takeoffId);
+  if (error) throw new Error(error.message);
+
+  const items = (linkedItems ?? []) as Array<{ id: string; estimate_version_id: string; notes: string | null }>;
+  if (items.length === 0) return;
+
+  const versionIds = [...new Set(items.map((item) => item.estimate_version_id))];
+  const { data: versions, error: versionError } = await db
+    .from("estimate_versions")
+    .select("id, status")
+    .in("id", versionIds);
+  if (versionError) throw new Error(versionError.message);
+
+  const updates = planRejectedEstimateUpdates(items, (versions ?? []) as Array<{ id: string; status: string }>);
+  const updatedAt = new Date().toISOString();
+  for (const update of updates) {
+    const { error: updateError } = await db
+      .from("estimate_items")
+      .update({ ...update.fields, updated_at: updatedAt })
+      .eq("id", update.id)
+      .eq("tenant_id", tenantId);
+    if (updateError) throw new Error(updateError.message);
   }
 }

@@ -73,6 +73,46 @@ export function detachedTakeoffEstimateFields(notes: string | null | undefined):
   return { ...sourceRemovedEstimateFields(notes), source_fingerprint: null };
 }
 
+/**
+ * A rejected takeoff must not keep a live draft price. The fingerprint is
+ * cleared so a later approval can price the line again instead of matching
+ * this zeroed row and skipping the update.
+ */
+export function rejectedTakeoffEstimateFields(notes: string | null | undefined): ReturnType<typeof detachedTakeoffEstimateFields> & {
+  indirect_cost: 0;
+  other_direct_cost: 0;
+  testing_cost: 0;
+  quantity: 0;
+} {
+  const prior = (notes ?? "").replace(/\[onyx_takeoff_fingerprint:[^\]]+\]/g, "").trim();
+  const nextNotes = prior.startsWith("Rejected") ? prior : `Rejected${prior ? ` — ${prior}` : ""}`;
+  return {
+    ...detachedTakeoffEstimateFields(null),
+    notes: nextNotes,
+    indirect_cost: 0,
+    other_direct_cost: 0,
+    testing_cost: 0,
+    quantity: 0,
+  };
+}
+
+export interface DraftEstimateLink {
+  id: string;
+  estimate_version_id: string;
+  notes?: string | null;
+}
+
+/** Draft and review lines to zero after a takeoff item is rejected. Approved versions stay locked. */
+export function planRejectedEstimateUpdates(
+  linkedItems: DraftEstimateLink[],
+  versions: Array<{ id: string; status: string }>,
+): Array<{ id: string; fields: ReturnType<typeof rejectedTakeoffEstimateFields> }> {
+  const draftIds = new Set(filterDraftEstimateItemIds(linkedItems, versions));
+  return linkedItems
+    .filter((item) => draftIds.has(item.id))
+    .map((item) => ({ id: item.id, fields: rejectedTakeoffEstimateFields(item.notes) }));
+}
+
 export function filterDraftEstimateItemIds(
   linkedItems: Array<{ id: string; estimate_version_id: string }>,
   versions: Array<{ id: string; status: string }>,
