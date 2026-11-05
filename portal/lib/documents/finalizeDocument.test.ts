@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { finalizeDocumentsFromOcr } from "./finalizeDocument.ts";
+import { finalizeDocumentsFromOcr, splitStillInProgress } from "./finalizeDocument.ts";
 
 type FakePage = {
   document_id: string;
@@ -11,6 +11,7 @@ type FakePage = {
 type FakeDoc = {
   id: string;
   status: string;
+  split_status?: string | null;
   page_count?: number | null;
   meta: Record<string, unknown> | null;
 };
@@ -73,6 +74,28 @@ function makeDb(args: {
     },
   };
 }
+
+describe("splitStillInProgress", () => {
+  it("is true while a later split batch has not been written", () => {
+    assert.equal(splitStillInProgress({
+      split_status: "processing",
+      page_count: 150,
+      meta: { processing_summary: { pages_split_through: 75, pages_total: 150 } },
+    }), true);
+    assert.equal(splitStillInProgress({
+      page_count: 150,
+      meta: { processing_summary: { pages_split_through: 75, pages_total: 150 } },
+    }), true);
+  });
+
+  it("is false once the last batch has recorded every page", () => {
+    assert.equal(splitStillInProgress({
+      split_status: "done",
+      page_count: 150,
+      meta: { processing_summary: { pages_split_through: 150, pages_total: 150, next_page_from: 76 } },
+    }), false);
+  });
+});
 
 describe("finalizeDocumentsFromOcr", () => {
   it("finalizes split docs when every page OCR is terminal", async () => {
@@ -137,6 +160,30 @@ describe("finalizeDocumentsFromOcr", () => {
         { document_id: "d3", status: "done" },
         { document_id: "d3", status: "pending" },
       ],
+      updates,
+    });
+
+    const results = await finalizeDocumentsFromOcr(db, "tenant-1");
+    assert.equal(results.length, 0);
+    assert.equal(updates.length, 0);
+  });
+
+  it("does not finalize a multi-batch split that has only written the first batch", async () => {
+    const updates: Array<{ id: string; patch: Record<string, unknown> }> = [];
+    const db = makeDb({
+      docs: [{
+        id: "d6",
+        status: "processing",
+        split_status: "processing",
+        page_count: 150,
+        meta: { processing_summary: { pages_split_through: 75, pages_total: 150, continued: true } },
+      }],
+      pages: Array.from({ length: 75 }, (_, index) => ({
+        document_id: "d6",
+        status: "done",
+        takeoff_status: "done",
+        page_number: index + 1,
+      })),
       updates,
     });
 
