@@ -1,4 +1,5 @@
 import { type EstimateLineType } from "./csi-catalog";
+import { storedAmount } from "./calculations";
 
 export interface TakeoffFingerprintInput {
   id?: string | null;
@@ -44,11 +45,11 @@ export interface ExistingEstimateForImport {
   source_takeoff_id?: string | null;
   source_fingerprint?: string | null;
   notes?: string | null;
-  quantity?: number | null;
-  unit_cost?: number | null;
-  labor_cost?: number | null;
-  material_cost?: number | null;
-  equipment_cost?: number | null;
+  quantity?: number | string | null;
+  unit_cost?: number | string | null;
+  labor_cost?: number | string | null;
+  material_cost?: number | string | null;
+  equipment_cost?: number | string | null;
 }
 
 export interface CostCatalogForImport {
@@ -126,26 +127,19 @@ export interface ScaledDirectCosts {
  */
 export function scaledDirectCosts(
   existing: ExistingEstimateForImport,
-  newQuantity: number | null,
+  newQuantity: number | string | null,
 ): ScaledDirectCosts | null {
-  const unitCost = existing.unit_cost;
-  const oldQuantity = existing.quantity;
-  if (
-    unitCost == null ||
-    oldQuantity == null ||
-    !Number.isFinite(oldQuantity) ||
-    oldQuantity === 0 ||
-    newQuantity == null ||
-    !Number.isFinite(newQuantity)
-  ) {
-    return null;
-  }
-  const factor = newQuantity / oldQuantity;
+  if (existing.unit_cost == null || existing.quantity == null || newQuantity == null) return null;
+  const unitCost = storedAmount(existing.unit_cost);
+  const oldQuantity = storedAmount(existing.quantity);
+  const quantity = storedAmount(newQuantity);
+  if (oldQuantity === 0) return null;
+  const factor = quantity / oldQuantity;
   return {
     unitCost,
-    laborCost: (existing.labor_cost ?? 0) * factor,
-    materialCost: (existing.material_cost ?? 0) * factor,
-    equipmentCost: (existing.equipment_cost ?? 0) * factor,
+    laborCost: storedAmount(existing.labor_cost) * factor,
+    materialCost: storedAmount(existing.material_cost) * factor,
+    equipmentCost: storedAmount(existing.equipment_cost) * factor,
   };
 }
 

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   applyVersionPercentages, calculateEstimateTotals, calculateItem,
   computeCostBeforeProfit, computeDirectCost, computeMargin, computeMarkup, computeSellingPrice, roundCurrency,
+  storedAmount,
 } from "./calculations";
 
 describe("cost calculations", () => {
@@ -124,5 +125,39 @@ describe("estimate-level roll-up", () => {
     assert.equal(totals.totalPrice, 0);
     assert.equal(totals.markup, null);
     assert.equal(totals.margin, null);
+  });
+
+  it("sums prices Postgres returns as numeric strings", () => {
+    assert.equal(storedAmount("1350.00"), 1350);
+    assert.equal(storedAmount(""), 0);
+    assert.equal(storedAmount("not-a-number"), 0);
+    const totals = calculateEstimateTotals([
+      {
+        totalDirectCost: "1000.00",
+        indirectCost: "50.00",
+        contingency: "50",
+        overhead: "100",
+        profit: "150",
+        totalPrice: "1350.00",
+      },
+      { totalDirectCost: "2000.50", totalPrice: "2000.50" },
+    ]);
+    assert.equal(totals.totalDirectCost, 3000.5);
+    assert.equal(totals.totalIndirectCost, 50);
+    assert.equal(totals.totalContingency, 50);
+    assert.equal(totals.totalOverhead, 100);
+    assert.equal(totals.totalProfit, 150);
+    assert.equal(totals.totalPrice, 3350.5);
+  });
+
+  it("applies version markup when the stored percentages are numeric strings", () => {
+    const { contingency, overhead, profit } = applyVersionPercentages(1000, 0, {
+      contingencyPct: "5.00",
+      overheadPct: "10",
+      profitPct: "15.0000",
+    });
+    assert.equal(contingency, 50);
+    assert.equal(overhead, 105);
+    assert.equal(profit, 173.25);
   });
 });
