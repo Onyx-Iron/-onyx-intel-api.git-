@@ -12,69 +12,66 @@ const SYSTEM = buildGroundedSystemPrompt(
   { sourceLabel: "structured project data" },
 );
 
+export interface ProjectStatusProject {
+  id: string;
+  name: string;
+  status: string;
+  budget: number | null;
+  start_date: string | null;
+  end_date: string | null;
+  city: string | null;
+  state: string | null;
+}
+
 export interface ProjectStatusReportResult {
   report: string;
   provider: string;
   completion: number;
   estimate_value: number;
   estimate_quality: ReturnType<typeof buildEstimateQualityReport>;
-  project: {
-    id: string;
-    name: string;
-    status: string;
-    budget: number | null;
-    start_date: string | null;
-    end_date: string | null;
-    city: string | null;
-    state: string | null;
-  };
+  project: ProjectStatusProject;
 }
 
-export async function generateProjectStatusReport(
-  tenantId: string,
-  projectId: string,
-  options?: { includeFinancials?: boolean },
-): Promise<ProjectStatusReportResult> {
-  const includeFinancials = options?.includeFinancials !== false;
-  const db = await createServiceClient();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const anyDb = db as any;
+export interface ProjectStatusPromptInput {
+  includeFinancials: boolean;
+  project: ProjectStatusProject;
+  tasks: Array<{ status: string }>;
+  estimateQuality: ReturnType<typeof buildEstimateQualityReport>;
+  punchRows: Array<{ description: string; status: string; priority: string }>;
+  permitRows: Array<{ permit_type: string; status: string }>;
+  procurementRows: Array<{ description: string; status: string; required_date: string | null }>;
+  logRows: Array<{ log_date: string; work_performed: string | null; crew_count: number | null; weather: string | null }>;
+  rfiRows: Array<{ number: string | null; subject: string; status: string; priority: string; due_date: string | null }>;
+  submittalRows: Array<{ number: string | null; title: string; status: string; due_date: string | null; responsible: string | null }>;
+  changeOrderRows: Array<{ number: string | null; description: string; status: string; amount: number | string | null }>;
+}
 
-  const [proj, tasks, estimate, punch, permits, procurement, logs, rfis, submittals, changeOrders] = await Promise.all([
-    db.from("projects").select("id,name,status,budget,start_date,end_date,city,state").eq("tenant_id", tenantId).eq("id", projectId).single(),
-    db.from("schedule_tasks").select("status").eq("tenant_id", tenantId).eq("project_id", projectId).limit(3000),
-    anyDb
-      .from("estimate_items")
-      .select("id,description,csi_code,trade,item_type,quantity,uom,unit_cost,source_takeoff_id,source_fingerprint,quantity_basis,drawing_ref,location_tag,pricing_status")
-      .eq("tenant_id", tenantId)
-      .eq("project_id", projectId)
-      .limit(5000),
-    anyDb.from("punch_list_items").select("description,status,priority").eq("tenant_id", tenantId).eq("project_id", projectId).in("status", ["open", "in_progress"]).limit(50),
-    anyDb.from("permit_items").select("permit_type,status").eq("tenant_id", tenantId).eq("project_id", projectId).limit(50),
-    anyDb.from("procurement_items").select("description,status,required_date").eq("tenant_id", tenantId).eq("project_id", projectId).neq("status", "delivered").limit(50),
-    anyDb.from("daily_logs").select("log_date,work_performed,crew_count,weather").eq("tenant_id", tenantId).eq("project_id", projectId).order("log_date", { ascending: false }).limit(5),
-    anyDb.from("rfi_items").select("number,subject,status,priority,due_date").eq("tenant_id", tenantId).eq("project_id", projectId).in("status", ["open", "answered"]).limit(25),
-    anyDb.from("submittal_items").select("number,title,status,due_date,responsible").eq("tenant_id", tenantId).eq("project_id", projectId).in("status", ["submitted", "under_review", "revise_resubmit", "rejected"]).limit(25),
-    anyDb.from("change_order_items").select("number,description,status,amount").eq("tenant_id", tenantId).eq("project_id", projectId).in("status", ["pending", "approved"]).limit(25),
-  ]);
+export interface ProjectStatusPrompt {
+  prompt: string;
+  completion: number;
+  estimateValue: number;
+}
 
-  const p = proj.data as ProjectStatusReportResult["project"] | null;
-  if (!p) throw new Error("Project not found");
-
-  const taskRows = (tasks.data ?? []) as Array<{ status: string }>;
+/** Prompt text sent to the model. Restricted readers must not see dollar amounts here. */
+export function buildProjectStatusPrompt(input: ProjectStatusPromptInput): ProjectStatusPrompt {
+  const includeFinancials = input.includeFinancials;
+  const p = input.project;
+  const taskRows = input.tasks;
   const done = taskRows.filter((x) => x.status === "complete").length;
   const completion = taskRows.length ? Math.round((done / taskRows.length) * 100) : 0;
-  const estimateQuality = buildEstimateQualityReport((estimate.data ?? []) as EstimateQcItem[]);
+  const estimateQuality = input.estimateQuality;
   const estVal = estimateQuality.totals.grand_total;
-  const punchRows = (punch.data ?? []) as Array<{ description: string; status: string; priority: string }>;
-  const permitRows = (permits.data ?? []) as Array<{ permit_type: string; status: string }>;
-  const procRows = (procurement.data ?? []) as Array<{ description: string; status: string; required_date: string | null }>;
-  const logRows = (logs.data ?? []) as Array<{ log_date: string; work_performed: string | null; crew_count: number | null; weather: string | null }>;
-  const rfiRows = rfis.error ? [] : (rfis.data ?? []) as Array<{ number: string | null; subject: string; status: string; priority: string; due_date: string | null }>;
-  const submittalRows = submittals.error ? [] : (submittals.data ?? []) as Array<{ number: string | null; title: string; status: string; due_date: string | null; responsible: string | null }>;
-  const changeOrderRows = changeOrders.error ? [] : (changeOrders.data ?? []) as Array<{ number: string | null; description: string; status: string; amount: number | null }>;
+  const {
+    punchRows,
+    permitRows,
+    procurementRows: procRows,
+    logRows,
+    rfiRows,
+    submittalRows,
+    changeOrderRows,
+  } = input;
 
-  const ctx = [
+  const prompt = [
     ...(includeFinancials ? [] : ["Do not state budget, estimate, change-order, invoice, or unit-price dollar amounts. Say that pricing is hidden."]),
     `PROJECT: ${p.name} (${[p.city, p.state].filter(Boolean).join(", ") || "location n/a"})`,
     `Status: ${p.status} | Timeline: ${p.start_date ?? "TBD"} -> ${p.end_date ?? "TBD"}`,
@@ -107,13 +104,62 @@ export async function generateProjectStatusReport(
     ...logRows.map((x) => `  - ${x.log_date} (${x.weather ?? "?"}, ${x.crew_count ?? "?"} crew): ${x.work_performed ?? "no description"}`),
   ].join("\n");
 
+  return { prompt, completion, estimateValue: Math.round(estVal) };
+}
+
+export async function generateProjectStatusReport(
+  tenantId: string,
+  projectId: string,
+  options?: { includeFinancials?: boolean },
+): Promise<ProjectStatusReportResult> {
+  const includeFinancials = options?.includeFinancials !== false;
+  const db = await createServiceClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const anyDb = db as any;
+
+  const [proj, tasks, estimate, punch, permits, procurement, logs, rfis, submittals, changeOrders] = await Promise.all([
+    db.from("projects").select("id,name,status,budget,start_date,end_date,city,state").eq("tenant_id", tenantId).eq("id", projectId).single(),
+    db.from("schedule_tasks").select("status").eq("tenant_id", tenantId).eq("project_id", projectId).limit(3000),
+    anyDb
+      .from("estimate_items")
+      .select("id,description,csi_code,trade,item_type,quantity,uom,unit_cost,source_takeoff_id,source_fingerprint,quantity_basis,drawing_ref,location_tag,pricing_status")
+      .eq("tenant_id", tenantId)
+      .eq("project_id", projectId)
+      .limit(5000),
+    anyDb.from("punch_list_items").select("description,status,priority").eq("tenant_id", tenantId).eq("project_id", projectId).in("status", ["open", "in_progress"]).limit(50),
+    anyDb.from("permit_items").select("permit_type,status").eq("tenant_id", tenantId).eq("project_id", projectId).limit(50),
+    anyDb.from("procurement_items").select("description,status,required_date").eq("tenant_id", tenantId).eq("project_id", projectId).neq("status", "delivered").limit(50),
+    anyDb.from("daily_logs").select("log_date,work_performed,crew_count,weather").eq("tenant_id", tenantId).eq("project_id", projectId).order("log_date", { ascending: false }).limit(5),
+    anyDb.from("rfi_items").select("number,subject,status,priority,due_date").eq("tenant_id", tenantId).eq("project_id", projectId).in("status", ["open", "answered"]).limit(25),
+    anyDb.from("submittal_items").select("number,title,status,due_date,responsible").eq("tenant_id", tenantId).eq("project_id", projectId).in("status", ["submitted", "under_review", "revise_resubmit", "rejected"]).limit(25),
+    anyDb.from("change_order_items").select("number,description,status,amount").eq("tenant_id", tenantId).eq("project_id", projectId).in("status", ["pending", "approved"]).limit(25),
+  ]);
+
+  const p = proj.data as ProjectStatusProject | null;
+  if (!p) throw new Error("Project not found");
+
+  const estimateQuality = buildEstimateQualityReport((estimate.data ?? []) as EstimateQcItem[]);
+  const built = buildProjectStatusPrompt({
+    includeFinancials,
+    project: p,
+    tasks: (tasks.data ?? []) as Array<{ status: string }>,
+    estimateQuality,
+    punchRows: (punch.data ?? []) as ProjectStatusPromptInput["punchRows"],
+    permitRows: (permits.data ?? []) as ProjectStatusPromptInput["permitRows"],
+    procurementRows: (procurement.data ?? []) as ProjectStatusPromptInput["procurementRows"],
+    logRows: (logs.data ?? []) as ProjectStatusPromptInput["logRows"],
+    rfiRows: rfis.error ? [] : (rfis.data ?? []) as ProjectStatusPromptInput["rfiRows"],
+    submittalRows: submittals.error ? [] : (submittals.data ?? []) as ProjectStatusPromptInput["submittalRows"],
+    changeOrderRows: changeOrders.error ? [] : (changeOrders.data ?? []) as ProjectStatusPromptInput["changeOrderRows"],
+  });
+
   try {
-    const result = await generateText({ system: SYSTEM, prompt: ctx, maxTokens: 3000 });
+    const result = await generateText({ system: SYSTEM, prompt: built.prompt, maxTokens: 3000 });
     return {
       report: result.text,
       provider: result.provider,
-      completion,
-      estimate_value: Math.round(estVal),
+      completion: built.completion,
+      estimate_value: built.estimateValue,
       estimate_quality: estimateQuality,
       project: p,
     };

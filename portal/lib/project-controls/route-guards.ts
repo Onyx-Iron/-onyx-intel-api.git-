@@ -13,12 +13,19 @@ import {
   type RoleLookup,
 } from "@/lib/project-controls/permissions";
 
+/** Org role from this user's Clerk session. Another user's session is ignored. */
+export function roleLookupFromSession(
+  userId: string,
+  session: { userId: string | null; orgId?: string | null; orgRole?: string | null },
+): RoleLookup {
+  if (session.userId !== userId) return {};
+  return { orgId: session.orgId, orgRole: session.orgRole };
+}
+
 /** Clerk org role for this request, used to recognize the workspace owner. */
 export async function roleLookupFor(userId: string): Promise<RoleLookup> {
   try {
-    const session = await auth();
-    if (session.userId !== userId) return {};
-    return { orgId: session.orgId, orgRole: session.orgRole };
+    return roleLookupFromSession(userId, await auth());
   } catch {
     return {};
   }
