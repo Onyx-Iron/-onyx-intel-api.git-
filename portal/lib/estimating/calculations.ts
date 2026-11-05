@@ -38,7 +38,20 @@ export interface ItemCalculationResult {
   margin: number | null; // profit / sellingPrice (totalPrice)
 }
 
-const n = (v: number | null | undefined): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+/**
+ * Money and percent values. Postgres `numeric` arrives as a string; blank
+ * and non-numeric values stay 0 so a missing cost does not become NaN.
+ */
+export function storedAmount(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
+const n = storedAmount;
 
 // Rounds to the nearest cent using standard rounding (never truncation),
 // applied once at the very end of a calculation chain — intermediate
@@ -107,9 +120,9 @@ export function calculateItem(inputs: ItemCalculationInputs): ItemCalculationRes
 }
 
 export interface VersionPercentages {
-  contingencyPct?: number | null;
-  overheadPct?: number | null;
-  profitPct?: number | null;
+  contingencyPct?: number | string | null;
+  overheadPct?: number | string | null;
+  profitPct?: number | string | null;
 }
 
 export interface ResolvedVersionAmounts {
@@ -153,12 +166,12 @@ export interface EstimateTotals {
 }
 
 export interface EstimateTotalsItemInput {
-  totalDirectCost?: number | null;
-  indirectCost?: number | null;
-  contingency?: number | null;
-  overhead?: number | null;
-  profit?: number | null;
-  totalPrice?: number | null;
+  totalDirectCost?: number | string | null;
+  indirectCost?: number | string | null;
+  contingency?: number | string | null;
+  overhead?: number | string | null;
+  profit?: number | string | null;
+  totalPrice?: number | string | null;
   isAlternate?: boolean | null;
   alternateAccepted?: boolean | null;
 }

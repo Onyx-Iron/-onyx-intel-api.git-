@@ -412,6 +412,21 @@ describe("takeoff to estimate import quality", () => {
     });
   });
 
+  it("keeps a negotiated split when Postgres returns the stored costs as numeric strings", () => {
+    assert.deepEqual(scaledDirectCosts({
+      quantity: "125.0000",
+      unit_cost: "40.00",
+      labor_cost: "1000.00",
+      material_cost: "4000.00",
+      equipment_cost: "0.00",
+    }, 140), {
+      unitCost: 40,
+      laborCost: 1120,
+      materialCost: 4480,
+      equipmentCost: 0,
+    });
+  });
+
   it("inserts a draft line when quantity changed and the draft has no copy of an approved line", () => {
     const result = buildEstimateImportRows({
       takeoffItems: [

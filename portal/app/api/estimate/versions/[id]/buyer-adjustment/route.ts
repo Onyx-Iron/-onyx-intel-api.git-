@@ -4,6 +4,7 @@ import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 import { assertVersionEditable, getServiceDb, loadVersionForTenant, NotFoundError, VersionLockedError } from "@/lib/estimating/versioning";
 import { recordEstimateAudit } from "@/lib/estimating/audit";
+import { storedAmount } from "@/lib/estimating/calculations";
 
 export const runtime = "nodejs";
 
@@ -66,14 +67,17 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     throw e;
   }
 
-  const originalValue = version[body.field] ?? 0;
+  const originalValue = storedAmount(version[body.field]);
   const { data: items } = await db
     .from("estimate_items")
     .select("total_direct_cost, indirect_cost, contingency, overhead")
     .eq("estimate_version_id", id);
-  const directPlusIndirectPlusOther = (items ?? []).reduce((s: number, it: Record<string, number>) => {
-    const base = it.total_direct_cost + it.indirect_cost + (body.field === "contingency_pct" ? 0 : it.contingency) + (body.field === "overhead_pct" ? 0 : it.overhead);
-    return s + base;
+  const directPlusIndirectPlusOther = (items ?? []).reduce((sum: number, it: Record<string, unknown>) => {
+    const base = storedAmount(it.total_direct_cost)
+      + storedAmount(it.indirect_cost)
+      + (body.field === "contingency_pct" ? 0 : storedAmount(it.contingency))
+      + (body.field === "overhead_pct" ? 0 : storedAmount(it.overhead));
+    return sum + base;
   }, 0);
   const originalDollarAmount = directPlusIndirectPlusOther * (originalValue / 100);
   const proposedDollarAmount = directPlusIndirectPlusOther * (body.proposed_value / 100);

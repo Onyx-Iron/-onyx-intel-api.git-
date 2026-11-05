@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 import { getServiceDb, loadVersionForTenant, NotFoundError } from "@/lib/estimating/versioning";
-import { calculateEstimateTotals } from "@/lib/estimating/calculations";
+import { calculateEstimateTotals, storedAmount } from "@/lib/estimating/calculations";
 import { recordEstimateAudit } from "@/lib/estimating/audit";
 
 export const runtime = "nodejs";
@@ -102,7 +102,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const key = groupKeyOf(it);
     const group = groups.get(key) ?? { rows: [], total: 0 };
     group.rows.push(it);
-    group.total += it.total_price;
+    group.total += storedAmount(it.total_price);
     groups.set(key, group);
   }
   const rows = Array.from(groups.entries()).map(([group, g]) => ({
