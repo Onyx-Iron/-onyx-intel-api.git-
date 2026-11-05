@@ -20,4 +20,9 @@ describe("scaleGate", () => {
     assert.equal(sheetHasVerifiedScale({ status: "verified", page_space_scale_factor: null }), false);
     assert.equal(sheetHasVerifiedScale({ status: "verified", page_space_scale_factor: 0.0125 }), true);
   });
+
+  it("treats a numeric string from Postgres as a verified scale", () => {
+    assert.equal(sheetHasVerifiedScale({ status: "verified", page_space_scale_factor: "0.0125" }), true);
+    assert.equal(sheetHasVerifiedScale({ status: "verified", page_space_scale_factor: "not-a-scale" }), false);
+  });
 });

@@ -9,6 +9,7 @@ import { FORMULA_VERSION } from "@/lib/takeoff/canvas/quantity";
 import { matchScalePreset, pageSpaceFactorForPreset } from "@/lib/takeoff/scale-presets";
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { processOutboxBatch } from "@/lib/estimating/outbox-worker";
+import { finiteScaleFactor } from "@/lib/takeoff/scaleGate";
 
 export const runtime = "nodejs";
 
@@ -149,7 +150,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     .eq("page_id", page_id)
     .maybeSingle();
 
-  const oldFactor = typeof before?.page_space_scale_factor === "number" ? before.page_space_scale_factor : null;
+  const oldFactor = finiteScaleFactor(before?.page_space_scale_factor);
   const oldVerified = before?.status === "verified" && oldFactor != null && oldFactor > 0;
   const { data: drafts } = await anyDb
     .from("manual_takeoffs")

@@ -2,6 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { clientFetch } from "@/lib/http";
+import { finiteScaleFactor } from "@/lib/takeoff/scaleGate";
 
 /** Static per-page data — invalidated only on explicit user action (recalibrate, vector refresh). */
 const STATIC_STALE_MS = Infinity;
@@ -26,6 +27,14 @@ export const takeoffQueryKeys = {
   cadVectors: (pageId: string) => ["takeoff", "cad-vectors", pageId] as const,
 };
 
+export function coerceSheetCalibration<T extends SheetCalibration>(row: T): T {
+  return {
+    ...row,
+    page_space_scale_factor: finiteScaleFactor(row.page_space_scale_factor),
+    scale_ratio: finiteScaleFactor(row.scale_ratio),
+  };
+}
+
 export function useSheetCalibration(pageId: string) {
   return useQuery({
     queryKey: takeoffQueryKeys.calibration(pageId),
@@ -35,7 +44,7 @@ export function useSheetCalibration(pageId: string) {
       );
       if (!res.ok) throw new Error(`calibration ${res.status}`);
       const data = (await res.json()) as { calibration: SheetCalibration | null };
-      return data.calibration;
+      return data.calibration ? coerceSheetCalibration(data.calibration) : null;
     },
     staleTime: STATIC_STALE_MS,
   });

@@ -16,13 +16,25 @@ export function toolRequiresVerifiedScale(tool: CanvasTool): boolean {
   return SCALE_GATED_TOOLS.has(tool);
 }
 
+/**
+ * Postgres `numeric` arrives as a string. `Number.isFinite` rejects those
+ * strings, so a verified sheet looked unscaled.
+ */
+export function finiteScaleFactor(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 export function sheetHasVerifiedScale(calibration: {
   status?: string | null;
-  page_space_scale_factor?: number | null;
+  page_space_scale_factor?: unknown;
 } | null | undefined): boolean {
   return calibration?.status === "verified"
-    && calibration.page_space_scale_factor != null
-    && Number.isFinite(calibration.page_space_scale_factor);
+    && finiteScaleFactor(calibration.page_space_scale_factor) != null;
 }
 
 export const SCALE_COACH_COPY =
