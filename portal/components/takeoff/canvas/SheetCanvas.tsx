@@ -29,10 +29,11 @@ import {
 } from "@/lib/takeoff/canvas/vector-snap";
 import { canEditVertex, recomputeShapeQuantity } from "@/lib/takeoff/canvas/shape-edit";
 import { attachPointerDrag } from "@/lib/takeoff/canvas/pointer-drag";
-import { takeoffQueryKeys, useSheetCalibration } from "@/lib/takeoff/queries";
+import { coerceSheetCalibration, takeoffQueryKeys, useSheetCalibration } from "@/lib/takeoff/queries";
 import type { SnapResult } from "@/lib/takeoff/canvas/snap-algorithm";
 import {
   SCALE_COACH_COPY,
+  finiteScaleFactor,
   sheetHasVerifiedScale,
   toolRequiresVerifiedScale,
 } from "@/lib/takeoff/scaleGate";
@@ -736,10 +737,11 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   // original render-scale-dependent scale_ratio unchanged (STEP 4 — never
   // fabricate a page-space factor for a calibration that predates one).
   const scale = useMemo(() => {
-    if (calibration?.page_space_scale_factor != null && renderScale > 0) {
-      return calibration.page_space_scale_factor / renderScale;
+    const pageFactor = finiteScaleFactor(calibration?.page_space_scale_factor);
+    if (pageFactor != null && renderScale > 0) {
+      return pageFactor / renderScale;
     }
-    return calibration?.scale_ratio ?? 1;
+    return finiteScaleFactor(calibration?.scale_ratio) ?? 1;
   }, [calibration, renderScale]);
 
   // Preview quantity for the in-progress draft (before commit).
@@ -1335,7 +1337,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
     }
     if (res.ok) {
       const data = await res.json() as { calibration: Calibration; recomputed?: number };
-      queryClient.setQueryData(takeoffQueryKeys.calibration(pageId), data.calibration);
+      queryClient.setQueryData(takeoffQueryKeys.calibration(pageId), coerceSheetCalibration(data.calibration));
       if (applyToDrafts || (data.recomputed ?? 0) > 0) window.location.reload();
     } else {
       const err = await res.json().catch(() => ({}));
@@ -1396,7 +1398,8 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
   }, [tool, vertexDrag]);
 
   const pageSpaceScaleFactor = useMemo(() => {
-    if (calibration?.page_space_scale_factor != null) return calibration.page_space_scale_factor;
+    const factor = finiteScaleFactor(calibration?.page_space_scale_factor);
+    if (factor != null) return factor;
     // Legacy calibrations: scale is real-units per current-render pixel;
     // page-space factor ≈ scale * renderScale.
     return scale * renderScale;
@@ -2009,7 +2012,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
               <>
                 {calibration.status === "verified" ? (
                   <span className="text-[#CCFF00]" title="Page-space calibration — stable across zoom, resize, and reload">
-                    ✓ Verified · {calibration.page_space_scale_factor?.toFixed(4)} {calibration.unit_type}/page-unit
+                    ✓ Verified · {finiteScaleFactor(calibration.page_space_scale_factor)?.toFixed(4) ?? "—"} {calibration.unit_type}/page-unit
                   </span>
                 ) : calibration.status === "needs_verification" ? (
                   <span className="text-amber-400" title={SCALE_COACH_COPY}>
@@ -2018,7 +2021,7 @@ export default function SheetCanvas({ projectId, projectName, pageId, pageNumber
                 ) : (
                   <span className="text-amber-400" title="This calibration predates the page-space model and is render-scale-dependent — recalibrate before approving new measurements or syncing to the estimate">
                     ⚠ Legacy scale — needs recalibration
-                    {calibration.scale_ratio != null && <> ({calibration.scale_ratio.toFixed(4)} ft/px at save time)</>}
+                    {finiteScaleFactor(calibration.scale_ratio) != null && <> ({finiteScaleFactor(calibration.scale_ratio)?.toFixed(4)} ft/px at save time)</>}
                   </span>
                 )}
                 <button

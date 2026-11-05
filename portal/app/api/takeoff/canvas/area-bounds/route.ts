@@ -11,6 +11,7 @@ import {
 import { requirePermission } from "@/lib/project-controls/route-guards";
 import { auditInsert, auditDelete } from "@/lib/audit";
 import { calculatePolygonArea } from "@/lib/takeoff/canvas/quantity";
+import { finiteScaleFactor } from "@/lib/takeoff/scaleGate";
 import type { Point } from "@/lib/takeoff/canvas/coordinates";
 import type { AreaBoundItem } from "@/lib/types/takeoff";
 
@@ -143,8 +144,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     let excavationVolumeCy = it.excavation_volume_cy ?? null;
 
     const calibration = it.page_id ? calibrationByPageId.get(it.page_id) : undefined;
-    const scale = calibration?.page_space_scale_factor;
-    if (calibration?.status === "verified" && typeof scale === "number" && scale > 0) {
+    const scale = finiteScaleFactor(calibration?.page_space_scale_factor);
+    if (calibration?.status === "verified" && scale != null && scale > 0) {
       // Authoritative: ignore client area/volume when verified calibration exists.
       areaSf = calculatePolygonArea(points, scale);
       excavationVolumeCy = (areaSf * (depthIn / 12)) / 27;
