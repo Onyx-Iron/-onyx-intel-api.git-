@@ -49,46 +49,66 @@ export function idwInterpolate(points: Point3[], at: Point2, power = 2): number 
 }
 
 /**
- * Build a uniform 2D grid of sample positions covering [minX,maxX] x [minY,maxY].
- * Result is row-major: grid[row][col] where row maps to Y, col maps to X.
+ * Sample coordinates from `min` through `max`, stepping by `resolution`.
+ * The last sample is `max` itself, so a partial closing interval stays inside
+ * the overlap instead of adding another full cell past the far edge.
+ */
+export function sampleAxis(min: number, max: number, resolution: number): number[] {
+  const res = Math.max(resolution, 0.0001);
+  if (!(max > min)) return [min];
+  const coords = [min];
+  let cursor = min;
+  while (cursor + res < max - 1e-9) {
+    cursor += res;
+    coords.push(cursor);
+  }
+  if (max - coords[coords.length - 1] > 1e-9) coords.push(max);
+  return coords;
+}
+
+/**
+ * Build a 2D grid of sample positions covering [minX,maxX] x [minY,maxY].
+ * Samples are cell corners, not cell centers. Result is row-major:
+ * grid[row][col] where row maps to Y, col maps to X.
  */
 export function buildGrid(
   bounds: Pick<Bounds, "minX" | "maxX" | "minY" | "maxY">,
   resolution: number
 ): Point2[][] {
-  const res = Math.max(resolution, 0.0001);
-  const cols = Math.max(1, Math.ceil((bounds.maxX - bounds.minX) / res) + 1);
-  const rows = Math.max(1, Math.ceil((bounds.maxY - bounds.minY) / res) + 1);
-  const grid: Point2[][] = [];
-  for (let r = 0; r < rows; r++) {
-    const row: Point2[] = [];
-    const y = bounds.minY + r * res;
-    for (let c = 0; c < cols; c++) {
-      const x = bounds.minX + c * res;
-      row.push({ x, y });
-    }
-    grid.push(row);
-  }
-  return grid;
+  const xs = sampleAxis(bounds.minX, bounds.maxX, resolution);
+  const ys = sampleAxis(bounds.minY, bounds.maxY, resolution);
+  return ys.map((y) => xs.map((x) => ({ x, y })));
 }
 
 /**
- * Integrate a per-cell Δz grid into cut/fill/net volumes in cubic yards.
- * cellAreaSf is the square-foot area represented by one grid cell.
+ * Integrate node Δz samples into cut/fill/net volumes in cubic yards.
+ * `xs` / `ys` are the sample coordinates for each column and row. Each cell
+ * is the rectangle between adjacent samples, and Δz is the mean of its four
+ * corners — the same rule as the earthwork grid composite.
  * Convention: delta = proposed.z - existing.z.
  *   delta < 0 → cut  (existing > proposed → material removed)
  *   delta > 0 → fill (proposed > existing → material added)
  */
-export function computeVolumes(deltaGrid: number[][], cellAreaSf: number): VolumeResult {
+export function computeVolumes(deltaGrid: number[][], xs: number[], ys: number[]): VolumeResult {
   let cutCf = 0;
   let fillCf = 0;
-  for (let r = 0; r < deltaGrid.length; r++) {
+  const rows = Math.min(deltaGrid.length, ys.length);
+  const cols = Math.min(deltaGrid[0]?.length ?? 0, xs.length);
+  for (let r = 0; r < rows - 1; r++) {
+    const height = ys[r + 1] - ys[r];
+    if (!(height > 0)) continue;
     const row = deltaGrid[r];
-    for (let c = 0; c < row.length; c++) {
-      const d = row[c];
-      if (!Number.isFinite(d)) continue;
-      if (d < 0) cutCf += -d * cellAreaSf;
-      else if (d > 0) fillCf += d * cellAreaSf;
+    const next = deltaGrid[r + 1];
+    if (!row || !next) continue;
+    for (let c = 0; c < cols - 1; c++) {
+      const width = xs[c + 1] - xs[c];
+      if (!(width > 0)) continue;
+      const corners = [row[c], row[c + 1], next[c], next[c + 1]];
+      if (corners.some((value) => !Number.isFinite(value))) continue;
+      const delta = (corners[0] + corners[1] + corners[2] + corners[3]) / 4;
+      const cubicFeet = delta * width * height;
+      if (delta < 0) cutCf += -cubicFeet;
+      else if (delta > 0) fillCf += cubicFeet;
     }
   }
   const cut = cutCf / 27;

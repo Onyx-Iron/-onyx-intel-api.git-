@@ -8,6 +8,7 @@ import {
   buildGrid,
   computeVolumes,
   idwInterpolate,
+  sampleAxis,
   type Bounds,
   type Point3,
 } from "@/lib/cutfill/sampling";
@@ -123,12 +124,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ error: "Surfaces do not overlap in XY" }, { status: 422 });
     }
 
-    const estRows = Math.ceil((maxY - minY) / gridRes) + 1;
-    const estCols = Math.ceil((maxX - minX) / gridRes) + 1;
-    if (estRows * estCols > MAX_GRID_CELLS) {
+    const xs = sampleAxis(minX, maxX, gridRes);
+    const ys = sampleAxis(minY, maxY, gridRes);
+    const sampleCount = xs.length * ys.length;
+    if (sampleCount > MAX_GRID_CELLS) {
       return NextResponse.json(
         {
-          error: `Grid too large: ${estRows * estCols} cells (max ${MAX_GRID_CELLS}). Increase grid_resolution_ft or reduce the overlap area.`,
+          error: `Grid too large: ${sampleCount} samples (max ${MAX_GRID_CELLS}). Increase grid_resolution_ft or reduce the overlap area.`,
         },
         { status: 422 }
       );
@@ -137,7 +139,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const grid = buildGrid({ minX, maxX, minY, maxY }, gridRes);
     const rowsCount = grid.length;
     const colsCount = rowsCount > 0 ? grid[0].length : 0;
-    const cellArea = gridRes * gridRes;
 
     const deltaGrid: number[][] = new Array(rowsCount);
     for (let r = 0; r < rowsCount; r++) {
@@ -151,7 +152,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       deltaGrid[r] = row;
     }
 
-    const vols = computeVolumes(deltaGrid, cellArea);
+    const vols = computeVolumes(deltaGrid, xs, ys);
 
     // Stat extremes for caller's color scaling.
     let minDelta = Infinity;
