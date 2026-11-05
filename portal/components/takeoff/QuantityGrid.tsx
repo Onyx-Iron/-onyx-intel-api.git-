@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { lookupCsi } from "@/lib/estimating/csi-catalog";
-import { groupQuantitiesByDivision, type QuantityGridRow } from "@/lib/takeoff/quantity-grid";
+import { finiteQuantity, groupQuantitiesByDivision, type QuantityGridRow } from "@/lib/takeoff/quantity-grid";
 
 interface ApiItem {
   id: string;
@@ -31,7 +31,7 @@ export default function QuantityGrid({ projectId }: { projectId: string }) {
           label: item.label ?? "Untitled",
           csiCode: item.csi_code,
           division: item.division,
-          quantity: item.quantity,
+          quantity: finiteQuantity(item.quantity),
           unit: item.unit,
           pageNumber: item.page,
           pageId: item.sheet_id,
@@ -95,7 +95,7 @@ export default function QuantityGrid({ projectId }: { projectId: string }) {
                 className="bg-transparent font-mono text-[10px] text-white/70 focus:outline-none"
               />
               <div className="text-right font-mono text-[10px] text-white/80">
-                {row.quantity == null ? "—" : row.quantity.toFixed(2)} {row.unit ?? ""}
+                {finiteQuantity(row.quantity)?.toFixed(2) ?? "—"} {row.unit ?? ""}
                 {row.pageId ? (
                   <Link
                     href={`/dashboard/projects/${projectId}/takeoff/canvas?page_id=${encodeURIComponent(row.pageId)}`}
