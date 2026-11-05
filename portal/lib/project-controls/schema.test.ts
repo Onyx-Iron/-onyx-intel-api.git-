@@ -111,6 +111,25 @@ describe("project control payloads", () => {
     });
   });
 
+  it("sums Postgres numeric strings instead of concatenating them", () => {
+    const summary = getControlSummary({
+      rfis: [],
+      submittals: [],
+      changeOrders: [
+        { status: "pending", amount: "2000.00" },
+        { status: "pending", amount: "3000.50" },
+        { status: "approved", amount: "12500.00" },
+        { status: "approved", amount: "4000.00" },
+        { status: "draft", amount: "9999.00" },
+      ],
+    });
+
+    assert.equal(summary.pending_change_order_value, 5000.5);
+    assert.equal(summary.approved_change_order_value, 16500);
+    assert.equal(typeof summary.pending_change_order_value, "number");
+    assert.equal(typeof summary.approved_change_order_value, "number");
+  });
+
   it("normalizes partial updates without requiring full forms", () => {
     assert.deepEqual(buildRfiUpdate({ status: "answered", response: "  See C2.1  " }), {
       status: "answered",

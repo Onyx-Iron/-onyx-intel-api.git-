@@ -99,7 +99,8 @@ export interface ChangeOrderPayload {
 export interface ControlSummaryInput {
   rfis: Array<{ status: string | null }>;
   submittals: Array<{ status: string | null }>;
-  changeOrders: Array<{ status: string | null; amount: number | null }>;
+  // PostgREST returns numeric columns as strings. Callers pass those through.
+  changeOrders: Array<{ status: string | null; amount: number | string | null }>;
 }
 
 type UpdatePayload = Record<string, string | number | null>;
@@ -269,8 +270,17 @@ export function getControlSummary(input: ControlSummaryInput): ControlSummary {
   };
 }
 
-function sumAmounts(items: Array<{ amount: number | null }>): number {
-  return items.reduce((sum, item) => sum + (item.amount ?? 0), 0);
+function amountValue(amount: number | string | null | undefined): number {
+  if (typeof amount === "number") return Number.isFinite(amount) ? amount : 0;
+  if (typeof amount === "string" && amount.trim() !== "") {
+    const parsed = Number(amount);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function sumAmounts(items: Array<{ amount: number | string | null }>): number {
+  return items.reduce((sum, item) => sum + amountValue(item.amount), 0);
 }
 
 function buildUpdate(
