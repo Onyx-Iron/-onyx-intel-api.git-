@@ -1,3 +1,4 @@
+import { civilMirrorTakeoffRefs } from "@/lib/estimating/civil-mirror-refs";
 import { syncTakeoffToEstimate } from "@/lib/estimating/auto-sync";
 import { recordTakeoffHistoryBatch } from "@/lib/takeoff/history";
 import { provenanceForNewItem } from "@/lib/takeoff/provenance";
@@ -34,6 +35,19 @@ export async function mirrorCivilItemsToTakeoff(
   actorUserId?: string | null,
 ): Promise<void> {
   if (rows.length === 0) return;
+  let parentDocumentId: string | null = null;
+  if (pageId) {
+    const { data: page, error: pageError } = await db
+      .from("document_pages")
+      .select("document_id")
+      .eq("id", pageId)
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+    if (pageError) throw new Error(pageError.message);
+    if (!page?.document_id) throw new Error("Sheet page not found");
+    parentDocumentId = String(page.document_id);
+  }
+  const pageRefs = civilMirrorTakeoffRefs(pageId, parentDocumentId);
   const stamp = provenanceForNewItem({ sourceMethod: "civil_calculator" });
   const payload = rows.map((r) => ({
     tenant_id: tenantId,
@@ -45,8 +59,8 @@ export async function mirrorCivilItemsToTakeoff(
     unit: r.unit,
     type: "takeoff_import",
     page: 0,
-    document_id: pageId,
-    sheet_id: pageId,
+    document_id: pageRefs.document_id,
+    sheet_id: pageRefs.sheet_id,
     // Civil calculators (trench embedment, stockpile swell, entrance
     // stone) are deterministic engineering math grounded in user-entered
     // inputs, not an AI guess — implicitly approved, same as manual/
@@ -72,8 +86,7 @@ export async function mirrorCivilItemsToTakeoff(
   }));
   const { data: inserted, error } = await db.from("takeoff_items").insert(payload).select("id");
   if (error) {
-    console.error(`[civil-mirror] takeoff_items insert failed for ${sourceTable}`, error);
-    return;
+    throw new Error(error.message);
   }
   await recordTakeoffHistoryBatch(
     db,
