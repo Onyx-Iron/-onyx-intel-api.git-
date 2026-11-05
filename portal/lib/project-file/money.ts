@@ -202,8 +202,21 @@ export function withBudgetPosted(meta: unknown): Record<string, unknown> {
 
 export interface WaiverCoverInput {
   status: string;
-  amount: number | null;
+  amount: number | string | null;
   draw_number: string | null;
+}
+
+/**
+ * PostgREST sends `numeric` columns as strings. `0 + "100"` is `"0100"`, and
+ * the coverage check then treats that text as a much larger number.
+ */
+function storedAmount(value: number | string | null | undefined): number {
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
 }
 
 /** A pay app becomes payable only when received waivers cover this draw. */
@@ -217,7 +230,7 @@ export function waiverCoversDraw(
   const matching = received.filter((waiver) =>
     !drawNumber || waiver.draw_number == null || waiver.draw_number === drawNumber,
   );
-  const covered = matching.reduce((sum, waiver) => sum + (waiver.amount ?? 0), 0);
+  const covered = matching.reduce((sum, waiver) => sum + storedAmount(waiver.amount), 0);
   return covered + 0.009 >= drawAmount;
 }
 

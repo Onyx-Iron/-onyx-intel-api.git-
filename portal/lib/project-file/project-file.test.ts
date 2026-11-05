@@ -183,6 +183,12 @@ describe("project cost math", () => {
     assert.equal(waiverCoversDraw([{ status: "pending", amount: 500, draw_number: "1" }], "1", 500), false);
     assert.equal(waiverCoversDraw([{ status: "received", amount: 500, draw_number: "1" }], "1", 500), true);
     assert.equal(waiverCoversDraw([{ status: "received", amount: 100, draw_number: "1" }], "1", 500), false);
+    assert.equal(waiverCoversDraw([{ status: "received", amount: "100.00", draw_number: "1" }], "1", 1000), false);
+    assert.equal(waiverCoversDraw([{ status: "received", amount: "1000.00", draw_number: "1" }], "1", 1000), true);
+    assert.equal(waiverCoversDraw([
+      { status: "received", amount: "400.00", draw_number: "1" },
+      { status: "received", amount: "600.00", draw_number: "1" },
+    ], "1", 1000), true);
   });
 });
 
