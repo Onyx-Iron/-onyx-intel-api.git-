@@ -3,11 +3,21 @@ export interface QuantityGridRow {
   label: string;
   csiCode: string | null;
   division: string | null;
-  quantity: number | null;
+  quantity: number | string | null;
   unit: string | null;
   pageNumber: number | null;
   pageId: string | null;
   documentId: string | null;
+}
+
+/** Postgres numeric arrives as a string. Callers need a real number before toFixed or addition. */
+export function finiteQuantity(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
 }
 
 export interface QuantityGridGroup {
@@ -33,8 +43,9 @@ export function groupQuantitiesByDivision(
     .map(([division, groupRows]) => {
       const byUnit = new Map<string, number>();
       for (const row of groupRows) {
-        if (row.quantity == null || !row.unit) continue;
-        byUnit.set(row.unit, (byUnit.get(row.unit) ?? 0) + row.quantity);
+        const quantity = finiteQuantity(row.quantity);
+        if (quantity == null || !row.unit) continue;
+        byUnit.set(row.unit, (byUnit.get(row.unit) ?? 0) + quantity);
       }
       return {
         division,
