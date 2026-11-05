@@ -38,6 +38,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { PDFDocument } from "https://esm.sh/pdf-lib@1.17.1";
 import { captureException } from "../_shared/errors.ts";
+import { rejectUnlessServiceRole } from "../_shared/service-role-auth.ts";
 import { reconcileDocumentPages, reconcileSheets } from "../_shared/split-reconcile.ts";
 import {
   DEFAULT_FANOUT_CONCURRENCY,
@@ -131,6 +132,9 @@ interface Payload {
 }
 
 Deno.serve(async (req) => {
+  const denied = rejectUnlessServiceRole(req, SERVICE_ROLE_KEY);
+  if (denied) return denied;
+
   const started = Date.now();
   let body: Payload;
   try {

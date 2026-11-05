@@ -31,6 +31,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { captureException } from "../_shared/errors.ts";
+import { rejectUnlessServiceRole } from "../_shared/service-role-auth.ts";
 import { planPageTakeoffWrite, type ExistingPageTakeoff } from "../_shared/page-takeoff-idempotency.ts";
 
 const SUPABASE_URL     = Deno.env.get("SUPABASE_URL")!;
@@ -102,6 +103,9 @@ async function enqueueProjectEstimateSync(
 }
 
 Deno.serve(async (req) => {
+  const denied = rejectUnlessServiceRole(req, SERVICE_ROLE_KEY);
+  if (denied) return denied;
+
   let body: Payload;
   try {
     body = await req.json();
