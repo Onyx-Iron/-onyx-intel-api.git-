@@ -3,7 +3,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { getOrCreateTenant, authTenantKey, authTenantName } from "@/lib/project-controls/server";
 import { assertPermission, PermissionError } from "@/lib/project-controls/permissions";
 import { getServiceDb, loadVersionForTenant, NotFoundError } from "@/lib/estimating/versioning";
-import { snapshotBudget, type BudgetSourceItem } from "@/lib/estimating/budget";
+import {
+  matchBudgetLineCarryForward,
+  revisedBudgetAfterCarry,
+  snapshotBudget,
+  type BudgetLineCarry,
+  type BudgetSourceItem,
+  type CarryBudgetLine,
+} from "@/lib/estimating/budget";
 
 export const runtime = "nodejs";
 
@@ -24,6 +31,92 @@ async function loadSnapshot(db: Awaited<ReturnType<typeof getServiceDb>>, tenant
     .order("sort_order", { ascending: true });
   if (lineError) throw new Error(lineError.message);
   return { budget, lines: lines ?? [] };
+}
+
+const LINE_PAGE = 1000;
+
+async function loadBudgetLines(
+  db: Awaited<ReturnType<typeof getServiceDb>>,
+  tenantId: string,
+  budgetId: string,
+): Promise<CarryBudgetLine[]> {
+  const rows: CarryBudgetLine[] = [];
+  const seen = new Set<string>();
+  for (let offset = 0; offset < LINE_PAGE * 100; offset += LINE_PAGE) {
+    const { data, error } = await db
+      .from("project_budget_lines")
+      .select("id, source_takeoff_id, csi_code, description, original_amount, total_price, approved_change_amount, forecast_override")
+      .eq("tenant_id", tenantId)
+      .eq("budget_id", budgetId)
+      .order("sort_order", { ascending: true })
+      .order("id", { ascending: true })
+      .range(offset, offset + LINE_PAGE - 1);
+    if (error) throw new Error(error.message);
+    const batch = (data ?? []) as CarryBudgetLine[];
+    let added = 0;
+    for (const row of batch) {
+      if (!row.id || seen.has(row.id)) continue;
+      seen.add(row.id);
+      rows.push(row);
+      added += 1;
+    }
+    if (added === 0 || batch.length < LINE_PAGE) break;
+  }
+  return rows;
+}
+
+async function carryBudgetLines(
+  db: Awaited<ReturnType<typeof getServiceDb>>,
+  tenantId: string,
+  projectId: string,
+  carries: BudgetLineCarry[],
+): Promise<void> {
+  const pointedTables = [
+    "project_cost_entries",
+    "project_commitment_lines",
+    "change_event_lines",
+    "daily_log_quantities",
+  ] as const;
+  for (const carry of carries) {
+    const { error: amountError } = await db
+      .from("project_budget_lines")
+      .update({
+        approved_change_amount: carry.approvedChange,
+        forecast_override: carry.forecastOverride,
+      })
+      .eq("id", carry.toId)
+      .eq("tenant_id", tenantId)
+      .eq("project_id", projectId);
+    if (amountError) throw new Error(amountError.message);
+
+    for (const table of pointedTables) {
+      const { error } = await db
+        .from(table)
+        .update({ budget_line_id: carry.toId })
+        .eq("tenant_id", tenantId)
+        .eq("project_id", projectId)
+        .eq("budget_line_id", carry.fromId);
+      if (error) throw new Error(error.message);
+    }
+
+    const { error: toLinkError } = await db
+      .from("project_record_links")
+      .update({ to_id: carry.toId })
+      .eq("tenant_id", tenantId)
+      .eq("project_id", projectId)
+      .eq("to_type", "budget_line")
+      .eq("to_id", carry.fromId);
+    if (toLinkError) throw new Error(toLinkError.message);
+
+    const { error: fromLinkError } = await db
+      .from("project_record_links")
+      .update({ from_id: carry.toId })
+      .eq("tenant_id", tenantId)
+      .eq("project_id", projectId)
+      .eq("from_type", "budget_line")
+      .eq("from_id", carry.fromId);
+    if (fromLinkError) throw new Error(fromLinkError.message);
+  }
 }
 
 /** GET the budget snapshotted from this approved version, if one exists. */
@@ -81,6 +174,22 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   if (itemError) return NextResponse.json({ error: itemError.message }, { status: 500 });
 
   const snapshot = snapshotBudget((items ?? []) as BudgetSourceItem[]);
+  const { data: previousBudget, error: previousBudgetError } = await db
+    .from("project_budgets")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("project_id", version.project_id)
+    .eq("is_current", true)
+    .maybeSingle();
+  if (previousBudgetError) return NextResponse.json({ error: previousBudgetError.message }, { status: 500 });
+  let previousLines: CarryBudgetLine[] = [];
+  try {
+    previousLines = previousBudget ? await loadBudgetLines(db, tenantId, previousBudget.id) : [];
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Could not read the current budget";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+
   await db
     .from("project_budgets")
     .update({ is_current: false })
@@ -118,7 +227,22 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
     if (lineError) return NextResponse.json({ error: lineError.message }, { status: 500 });
   }
 
-  await db.from("projects").update({ budget: snapshot.totalPrice }).eq("id", version.project_id).eq("tenant_id", tenantId);
+  let nextLines: CarryBudgetLine[] = [];
+  try {
+    nextLines = await loadBudgetLines(db, tenantId, budget.id);
+    const carries = matchBudgetLineCarryForward(previousLines, nextLines);
+    await carryBudgetLines(db, tenantId, version.project_id, carries);
+    const revised = revisedBudgetAfterCarry(nextLines, carries);
+    const { error: headerError } = await db
+      .from("projects")
+      .update({ budget: revised })
+      .eq("id", version.project_id)
+      .eq("tenant_id", tenantId);
+    if (headerError) return NextResponse.json({ error: headerError.message }, { status: 500 });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Could not keep posted costs on the new budget";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
 
   const saved = await loadSnapshot(db, tenantId, id);
   return NextResponse.json({ tenant_id: tenantId, created: true, ...saved });
