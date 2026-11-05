@@ -121,6 +121,38 @@ describe("project cost math", () => {
     assert.equal(posted[1].amount + removed[1].amount, 0);
   });
 
+  it("splits an approved amount across distinct budget lines and keeps the remainder on the last line", () => {
+    const posted = changeOrderBudgetDelta(
+      { status: "pending", amount: 100 },
+      { status: "approved", amount: 100 },
+      ["a", "b", "c", "a", ""],
+      [],
+    );
+    assert.deepEqual(posted, [
+      { budgetLineId: "a", amount: 33.33 },
+      { budgetLineId: "b", amount: 33.33 },
+      { budgetLineId: "c", amount: 33.34 },
+    ]);
+    assert.equal(posted.reduce((sum, row) => sum + row.amount, 0), 100);
+  });
+
+  it("posts only the difference when an approved change order amount is edited", () => {
+    const weights = [
+      { budgetLineId: "concrete", amount: 9000 },
+      { budgetLineId: "rebar", amount: 1000 },
+    ];
+    const edited = changeOrderBudgetDelta(
+      { status: "approved", amount: 10000 },
+      { status: "approved", amount: 12000 },
+      ["ignored"],
+      weights,
+    );
+    assert.deepEqual(edited, [
+      { budgetLineId: "concrete", amount: 1800 },
+      { budgetLineId: "rebar", amount: 200 },
+    ]);
+  });
+
   it("forecasts the remainder unless a line override is set", () => {
     const computed = computeBudgetLine({
       original: 1000,
@@ -170,19 +202,44 @@ describe("project cost math", () => {
     const workOnly = payAppInvoiceTotals([{ previous: 0, thisPeriod: 1000, storedMaterials: 0 }], 10);
     assert.equal(workOnly.amount, 1000);
     assert.equal(workOnly.retainage, 100);
+
+    const twoDraws = payAppInvoiceTotals([
+      { previous: 0, thisPeriod: 1000, storedMaterials: 0 },
+      { previous: 1000, thisPeriod: 500, storedMaterials: 0 },
+    ], 0.1);
+    assert.equal(twoDraws.amount, 1500);
+    assert.equal(twoDraws.retainage, 150);
+  });
+
+  it("treats retainage above 1 as a percent and ignores a non-finite rate", () => {
+    const base = { scheduledValue: 1000, previous: 0, thisPeriod: 1000, storedMaterials: 0 };
+    assert.equal(computePayLine({ ...base, retainagePct: 10 }).retainage, 100);
+    assert.equal(computePayLine({ ...base, retainagePct: 0.1 }).retainage, 100);
+    assert.equal(computePayLine({ ...base, retainagePct: Number.NaN }).retainage, 0);
+    assert.equal(computePayLine({ ...base, retainagePct: -5 }).retainage, 0);
   });
 
   it("posts a change order to the budget only once", () => {
     assert.equal(budgetAlreadyPosted(null), false);
     assert.equal(budgetAlreadyPosted({}), false);
     assert.equal(budgetAlreadyPosted({ budget_posted: true }), true);
+    assert.equal(budgetAlreadyPosted({ budget_posted: "true" }), false);
+    assert.equal(budgetAlreadyPosted([]), false);
     assert.deepEqual(withBudgetPosted({ source: "event" }), { source: "event", budget_posted: true });
+    assert.deepEqual(withBudgetPosted(null), { budget_posted: true });
+    assert.deepEqual(withBudgetPosted([]), { budget_posted: true });
   });
 
   it("holds a pay app until received lien waivers cover the draw", () => {
     assert.equal(waiverCoversDraw([{ status: "pending", amount: 500, draw_number: "1" }], "1", 500), false);
     assert.equal(waiverCoversDraw([{ status: "received", amount: 500, draw_number: "1" }], "1", 500), true);
     assert.equal(waiverCoversDraw([{ status: "received", amount: 100, draw_number: "1" }], "1", 500), false);
+    assert.equal(waiverCoversDraw([{ status: "received", amount: 500, draw_number: "2" }], "1", 500), false);
+    assert.equal(waiverCoversDraw([{ status: "received", amount: 500, draw_number: null }], "1", 500), true);
+    assert.equal(waiverCoversDraw([{ status: "received", amount: 500, draw_number: "2" }], null, 500), true);
+    assert.equal(waiverCoversDraw([{ status: "received", amount: 10, draw_number: "1" }], "1", 10.005), true);
+    assert.equal(waiverCoversDraw([{ status: "received", amount: 10, draw_number: "1" }], "1", 10.02), false);
+    assert.equal(waiverCoversDraw([], "1", -1), false);
   });
 });
 
