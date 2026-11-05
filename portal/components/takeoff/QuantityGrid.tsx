@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { lookupCsi } from "@/lib/estimating/csi-catalog";
-import { groupQuantitiesByDivision, type QuantityGridRow } from "@/lib/takeoff/quantity-grid";
+import { finiteQuantity, groupQuantitiesByDivision, type QuantityGridRow } from "@/lib/takeoff/quantity-grid";
 
 interface ApiItem {
   id: string;
@@ -31,7 +31,7 @@ export default function QuantityGrid({ projectId }: { projectId: string }) {
           label: item.label ?? "Untitled",
           csiCode: item.csi_code,
           division: item.division,
-          quantity: item.quantity,
+          quantity: finiteQuantity(item.quantity),
           unit: item.unit,
           pageNumber: item.page,
           pageId: item.sheet_id,
