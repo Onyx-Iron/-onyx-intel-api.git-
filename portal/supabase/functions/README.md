@@ -54,6 +54,7 @@ redeploy before calling the merge done:
 | `supabase/functions/page-processor/**` | `page-processor` |
 | `lib/cad/pdf-vector-extract.ts` (imported by split) | `page-split-worker` |
 | `_shared/errors.ts` | every function that imports it |
+| `_shared/service-role-auth.ts` | `page-split-worker`, `page-processor`, `page-takeoff-worker`, `sync-commodity-indexes` |
 
 ```bash
 supabase link --project-ref vvnigrbdsipriufhrwbs

@@ -11,6 +11,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { rejectUnlessServiceRole } from "../_shared/service-role-auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -26,6 +27,9 @@ interface Payload {
 }
 
 Deno.serve(async (req) => {
+  const denied = rejectUnlessServiceRole(req, SERVICE_ROLE_KEY);
+  if (denied) return denied;
+
   let body: Payload;
   try {
     body = await req.json();
@@ -100,7 +104,8 @@ Deno.serve(async (req) => {
     await recordEvent("ocr", "failed", message);
     await db.from("document_pages")
       .update({ status: "error", error: message.slice(0, 500), updated_at: new Date().toISOString() })
-      .eq("id", body.page_id);
+      .eq("id", body.page_id)
+      .eq("tenant_id", body.tenant_id);
     await refreshDocumentSummary();
     return new Response(JSON.stringify({ error: message }), { status: 500 });
   }
