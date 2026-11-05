@@ -26,4 +26,23 @@ describe("approved estimate budget snapshot", () => {
     assert.equal(snapshot.lines[0].material_cost, 240);
     assert.equal(snapshot.lines[0].source_estimate_item_id, "item-1");
   });
+
+  it("keeps the bid amount when Postgres returns numeric strings", () => {
+    const snapshot = snapshotBudget([
+      {
+        id: "item-1",
+        description: "Copper pipe",
+        quantity: 10,
+        labor_cost: "220.00",
+        material_cost: "240.50",
+        equipment_cost: "20",
+        total_price: "480.50",
+      },
+    ]);
+    assert.equal(snapshot.totalPrice, 480.5);
+    assert.equal(snapshot.lines[0].labor_cost, 220);
+    assert.equal(snapshot.lines[0].material_cost, 240.5);
+    assert.equal(snapshot.lines[0].equipment_cost, 20);
+    assert.equal(snapshot.lines[0].total_price, 480.5);
+  });
 });

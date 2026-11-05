@@ -5,10 +5,10 @@ export interface BudgetSourceItem {
   description?: string | null;
   quantity?: number | null;
   uom?: string | null;
-  labor_cost?: number | null;
-  material_cost?: number | null;
-  equipment_cost?: number | null;
-  total_price?: number | null;
+  labor_cost?: number | string | null;
+  material_cost?: number | string | null;
+  equipment_cost?: number | string | null;
+  total_price?: number | string | null;
   sort_order?: number | null;
 }
 
@@ -32,8 +32,14 @@ export interface BudgetSnapshot {
   lineCount: number;
 }
 
-function money(value: number | null | undefined): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+/** Postgres `numeric` columns arrive as strings. Blank and non-numeric values are 0. */
+function money(value: number | string | null | undefined): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
 }
 
 /** Copy the lines of one estimate version. The caller must pass that version's rows. */
