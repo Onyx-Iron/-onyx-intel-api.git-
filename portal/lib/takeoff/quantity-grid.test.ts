@@ -20,8 +20,12 @@ describe("quantity grid numeric strings", () => {
   it("parses a Postgres numeric string", () => {
     assert.equal(finiteQuantity("12.5000"), 12.5);
     assert.equal(finiteQuantity(4), 4);
+    assert.equal(finiteQuantity(0), 0);
     assert.equal(finiteQuantity(null), null);
     assert.equal(finiteQuantity(""), null);
+    assert.equal(finiteQuantity("12.5000")?.toFixed(2) ?? "—", "12.50");
+    assert.equal(finiteQuantity(0)?.toFixed(2) ?? "—", "0.00");
+    assert.equal(finiteQuantity("nope")?.toFixed(2) ?? "—", "—");
   });
 
   it("sums string quantities instead of concatenating them", () => {

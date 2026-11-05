@@ -95,7 +95,7 @@ export default function QuantityGrid({ projectId }: { projectId: string }) {
                 className="bg-transparent font-mono text-[10px] text-white/70 focus:outline-none"
               />
               <div className="text-right font-mono text-[10px] text-white/80">
-                {row.quantity == null ? "—" : row.quantity.toFixed(2)} {row.unit ?? ""}
+                {finiteQuantity(row.quantity)?.toFixed(2) ?? "—"} {row.unit ?? ""}
                 {row.pageId ? (
                   <Link
                     href={`/dashboard/projects/${projectId}/takeoff/canvas?page_id=${encodeURIComponent(row.pageId)}`}
