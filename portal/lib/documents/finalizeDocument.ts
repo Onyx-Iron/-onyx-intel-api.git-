@@ -22,6 +22,31 @@ const TERMINAL_DOC = new Set([
 
 const TERMINAL_TAKEOFF = new Set(["done", "error", "skipped"]);
 
+/**
+ * Page-split writes `page_count` for the whole PDF on the first batch, then
+ * keeps `split_status=processing` until the last batch. A documents poll
+ * must not roll that row up to complete / complete_with_errors: takeoff
+ * refuses to emit quantities while `complete_with_errors` is unacknowledged,
+ * so the pages the next batch is about to create would be skipped.
+ */
+export function splitStillInProgress(doc: {
+  split_status?: string | null;
+  page_count?: number | null;
+  meta: unknown;
+}): boolean {
+  if (doc.split_status === "processing") return true;
+  if (!doc.meta || typeof doc.meta !== "object" || Array.isArray(doc.meta)) return false;
+  const summary = (doc.meta as { processing_summary?: unknown }).processing_summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) return false;
+  const through = (summary as { pages_split_through?: unknown }).pages_split_through;
+  if (typeof through !== "number" || !Number.isFinite(through)) return false;
+  const declared = (summary as { pages_total?: unknown }).pages_total;
+  const total = typeof declared === "number" && declared > 0
+    ? declared
+    : doc.page_count;
+  return typeof total === "number" && total > 0 && through < total;
+}
+
 export type FinalizeResult = {
   documentId: string;
   status: string;
@@ -42,7 +67,7 @@ export async function finalizeDocumentsFromOcr(
 ): Promise<FinalizeResult[]> {
   let docsQ = db
     .from("documents")
-    .select("id, status, page_count, meta")
+    .select("id, status, split_status, page_count, meta")
     .eq("tenant_id", tenantId)
     .in("status", ["split", "processing", "queued"]);
   if (projectId) {
@@ -103,8 +128,9 @@ export async function finalizeDocumentsFromOcr(
   const results: FinalizeResult[] = [];
   const now = new Date().toISOString();
 
-  for (const doc of docs as Array<{ id: string; status: string; page_count: number | null; meta: unknown }>) {
+  for (const doc of docs as Array<{ id: string; status: string; split_status?: string | null; page_count: number | null; meta: unknown }>) {
     if (TERMINAL_DOC.has(String(doc.status))) continue;
+    if (splitStillInProgress(doc)) continue;
     const stats = byDoc.get(doc.id);
     if (!stats || stats.total === 0) continue;
     const settled = stats.done + stats.errored;
