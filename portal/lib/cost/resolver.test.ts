@@ -65,6 +65,17 @@ function fakeResolverDb(tables: Record<string, Row[]>) {
 
 const texas = { zip: "78701", metro: "Austin", state: "TX" };
 
+function daysAgo(days: number): string {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() - days);
+  return date.toISOString().slice(0, 10);
+}
+
+const fresh = daysAgo(15);
+const newer = daysAgo(5);
+const stale = daysAgo(140);
+const expiredActual = daysAgo(400);
+
 function catalog(): Record<string, Row[]> {
   return {
     commodity_trend_series: [{ csi_division: "03", pct_change_90d: "10" }],
@@ -107,11 +118,11 @@ describe("resolveCostsBatch", () => {
       { tenant_id: "tenant-b", cost_code_id: "code-concrete", region_code: "TX", unit_cost: "999", effective_from: "2026-10-01" },
     ];
     tables.cost_actuals = [
-      { tenant_id: "tenant-a", csi_code: "03 30 00", region_code: "TX", actual_unit_cost: 12, observed_at: "2026-10-01" },
+      { tenant_id: "tenant-a", csi_code: "03 30 00", region_code: "TX", actual_unit_cost: 12, observed_at: fresh },
     ];
     tables.cost_prices = [
-      { cost_code_id: "code-concrete", region_code: "78701", region_type: "zip", unit_cost: 11, observed_at: "2026-10-01" },
-      { cost_code_id: "code-concrete", region_code: "US", region_type: "national", unit_cost: 1, observed_at: "2026-10-01" },
+      { cost_code_id: "code-concrete", region_code: "78701", region_type: "zip", unit_cost: 11, observed_at: fresh },
+      { cost_code_id: "code-concrete", region_code: "US", region_type: "national", unit_cost: 1, observed_at: fresh },
     ];
 
     const [priced] = await resolveCostsBatch(
@@ -137,7 +148,7 @@ describe("resolveCostsBatch", () => {
       { tenant_id: "tenant-a", cost_code_id: "code-concrete", region_code: "TX", unit_cost: 40, effective_from: "2026-08-01" },
     ];
     tables.cost_prices = [
-      { cost_code_id: "code-concrete", region_code: "US", region_type: "national", unit_cost: 7, observed_at: "2026-10-01" },
+      { cost_code_id: "code-concrete", region_code: "US", region_type: "national", unit_cost: 7, observed_at: fresh },
     ];
 
     const results = await resolveCostsBatch(
@@ -157,13 +168,13 @@ describe("resolveCostsBatch", () => {
   it("averages recent numeric actuals and ignores observations outside six months", async () => {
     const tables = catalog();
     tables.cost_actuals = [
-      { tenant_id: "tenant-a", csi_code: "03 30 00", region_code: "TX", actual_unit_cost: "10.00", observed_at: "2026-09-01" },
-      { tenant_id: "tenant-a", csi_code: "03 30 00", region_code: "TX", actual_unit_cost: "20.50", observed_at: "2026-10-15" },
-      { tenant_id: "tenant-a", csi_code: "03 30 00", region_code: "TX", actual_unit_cost: 500, observed_at: "2024-01-01" },
-      { tenant_id: "tenant-a", csi_code: "03 30 00", region_code: "CA", actual_unit_cost: 80, observed_at: "2026-10-01" },
+      { tenant_id: "tenant-a", csi_code: "03 30 00", region_code: "TX", actual_unit_cost: "10.00", observed_at: fresh },
+      { tenant_id: "tenant-a", csi_code: "03 30 00", region_code: "TX", actual_unit_cost: "20.50", observed_at: newer },
+      { tenant_id: "tenant-a", csi_code: "03 30 00", region_code: "TX", actual_unit_cost: 500, observed_at: expiredActual },
+      { tenant_id: "tenant-a", csi_code: "03 30 00", region_code: "CA", actual_unit_cost: 80, observed_at: fresh },
     ];
     tables.cost_prices = [
-      { cost_code_id: "code-concrete", region_code: "US", region_type: "national", unit_cost: 1, observed_at: "2026-10-01" },
+      { cost_code_id: "code-concrete", region_code: "US", region_type: "national", unit_cost: 1, observed_at: fresh },
     ];
 
     const [priced] = await resolveCostsBatch(
@@ -175,16 +186,16 @@ describe("resolveCostsBatch", () => {
     assert.equal(priced.price_scope, "actuals");
     assert.equal(priced.unit_cost, 15.25);
     assert.equal(priced.confidence, "medium");
-    assert.equal(priced.observed_at, "2026-10-15");
+    assert.equal(priced.observed_at, newer);
     assert.equal(priced.ppi_escalated, undefined);
   });
 
   it("uses the zip price before the state price", async () => {
     const tables = catalog();
     tables.cost_prices = [
-      { cost_code_id: "code-concrete", region_code: "TX", region_type: "state", unit_cost: 22, observed_at: "2026-10-20" },
-      { cost_code_id: "code-concrete", region_code: "78701", region_type: "zip", unit_cost: "11.00", observed_at: "2026-10-20" },
-      { cost_code_id: "code-concrete", region_code: "US", region_type: "national", unit_cost: 1, observed_at: "2026-10-01" },
+      { cost_code_id: "code-concrete", region_code: "TX", region_type: "state", unit_cost: 22, observed_at: fresh },
+      { cost_code_id: "code-concrete", region_code: "78701", region_type: "zip", unit_cost: "11.00", observed_at: fresh },
+      { cost_code_id: "code-concrete", region_code: "US", region_type: "national", unit_cost: 1, observed_at: fresh },
     ];
 
     const [priced] = await resolveCostsBatch(
@@ -210,12 +221,12 @@ describe("resolveCostsBatch", () => {
         labor_cost: 60,
         material_cost: 30,
         equipment_cost: 10,
-        observed_at: "2026-10-01",
+        observed_at: fresh,
       },
     ];
     tables.cost_indices = [
-      { region_code: "US", index_value: 100, series_code: "cci", source: "enr_cci", observed_at: "2026-09-01" },
-      { region_code: "TX", index_value: 110, series_code: "cci", source: "enr_cci", observed_at: "2026-09-01" },
+      { region_code: "US", index_value: 100, series_code: "cci", source: "enr_cci", observed_at: fresh },
+      { region_code: "TX", index_value: 110, series_code: "cci", source: "enr_cci", observed_at: fresh },
     ];
 
     const [priced] = await resolveCostsBatch(
@@ -245,7 +256,7 @@ describe("resolveCostsBatch", () => {
         labor_cost: 60,
         material_cost: 30,
         equipment_cost: 10,
-        observed_at: "2026-01-01",
+        observed_at: stale,
       },
     ];
 
@@ -277,7 +288,7 @@ describe("resolveCostsBatch", () => {
         labor_cost: "60",
         material_cost: "30",
         equipment_cost: "10",
-        observed_at: "2026-01-01",
+        observed_at: stale,
       },
     ];
 
@@ -295,7 +306,7 @@ describe("resolveCostsBatch", () => {
   it("drops confidence when a stale regional price is aged", async () => {
     const tables = catalog();
     tables.cost_prices = [
-      { cost_code_id: "code-concrete", region_code: "TX", region_type: "state", unit_cost: 50, observed_at: "2026-01-01" },
+      { cost_code_id: "code-concrete", region_code: "TX", region_type: "state", unit_cost: 50, observed_at: stale },
     ];
 
     const [priced] = await resolveCostsBatch(
@@ -311,7 +322,7 @@ describe("resolveCostsBatch", () => {
   it("reports an unknown code without blocking a known code in the same batch", async () => {
     const tables = catalog();
     tables.cost_prices = [
-      { cost_code_id: "code-steel", region_code: "US", region_type: "national", unit_cost: 900, observed_at: "2026-10-01" },
+      { cost_code_id: "code-steel", region_code: "US", region_type: "national", unit_cost: 900, observed_at: fresh },
     ];
 
     const results = await resolveCostsBatch(
@@ -379,7 +390,7 @@ describe("resolveCost", () => {
   it("scores a single recent actual as medium and records the score", async () => {
     const tables = catalog();
     tables.cost_actuals = [
-      { tenant_id: "tenant-a", csi_code: "03 30 00", region_code: "TX", actual_unit_cost: "18", observed_at: "2026-10-01" },
+      { tenant_id: "tenant-a", csi_code: "03 30 00", region_code: "TX", actual_unit_cost: "18", observed_at: fresh },
     ];
 
     const priced = await resolveCost(
